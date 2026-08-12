@@ -28,7 +28,7 @@ import {
   ScrollArea,
 } from '@mantine/core';
 import { useTranslation, useI18n } from '../src/contexts/I18nContext';
-import { LanguageThemeControls } from '../src/components/LanguageThemeControls';
+import { AppHeader, HEADER_HEIGHT } from '../src/components/AppHeader';
 import ProblemForm from '../src/components/ProblemForm';
 
 type Problem = {
@@ -296,30 +296,22 @@ export default function ManageProblems() {
   };
 
   return (
-    <AppShell header={{ height: 64 }}>
+    <AppShell header={{ height: HEADER_HEIGHT }}>
       <Head>
         <title>{t('manage.title')} - {t('header.title')}</title>
         <meta name="description" content="Manage your problem collection" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
 
-      <AppShell.Header>
-        <Container size="xl" h="100%">
-          <Group h="100%" justify="space-between">
-            <Link href="/" style={{ textDecoration: 'none' }}>
-              <Title order={3} c="var(--mantine-color-text)">
-                {t('header.title')}
-              </Title>
-            </Link>
-            <Group>
-              <Button component={Link} href="/" variant="subtle">
-                {t('manage.backToProblems')}
-              </Button>
-              <LanguageThemeControls />
-            </Group>
-          </Group>
-        </Container>
-      </AppShell.Header>
+      <AppHeader
+        backHref="/"
+        title={t('manage.title')}
+        actions={
+          <Button component={Link} href="/" variant="subtle" color="gray" size="xs" visibleFrom="sm">
+            {t('manage.backToProblems')}
+          </Button>
+        }
+      />
 
       <AppShell.Main>
         <Container size="xl" py="xl">

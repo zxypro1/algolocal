@@ -19,9 +19,9 @@ import {
   Select
 } from '@mantine/core';
 import dynamic from 'next/dynamic';
+import { IconPlus, IconFileText, IconBulb, IconFlask } from '@tabler/icons-react';
 import { useTranslation, useI18n } from '../../src/contexts/I18nContext';
-import { useTheme } from '../../src/contexts/ThemeContext';
-import { LanguageThemeControls } from '../../src/components/LanguageThemeControls';
+import { AppHeader, HEADER_HEIGHT } from '../../src/components/AppHeader';
 import { CodeWithCopy } from '../../src/components/CodeWithCopy';
 import MarkdownRenderer from '../../src/components/MarkdownRenderer';
 import { appendPracticeAttemptEvent } from '../../src/lib/practiceStats';
@@ -34,7 +34,6 @@ export default function ProblemPage() {
   const { id } = router.query;
   const { t } = useTranslation();
   const { locale } = useI18n();
-  const { colorScheme } = useTheme();
   const [showSolution, setShowSolution] = useState(false);
   const [problem, setProblem] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -129,92 +128,27 @@ export default function ProblemPage() {
   
   if (loading) {
     return (
-      <AppShell
-        header={{ height: 80 }}
-        padding={{ base: 'sm', md: 'md' }}
-      >
-        <AppShell.Header>
-          <Stack gap="xs" h="100%" justify="center" px="md">
-            <Group justify="space-between" align="flex-start">
-            <div 
-              onClick={() => router.push('/')} 
-              style={{ textDecoration: 'none', color: 'inherit', cursor: 'pointer' }}
-            >
-              <Title order={2} mb={4}>{t('homepage.title')}</Title>
-              <Text size="sm" c="dimmed">{t('homepage.subtitle')}</Text>
-            </div>
-            <Group>
-              <Button 
-                component={Link} 
-                href="/add-problem" 
-                variant="outline" 
-                color="blue"
-                size="sm"
-              >
-                + {t('homepage.addProblem')}
-              </Button>
-              <LanguageThemeControls />
-            </Group>
-          </Group>
-        </Stack>
-      </AppShell.Header>
-
-      <AppShell.Main>
-        <Center style={{ minHeight: '50vh' }}>
-          <Stack align="center" gap={20}>
-            <Loader size="lg" />
-            <Text>{t('common.loading')}</Text>
-          </Stack>
-        </Center>
-      </AppShell.Main>
-    </AppShell>
-  );
-}
-
-if (error || !problem) {
-  return (
-    <AppShell
-      header={{ height: 80 }}
-      padding={{ base: 'sm', md: 'md' }}
-    >
-      <AppShell.Header>
-        <Stack gap="xs" h="100%" justify="center" px="md">
-          <Group justify="space-between" align="flex-start">
-            <div 
-              onClick={() => router.push('/')} 
-              style={{ textDecoration: 'none', color: 'inherit', cursor: 'pointer' }}
-            >
-              <Title order={2} mb={4}>{t('homepage.title')}</Title>
-              <Text size="sm" c="dimmed">{t('homepage.subtitle')}</Text>
-            </div>
-            <Group>
-              <Button 
-                component={Link} 
-                href="/" 
-                variant="outline" 
-                color="gray"
-                size="sm"
-              >
-                ← {t('common.home')}
-              </Button>
-              <Button 
-                component={Link} 
-                href="/add-problem" 
-                variant="outline" 
-                color="blue"
-                size="sm"
-              >
-                + {t('homepage.addProblem')}
-              </Button>
-              <LanguageThemeControls />
-            </Group>
-            </Group>
-          </Stack>
-        </AppShell.Header>
-
+      <AppShell header={{ height: HEADER_HEIGHT }} padding={{ base: 'sm', md: 'md' }}>
+        <AppHeader backHref="/" />
         <AppShell.Main>
-          <Center style={{ minHeight: '50vh' }}>
-            <Alert color="red" title={t('common.error')}>
+          <Center style={{ minHeight: '60vh' }}>
+            <Stack align="center" gap="md">
+              <Loader size="md" />
+              <Text size="sm" c="dimmed">{t('common.loading')}</Text>
+            </Stack>
+          </Center>
+        </AppShell.Main>
+      </AppShell>
+    );
+  }
+
+  if (error || !problem) {
+    return (
+      <AppShell header={{ height: HEADER_HEIGHT }} padding={{ base: 'sm', md: 'md' }}>
+        <AppHeader backHref="/" />
+        <AppShell.Main>
+          <Center style={{ minHeight: '60vh' }}>
+            <Alert color="red" title={t('common.error')} maw={480}>
               {error || 'Problem not found'}
             </Alert>
           </Center>
@@ -311,7 +245,7 @@ if (error || !problem) {
           
           {/* Performance Information */}
           {result.performance && (
-            <Paper p="sm" withBorder style={{ background: colorScheme === 'dark' ? 'var(--mantine-color-dark-6)' : 'var(--mantine-color-blue-light)' }}>
+            <Paper p="sm" withBorder style={{ background: 'var(--app-surface-muted)' }}>
               <Group justify="space-between">
                 <div>
                   <Text size="xs" c="dimmed">{t('codeRunner.totalExecutionTime')}:</Text>
@@ -394,44 +328,26 @@ if (error || !problem) {
   
   return (
     <AppShell
-      header={{ height: 80 }}
+      header={{ height: HEADER_HEIGHT }}
       padding="0"
     >
       {/* Header with title and controls */}
-      <AppShell.Header>
-        <Stack gap="xs" h="100%" justify="center" px="md">
-          <Group justify="space-between" align="flex-start">
-            <div 
-              onClick={() => router.push('/')} 
-              style={{ textDecoration: 'none', color: 'inherit', cursor: 'pointer' }}
-            >
-              <Title order={2} mb={4}>{t('homepage.title')}</Title>
-              <Text size="sm" c="dimmed">{t('homepage.subtitle')}</Text>
-            </div>
-            <Group>
-              <Button 
-                component={Link} 
-                href="/" 
-                variant="outline" 
-                color="gray"
-                size="sm"
-              >
-                ← {t('common.home')}
-              </Button>
-              <Button 
-                component={Link} 
-                href="/add-problem" 
-                variant="outline" 
-                color="blue"
-                size="sm"
-              >
-                + {t('homepage.addProblem')}
-              </Button>
-              <LanguageThemeControls />
-            </Group>
-          </Group>
-        </Stack>
-      </AppShell.Header>
+      <AppHeader
+        backHref="/"
+        title={problem.title[locale as keyof typeof problem.title] || problem.title.zh}
+        actions={
+          <Button
+            component={Link}
+            href="/add-problem"
+            variant="light"
+            size="xs"
+            leftSection={<IconPlus size={14} />}
+            visibleFrom="sm"
+          >
+            {t('homepage.addProblem')}
+          </Button>
+        }
+      />
 
       {/* Main content with resizable split panes */}
       <AppShell.Main>
@@ -439,7 +355,7 @@ if (error || !problem) {
           ref={containerRef}
           style={{
             display: 'flex',
-            height: 'calc(100vh - 80px)',
+            height: `calc(100vh - ${HEADER_HEIGHT}px)`,
             overflow: 'hidden'
           }}
         >
@@ -451,33 +367,39 @@ if (error || !problem) {
               maxWidth: '80%',
               overflow: 'hidden',
               padding: '16px',
-              borderRight: '1px solid #e9ecef',
               display: 'flex',
               flexDirection: 'column'
             }}
           >
             {/* Problem Title and Metadata */}
-            <Paper shadow="sm" p="lg" withBorder mb="md">
-              <Group justify="space-between" align="flex-start" mb={15}>
-                <div style={{ flex: 1 }}>
-                  <Title order={2} mb={8}>
-                    {problem.title[locale as keyof typeof problem.title] || problem.title.zh}
-                  </Title>
-                  <Group gap={8}>
-                    <Badge 
-                      color={getDifficultyColor(problem.difficulty)}
-                      variant="filled"
-                      size="md"
-                    >
-                      {t(`homepage.difficulty.${problem.difficulty}`)}
-                    </Badge>
-                    {problem.tags?.map((tag: string) => (
-                      <Badge key={tag} color="blue" variant="light" size="sm">
-                        {t(`tags.${tag}`) !== `tags.${tag}` ? t(`tags.${tag}`) : tag}
-                      </Badge>
-                    ))}
-                  </Group>
-                </div>
+            <Paper p="md" withBorder mb="md" radius="lg">
+              <Title order={3} mb={10}>
+                {problem.title[locale as keyof typeof problem.title] || problem.title.zh}
+              </Title>
+              <Group gap={6} wrap="wrap">
+                <Badge
+                  color={getDifficultyColor(problem.difficulty)}
+                  variant="light"
+                  size="sm"
+                  leftSection={
+                    <span
+                      style={{
+                        display: 'inline-block',
+                        width: 6,
+                        height: 6,
+                        borderRadius: '50%',
+                        background: `var(--mantine-color-${getDifficultyColor(problem.difficulty)}-filled)`,
+                      }}
+                    />
+                  }
+                >
+                  {t(`homepage.difficulty.${problem.difficulty}`)}
+                </Badge>
+                {problem.tags?.map((tag: string) => (
+                  <Badge key={tag} color="gray" variant="light" size="sm">
+                    {t(`tags.${tag}`) !== `tags.${tag}` ? t(`tags.${tag}`) : tag}
+                  </Badge>
+                ))}
               </Group>
             </Paper>
             
@@ -485,13 +407,13 @@ if (error || !problem) {
             <div style={{ flex: 1, overflow: 'hidden' }}>
               <Tabs value={activeTab} onChange={(value) => value && setActiveTab(value)} style={{ height: '100%' }}>
                 <Tabs.List>
-                  <Tabs.Tab value="description">
-                    📝 {t('problemPage.description')}
+                  <Tabs.Tab value="description" leftSection={<IconFileText size={15} />}>
+                    {t('problemPage.description')}
                   </Tabs.Tab>
-                  <Tabs.Tab value="solution">
-                    🔍 {t('problemPage.solution')}
+                  <Tabs.Tab value="solution" leftSection={<IconBulb size={15} />}>
+                    {t('problemPage.solution')}
                   </Tabs.Tab>
-                  <Tabs.Tab value="results">
+                  <Tabs.Tab value="results" leftSection={<IconFlask size={15} />}>
                     {t('codeRunner.testResults')}
                   </Tabs.Tab>
                 </Tabs.List>
@@ -499,7 +421,7 @@ if (error || !problem) {
                 <Tabs.Panel value="description" style={{ height: 'calc(100% - 40px)', overflow: 'auto', padding: '16px 0' }}>
                   <Stack gap="lg">
                     {/* Problem Description */}
-                    <Paper shadow="sm" p="lg" withBorder>
+                    <Paper p="lg" withBorder radius="lg">
                       <MarkdownRenderer 
                         content={problem.description[locale as keyof typeof problem.description] || problem.description.zh}
                       />
@@ -507,10 +429,11 @@ if (error || !problem) {
                     
                     {/* Examples */}
                     {problem.examples && (
-                      <Paper shadow="sm" p="lg" withBorder>
-                        <Title order={4} mb={15}>
-                          💡 {t('problemPage.examples')}
-                        </Title>
+                      <Paper p="lg" withBorder radius="lg">
+                        <Group gap={8} mb={15}>
+                          <IconBulb size={18} />
+                          <Title order={4}>{t('problemPage.examples')}</Title>
+                        </Group>
                         <Stack gap={15}>
                           {problem.examples.map((example: any, index: number) => (
                             <div key={index}>
@@ -518,12 +441,13 @@ if (error || !problem) {
                                 {t('problemPage.example')} {index + 1}:
                               </Text>
                               <pre style={{
-                                backgroundColor: colorScheme === 'dark' ? '#2e2e2e' : '#f8f9fa',
-                                border: `1px solid ${colorScheme === 'dark' ? '#373a40' : '#e9ecef'}`,
-                                borderRadius: '4px',
+                                backgroundColor: 'var(--app-surface-muted)',
+                                border: '1px solid var(--app-border)',
+                                borderRadius: '8px',
                                 padding: '12px',
-                                fontFamily: 'monospace',
-                                fontSize: '14px',
+                                fontFamily: 'var(--mantine-font-family-monospace)',
+                                fontSize: '13px',
+                                lineHeight: 1.7,
                                 whiteSpace: 'pre-wrap',
                                 wordBreak: 'break-word',
                                 margin: 0
@@ -543,7 +467,7 @@ if (error || !problem) {
 
                 <Tabs.Panel value="solution" style={{ height: 'calc(100% - 40px)', overflow: 'auto', padding: '16px 0' }}>
                   {problem.solutions && problem.solutions.length > 0 ? (
-                    <Paper shadow="sm" p="lg" withBorder>
+                    <Paper p="lg" withBorder radius="lg">
                       <Group justify="space-between" align="center" mb={15}>
                         {problem.solutions.length > 1 && (
                           <Select
@@ -592,7 +516,7 @@ if (error || !problem) {
                       )}
                     </Paper>
                   ) : problem.solution?.js ? (
-                    <Paper shadow="sm" p="lg" withBorder>
+                    <Paper p="lg" withBorder radius="lg">
                       <Group justify="flex-end" align="center" mb={15}>
                         <Button 
                           variant="light" 
@@ -612,7 +536,7 @@ if (error || !problem) {
                       )}
                     </Paper>
                   ) : (
-                    <Paper shadow="sm" p="lg" withBorder>
+                    <Paper p="lg" withBorder radius="lg">
                       <Center py="xl">
                         <Text size="md" c="dimmed">
                           {t('problemPage.noSolutions')}
@@ -624,13 +548,13 @@ if (error || !problem) {
 
                 <Tabs.Panel value="results" style={{ height: 'calc(100% - 40px)', overflow: 'auto', padding: '16px 0' }}>
                   {testResult ? (
-                    <Paper shadow="sm" p="lg" withBorder>
+                    <Paper p="lg" withBorder radius="lg">
                       <div style={{ maxHeight: '100%', overflow: 'auto' }}>
                         {renderTestResult(testResult)}
                       </div>
                     </Paper>
                   ) : (
-                    <Paper shadow="sm" p="lg" withBorder>
+                    <Paper p="lg" withBorder radius="lg">
                       <Center py="xl">
                         <Text size="md" c="dimmed">
                           {t('codeRunner.noResults')}
@@ -645,41 +569,14 @@ if (error || !problem) {
           
           {/* Resizable Divider */}
           <div
+            className="app-resizer"
+            data-dragging={isDragging || undefined}
             onMouseDown={handleMouseDown}
-            style={{
-              width: '4px',
-              backgroundColor: isDragging 
-                ? '#228be6' 
-                : colorScheme === 'dark' ? '#424242' : '#e9ecef',
-              cursor: 'col-resize',
-              position: 'relative',
-              transition: isDragging ? 'none' : 'background-color 0.2s ease'
-            }}
-          >
-            <div
-              style={{
-                position: 'absolute',
-                top: '50%',
-                left: '50%',
-                transform: 'translate(-50%, -50%)',
-                width: '20px',
-                height: '40px',
-                backgroundColor: '#228be6',
-                borderRadius: '4px',
-                opacity: isDragging ? 1 : 0.3,
-                transition: 'opacity 0.2s ease',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: 'white',
-                fontSize: '12px',
-                fontWeight: 'bold'
-              }}
-            >
-              ⋮⋮
-            </div>
-          </div>
-          
+            role="separator"
+            aria-orientation="vertical"
+          />
+
+
           {/* Right Panel - Code Editor */}
           <div
             style={{

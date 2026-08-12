@@ -17,7 +17,6 @@ import {
 } from '@mantine/core';
 import { IconSend, IconRobot, IconUser, IconX, IconMessageCircle } from '@tabler/icons-react';
 import { useTranslation, useI18n } from '../contexts/I18nContext';
-import { useTheme } from '../contexts/ThemeContext';
 import MarkdownRenderer from './MarkdownRenderer';
 
 interface AIProviderConfig {
@@ -49,7 +48,6 @@ interface AIChatDialogProps {
 export default function AIChatDialog({ problem, currentCode, codeLanguage }: AIChatDialogProps) {
   const { t } = useTranslation();
   const { locale } = useI18n();
-  const { colorScheme } = useTheme();
   
   const [opened, setOpened] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -318,9 +316,9 @@ export default function AIChatDialog({ problem, currentCode, codeLanguage }: AIC
                     p="sm"
                     withBorder
                     style={{
-                      backgroundColor: msg.role === 'user' 
-                        ? (colorScheme === 'dark' ? '#2C2E33' : '#f0f4ff')
-                        : (colorScheme === 'dark' ? '#25262b' : '#ffffff'),
+                      backgroundColor: msg.role === 'user'
+                        ? 'var(--mantine-color-brand-light)'
+                        : 'var(--app-surface)',
                       marginLeft: msg.role === 'user' ? '20%' : 0,
                       marginRight: msg.role === 'assistant' ? '20%' : 0,
                     }}

@@ -1,17 +1,13 @@
-import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, ReactNode } from 'react';
 import {
   AppShell,
-  Badge,
   Center,
-  Group,
   Loader,
   Stack,
   Text,
-  Title,
 } from '@mantine/core';
 import { useTranslation } from '../src/contexts/I18nContext';
-import { LanguageThemeControls } from '../src/components/LanguageThemeControls';
+import { AppHeader, HEADER_HEIGHT } from '../src/components/AppHeader';
 import { PracticeDashboard } from '../src/components/PracticeDashboard';
 
 type ProblemLite = {
@@ -43,106 +39,32 @@ export default function StatsPage() {
     fetchProblems();
   }, []);
 
+  const shell = (children: ReactNode) => (
+    <AppShell header={{ height: HEADER_HEIGHT }} padding={{ base: 'sm', md: 'lg' }}>
+      <AppHeader backHref="/" title={t('statsPage.title')} />
+      <AppShell.Main>{children}</AppShell.Main>
+    </AppShell>
+  );
+
   if (loading) {
-    return (
-      <AppShell header={{ height: 80 }} padding={{ base: 'sm', md: 'md' }}>
-        <AppShell.Header>
-          <Stack gap="xs" h="100%" justify="center" px="md">
-            <Group justify="space-between" align="flex-start">
-              <div>
-                <Title order={2} mb={4}>
-                  {t('statsPage.title')}
-                </Title>
-                <Text size="sm" c="dimmed">
-                  {t('statsPage.subtitle')}
-                </Text>
-              </div>
-              <Group>
-                <Link href="/">
-                  <Badge size="lg" variant="outline" color="gray" style={{ cursor: 'pointer', padding: '8px 16px' }}>
-                    ← {t('common.home')}
-                  </Badge>
-                </Link>
-                <LanguageThemeControls />
-              </Group>
-            </Group>
-          </Stack>
-        </AppShell.Header>
-        <AppShell.Main>
-          <Center style={{ minHeight: '50vh' }}>
-            <Stack align="center" gap={20}>
-              <Loader size="lg" />
-              <Text>{t('common.loading')}</Text>
-            </Stack>
-          </Center>
-        </AppShell.Main>
-      </AppShell>
+    return shell(
+      <Center style={{ minHeight: '60vh' }}>
+        <Stack align="center" gap="md">
+          <Loader size="md" />
+          <Text size="sm" c="dimmed">{t('common.loading')}</Text>
+        </Stack>
+      </Center>
     );
   }
 
   if (error) {
-    return (
-      <AppShell header={{ height: 80 }} padding={{ base: 'sm', md: 'md' }}>
-        <AppShell.Header>
-          <Stack gap="xs" h="100%" justify="center" px="md">
-            <Group justify="space-between" align="flex-start">
-              <div>
-                <Title order={2} mb={4}>
-                  {t('statsPage.title')}
-                </Title>
-                <Text size="sm" c="dimmed">
-                  {t('statsPage.subtitle')}
-                </Text>
-              </div>
-              <Group>
-                <Link href="/">
-                  <Badge size="lg" variant="outline" color="gray" style={{ cursor: 'pointer', padding: '8px 16px' }}>
-                    ← {t('common.home')}
-                  </Badge>
-                </Link>
-                <LanguageThemeControls />
-              </Group>
-            </Group>
-          </Stack>
-        </AppShell.Header>
-        <AppShell.Main>
-          <Center style={{ minHeight: '50vh' }}>
-            <Text c="red">{error}</Text>
-          </Center>
-        </AppShell.Main>
-      </AppShell>
+    return shell(
+      <Center style={{ minHeight: '60vh' }}>
+        <Text c="red">{error}</Text>
+      </Center>
     );
   }
 
-  return (
-    <AppShell header={{ height: 80 }} padding={{ base: 'sm', md: 'md' }}>
-      <AppShell.Header>
-        <Stack gap="xs" h="100%" justify="center" px="md">
-          <Group justify="space-between" align="flex-start">
-            <div>
-              <Title order={2} mb={4}>
-                {t('statsPage.title')}
-              </Title>
-              <Text size="sm" c="dimmed">
-                {t('statsPage.subtitle')}
-              </Text>
-            </div>
-            <Group>
-              <Link href="/">
-                <Badge size="lg" variant="outline" color="gray" style={{ cursor: 'pointer', padding: '8px 16px' }}>
-                  ← {t('common.home')}
-                </Badge>
-              </Link>
-              <LanguageThemeControls />
-            </Group>
-          </Group>
-        </Stack>
-      </AppShell.Header>
-
-      <AppShell.Main>
-        <PracticeDashboard problems={problems as any} />
-      </AppShell.Main>
-    </AppShell>
-  );
+  return shell(<PracticeDashboard problems={problems as any} />);
 }
 
