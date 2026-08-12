@@ -3,8 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Offline Code Practice - Page Not Found</title>
+    <title>AlgoLocal - Page Not Found</title>
     <meta name="robots" content="noindex, follow" />
+    <meta name="theme-color" content="#12110f" />
     <link rel="canonical" href="https://zxypro1.github.io/algolocal/" />
     <link rel="icon" href="favicon.ico" sizes="any" />
     <link rel="icon" type="image/png" href="favicon-32.png" sizes="32x32" />
@@ -12,14 +13,57 @@
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <meta http-equiv="refresh" content="0; url=/algolocal/" />
     <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 48px; }
-      a { color: #4f46e5; }
+      :root {
+        --bg: #12110f;
+        --text: #f5f1ea;
+        --text-secondary: #a8a29e;
+        --primary: #f59e0b;
+        --primary-light: #fbbf24;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 32px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+      body::before {
+        content: '';
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        background: radial-gradient(ellipse 70% 50% at 50% -10%, rgba(245, 158, 11, 0.14), transparent 70%);
+      }
+      .code {
+        font-family: SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 3.5rem;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+        color: var(--primary);
+        margin-bottom: 8px;
+      }
+      h1 { font-size: 1.35rem; font-weight: 650; margin-bottom: 10px; }
+      p { color: var(--text-secondary); font-size: 0.95rem; }
+      a {
+        color: var(--primary-light);
+        text-decoration: none;
+        border-bottom: 1px solid rgba(245, 158, 11, 0.4);
+      }
+      a:hover { border-bottom-color: var(--primary-light); }
     </style>
   </head>
   <body>
-    <h1>404 - Page Not Found</h1>
-    <p>Redirecting to <a href="/algolocal/">Offline Code Practice</a>…</p>
+    <main>
+      <div class="code">404</div>
+      <h1>Page Not Found</h1>
+      <p>Redirecting to <a href="/algolocal/">AlgoLocal</a>…</p>
+    </main>
   </body>
 </html>
-
-

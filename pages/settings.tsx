@@ -15,11 +15,12 @@ import {
   PasswordInput,
   Center,
   Select,
-  Badge
+  Badge,
+  AppShell
 } from '@mantine/core';
 import { IconRobot } from '@tabler/icons-react';
 import { useTranslation, useI18n } from '../src/contexts/I18nContext';
-import { LanguageThemeControls } from '../src/components/LanguageThemeControls';
+import { AppHeader, HEADER_HEIGHT } from '../src/components/AppHeader';
 
 export default function SettingsPage() {
   const { t } = useTranslation();
@@ -213,42 +214,33 @@ export default function SettingsPage() {
 
   if (loading) {
     return (
-      <Container size="md" py="xl">
-        <Stack gap="xl">
-          <Group justify="space-between" align="center">
-            <Title>{t('settings.title')}</Title>
-            <LanguageThemeControls />
-          </Group>
-          
-          <Card shadow="sm" padding="lg" radius="md" withBorder>
-            <Center style={{ minHeight: '300px' }}>
-              <Stack align="center" gap="md">
-                <Loader />
-                <Text>{t('common.loading')}</Text>
-              </Stack>
-            </Center>
-          </Card>
-        </Stack>
-      </Container>
+      <AppShell header={{ height: HEADER_HEIGHT }}>
+        <AppHeader backHref="/" title={t('settings.title')} />
+        <AppShell.Main>
+          <Container size="md" py="xl">
+            <Card padding="lg" radius="lg" withBorder>
+              <Center style={{ minHeight: '300px' }}>
+                <Stack align="center" gap="md">
+                  <Loader size="md" />
+                  <Text size="sm" c="dimmed">{t('common.loading')}</Text>
+                </Stack>
+              </Center>
+            </Card>
+          </Container>
+        </AppShell.Main>
+      </AppShell>
     );
   }
 
   return (
-    <Container size="md" py="xl">
-      <Stack gap="xl">
-        <Group justify="space-between" align="center">
-          <Button 
-            variant="subtle"
-            onClick={() => window.location.href = '/'}
-            size="md"
-          >
-            ← {t('common.home')}
-          </Button>
-          <Title>{t('settings.title')}</Title>
-          <LanguageThemeControls />
-        </Group>
-        
-        <Card shadow="sm" padding="lg" radius="md" withBorder>
+    <AppShell header={{ height: HEADER_HEIGHT }}>
+      <AppHeader backHref="/" title={t('settings.title')} />
+      <AppShell.Main>
+      <Container size="md" py="xl">
+        <Stack gap="xl">
+          <Title order={1}>{t('settings.title')}</Title>
+
+          <Card padding="lg" radius="lg" withBorder>
           <Stack gap="xl">
             <Text size="sm" c="dimmed">
               {t('settings.description')}
@@ -426,8 +418,10 @@ export default function SettingsPage() {
               </Button>
             </Group>
           </Stack>
-        </Card>
-      </Stack>
-    </Container>
+          </Card>
+        </Stack>
+      </Container>
+      </AppShell.Main>
+    </AppShell>
   );
 }

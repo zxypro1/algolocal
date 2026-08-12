@@ -568,10 +568,10 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
                   style={{
                     maxHeight: 150,
                     overflow: 'auto',
-                    border: `1px solid ${colorScheme === 'dark' ? '#373a40' : '#e9ecef'}`,
-                    borderRadius: 4,
+                    border: '1px solid var(--app-border)',
+                    borderRadius: 8,
                     padding: 12,
-                    backgroundColor: colorScheme === 'dark' ? '#2e2e2e' : '#f8f9fa'
+                    backgroundColor: 'var(--app-surface-muted)'
                   }}
                 >
                   <Text size="sm">

@@ -1,35 +1,31 @@
 import React from 'react';
 import Head from 'next/head';
 import Link from 'next/link';
-import { Container, AppShell, Title, Button, Group } from '@mantine/core';
+import { Container, AppShell, Button } from '@mantine/core';
 import { useTranslation } from '../src/contexts/I18nContext';
+import { AppHeader, HEADER_HEIGHT } from '../src/components/AppHeader';
 import ProblemForm from '../src/components/ProblemForm';
 
 const AddProblem: React.FC = () => {
   const { t } = useTranslation();
 
   return (
-    <AppShell header={{ height: 64 }}>
+    <AppShell header={{ height: HEADER_HEIGHT }}>
       <Head>
         <title>{t('addProblem.title')} - {t('header.title')}</title>
         <meta name="description" content="Add new coding problems to the practice system" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
 
-      <AppShell.Header>
-        <Container size="xl" h="100%">
-          <Group h="100%" justify="space-between">
-            <Link href="/" style={{ textDecoration: 'none' }}>
-              <Title order={3} c="var(--mantine-color-text)">
-                {t('header.title')}
-              </Title>
-            </Link>
-            <Button component={Link} href="/" variant="subtle">
-              {t('addProblem.backToProblems')}
-            </Button>
-          </Group>
-        </Container>
-      </AppShell.Header>
+      <AppHeader
+        backHref="/"
+        title={t('addProblem.title')}
+        actions={
+          <Button component={Link} href="/" variant="subtle" color="gray" size="xs" visibleFrom="sm">
+            {t('addProblem.backToProblems')}
+          </Button>
+        }
+      />
 
       <AppShell.Main>
         <Container size="xl" py="xl">

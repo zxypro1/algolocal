@@ -1,6 +1,6 @@
 # AlgoLocal
 
-[中文](./README-zh.md)
+[中文](./README-zh.md) | [Español](./README.es-ES.md)
 
 Quick links: [Discussions](https://github.com/zxypro1/algolocal/discussions) | [Issues](https://github.com/zxypro1/algolocal/issues) | [Pull Requests](https://github.com/zxypro1/algolocal/pulls)
 

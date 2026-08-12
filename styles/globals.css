@@ -1,65 +1,182 @@
-/* 全局样式 - 确保暗色主题正确工作 */
+/* 全局样式：表面分层、滚动条、焦点环、通用交互反馈 */
 
-/* 亮色主题样式 */
-[data-mantine-color-scheme="light"] {
+/* ---------- 颜色分层 ----------
+   --mantine-color-body 是 Card / Paper / Header 的表面色，
+   --app-bg 是页面底色，比表面稍暗一档，卡片才有层次。 */
+
+[data-mantine-color-scheme='light'] {
   --mantine-color-body: #ffffff;
-  --mantine-color-text: #000000;
+  --mantine-color-text: #16181d;
+  --app-bg: #f5f6f8;
+  --app-surface: #ffffff;
+  --app-surface-muted: #f8f9fb;
+  --app-border: #e6e8ec;
+  --app-border-strong: #d3d6dd;
+  --app-shadow: 0 1px 3px rgba(15, 18, 34, 0.06), 0 8px 24px rgba(15, 18, 34, 0.05);
 }
 
-/* 暗色主题样式 */
-[data-mantine-color-scheme="dark"] {
-  --mantine-color-body: #1a1b1e;
-  --mantine-color-text: #c1c2c5;
+[data-mantine-color-scheme='dark'] {
+  --mantine-color-body: #17191d;
+  --mantine-color-text: #c9cbd1;
+  --app-bg: #131418;
+  --app-surface: #17191d;
+  --app-surface-muted: #1f2127;
+  --app-border: #2a2d34;
+  --app-border-strong: #3a3e47;
+  --app-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.25);
 }
 
-/* 确保body元素使用正确的背景色 */
-html[data-mantine-color-scheme="dark"] body {
-  background-color: #1a1b1e;
-  color: #c1c2c5;
+html[data-mantine-color-scheme='dark'],
+html[data-mantine-color-scheme='dark'] body {
+  background-color: var(--app-bg);
+  color: var(--mantine-color-text);
 }
 
-html[data-mantine-color-scheme="light"] body {
-  background-color: #ffffff;
-  color: #000000;
+html[data-mantine-color-scheme='light'],
+html[data-mantine-color-scheme='light'] body {
+  background-color: var(--app-bg);
+  color: var(--mantine-color-text);
 }
 
-/* 确保页面根元素的背景色 */
-html[data-mantine-color-scheme="dark"] {
-  background-color: #1a1b1e;
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
-html[data-mantine-color-scheme="light"] {
-  background-color: #ffffff;
+/* Next.js 的 Link 默认继承下划线，这里统一交给组件自己控制 */
+a {
+  color: inherit;
+  text-decoration: none;
 }
 
-/* 自定义滚动条样式 */
+/* ---------- 焦点可见性 ---------- */
+:focus-visible {
+  outline: 2px solid var(--mantine-color-brand-filled);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ---------- 滚动条 ---------- */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 
-[data-mantine-color-scheme="dark"] ::-webkit-scrollbar-track {
-  background: #25262b;
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-[data-mantine-color-scheme="dark"] ::-webkit-scrollbar-thumb {
-  background: #373a40;
-  border-radius: 4px;
+::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
 }
 
-[data-mantine-color-scheme="dark"] ::-webkit-scrollbar-thumb:hover {
-  background: #5c5f66;
+[data-mantine-color-scheme='dark'] ::-webkit-scrollbar-thumb {
+  background-color: #3a3e47;
+  background-clip: content-box;
 }
 
-[data-mantine-color-scheme="light"] ::-webkit-scrollbar-track {
-  background: #f1f3f4;
+[data-mantine-color-scheme='dark'] ::-webkit-scrollbar-thumb:hover {
+  background-color: #4d525d;
+  background-clip: content-box;
 }
 
-[data-mantine-color-scheme="light"] ::-webkit-scrollbar-thumb {
-  background: #c1c2c5;
-  border-radius: 4px;
+[data-mantine-color-scheme='light'] ::-webkit-scrollbar-thumb {
+  background-color: #cfd3da;
+  background-clip: content-box;
 }
 
-[data-mantine-color-scheme="light"] ::-webkit-scrollbar-thumb:hover {
-  background: #a6a7ab;
+[data-mantine-color-scheme='light'] ::-webkit-scrollbar-thumb:hover {
+  background-color: #b4b9c3;
+  background-clip: content-box;
+}
+
+/* ---------- 通用交互工具类 ---------- */
+
+/* 卡片悬停抬升：列表 / 网格项共用 */
+.app-hover-card {
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+}
+
+.app-hover-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--app-shadow);
+  border-color: var(--app-border-strong);
+}
+
+/* 抽屉里的导航项 */
+.app-nav-item {
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+.app-nav-item:hover {
+  transform: translateX(-3px);
+  box-shadow: var(--app-shadow);
+}
+
+/* 顶栏：轻微毛玻璃，滚动时内容不会顶穿 */
+.app-header {
+  background-color: color-mix(in srgb, var(--app-surface) 88%, transparent);
+  backdrop-filter: saturate(180%) blur(12px);
+  -webkit-backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--app-border);
+}
+
+/* 分区小标题：替代到处使用的 Title order={4} */
+.app-section-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mantine-color-dimmed);
+}
+
+/* 左右分栏的拖拽条 */
+.app-resizer {
+  position: relative;
+  width: 6px;
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background-color: var(--app-border);
+  transition: background-color 160ms ease;
+}
+
+.app-resizer:hover,
+.app-resizer[data-dragging='true'] {
+  background-color: var(--mantine-color-brand-filled);
+}
+
+.app-resizer::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 28px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background-color: var(--app-border-strong);
+  transition: background-color 160ms ease;
+}
+
+.app-resizer:hover::after,
+.app-resizer[data-dragging='true']::after {
+  background-color: #ffffff;
+}
+
+/* 减少动画偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .app-hover-card,
+  .app-nav-item,
+  .app-resizer,
+  .app-resizer::after {
+    transition: none;
+  }
+
+  .app-hover-card:hover,
+  .app-nav-item:hover {
+    transform: none;
+  }
 }
