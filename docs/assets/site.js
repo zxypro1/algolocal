@@ -1,80 +1,77 @@
-document.addEventListener('DOMContentLoaded', function () {
-  /* ---------- 滚动入场动效 ---------- */
-  const faders = document.querySelectorAll('.fade-in');
+document.addEventListener('DOMContentLoaded', () => {
+  const body = document.body;
+  const header = document.querySelector('[data-header]');
+  const menuButton = document.querySelector('[data-menu-button]');
+  const mobileNav = document.querySelector('[data-mobile-nav]');
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  if ('IntersectionObserver' in window) {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (!entry.isIntersecting) return;
-          entry.target.classList.add('visible');
-          observer.unobserve(entry.target); // 只播一次
-        });
-      },
-      {
-        threshold: 0.1,
-        rootMargin: '0px 0px -50px 0px',
-      }
-    );
+  body.classList.add('motion-ready');
 
-    faders.forEach((el) => observer.observe(el));
-  } else {
-    // 老浏览器直接显示，避免内容永远透明
-    faders.forEach((el) => el.classList.add('visible'));
-  }
+  const syncHeader = () => {
+    if (header) header.classList.toggle('scrolled', window.scrollY > 12);
+  };
 
-  /* 同一组卡片依次入场，而不是整排一起跳出来 */
-  document.querySelectorAll('.features-grid, .languages-grid, .download-grid').forEach((grid) => {
-    Array.from(grid.children).forEach((card, i) => {
-      if (card.classList.contains('fade-in')) {
-        card.style.transitionDelay = Math.min(i * 70, 350) + 'ms';
-      }
-    });
+  const closeMenu = () => {
+    header?.classList.remove('open');
+    mobileNav?.classList.remove('open');
+    body.classList.remove('menu-open');
+    menuButton?.setAttribute('aria-expanded', 'false');
+  };
+
+  syncHeader();
+  window.addEventListener('scroll', syncHeader, { passive: true });
+
+  menuButton?.addEventListener('click', () => {
+    const isOpen = !header?.classList.contains('open');
+    header?.classList.toggle('open', isOpen);
+    mobileNav?.classList.toggle('open', isOpen);
+    body.classList.toggle('menu-open', isOpen);
+    menuButton.setAttribute('aria-expanded', String(isOpen));
   });
 
-  /* ---------- 导航滚动态 ---------- */
-  const nav = document.querySelector('nav');
+  mobileNav?.addEventListener('click', (event) => {
+    if (event.target.closest('a')) closeMenu();
+  });
 
-  if (nav) {
-    const syncNavState = () => {
-      nav.classList.toggle('scrolled', window.scrollY > 8);
-    };
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeMenu();
+  });
 
-    syncNavState();
-    window.addEventListener('scroll', syncNavState, { passive: true });
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 1180) closeMenu();
+  });
 
-    /* ---------- 移动端菜单 ---------- */
-    const menuBtn = nav.querySelector('.mobile-menu-btn');
-    const navLinks = nav.querySelector('.nav-links');
-
-    if (menuBtn && navLinks) {
-      menuBtn.setAttribute('aria-expanded', 'false');
-      menuBtn.setAttribute('aria-controls', 'nav-links');
-      navLinks.id = navLinks.id || 'nav-links';
-
-      const setMenu = (open) => {
-        nav.classList.toggle('nav-open', open);
-        menuBtn.setAttribute('aria-expanded', String(open));
-      };
-
-      menuBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        setMenu(!nav.classList.contains('nav-open'));
+  const reveals = document.querySelectorAll('.reveal');
+  if (reduceMotion || !('IntersectionObserver' in window)) {
+    reveals.forEach((element) => element.classList.add('visible'));
+  } else {
+    const revealObserver = new IntersectionObserver((entries, observer) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add('visible');
+        observer.unobserve(entry.target);
       });
+    }, { threshold: 0.12, rootMargin: '0px 0px -45px' });
 
-      // 点链接后收起
-      navLinks.addEventListener('click', (e) => {
-        if (e.target.closest('a')) setMenu(false);
-      });
+    reveals.forEach((element) => revealObserver.observe(element));
+  }
 
-      // 点空白处 / 按 Esc 收起
-      document.addEventListener('click', (e) => {
-        if (!nav.contains(e.target)) setMenu(false);
-      });
+  const navLinks = document.querySelectorAll('.desktop-nav a[href^="#"]');
+  const sections = [...navLinks]
+    .map((link) => document.querySelector(link.getAttribute('href')))
+    .filter(Boolean);
 
-      document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') setMenu(false);
+  if ('IntersectionObserver' in window && sections.length) {
+    const sectionObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        navLinks.forEach((link) => {
+          const active = link.getAttribute('href') === `#${entry.target.id}`;
+          link.toggleAttribute('aria-current', active);
+        });
       });
-    }
+    }, { rootMargin: '-30% 0px -62%', threshold: 0 });
+
+    sections.forEach((section) => sectionObserver.observe(section));
   }
 });

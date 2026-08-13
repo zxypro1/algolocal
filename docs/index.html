@@ -1,313 +1,259 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
-    
-    <!-- SEO Meta Tags -->
-    <title>AlgoLocal - Free LeetCode-Style Algorithm Practice App | 100% Offline with AI</title>
-    <meta name="description" content="Practice coding algorithms 100% offline with AI: generate problems, get hints, discuss solutions, and run code in JavaScript, TypeScript, or Python. No internet or setup required. Available for Windows, macOS, and Linux. Free & open source.">
-    <meta name="keywords" content="LeetCode, algorithm practice, coding interview, offline coding, AI coding assistant, AI solution, AI chat, AI problem generator, JavaScript, TypeScript, Python, programming practice, data structures, coding problems, free, open source">
-    <meta name="author" content="zxypro1">
-    <meta name="robots" content="index, follow">
-    <meta name="msvalidate.01" content="851E8929724BC064EAFA2D4AAE903E09" />
-    <meta name="google-site-verification" content="polTjQtkihIv7LZ-5RVl19ejDTy6ZU9TTX6xiDBKgUg" />
-    <link rel="canonical" href="https://zxypro1.github.io/algolocal/">
-    <link rel="alternate" href="https://zxypro1.github.io/algolocal/" hreflang="en">
-    <link rel="alternate" href="https://zxypro1.github.io/algolocal/zh/" hreflang="zh-CN">
-    
-    <!-- Open Graph / Facebook -->
-    <meta property="og:type" content="website">
-    <meta property="og:url" content="https://zxypro1.github.io/algolocal/">
-    <meta property="og:title" content="AlgoLocal - Free Algorithm Practice App with AI">
-    <meta property="og:description" content="Practice coding algorithms 100% offline with AI: generate problems, get hints, discuss solutions, and run code in JavaScript, TypeScript, or Python. No internet or setup required.">
-    <meta property="og:image" content="https://zxypro1.github.io/algolocal/icon.png">
-    
-    <!-- Twitter -->
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:url" content="https://zxypro1.github.io/algolocal/">
-    <meta name="twitter:title" content="AlgoLocal - Free Algorithm Practice App with AI">
-    <meta name="twitter:description" content="Practice coding algorithms 100% offline with AI: generate problems, get hints, discuss solutions, and run code in JavaScript, TypeScript, or Python. No internet or setup required.">
-    <meta name="twitter:image" content="https://zxypro1.github.io/algolocal/icon.png">
-    
-    <!-- Favicon -->
-    <link rel="icon" href="favicon.ico" sizes="any">
-    <link rel="icon" type="image/png" href="favicon-32.png" sizes="32x32">
-    <link rel="icon" type="image/png" href="favicon-16.png" sizes="16x16">
-    <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <link rel="apple-touch-icon" href="icon.png">
-    <link rel="manifest" href="site.webmanifest">
-    <meta name="theme-color" content="#12110f">
-    
-    <!-- Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    
-    <!-- Structured Data for SEO -->
-    <script type="application/ld+json">
-    {
-        "@context": "https://schema.org",
-        "@type": "SoftwareApplication",
-        "name": "AlgoLocal",
-        "operatingSystem": "Windows, macOS, Linux",
-        "applicationCategory": "DeveloperApplication",
-        "offers": {
-            "@type": "Offer",
-            "price": "0",
-            "priceCurrency": "USD"
-        },
-        "description": "Practice coding algorithms 100% offline with AI: generate problems, get hints, discuss solutions, and run code in JavaScript, TypeScript, or Python — no internet or setup required.",
-        "downloadUrl": "https://github.com/zxypro1/algolocal/releases",
-        "softwareVersion": "0.3.0",
-        "author": {
-            "@type": "Person",
-            "name": "zxypro1"
-        }
-    }
-    </script>
-    
-    <link rel="stylesheet" href="assets/site.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>AlgoLocal — Local-first algorithm practice with optional AI</title>
+  <meta name="description" content="Practice algorithms in a focused local-first desktop workspace. Run JavaScript, TypeScript, and Python on your machine, track progress, and bring your preferred AI provider when you want help.">
+  <meta name="keywords" content="algorithm practice, coding interview, offline coding, local-first, AI coding assistant, JavaScript, TypeScript, Python, WASM, open source">
+  <meta name="author" content="zxypro1">
+  <meta name="robots" content="index, follow">
+  <meta name="msvalidate.01" content="851E8929724BC064EAFA2D4AAE903E09">
+  <meta name="google-site-verification" content="polTjQtkihIv7LZ-5RVl19ejDTy6ZU9TTX6xiDBKgUg">
+  <link rel="canonical" href="https://zxypro1.github.io/algolocal/">
+  <link rel="alternate" href="https://zxypro1.github.io/algolocal/" hreflang="en">
+  <link rel="alternate" href="https://zxypro1.github.io/algolocal/zh/" hreflang="zh-CN">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://zxypro1.github.io/algolocal/">
+  <meta property="og:title" content="AlgoLocal — Practice algorithms. Keep everything local.">
+  <meta property="og:description" content="A focused, local-first algorithm practice workspace with optional AI help.">
+  <meta property="og:image" content="https://zxypro1.github.io/algolocal/icon.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="AlgoLocal — Practice algorithms. Keep everything local.">
+  <meta name="twitter:description" content="A focused, local-first algorithm practice workspace with optional AI help.">
+  <meta name="twitter:image" content="https://zxypro1.github.io/algolocal/icon.png">
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=4">
+  <link rel="icon" type="image/png" href="favicon-32.png" sizes="32x32">
+  <link rel="apple-touch-icon" href="icon.png">
+  <link rel="manifest" href="site.webmanifest">
+  <meta name="theme-color" content="#11182f">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "AlgoLocal",
+    "operatingSystem": "Windows, macOS, Linux",
+    "applicationCategory": "DeveloperApplication",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "description": "A local-first desktop workspace for algorithm practice with optional AI help.",
+    "downloadUrl": "https://github.com/zxypro1/algolocal/releases",
+    "softwareVersion": "0.3.0",
+    "license": "https://opensource.org/license/mit",
+    "author": { "@type": "Person", "name": "zxypro1" }
+  }
+  </script>
+  <link rel="stylesheet" href="assets/site.css?v=5">
 </head>
 <body>
-    <div class="bg-gradient"></div>
-    
-    <!-- Navigation -->
-    <nav>
-        <div class="container">
-            <a href="#" class="logo">
-                <img src="icon.png" alt="AlgoLocal Logo">
-                <span>AlgoLocal</span>
-            </a>
-            <div class="nav-links">
-                <a href="#features">Features</a>
-                <a href="#languages">Languages</a>
-                <a href="#ai">AI</a>
-                <a href="#download">Download</a>
-                <a href="./zh/" class="lang-btn" aria-label="Switch to Chinese">中文</a>
-                <a href="https://github.com/zxypro1/algolocal" target="_blank" rel="noopener" class="github-btn">
-                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
-                    GitHub
-                </a>
-            </div>
-            <button class="mobile-menu-btn" aria-label="Menu">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
-            </button>
-        </div>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header" data-header>
+    <div class="site-container nav-shell">
+      <a class="brand" href="#top" aria-label="AlgoLocal home">
+        <img src="favicon.svg?v=4" alt="" width="42" height="42">
+        <span>AlgoLocal</span>
+      </a>
+      <nav class="desktop-nav" aria-label="Primary navigation">
+        <a href="#product">Product</a>
+        <a href="#workflow">Workflow</a>
+        <a href="#ai">AI</a>
+        <a href="#download">Download</a>
+      </nav>
+      <div class="nav-actions">
+        <a class="language-link" href="./zh/" aria-label="Switch to Chinese">中文</a>
+        <a class="button button-dark nav-download" href="#download">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14"/></svg>
+          Download
+        </a>
+        <button class="menu-button" type="button" aria-label="Open menu" aria-expanded="false" data-menu-button>
+          <span></span><span></span>
+        </button>
+      </div>
+    </div>
+    <nav class="mobile-nav" aria-label="Mobile navigation" data-mobile-nav>
+      <a href="#product">Product</a>
+      <a href="#workflow">Workflow</a>
+      <a href="#ai">AI</a>
+      <a href="#download">Download</a>
+      <a href="./zh/">中文</a>
     </nav>
-    
-    <!-- Hero Section -->
-    <section class="hero">
-        <div class="container">
-            <div class="badge">
-                <span>v0.3.0 Released</span>
-            </div>
-            <h1>AlgoLocal</h1>
-            <p>Practice coding algorithms 100% offline with AI: generate problems, get hints, discuss solutions, and run code in JavaScript, TypeScript, or Python — no internet or setup required.</p>
-            <div class="hero-buttons">
-                <a href="#download" class="btn btn-primary">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                    Download Free
-                </a>
-                <a href="https://github.com/zxypro1/algolocal" target="_blank" rel="noopener" class="btn btn-secondary">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
-                    View on GitHub
-                </a>
-            </div>
-            <img src="https://github.com/user-attachments/assets/7292075e-6d1b-4fc3-9019-7a80f17c1711" alt="Offline Code Practice Screenshot" class="hero-image fade-in" loading="lazy">
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top">
+      <div class="site-container hero-grid">
+        <div class="hero-copy reveal">
+          <h1>Practice algorithms.<br>Keep everything <span>local.</span></h1>
+          <p>A focused desktop workspace to solve problems, run JavaScript, TypeScript and Python, and get AI help—without handing your practice data to another platform.</p>
+          <div class="hero-actions">
+            <a class="button button-dark" href="#download">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14"/></svg>
+              Download for free
+            </a>
+            <a class="button button-outline" href="https://github.com/zxypro1/algolocal" target="_blank" rel="noopener">
+              <svg class="fill-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 .8a11.4 11.4 0 0 0-3.6 22.2c.6.1.8-.2.8-.6v-2.2c-3.4.7-4.1-1.4-4.1-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.4 11.4 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .4.2.7.8.6A11.4 11.4 0 0 0 12 .8Z"/></svg>
+              View on GitHub
+            </a>
+          </div>
+          <p class="hero-proof"><span>Free &amp; open source</span><i></i><span>macOS</span><i></i><span>Windows</span><i></i><span>Linux</span></p>
         </div>
-    </section>
-    
-    <!-- Features Section -->
-    <section class="features" id="features">
-        <div class="container">
-            <div class="section-title fade-in">
-                <h2>Why Offline Code Practice?</h2>
-                <p>Everything you need to ace your coding interviews, without internet dependency</p>
+
+        <div class="product-window hero-window reveal" id="product" aria-label="AlgoLocal product interface preview">
+          <div class="window-bar">
+            <div class="window-dots"><i></i><i></i><i></i></div>
+            <span class="window-title"><img src="favicon.svg?v=4" alt="">AlgoLocal</span>
+            <div class="window-controls"><span class="run-control">▶ Run</span><span>TypeScript⌄</span></div>
+          </div>
+          <div class="workspace">
+            <aside class="tool-rail" aria-label="Product navigation">
+              <span class="tool-logo"><img src="favicon.svg?v=4" alt=""></span>
+              <span class="active">Problems</span><span>Editor</span><span>Tests</span><span>AI Help</span><span>Settings</span>
+            </aside>
+            <div class="problem-pane">
+              <label class="mock-search">⌕ &nbsp;Search problems…</label>
+              <button type="button">All topics <span>⌄</span></button>
+              <div class="problem active"><b>Two Sum</b><small><em>Easy</em> · Array · Hash table</small></div>
+              <div class="problem"><b>Valid Parentheses</b><small><em>Easy</em> · String · Stack</small></div>
+              <div class="problem"><b>Merge Two Sorted Lists</b><small><em>Easy</em> · Linked list</small></div>
+              <div class="problem"><b>Binary Tree Inorder</b><small><strong>Medium</strong> · Tree · Stack</small></div>
+              <div class="problem"><b>Top K Frequent</b><small><strong>Medium</strong> · Heap</small></div>
+              <p class="pane-foot">28 problems</p>
             </div>
-            <div class="features-grid">
-                <article class="feature-card fade-in">
-                    <div class="feature-icon">✈️</div>
-                    <h3>100% Offline</h3>
-                    <p>Practice on flights, trains, or anywhere without internet. Your coding practice never stops.</p>
-                </article>
-                <article class="feature-card fade-in">
-                    <div class="feature-icon">⚡</div>
-                    <h3>Instant Execution</h3>
-                    <p>WASM-powered code execution runs directly in your browser. No server round-trips needed.</p>
-                </article>
-                <article class="feature-card fade-in">
-                    <div class="feature-icon">🎨</div>
-                    <h3>VS Code Experience</h3>
-                    <p>Monaco Editor with syntax highlighting, autocomplete, and all the features you love.</p>
-                </article>
-                <article class="feature-card fade-in">
-                    <div class="feature-icon">🤖</div>
-                    <h3>AI Assistant (3-in-1)</h3>
-                    <p>AI Problem Generator + AI Chat for hints + AI Solution with multiple approaches—configurable providers in Settings (DeepSeek/OpenAI/Claude/Qwen/Ollama).</p>
-                </article>
-                <article class="feature-card fade-in">
-                    <div class="feature-icon">📊</div>
-                    <h3>Practice Dashboard</h3>
-                    <p>Track your progress with daily statistics, accuracy metrics by difficulty and tags, contribution heatmap, and performance trends.</p>
-                </article>
-                <article class="feature-card fade-in">
-                    <div class="feature-icon">🌍</div>
-                    <h3>Cross-Platform</h3>
-                    <p>Available for Windows, macOS, and Linux. Same great experience everywhere.</p>
-                </article>
+            <div class="editor-pane">
+              <div class="editor-tab"><span>TS</span> two-sum.ts <b>×</b></div>
+              <pre aria-label="TypeScript example"><code><span class="line">1</span> <i>function</i> <b>twoSum</b>(nums: <u>number[]</u>, target: <u>number</u>) {
+<span class="line">2</span>   <i>const</i> map = <i>new</i> Map&lt;number, number&gt;();
+<span class="line">3</span>
+<span class="line">4</span>   <i>for</i> (<i>let</i> i = 0; i &lt; nums.length; i++) {
+<span class="line">5</span>     <i>const</i> complement = target - nums[i];
+<span class="line">6</span>     <i>if</i> (map.has(complement)) {
+<span class="line">7</span>       <i>return</i> [map.get(complement)!, i];
+<span class="line">8</span>     }
+<span class="line">9</span>     map.set(nums[i], i);
+<span class="line">10</span>  }
+<span class="line">11</span>  <i>return</i> [];
+<span class="line">12</span> }</code></pre>
+              <div class="test-panel">
+                <div class="test-tabs"><b>Tests</b><span>Console</span></div>
+                <div class="test-body"><p><span>Test case 1</span><b>✓</b></p><p><span>Test case 2</span><b>✓</b></p><p><span>Test case 3</span><b>✓</b></p><code>nums = [2,7,11,15], target = 9<br>Output&nbsp; [0,1] <strong>Passed</strong></code></div>
+              </div>
             </div>
+            <aside class="ai-pane">
+              <div class="ai-pane-title">◉ &nbsp;AI Help <span>×</span></div>
+              <div class="prompt-box">Can you explain the time complexity of this solution?</div>
+              <p>This solution uses a hash map to store numbers as we iterate.</p>
+              <ul><li><b>Time complexity: O(n)</b><br>One pass through the array.</li><li><b>Space complexity: O(n)</b><br>At most n elements.</li></ul>
+              <label>Ask a follow-up… <span>➤</span></label>
+            </aside>
+          </div>
         </div>
+      </div>
     </section>
-    
-    <!-- Languages Section -->
-    <section class="languages" id="languages">
-        <div class="container">
-            <div class="section-title fade-in">
-                <h2>Supported Languages</h2>
-                <p>Write solutions in your preferred programming language</p>
+
+    <section class="workflow-section" id="workflow">
+      <div class="site-container">
+        <div class="workflow-grid">
+          <div class="workflow-copy reveal">
+            <h2>Everything between the prompt and the breakthrough.</h2>
+            <p class="section-intro">A local-first workspace that keeps you in flow.</p>
+            <ol class="route-list">
+              <li><span>01</span><div><h3>Pick your problem</h3><p>Search by topic, tag or difficulty.</p></div></li>
+              <li><span>02</span><div><h3>Work in a real editor</h3><p>Write JavaScript, TypeScript or Python with Monaco.</p></div></li>
+              <li class="orange"><span>03</span><div><h3>Run it right here</h3><p>WASM executes every test on your machine.</p></div></li>
+              <li class="orange"><span>04</span><div><h3>Learn from every attempt</h3><p>Review results and track progress over time.</p></div></li>
+            </ol>
+            <a class="text-link" href="https://github.com/zxypro1/algolocal#features" target="_blank" rel="noopener">Explore the product <span>→</span></a>
+          </div>
+          <div class="workflow-media reveal">
+            <div class="focus-window">
+              <div class="mini-bar"><div class="window-dots"><i></i><i></i><i></i></div><span>AlgoLocal / Practice</span></div>
+              <div class="focus-code"><span>function</span> <b>solve</b>(input) {<br>&nbsp;&nbsp;<i>// your approach stays here</i><br>&nbsp;&nbsp;<span>return</span> result;<br>}</div>
+              <div class="focus-result"><span>Test case 1</span><b>Passed&nbsp; ✓</b></div>
+              <div class="focus-result"><span>Test case 2</span><b>Passed&nbsp; ✓</b></div>
             </div>
-            <div class="languages-grid">
-                <article class="language-card fade-in">
-                    <div class="language-icon">🟨</div>
-                    <h3>JavaScript</h3>
-                    <p>Native browser execution with full ES6+ support</p>
-                </article>
-                <article class="language-card fade-in">
-                    <div class="language-icon">🔷</div>
-                    <h3>TypeScript</h3>
-                    <p>Real-time transpilation with type safety</p>
-                </article>
-                <article class="language-card fade-in">
-                    <div class="language-icon">🐍</div>
-                    <h3>Python</h3>
-                    <p>Pyodide WASM for CPython compatibility</p>
-                </article>
+            <div class="dashboard-window">
+              <div class="mini-bar"><div class="window-dots"><i></i><i></i><i></i></div><span>AlgoLocal / Progress</span></div>
+              <div class="dashboard-body">
+                <div><small>Solved</small><strong>12<span>/28</span></strong><p>Keep practicing.</p></div>
+                <div class="heatmap-wrap"><small>Past 12 weeks</small><div class="heatmap" aria-hidden="true"></div><p>Less <span></span><span></span><span></span><span></span> More</p></div>
+              </div>
             </div>
+          </div>
         </div>
+      </div>
     </section>
-    
-    <!-- Download Section -->
-    <section class="download" id="download">
-        <div class="container">
-            <div class="section-title fade-in">
-                <h2>Download Now</h2>
-                <p>Free and open source. No account required.</p>
-            </div>
-            <div class="download-grid">
-                <!-- macOS -->
-                <article class="download-card fade-in">
-                    <div class="platform-icon">
-                        <svg viewBox="0 0 24 24"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
-                    </div>
-                    <h3>macOS</h3>
-                    <p class="version">Version 0.3.0</p>
-                    <div class="download-options">
-                        <a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-macOS-arm64.dmg" class="download-btn">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                            Apple Silicon (M1/M2/M3)
-                        </a>
-                        <a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-macOS-x64.dmg" class="download-btn secondary">
-                            Intel Mac
-                        </a>
-                    </div>
-                </article>
-                
-                <!-- Windows -->
-                <article class="download-card fade-in">
-                    <div class="platform-icon">
-                        <svg viewBox="0 0 24 24"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/></svg>
-                    </div>
-                    <h3>Windows</h3>
-                    <p class="version">Version 0.3.0</p>
-                    <div class="download-options">
-                        <a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Windows-Setup.exe" class="download-btn">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                            Installer (.exe)
-                        </a>
-                        <a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Windows-Portable.exe" class="download-btn secondary">
-                            Portable Version
-                        </a>
-                    </div>
-                </article>
-                
-                <!-- Linux -->
-                <article class="download-card fade-in">
-                    <div class="platform-icon">
-                        <svg viewBox="0 0 24 24"><path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.132 1.884 1.071.771-.06 1.592-.536 2.257-1.306.631-.765 1.683-1.084 2.378-1.503.348-.199.629-.469.649-.853.023-.4-.2-.811-.714-1.376v-.097l-.003-.003c-.17-.2-.25-.535-.338-.926-.085-.401-.182-.786-.492-1.046h-.003c-.059-.054-.123-.067-.188-.135a.357.357 0 00-.19-.064c.431-1.278.264-2.55-.173-3.694-.533-1.41-1.465-2.638-2.175-3.483-.796-1.005-1.576-1.957-1.56-3.368.026-2.152.236-6.133-3.544-6.139zm.529 3.405h.013c.213 0 .396.062.584.198.19.135.33.332.438.533.105.259.158.459.166.724 0-.02.006-.04.006-.06v.105a.086.086 0 01-.004-.021l-.004-.024a1.807 1.807 0 01-.15.706.953.953 0 01-.213.335.71.71 0 00-.088-.042c-.104-.045-.198-.064-.284-.133a1.312 1.312 0 00-.22-.066c.05-.06.146-.133.183-.198.053-.128.082-.264.088-.402v-.02a1.21 1.21 0 00-.061-.4c-.045-.134-.101-.2-.183-.333-.084-.066-.167-.132-.267-.132h-.016c-.093 0-.176.03-.262.132a.8.8 0 00-.205.334 1.18 1.18 0 00-.09.4v.019c.002.089.008.179.02.267-.193-.067-.438-.135-.607-.202a1.635 1.635 0 01-.018-.2v-.02a1.772 1.772 0 01.15-.768c.082-.22.232-.406.43-.533a.985.985 0 01.594-.2zm-2.962.059h.036c.142 0 .27.048.399.135.146.129.264.288.344.465.09.199.14.4.153.667v.004c.007.134.006.2-.002.266v.08c-.03.007-.056.018-.083.024-.152.055-.274.135-.393.2.012-.09.013-.18.003-.267v-.015c-.012-.133-.04-.2-.082-.333a.613.613 0 00-.166-.267.248.248 0 00-.183-.064h-.021c-.071.006-.13.04-.186.132a.552.552 0 00-.12.27.944.944 0 00-.023.33v.015c.012.135.037.2.08.334.046.134.098.2.166.268.01.009.02.018.034.024-.07.057-.117.07-.176.136a.304.304 0 01-.131.068 2.62 2.62 0 01-.275-.402 1.772 1.772 0 01-.155-.667 1.759 1.759 0 01.08-.668 1.43 1.43 0 01.283-.535c.128-.133.26-.2.418-.2zm1.37 1.706c.332 0 .733.065 1.216.399.293.2.523.269 1.052.468h.003c.255.136.405.266.478.399v-.131a.571.571 0 01.016.47c-.123.31-.516.643-1.063.842v.002c-.268.135-.501.333-.775.465-.276.135-.588.292-1.012.267a1.139 1.139 0 01-.448-.067 3.566 3.566 0 01-.322-.198c-.195-.135-.363-.332-.612-.465v-.005h-.005c-.4-.246-.616-.512-.686-.71-.07-.268-.005-.47.193-.6.224-.135.38-.271.483-.336.104-.074.143-.102.176-.131h.002v-.003c.169-.202.436-.47.839-.601.139-.036.294-.065.466-.065zm2.8 2.142c.358 1.417 1.196 3.475 1.735 4.473.286.534.855 1.659 1.102 3.024.156-.005.33.018.513.064.646-1.671-.546-3.467-1.089-3.966-.22-.2-.232-.335-.123-.335.59.534 1.365 1.572 1.646 2.757.13.535.16 1.104.021 1.67.067.028.135.06.205.067 1.032.534 1.413.938 1.23 1.537v-.002c-.06-.135-.12-.2-.18-.264-.312-.334-.661-.47-.99-.534-.3-.066-.568-.068-.79-.002a.086.086 0 00-.035-.018c-.046-.032-.157-.067-.178-.136a.507.507 0 01-.018-.2v-.02c.017-.2.036-.333.106-.465.023-.066.047-.064.074-.198h-.002c-.028.006-.067-.066-.095-.132-.026-.066-.073-.2-.106-.267-.035-.134-.106-.2-.153-.333-.012-.067-.018-.135-.018-.2 0-.27-.062-.933-.235-1.37a5.302 5.302 0 00-.393-.865c-.105-.198-.227-.333-.337-.465-.11-.135-.203-.2-.27-.267a.67.67 0 00-.09-.067h-.008c-.012 0-.018.006-.024.006l-.015-.003h.005l.009-.003a1.66 1.66 0 00-.088-.067c-.067-.054-.12-.067-.173-.133-.06-.075-.12-.198-.181-.265-.123-.135-.177-.202-.305-.269l.005.003c-.027-.018-.054-.03-.08-.045-.088.06-.176.118-.263.18-.153.135-.227.268-.227.4 0 .066.012.134.036.267.024.066.06.198.096.268.036.133.09.4.09.533v.006c-.001.2-.017.332-.062.464l-.012.039h.002c-.06.135-.12.335-.21.4-.087.133-.192.333-.315.4-.12.135-.27.334-.512.467-.239.133-.571.334-1.073.334-.502-.001-.904-.068-1.186-.134l.003-.001c-.487-.138-.878-.4-1.154-.8-.277-.4-.426-.933-.398-1.537.054-1.134.18-1.735.303-2.2.06-.466.21-.667.303-.8v-.003c.04-.068.06-.068.08-.135 0 0-.007-.003-.014-.005-.201.4-.403.734-.506 1.068-.1.333-.123.666-.077 1 .015.134.04.2.063.265a.981.981 0 00.078.265c.107.267.252.4.404.533.153.135.319.2.485.267.166.066.332.133.503.133h.02c.178-.002.29-.068.366-.2.07-.067.08-.132.08-.2-.003-.333-.125-.467-.347-.6-.224-.135-.48-.467-.55-.733-.07-.267-.037-.6.116-.866.154-.267.415-.534.72-.534h.035c.164 0 .32.038.462.08l.015.003c.15.072.294.13.425.263.08.066.137.2.181.332v.003c.048.135.094.2.13.333h.003c.054.135.086.4.116.466h.004v.003h.002c.017.134.023.268-.004.4-.026.134-.077.266-.204.333-.21.133-.303.066-.334 0-.03-.066-.03-.135-.03-.2.004-.067-.01-.135-.045-.2a.386.386 0 00-.135-.135c-.063-.03-.136-.046-.197-.046h-.037c-.066.003-.128.02-.184.048-.082.04-.15.102-.196.18-.05.08-.076.175-.076.265-.002.225.122.342.296.408.18.066.387.066.557 0 .17-.068.293-.2.37-.4.077-.202.115-.47.093-.737-.021-.27-.067-.606-.166-.87-.046-.134-.098-.2-.158-.333-.06-.135-.125-.267-.224-.4v-.003c-.1-.067-.21-.334-.426-.534-.217-.135-.5-.4-.916-.4h-.055c-.333.004-.567.133-.723.332-.153.2-.216.467-.232.735-.023.265-.003.467.05.667.057.2.153.4.332.534.178.133.43.267.74.334.31.067.693.2 1.173.2a2.08 2.08 0 001.18-.333c.166-.134.3-.334.393-.534.094-.2.146-.467.146-.733 0-.268-.046-.533-.123-.8-.074-.266-.183-.466-.313-.665-.283-.4-.606-.933-.842-1.067-.24-.135-.414-.2-.556-.332-.144-.068-.28-.2-.382-.333a1.32 1.32 0 01-.205-.468c.017.002.034.006.05.006l.002.003h.032c.077.008.15.002.224-.005a.78.78 0 00.216-.05c.066-.03.14-.078.2-.133l.02-.018h.002c.11-.066.2-.132.26-.197.062-.072.094-.132.136-.2a.668.668 0 00.04-.266v-.033c-.005-.07-.018-.134-.038-.2l-.003-.008c-.012-.03-.027-.076-.05-.118a.74.74 0 00-.122-.18l-.006-.005-.007-.008a2.27 2.27 0 00-.122-.135 1.98 1.98 0 00-.362-.265.922.922 0 00-.18-.069l.001.001-.052-.019c-.13-.04-.274-.058-.42-.058z"/></svg>
-                    </div>
-                    <h3>Linux</h3>
-                    <p class="version">Version 0.3.0</p>
-                    <div class="download-options">
-                        <a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Linux.AppImage" class="download-btn">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                            AppImage
-                        </a>
-                        <a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Linux.deb" class="download-btn secondary">
-                            .deb (Debian/Ubuntu)
-                        </a>
-                    </div>
-                </article>
-            </div>
-            <p class="download-all">
-                <a href="https://github.com/zxypro1/algolocal/releases" target="_blank" rel="noopener">View all releases →</a>
-            </p>
-        </div>
-    </section>
-    
-    <!-- AI Section -->
+
     <section class="ai-section" id="ai">
-        <div class="container">
-            <div class="ai-content">
-                <div class="ai-text fade-in">
-                    <h2>AI for the Whole Workflow</h2>
-                    <p>Generate new problems, ask for contextual hints while you code, and generate full annotated solutions with multiple approaches. All AI features share the same provider settings so you can switch models anytime.</p>
-                    <div class="ai-providers">
-                        <span class="provider-badge">🤖 DeepSeek</span>
-                        <span class="provider-badge">🧠 OpenAI</span>
-                        <span class="provider-badge">☁️ Claude</span>
-                        <span class="provider-badge">🌐 Qwen</span>
-                        <span class="provider-badge">🦙 Ollama</span>
-                    </div>
-                </div>
-                <div class="ai-visual fade-in">
-                    <div class="code-block">
-                        <p><span class="code-comment">// AI Chat (contextual hints):</span></p>
-                        <p><span class="code-string">"Give me a hint based on my current code..."</span></p>
-                        <p><span class="code-string">"What data structure should I use here?"</span></p>
-                        <br>
-                        <p><span class="code-comment">// AI Solution (multiple approaches):</span></p>
-                        <p><span class="code-keyword">function</span> <span class="code-function">solution</span>(input) {</p>
-                        <p>&nbsp;&nbsp;<span class="code-comment">/* Approach 1: Brute force with detailed notes */</span></p>
-                        <p>&nbsp;&nbsp;<span class="code-comment">/* Approach 2: Optimized solution (recommended) */</span></p>
-                        <p>&nbsp;&nbsp;<span class="code-comment">/* Time/Space complexity + trade-offs */</span></p>
-                        <p>}</p>
-                    </div>
-                </div>
-            </div>
+      <div class="site-container">
+        <div class="ai-modes reveal" aria-label="AI workflow">
+          <div><span>Generate</span><p>From a topic to a complete problem.</p></div>
+          <div><span>Ask</span><p>Context-aware hints while you work.</p></div>
+          <div class="orange"><span>Understand</span><p>Multiple approaches with complexity trade-offs.</p></div>
         </div>
+        <div class="ai-grid">
+          <div class="ai-copy reveal">
+            <h2>AI when you want it.<br>Focus when you don’t.</h2>
+            <p>Generate a new problem, ask for a hint, or compare solutions. Bring DeepSeek, OpenAI, Claude, Qwen or a local Ollama model—and stay in control of the setup.</p>
+            <a class="text-link text-link-light" href="https://github.com/zxypro1/algolocal/blob/main/AI_PROVIDER_GUIDE.md" target="_blank" rel="noopener">See how AI works <span>→</span></a>
+          </div>
+          <div class="ai-demo reveal">
+            <div class="mini-bar"><div class="window-dots"><i></i><i></i><i></i></div><span>AlgoLocal / AI Help</span><b>DeepSeek⌄</b></div>
+            <div class="ai-demo-body">
+              <div class="ai-context"><small>Current problem</small><h3>Two Sum</h3><p>Return the indices of two numbers that add up to the target.</p><code>const complement = target - nums[i];</code></div>
+              <div class="ai-response"><small>Your question</small><p class="question">Give me a hint without revealing the full answer.</p><p>Think about what information you need to remember as you scan the array once.</p><div class="approach"><b>Try this next</b><span>Store each value with its index, then look for its complement.</span></div><label>Ask a follow-up… <span>➤</span></label></div>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
-    
-    <!-- Footer -->
-    <footer>
-        <div class="container">
-            <div class="footer-content">
-                <div class="footer-links">
-                    <a href="https://github.com/zxypro1/algolocal" target="_blank" rel="noopener">GitHub</a>
-                    <a href="https://github.com/zxypro1/algolocal/releases" target="_blank" rel="noopener">Releases</a>
-                    <a href="https://github.com/zxypro1/algolocal/issues" target="_blank" rel="noopener">Issues</a>
-                    <a href="https://github.com/zxypro1/algolocal/discussions" target="_blank" rel="noopener">Discussions</a>
-                </div>
-                <div class="footer-info">
-                    <p>Open source under MIT License</p>
-                    <p>Contact: <a href="mailto:tzblackwood22@gmail.com">tzblackwood22@gmail.com</a></p>
-                </div>
-            </div>
+
+    <section class="runtime-section" aria-labelledby="runtime-heading">
+      <div class="site-container runtime-grid reveal">
+        <div><h2 id="runtime-heading">Three languages.<br>One local runtime.</h2></div>
+        <div class="language-item"><span class="lang-icon js">JS</span><p><b>JavaScript</b><small>Native browser execution</small></p></div>
+        <div class="language-item"><span class="lang-icon ts">TS</span><p><b>TypeScript</b><small>Real-time transpilation</small></p></div>
+        <div class="language-item"><span class="lang-icon py">Py</span><p><b>Python</b><small>CPython through Pyodide</small></p></div>
+      </div>
+      <p class="privacy-line reveal"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.8 8.2 7 10 4.2-1.8 7-5.4 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></svg>No account. No telemetry. Your attempts stay on your machine.</p>
+    </section>
+
+    <section class="download-section" id="download">
+      <div class="site-container">
+        <div class="download-grid">
+          <div class="download-copy reveal"><h2>Take the whole<br>workspace with you.</h2><p>Free, open source, and ready wherever you practice.</p></div>
+          <div class="platform-list reveal">
+            <article class="platform-row">
+              <div class="platform-name"><span aria-hidden="true">⌘</span><p><b>macOS</b><small>v0.3.0</small></p></div>
+              <div class="platform-actions"><a class="platform-primary" href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-macOS-arm64.dmg">Apple silicon</a><a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-macOS-x64.dmg">Intel</a></div>
+            </article>
+            <article class="platform-row">
+              <div class="platform-name"><span aria-hidden="true">⊞</span><p><b>Windows</b><small>v0.3.0</small></p></div>
+              <div class="platform-actions"><a class="platform-primary" href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Windows-Setup.exe">Installer</a><a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Windows-Portable.exe">Portable</a></div>
+            </article>
+            <article class="platform-row">
+              <div class="platform-name"><span aria-hidden="true">◇</span><p><b>Linux</b><small>v0.3.0</small></p></div>
+              <div class="platform-actions"><a class="platform-orange" href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Linux.AppImage">AppImage</a><a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Linux.deb">Debian / Ubuntu</a></div>
+            </article>
+            <a class="text-link text-link-light all-releases" href="https://github.com/zxypro1/algolocal/releases" target="_blank" rel="noopener">View all releases <span>→</span></a>
+          </div>
         </div>
-    </footer>
-    
-    <script src="assets/site.js" defer></script>
+        <div class="closing reveal"><i aria-hidden="true"></i><h2>Your next breakthrough<br>doesn’t need a connection.</h2></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="site-container footer-grid">
+      <a class="brand brand-light" href="#top"><img src="favicon.svg?v=4" alt="" width="38" height="38"><span>AlgoLocal</span></a>
+      <nav aria-label="Footer navigation"><a href="https://github.com/zxypro1/algolocal" target="_blank" rel="noopener">GitHub</a><a href="https://github.com/zxypro1/algolocal/releases" target="_blank" rel="noopener">Releases</a><a href="https://github.com/zxypro1/algolocal/issues" target="_blank" rel="noopener">Issues</a><a href="https://github.com/zxypro1/algolocal/discussions" target="_blank" rel="noopener">Discussions</a></nav>
+      <p>MIT licensed · Built for focused practice.</p>
+    </div>
+  </footer>
+  <script src="assets/site.js?v=5" defer></script>
 </body>
 </html>
-

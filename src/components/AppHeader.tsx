@@ -1,7 +1,7 @@
 import { ReactNode } from 'react';
 import Link from 'next/link';
 import { AppShell, Group, Text, Divider, ActionIcon, Tooltip, Box } from '@mantine/core';
-import { IconCode, IconArrowLeft } from '@tabler/icons-react';
+import { IconArrowLeft } from '@tabler/icons-react';
 import { useTranslation } from '../contexts/I18nContext';
 import { LanguageThemeControls } from './LanguageThemeControls';
 
@@ -20,20 +20,17 @@ interface AppHeaderProps {
 function BrandMark() {
   return (
     <Box
+      component="img"
+      src="/favicon.svg?v=4"
+      alt=""
+      aria-hidden="true"
       style={{
-        width: 30,
-        height: 30,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        borderRadius: 9,
-        background: 'linear-gradient(135deg, var(--mantine-color-brand-5), var(--mantine-color-brand-7))',
-        boxShadow: '0 2px 8px rgba(79, 70, 229, 0.35)',
+        width: 32,
+        height: 32,
+        display: 'block',
         flexShrink: 0,
       }}
-    >
-      <IconCode size={18} stroke={2.2} color="#fff" />
-    </Box>
+    />
   );
 }
 

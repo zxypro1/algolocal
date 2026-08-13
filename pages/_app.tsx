@@ -6,18 +6,18 @@ import '../styles/globals.css';
 import { I18nProvider, useI18n } from '../src/contexts/I18nContext';
 import { ThemeProvider, useTheme } from '../src/contexts/ThemeContext';
 
-// 品牌主色：靛蓝，比 Mantine 默认蓝更沉稳，暗色下也不刺眼
+// AlgoLocal 品牌青色：与新的本地执行回路标志保持一致
 const brand: MantineColorsTuple = [
-  '#eef2ff',
-  '#e0e7ff',
-  '#c7d2fe',
-  '#a5b4fc',
-  '#818cf8',
-  '#6366f1',
-  '#4f46e5',
-  '#4338ca',
-  '#3730a3',
-  '#312e81',
+  '#e6fbff',
+  '#ccf6ff',
+  '#9cecff',
+  '#63e1ff',
+  '#2ed4ff',
+  '#14c8ff',
+  '#08a9dc',
+  '#0787b1',
+  '#096d8e',
+  '#0c5a75',
 ];
 
 const fontStack =
@@ -109,7 +109,7 @@ function AppHead() {
     <Head>
       <title>{title}</title>
       <meta name="viewport" content="minimum-scale=1, initial-scale=1, width=device-width" />
-      <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+      <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=4" />
       <link rel="icon" type="image/x-icon" href="/favicon.ico" />
       <ColorSchemeScript />
     </Head>

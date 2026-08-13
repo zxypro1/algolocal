@@ -234,7 +234,7 @@ function createWindow() {
     minWidth: 1000,
     minHeight: 700,
     title: 'AlgoLocal',
-    backgroundColor: savedThemePref === 'dark' ? '#1a1a2e' : '#FFFFFF',
+    backgroundColor: savedThemePref === 'dark' ? '#11182f' : '#FFFFFF',
     // 使用默认标题栏，避免红绿灯按钮与内容重叠
     titleBarStyle: 'default',
     webPreferences: {

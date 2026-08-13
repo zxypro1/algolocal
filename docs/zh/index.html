@@ -1,49 +1,37 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
-
-  <!-- SEO Meta Tags -->
-  <title>AlgoLocal - 离线算法刷题软件 | 100% 离线 + AI 全程辅助</title>
-  <meta name="description" content="100% 离线刷算法，AI 全程辅助：生成题目、获取提示、讨论解法，支持 JavaScript、TypeScript、Python 代码运行——无需联网或配置环境。Windows / macOS / Linux 全平台下载，免费开源。">
-  <meta name="keywords" content="离线刷题,算法练习,LeetCode,面试,AI题解,AI对话,AI生成题目,AI编程助手,数据结构,编程题,JavaScript,TypeScript,Python,桌面应用,开源,免费">
+  <title>AlgoLocal — 本地优先的算法练习工作台</title>
+  <meta name="description" content="在专注、本地优先的桌面工作台中练习算法。在本机运行 JavaScript、TypeScript 与 Python，记录练习进度，需要时接入你选择的 AI 服务。">
+  <meta name="keywords" content="算法练习, 编程面试, 离线刷题, 本地优先, AI 编程助手, JavaScript, TypeScript, Python, WASM, 开源">
   <meta name="author" content="zxypro1">
   <meta name="robots" content="index, follow">
+  <meta name="msvalidate.01" content="851E8929724BC064EAFA2D4AAE903E09">
+  <meta name="google-site-verification" content="polTjQtkihIv7LZ-5RVl19ejDTy6ZU9TTX6xiDBKgUg">
   <link rel="canonical" href="https://zxypro1.github.io/algolocal/zh/">
   <link rel="alternate" href="https://zxypro1.github.io/algolocal/" hreflang="en">
   <link rel="alternate" href="https://zxypro1.github.io/algolocal/zh/" hreflang="zh-CN">
-
-  <!-- Open Graph -->
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://zxypro1.github.io/algolocal/zh/">
-  <meta property="og:title" content="AlgoLocal - 离线算法刷题软件">
-  <meta property="og:description" content="100% 离线刷算法，AI 全程辅助：生成题目、获取提示、讨论解法，支持 JavaScript、TypeScript、Python 代码运行——无需联网或配置环境。">
+  <meta property="og:title" content="AlgoLocal — 练算法，把一切留在本地">
+  <meta property="og:description" content="本地优先的算法练习工作台，AI 辅助由你选择。">
   <meta property="og:image" content="https://zxypro1.github.io/algolocal/icon.png">
-
-  <!-- Twitter -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:url" content="https://zxypro1.github.io/algolocal/zh/">
-  <meta name="twitter:title" content="AlgoLocal - 离线算法刷题软件">
-  <meta name="twitter:description" content="100% 离线刷算法，AI 全程辅助：生成题目、获取提示、讨论解法，支持 JavaScript、TypeScript、Python 代码运行——无需联网或配置环境。">
+  <meta name="twitter:title" content="AlgoLocal — 练算法，把一切留在本地">
+  <meta name="twitter:description" content="本地优先的算法练习工作台，AI 辅助由你选择。">
   <meta name="twitter:image" content="https://zxypro1.github.io/algolocal/icon.png">
-
-  <!-- Favicon -->
   <link rel="icon" href="../favicon.ico" sizes="any">
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg?v=4">
   <link rel="icon" type="image/png" href="../favicon-32.png" sizes="32x32">
-  <link rel="icon" type="image/png" href="../favicon-16.png" sizes="16x16">
-  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
   <link rel="apple-touch-icon" href="../icon.png">
   <link rel="manifest" href="../site.webmanifest">
-  <meta name="theme-color" content="#12110f">
-
-  <!-- Fonts -->
+  <meta name="theme-color" content="#11182f">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-
-  <!-- Structured Data -->
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
@@ -51,250 +39,143 @@
     "name": "AlgoLocal",
     "operatingSystem": "Windows, macOS, Linux",
     "applicationCategory": "DeveloperApplication",
-    "inLanguage": "zh-CN",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
-    "description": "100% 离线刷算法，AI 全程辅助：生成题目、获取提示、讨论解法，支持 JavaScript、TypeScript、Python 代码运行——无需联网或配置环境。",
+    "description": "本地优先、可选 AI 辅助的算法练习桌面工作台。",
     "downloadUrl": "https://github.com/zxypro1/algolocal/releases",
     "softwareVersion": "0.3.0",
+    "license": "https://opensource.org/license/mit",
     "author": { "@type": "Person", "name": "zxypro1" }
   }
   </script>
-
-  <link rel="stylesheet" href="../assets/site.css">
+  <link rel="stylesheet" href="../assets/site.css?v=5">
 </head>
 <body>
-  <div class="bg-gradient"></div>
+  <a class="skip-link" href="#main">跳到主要内容</a>
 
-  <!-- Navigation -->
-  <nav>
-    <div class="container">
-      <a href="#" class="logo">
-        <img src="../icon.png" alt="AlgoLocal Logo">
+  <header class="site-header" data-header>
+    <div class="site-container nav-shell">
+      <a class="brand" href="#top" aria-label="AlgoLocal 首页">
+        <img src="../favicon.svg?v=4" alt="" width="42" height="42">
         <span>AlgoLocal</span>
       </a>
-      <div class="nav-links">
-        <a href="#features">功能亮点</a>
-        <a href="#languages">支持语言</a>
-        <a href="#ai">AI 功能</a>
-        <a href="#download">下载</a>
-        <a href="../" class="lang-btn" aria-label="Switch to English">English</a>
-        <a href="https://github.com/zxypro1/algolocal" target="_blank" rel="noopener" class="github-btn">
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
-          GitHub
+      <nav class="desktop-nav" aria-label="主要导航">
+        <a href="#product">产品</a><a href="#workflow">流程</a><a href="#ai">AI</a><a href="#download">下载</a>
+      </nav>
+      <div class="nav-actions">
+        <a class="language-link" href="../" aria-label="Switch to English">EN</a>
+        <a class="button button-dark nav-download" href="#download">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14"/></svg>免费下载
         </a>
-      </div>
-      <button class="mobile-menu-btn" aria-label="Menu">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
-      </button>
-    </div>
-  </nav>
-
-  <!-- Hero Section -->
-  <section class="hero">
-    <div class="container">
-      <div class="badge">
-        <span>v0.3.0 已发布</span>
-      </div>
-      <h1>AlgoLocal</h1>
-      <p>100% 离线刷算法，AI 全程辅助：生成题目、获取提示、讨论解法，支持 JavaScript、TypeScript、Python 代码运行——无需联网或配置环境。</p>
-      <div class="hero-buttons">
-        <a href="#download" class="btn btn-primary">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          立即下载
-        </a>
-        <a href="https://github.com/zxypro1/algolocal" target="_blank" rel="noopener" class="btn btn-secondary">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
-          查看项目
-        </a>
-      </div>
-      <img src="https://github.com/user-attachments/assets/a601c9fb-2e36-4e64-a547-11ed5fbde581" alt="Offline Code Practice Screenshot" class="hero-image fade-in" loading="lazy">
-    </div>
-  </section>
-
-  <!-- Features Section -->
-  <section class="features" id="features">
-    <div class="container">
-      <div class="section-title fade-in">
-        <h2>为什么选择离线刷题？</h2>
-        <p>把面试刷题体验带到任何地方：不依赖网络，随开随用</p>
-      </div>
-      <div class="features-grid">
-        <article class="feature-card fade-in">
-          <div class="feature-icon">✈️</div>
-          <h3>100% 离线</h3>
-          <p>坐飞机、地铁或断网环境下也能刷题，练习不中断。</p>
-        </article>
-        <article class="feature-card fade-in">
-          <div class="feature-icon">⚡</div>
-          <h3>即时执行</h3>
-          <p>基于 WASM 的浏览器端执行，无需服务器往返，体验更流畅。</p>
-        </article>
-        <article class="feature-card fade-in">
-          <div class="feature-icon">🎨</div>
-          <h3>类 VS Code 编辑器</h3>
-          <p>Monaco Editor：语法高亮、自动补全等熟悉体验一应俱全。</p>
-        </article>
-        <article class="feature-card fade-in">
-          <div class="feature-icon">🤖</div>
-          <h3>AI 辅助（3 合 1）</h3>
-          <p>AI 生成题目 + AI 对话提示 + AI 题解（带注释多解法）。支持多供应商统一在设置页配置（DeepSeek/OpenAI/Claude/Qwen/Ollama）。</p>
-        </article>
-        <article class="feature-card fade-in">
-          <div class="feature-icon">📊</div>
-          <h3>练习数据看板</h3>
-          <p>通过每日统计、按难度/标签的准确率指标、贡献热力图和性能趋势跟踪练习进度。</p>
-        </article>
-        <article class="feature-card fade-in">
-          <div class="feature-icon">🌍</div>
-          <h3>跨平台</h3>
-          <p>Windows / macOS / Linux 全平台支持，体验一致。</p>
-        </article>
+        <button class="menu-button" type="button" aria-label="打开菜单" aria-expanded="false" data-menu-button><span></span><span></span></button>
       </div>
     </div>
-  </section>
+    <nav class="mobile-nav" aria-label="移动端导航" data-mobile-nav>
+      <a href="#product">产品</a><a href="#workflow">流程</a><a href="#ai">AI</a><a href="#download">下载</a><a href="../">English</a>
+    </nav>
+  </header>
 
-  <!-- AI Section -->
-  <section class="features" id="ai">
-    <div class="container">
-      <div class="section-title fade-in">
-        <h2>AI 功能：从出题到题解</h2>
-        <p>三大 AI 功能共用同一套供应商配置，可随时切换模型</p>
-      </div>
-      <div class="features-grid">
-        <article class="feature-card fade-in">
-          <div class="feature-icon">🧩</div>
-          <h3>AI 生成题目</h3>
-          <p>用自然语言描述练习目标，自动生成题目、示例与测试用例，直接加入本地题库。</p>
-        </article>
-        <article class="feature-card fade-in">
-          <div class="feature-icon">💬</div>
-          <h3>AI 对话助手</h3>
-          <p>做题时随时提问：获取提示、讨论思路、分析复杂度、调试建议。AI 会结合题目和当前代码给出针对性回答，不会直接透露完整答案。</p>
-        </article>
-        <article class="feature-card fade-in">
-          <div class="feature-icon">🪄</div>
-          <h3>AI 题解生成</h3>
-          <p>一键生成完整题解：包含多种解法（暴力解法/优化解法/最优解法），带详细中文注释、时空复杂度分析和权衡说明。</p>
-        </article>
-      </div>
-    </div>
-  </section>
-
-  <!-- Languages Section -->
-  <section class="languages" id="languages">
-    <div class="container">
-      <div class="section-title fade-in">
-        <h2>支持语言</h2>
-        <p>用你习惯的语言写出最优解</p>
-      </div>
-      <div class="languages-grid">
-        <article class="language-card fade-in">
-          <div class="language-icon">🟨</div>
-          <h3>JavaScript</h3>
-          <p>浏览器端原生执行，支持 ES6+。</p>
-        </article>
-        <article class="language-card fade-in">
-          <div class="language-icon">🔷</div>
-          <h3>TypeScript</h3>
-          <p>实时转译 + 类型安全，提升代码质量。</p>
-        </article>
-        <article class="language-card fade-in">
-          <div class="language-icon">🐍</div>
-          <h3>Python</h3>
-          <p>Pyodide WASM，兼容 CPython 生态。</p>
-        </article>
-      </div>
-    </div>
-  </section>
-
-  <!-- Download Section -->
-  <section class="download" id="download">
-    <div class="container">
-      <div class="section-title fade-in">
-        <h2>立即下载</h2>
-        <p>免费开源，无需账号。</p>
-      </div>
-      <div class="download-grid">
-        <!-- macOS -->
-        <article class="download-card fade-in">
-          <div class="platform-icon">
-            <svg viewBox="0 0 24 24"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
+  <main id="main">
+    <section class="hero" id="top">
+      <div class="site-container hero-grid">
+        <div class="hero-copy reveal">
+          <h1>练算法。<br>把一切留在<span>本地。</span></h1>
+          <p>一个专注的桌面工作台：解题、运行 JavaScript、TypeScript 和 Python，需要时获得 AI 帮助——练习数据无需交给另一个平台。</p>
+          <div class="hero-actions">
+            <a class="button button-dark" href="#download"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14"/></svg>免费下载</a>
+            <a class="button button-outline" href="https://github.com/zxypro1/algolocal" target="_blank" rel="noopener"><svg class="fill-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 .8a11.4 11.4 0 0 0-3.6 22.2c.6.1.8-.2.8-.6v-2.2c-3.4.7-4.1-1.4-4.1-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.4 11.4 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .4.2.7.8.6A11.4 11.4 0 0 0 12 .8Z"/></svg>在 GitHub 查看</a>
           </div>
-          <h3>macOS</h3>
-          <p class="version">版本 0.3.0</p>
-          <div class="download-options">
-            <a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-macOS-arm64.dmg" class="download-btn">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-              Apple 芯片 (M1/M2/M3)
-            </a>
-            <a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-macOS-x64.dmg" class="download-btn secondary">
-              Intel Mac
-            </a>
-          </div>
-        </article>
-
-        <!-- Windows -->
-        <article class="download-card fade-in">
-          <div class="platform-icon">
-            <svg viewBox="0 0 24 24"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/></svg>
-          </div>
-          <h3>Windows</h3>
-          <p class="version">版本 0.3.0</p>
-          <div class="download-options">
-            <a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Windows-Setup.exe" class="download-btn">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-              安装版 (.exe)
-            </a>
-            <a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Windows-Portable.exe" class="download-btn secondary">
-              便携版
-            </a>
-          </div>
-        </article>
-
-        <!-- Linux -->
-        <article class="download-card fade-in">
-          <div class="platform-icon">
-            <svg viewBox="0 0 24 24"><path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.132 1.884 1.071.771-.06 1.592-.536 2.257-1.306.631-.765 1.683-1.084 2.378-1.503.348-.199.629-.469.649-.853.023-.4-.2-.811-.714-1.376v-.097l-.003-.003c-.17-.2-.25-.535-.338-.926-.085-.401-.182-.786-.492-1.046h-.003c-.059-.054-.123-.067-.188-.135a.357.357 0 00-.19-.064c.431-1.278.264-2.55-.173-3.694-.533-1.41-1.465-2.638-2.175-3.483-.796-1.005-1.576-1.957-1.56-3.368.026-2.152.236-6.133-3.544-6.139z"/></svg>
-          </div>
-          <h3>Linux</h3>
-          <p class="version">版本 0.3.0</p>
-          <div class="download-options">
-            <a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Linux.AppImage" class="download-btn">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-              AppImage
-            </a>
-            <a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Linux.deb" class="download-btn secondary">
-              .deb
-            </a>
-          </div>
-        </article>
-      </div>
-      <p class="download-all">
-        <a href="https://github.com/zxypro1/algolocal/releases" target="_blank" rel="noopener">查看全部版本 →</a>
-      </p>
-    </div>
-  </section>
-
-  <!-- Footer -->
-  <footer>
-    <div class="container">
-      <div class="footer-content">
-        <div class="footer-links">
-          <a href="https://github.com/zxypro1/algolocal" target="_blank" rel="noopener">GitHub</a>
-          <a href="https://github.com/zxypro1/algolocal/releases" target="_blank" rel="noopener">Releases</a>
-          <a href="https://github.com/zxypro1/algolocal/issues" target="_blank" rel="noopener">Issues</a>
-          <a href="https://github.com/zxypro1/algolocal/discussions" target="_blank" rel="noopener">Discussions</a>
+          <p class="hero-proof"><span>免费且开源</span><i></i><span>macOS</span><i></i><span>Windows</span><i></i><span>Linux</span></p>
         </div>
-        <div class="footer-info">
-          <p>MIT 协议开源</p>
-          <p>联系邮箱：<a href="mailto:tzblackwood22@gmail.com">tzblackwood22@gmail.com</a></p>
+
+        <div class="product-window hero-window reveal" id="product" aria-label="AlgoLocal 产品界面预览">
+          <div class="window-bar">
+            <div class="window-dots"><i></i><i></i><i></i></div>
+            <span class="window-title"><img src="../favicon.svg?v=4" alt="">AlgoLocal</span>
+            <div class="window-controls"><span class="run-control">▶ 运行</span><span>TypeScript⌄</span></div>
+          </div>
+          <div class="workspace">
+            <aside class="tool-rail" aria-label="产品导航"><span class="tool-logo"><img src="../favicon.svg?v=4" alt=""></span><span class="active">题目</span><span>编辑器</span><span>测试</span><span>AI 助手</span><span>设置</span></aside>
+            <div class="problem-pane">
+              <label class="mock-search">⌕ &nbsp;搜索题目…</label><button type="button">全部主题 <span>⌄</span></button>
+              <div class="problem active"><b>两数之和</b><small><em>简单</em> · 数组 · 哈希表</small></div>
+              <div class="problem"><b>有效的括号</b><small><em>简单</em> · 字符串 · 栈</small></div>
+              <div class="problem"><b>合并两个有序链表</b><small><em>简单</em> · 链表</small></div>
+              <div class="problem"><b>二叉树的中序遍历</b><small><strong>中等</strong> · 树 · 栈</small></div>
+              <div class="problem"><b>前 K 个高频元素</b><small><strong>中等</strong> · 堆</small></div><p class="pane-foot">28 道题目</p>
+            </div>
+            <div class="editor-pane">
+              <div class="editor-tab"><span>TS</span> two-sum.ts <b>×</b></div>
+              <pre aria-label="TypeScript 示例"><code><span class="line">1</span> <i>function</i> <b>twoSum</b>(nums: <u>number[]</u>, target: <u>number</u>) {
+<span class="line">2</span>   <i>const</i> map = <i>new</i> Map&lt;number, number&gt;();
+<span class="line">3</span>
+<span class="line">4</span>   <i>for</i> (<i>let</i> i = 0; i &lt; nums.length; i++) {
+<span class="line">5</span>     <i>const</i> complement = target - nums[i];
+<span class="line">6</span>     <i>if</i> (map.has(complement)) {
+<span class="line">7</span>       <i>return</i> [map.get(complement)!, i];
+<span class="line">8</span>     }
+<span class="line">9</span>     map.set(nums[i], i);
+<span class="line">10</span>  }
+<span class="line">11</span>  <i>return</i> [];
+<span class="line">12</span> }</code></pre>
+              <div class="test-panel"><div class="test-tabs"><b>测试</b><span>控制台</span></div><div class="test-body"><p><span>测试用例 1</span><b>✓</b></p><p><span>测试用例 2</span><b>✓</b></p><p><span>测试用例 3</span><b>✓</b></p><code>nums = [2,7,11,15], target = 9<br>输出&nbsp; [0,1] <strong>通过</strong></code></div></div>
+            </div>
+            <aside class="ai-pane"><div class="ai-pane-title">◉ &nbsp;AI 助手 <span>×</span></div><div class="prompt-box">可以解释一下这个解法的时间复杂度吗？</div><p>这个解法在遍历时使用哈希表保存数字。</p><ul><li><b>时间复杂度：O(n)</b><br>只需遍历数组一次。</li><li><b>空间复杂度：O(n)</b><br>最多保存 n 个元素。</li></ul><label>继续提问… <span>➤</span></label></aside>
+          </div>
         </div>
       </div>
-    </div>
-  </footer>
+    </section>
 
-  <script src="../assets/site.js" defer></script>
+    <section class="workflow-section" id="workflow">
+      <div class="site-container"><div class="workflow-grid">
+        <div class="workflow-copy reveal">
+          <h2>从读题到顿悟，<br>都在一个工作台。</h2><p class="section-intro">本地优先，让你专注于解题本身。</p>
+          <ol class="route-list">
+            <li><span>01</span><div><h3>挑选题目</h3><p>按主题、标签或难度快速筛选。</p></div></li>
+            <li><span>02</span><div><h3>在真正的编辑器里思考</h3><p>用 Monaco 编写 JavaScript、TypeScript 或 Python。</p></div></li>
+            <li class="orange"><span>03</span><div><h3>就在本机运行</h3><p>WASM 在你的设备上执行每个测试。</p></div></li>
+            <li class="orange"><span>04</span><div><h3>从每次尝试中学习</h3><p>回顾结果，持续跟踪练习进度。</p></div></li>
+          </ol>
+          <a class="text-link" href="https://github.com/zxypro1/algolocal/blob/main/README-zh.md#功能特性" target="_blank" rel="noopener">了解完整功能 <span>→</span></a>
+        </div>
+        <div class="workflow-media reveal">
+          <div class="focus-window"><div class="mini-bar"><div class="window-dots"><i></i><i></i><i></i></div><span>AlgoLocal / 练习</span></div><div class="focus-code"><span>function</span> <b>solve</b>(input) {<br>&nbsp;&nbsp;<i>// 你的思路留在本地</i><br>&nbsp;&nbsp;<span>return</span> result;<br>}</div><div class="focus-result"><span>测试用例 1</span><b>通过&nbsp; ✓</b></div><div class="focus-result"><span>测试用例 2</span><b>通过&nbsp; ✓</b></div></div>
+          <div class="dashboard-window"><div class="mini-bar"><div class="window-dots"><i></i><i></i><i></i></div><span>AlgoLocal / 进度</span></div><div class="dashboard-body"><div><small>已解决</small><strong>12<span>/28</span></strong><p>继续保持。</p></div><div class="heatmap-wrap"><small>最近 12 周</small><div class="heatmap" aria-hidden="true"></div><p>少 <span></span><span></span><span></span><span></span> 多</p></div></div></div>
+        </div>
+      </div></div>
+    </section>
+
+    <section class="ai-section" id="ai">
+      <div class="site-container">
+        <div class="ai-modes reveal" aria-label="AI 工作流"><div><span>生成</span><p>从一个主题到一道完整题目。</p></div><div><span>提问</span><p>在解题过程中获得上下文提示。</p></div><div class="orange"><span>理解</span><p>对比多种解法与复杂度权衡。</p></div></div>
+        <div class="ai-grid">
+          <div class="ai-copy reveal"><h2>需要时用 AI。<br>不需要时只管专注。</h2><p>生成新题、获取提示或对比解法。你可以接入 DeepSeek、OpenAI、Claude、Qwen 或本地 Ollama 模型，配置与选择始终由你掌控。</p><a class="text-link text-link-light" href="https://github.com/zxypro1/algolocal/blob/main/AI_PROVIDER_GUIDE.md" target="_blank" rel="noopener">查看 AI 配置说明 <span>→</span></a></div>
+          <div class="ai-demo reveal"><div class="mini-bar"><div class="window-dots"><i></i><i></i><i></i></div><span>AlgoLocal / AI 助手</span><b>DeepSeek⌄</b></div><div class="ai-demo-body"><div class="ai-context"><small>当前题目</small><h3>两数之和</h3><p>返回数组中和等于目标值的两个数字的下标。</p><code>const complement = target - nums[i];</code></div><div class="ai-response"><small>你的问题</small><p class="question">给我一个提示，但不要直接说出完整答案。</p><p>想一想：只遍历数组一次时，你需要记住哪些信息？</p><div class="approach"><b>下一步可以尝试</b><span>记录每个值及其下标，再寻找它的补数。</span></div><label>继续提问… <span>➤</span></label></div></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="runtime-section" aria-labelledby="runtime-heading">
+      <div class="site-container runtime-grid reveal"><div><h2 id="runtime-heading">三种语言，<br>一个本地运行时。</h2></div><div class="language-item"><span class="lang-icon js">JS</span><p><b>JavaScript</b><small>浏览器原生执行</small></p></div><div class="language-item"><span class="lang-icon ts">TS</span><p><b>TypeScript</b><small>实时转译</small></p></div><div class="language-item"><span class="lang-icon py">Py</span><p><b>Python</b><small>通过 Pyodide 运行 CPython</small></p></div></div>
+      <p class="privacy-line reveal"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.6 2.8 8.2 7 10 4.2-1.8 7-5.4 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></svg>无需账号，没有遥测；练习记录留在你的设备上。</p>
+    </section>
+
+    <section class="download-section" id="download">
+      <div class="site-container">
+        <div class="download-grid">
+          <div class="download-copy reveal"><h2>把整个工作台<br>带在身边。</h2><p>免费、开源，随时开始你的下一次练习。</p></div>
+          <div class="platform-list reveal">
+            <article class="platform-row"><div class="platform-name"><span aria-hidden="true">⌘</span><p><b>macOS</b><small>v0.3.0</small></p></div><div class="platform-actions"><a class="platform-primary" href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-macOS-arm64.dmg">Apple 芯片</a><a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-macOS-x64.dmg">Intel</a></div></article>
+            <article class="platform-row"><div class="platform-name"><span aria-hidden="true">⊞</span><p><b>Windows</b><small>v0.3.0</small></p></div><div class="platform-actions"><a class="platform-primary" href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Windows-Setup.exe">安装版</a><a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Windows-Portable.exe">便携版</a></div></article>
+            <article class="platform-row"><div class="platform-name"><span aria-hidden="true">◇</span><p><b>Linux</b><small>v0.3.0</small></p></div><div class="platform-actions"><a class="platform-orange" href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Linux.AppImage">AppImage</a><a href="https://github.com/zxypro1/algolocal/releases/download/v0.3.0/AlgoLocal-0.3.0-Linux.deb">Debian / Ubuntu</a></div></article>
+            <a class="text-link text-link-light all-releases" href="https://github.com/zxypro1/algolocal/releases" target="_blank" rel="noopener">查看全部版本 <span>→</span></a>
+          </div>
+        </div>
+        <div class="closing reveal"><i aria-hidden="true"></i><h2>下一次突破，<br>不必等待网络。</h2></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer"><div class="site-container footer-grid"><a class="brand brand-light" href="#top"><img src="../favicon.svg?v=4" alt="" width="38" height="38"><span>AlgoLocal</span></a><nav aria-label="页脚导航"><a href="https://github.com/zxypro1/algolocal" target="_blank" rel="noopener">GitHub</a><a href="https://github.com/zxypro1/algolocal/releases" target="_blank" rel="noopener">Releases</a><a href="https://github.com/zxypro1/algolocal/issues" target="_blank" rel="noopener">Issues</a><a href="https://github.com/zxypro1/algolocal/discussions" target="_blank" rel="noopener">Discussions</a></nav><p>MIT 开源许可 · 为专注练习而生。</p></div></footer>
+  <script src="../assets/site.js?v=5" defer></script>
 </body>
 </html>
-
-

@@ -1,29 +1,27 @@
 {
   "name": "AlgoLocal",
   "short_name": "AlgoLocal",
-  "description": "Practice coding algorithms 100% offline with AI",
+  "description": "A local-first algorithm practice workspace with optional AI help",
   "start_url": "/algolocal/",
   "scope": "/algolocal/",
   "display": "standalone",
-  "background_color": "#0f0f23",
-  "theme_color": "#0f0f23",
+  "background_color": "#f5f7fb",
+  "theme_color": "#11182f",
   "icons": [
     {
-      "src": "/algolocal/icon.png",
+      "src": "icon.png",
       "sizes": "512x512",
       "type": "image/png"
     },
     {
-      "src": "/algolocal/favicon-32.png",
+      "src": "favicon-32.png",
       "sizes": "32x32",
       "type": "image/png"
     },
     {
-      "src": "/algolocal/favicon-16.png",
+      "src": "favicon-16.png",
       "sizes": "16x16",
       "type": "image/png"
     }
   ]
 }
-
-

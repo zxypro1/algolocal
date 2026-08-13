@@ -175,7 +175,7 @@ module.exports = {
       width: 540,
       height: 380
     },
-    backgroundColor: '#1a1a2e',
+    backgroundColor: '#11182f',
     title: 'AlgoLocal',
     artifactName: '${productName}-${version}-macOS-${arch}.${ext}'
   },
