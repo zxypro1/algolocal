@@ -269,7 +269,7 @@ module.exports = twoSum;`;
         expect(res._jsonData.status).toBe('success');
         
         if (res._jsonData.passed !== res._jsonData.total) {
-          console.log(`\n❌ FAILING PROBLEM: ${problem.id}`);
+          console.log(`\n✗ FAILING PROBLEM: ${problem.id}`);
           console.log(`Passed: ${res._jsonData.passed}/${res._jsonData.total}`);
           console.log('Failed test cases:');
           res._jsonData.results.forEach((result, index) => {
@@ -296,7 +296,7 @@ module.exports = twoSum;`;
         expect(res._jsonData.performance.averageExecutionTime).toBeGreaterThan(0);
         expect(res._jsonData.performance.totalExecutionTime).toBeLessThan(10000); // Should complete within 10 seconds
         
-        console.log(`✅ ${problem.id}: ${res._jsonData.passed}/${res._jsonData.total} tests passed`);
+        console.log(`✓ ${problem.id}: ${res._jsonData.passed}/${res._jsonData.total} tests passed`);
       }
     });
   });

@@ -613,7 +613,6 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
                   runtimeStatus[selectedLanguage as 'javascript' | 'typescript' | 'python'] === 'error' ? 'red' : 'gray'
                 }
                 variant="light"
-                leftSection={<Text size="xs">⚡</Text>}
               >
                 {runtimeStatus[selectedLanguage as 'javascript' | 'typescript' | 'python'] === 'ready' ? 'WASM Ready' :
                  runtimeStatus[selectedLanguage as 'javascript' | 'typescript' | 'python'] === 'loading' ? 'Loading...' :

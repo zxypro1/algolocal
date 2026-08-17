@@ -63,16 +63,16 @@ async function generateIcons() {
     linux: [16, 24, 32, 48, 64, 128, 256, 512]
   };
 
-  console.log('🎨 Generating application icons...\n');
+  console.log('Generating application icons...\n');
 
   try {
     // Generate main icon.png (512x512)
-    console.log('📱 Creating main icon (512x512)...');
+    console.log('Creating main icon (512x512)...');
     await sharp(svgBuffer)
       .resize(512, 512)
       .png()
       .toFile(path.join(publicDir, 'icon.png'));
-    console.log('   ✅ public/icon.png');
+    console.log('   ✓ public/icon.png');
 
     // Generate 256x256 PNG for Windows ICO conversion
     const icon256Path = path.join(buildDir, 'icon-256.png');
@@ -82,20 +82,20 @@ async function generateIcons() {
       .toFile(icon256Path);
     
     // Generate Windows .ico file
-    console.log('\n🪟 Creating Windows .ico file...');
+    console.log('\nCreating Windows .ico file...');
     const icoBuffer = await pngToIco([icon256Path]);
     fs.writeFileSync(path.join(buildDir, 'icon.ico'), icoBuffer);
-    console.log('   ✅ build/icon.ico');
+    console.log('   ✓ build/icon.ico');
 
     // Generate macOS icons
-    console.log('\n🍎 Creating macOS icons...');
+    console.log('\nCreating macOS icons...');
     for (const size of sizes.mac) {
       const filename = `icon_${size}x${size}.png`;
       await sharp(svgBuffer)
         .resize(size, size)
         .png()
         .toFile(path.join(iconsDir, filename));
-      console.log(`   ✅ ${filename}`);
+      console.log(`   ✓ ${filename}`);
     }
 
     // Generate @2x versions for macOS
@@ -105,56 +105,56 @@ async function generateIcons() {
         .resize(size * 2, size * 2)
         .png()
         .toFile(path.join(iconsDir, filename));
-      console.log(`   ✅ ${filename}`);
+      console.log(`   ✓ ${filename}`);
     }
 
     // Generate Windows icon sizes (individual PNGs)
-    console.log('\n🪟 Creating Windows PNG icons...');
+    console.log('\nCreating Windows PNG icons...');
     for (const size of sizes.win) {
       const filename = `icon_${size}.png`;
       await sharp(svgBuffer)
         .resize(size, size)
         .png()
         .toFile(path.join(iconsDir, filename));
-      console.log(`   ✅ ${filename}`);
+      console.log(`   ✓ ${filename}`);
     }
 
     // Generate favicon.ico (multi-size) - simplified version
-    console.log('\n🌐 Creating favicon...');
+    console.log('\nCreating favicon...');
     await sharp(svgBuffer)
       .resize(32, 32)
       .png()
       .toFile(path.join(publicDir, 'favicon-32.png'));
-    console.log('   ✅ favicon-32.png');
+    console.log('   ✓ favicon-32.png');
 
     await sharp(svgBuffer)
       .resize(16, 16)
       .png()
       .toFile(path.join(publicDir, 'favicon-16.png'));
-    console.log('   ✅ favicon-16.png');
+    console.log('   ✓ favicon-16.png');
 
     // Linux icons
-    console.log('\n🐧 Creating Linux icons...');
+    console.log('\nCreating Linux icons...');
     for (const size of sizes.linux) {
       const filename = `${size}x${size}.png`;
       await sharp(svgBuffer)
         .resize(size, size)
         .png()
         .toFile(path.join(iconsDir, filename));
-      console.log(`   ✅ ${filename}`);
+      console.log(`   ✓ ${filename}`);
     }
 
     // Cleanup temporary file
     fs.unlinkSync(icon256Path);
 
-    console.log('\n✨ Icon generation complete!');
-    console.log('\n📁 Generated files:');
+    console.log('\nIcon generation complete!');
+    console.log('\nGenerated files:');
     console.log('   - public/icon.png (main app icon)');
     console.log('   - build/icon.ico (Windows installer icon)');
     console.log('   - build/icons/ (platform-specific icons)');
 
   } catch (error) {
-    console.error('❌ Error generating icons:', error);
+    console.error('✗ Error generating icons:', error);
     process.exit(1);
   }
 }

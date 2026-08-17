@@ -86,7 +86,7 @@ async function main() {
 
   const projectsPath = path.join(root, 'projects', 'projects.json');
   if (!fs.existsSync(projectsPath)) {
-    console.error('❌ 找不到 projects/projects.json，请先运行 node scripts/build-projects.js');
+    console.error('✗ 找不到 projects/projects.json，请先运行 node scripts/build-projects.js');
     process.exit(1);
   }
 
@@ -96,14 +96,14 @@ async function main() {
   );
 
   if (projects.length === 0) {
-    console.error(`❌ 没有匹配的工程：${filter}`);
+    console.error(`✗ 没有匹配的工程：${filter}`);
     process.exit(1);
   }
 
   let failures = 0;
 
   for (const rawProject of projects) {
-    console.log(`\n📦 ${rawProject.id} — ${rawProject.title.zh}`);
+    console.log(`\n${rawProject.id} — ${rawProject.title.zh}`);
 
     const languages = ['typescript', ...Object.keys(rawProject.variants || {})];
 
@@ -117,7 +117,7 @@ async function main() {
       const files = buildStageWorkspace(project, index);
 
       if (!(stage.referenceFiles || []).length) {
-        console.log(`  ⚠️  第 ${index + 1} 关没有参考实现，跳过验证`);
+        console.log(`  第 ${index + 1} 关没有参考实现，跳过验证`);
         continue;
       }
 
@@ -137,7 +137,7 @@ async function main() {
       const scoreCard = computeScoreCard({ report, quality, weights: project.weights });
 
       console.log(
-        `  ${ok ? '✅' : '❌'} 第 ${index + 1} 关 ${stage.id}: ` +
+        `  ${ok ? '✓' : '✗'} 第 ${index + 1} 关 ${stage.id}: ` +
           `${report.totals.passed}/${report.totals.total} 用例, ` +
           `${report.gates.filter((gate) => gate.passed).length}/${report.gates.length} 门槛, ` +
           `评分 ${scoreCard.total}`
@@ -177,10 +177,10 @@ async function main() {
 
   console.log('');
   if (failures > 0) {
-    console.error(`❌ ${failures} 关未通过`);
+    console.error(`✗ ${failures} 关未通过`);
     process.exit(1);
   }
-  console.log('✅ 全部关卡的参考实现都通过了用例与工程门槛');
+  console.log('✓ 全部关卡的参考实现都通过了用例与工程门槛');
 }
 
 main().catch((error) => {

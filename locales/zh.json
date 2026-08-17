@@ -59,7 +59,7 @@
       "solved": "已通过"
     },
     "stats": {
-      "title": "📊 做题统计大盘",
+      "title": "做题统计大盘",
       "subtitle": "本地统计（按天聚合）：做题数量、题目列表、正确率与趋势",
       "jumpToDashboard": "统计",
       "last7Days": "近7天",
@@ -127,9 +127,9 @@
   },
   "codeRunner": {
     "title": "代码编辑器",
-    "submit": "🚀 提交并运行测试",
+    "submit": "提交并运行测试",
     "running": "运行中...",
-    "testResults": "📋 测试结果",
+    "testResults": "测试结果",
     "passed": "通过",
     "failed": "失败",
     "testCase": "测试用例",
@@ -166,11 +166,11 @@
     "aiSolutionConfirmMessage": "你已经修改了代码。生成 AI 题解将替换你当前的代码。是否继续？",
     "generateAnyway": "继续生成",
     "selectSolution": "选择解法",
-    "comparisonAnalysis": "📊 解法对比分析",
-    "approach": "💡 解题思路",
-    "timeComplexity": "⏱️ 时间复杂度",
-    "spaceComplexity": "💾 空间复杂度",
-    "codePreview": "📝 代码预览",
+    "comparisonAnalysis": "解法对比分析",
+    "approach": "解题思路",
+    "timeComplexity": "时间复杂度",
+    "spaceComplexity": "空间复杂度",
+    "codePreview": "代码预览",
     "applySolution": "应用此解法"
   },
   "aiChat": {
@@ -202,7 +202,7 @@
     "memoization": "记忆化"
   },
   "statsPage": {
-    "title": "📊 做题统计",
+    "title": "做题统计",
     "subtitle": "监控大盘：每日做题、通过数、正确率与趋势"
   },
   "addProblem": {

@@ -53,7 +53,7 @@ class TestRunner {
    * Check if required files exist
    */
   checkEnvironment() {
-    console.log('🔍 Checking test environment...');
+    console.log('Checking test environment...');
     
     const requiredFiles = [
       'public/problems.json',
@@ -67,12 +67,12 @@ class TestRunner {
     );
 
     if (missingFiles.length > 0) {
-      console.error('❌ Missing required files:');
+      console.error('✗ Missing required files:');
       missingFiles.forEach(file => console.error(`   - ${file}`));
       return false;
     }
 
-    console.log('✅ Environment check passed');
+    console.log('✓ Environment check passed');
     return true;
   }
 
@@ -80,14 +80,14 @@ class TestRunner {
    * Validate problems.json structure
    */
   validateProblems() {
-    console.log('🔍 Validating problems.json...');
+    console.log('Validating problems.json...');
     
     try {
       const problemsPath = path.join(process.cwd(), 'public', 'problems.json');
       const problems = JSON.parse(fs.readFileSync(problemsPath, 'utf8'));
       
       if (!Array.isArray(problems) || problems.length === 0) {
-        console.error('❌ Invalid problems.json: must be non-empty array');
+        console.error('✗ Invalid problems.json: must be non-empty array');
         return false;
       }
 
@@ -97,15 +97,15 @@ class TestRunner {
       );
 
       if (invalidProblems.length > 0) {
-        console.error('❌ Invalid problems found (missing required fields):');
+        console.error('✗ Invalid problems found (missing required fields):');
         invalidProblems.forEach(p => console.error(`   - ${p.id || 'Unknown'}`));
         return false;
       }
 
-      console.log(`✅ Found ${problems.length} valid problems`);
+      console.log(`✓ Found ${problems.length} valid problems`);
       return true;
     } catch (error) {
-      console.error('❌ Error validating problems.json:', error.message);
+      console.error('✗ Error validating problems.json:', error.message);
       return false;
     }
   }
@@ -114,7 +114,7 @@ class TestRunner {
    * Run a specific test suite
    */
   async runTestSuite(suite, options = {}) {
-    console.log(`\n🧪 Running ${suite.name}...`);
+    console.log(`\nRunning ${suite.name}...`);
     console.log(`   ${suite.description}`);
     
     return new Promise((resolve) => {
@@ -140,15 +140,15 @@ class TestRunner {
 
       jest.on('close', (code) => {
         if (code === 0) {
-          console.log(`✅ ${suite.name} passed`);
+          console.log(`✓ ${suite.name} passed`);
         } else {
-          console.log(`❌ ${suite.name} failed with code ${code}`);
+          console.log(`✗ ${suite.name} failed with code ${code}`);
         }
         resolve(code === 0);
       });
 
       jest.on('error', (error) => {
-        console.error(`❌ Error running ${suite.name}:`, error.message);
+        console.error(`✗ Error running ${suite.name}:`, error.message);
         resolve(false);
       });
     });
@@ -158,7 +158,7 @@ class TestRunner {
    * Run all test suites
    */
   async runAllTests(options = {}) {
-    console.log('🚀 Starting comprehensive API test suite\n');
+    console.log('Starting comprehensive API test suite\n');
     
     // Environment checks
     if (!this.checkEnvironment()) {
@@ -176,30 +176,30 @@ class TestRunner {
       results.push({ suite: suite.name, success });
       
       if (!success && options.bail) {
-        console.log('\n❌ Test suite failed, stopping due to --bail flag');
+        console.log('\n✗ Test suite failed, stopping due to --bail flag');
         break;
       }
     }
 
     // Summary
-    console.log('\n📊 Test Results Summary:');
+    console.log('\nTest Results Summary:');
     console.log('========================');
     
     const passed = results.filter(r => r.success).length;
     const total = results.length;
     
     results.forEach(result => {
-      const status = result.success ? '✅' : '❌';
+      const status = result.success ? '✓' : '✗';
       console.log(`${status} ${result.suite}`);
     });
 
     console.log(`\nOverall: ${passed}/${total} test suites passed`);
     
     if (passed === total) {
-      console.log('🎉 All tests passed! API is working correctly.');
+      console.log('All tests passed! API is working correctly.');
       process.exit(0);
     } else {
-      console.log('💥 Some tests failed. Please check the output above.');
+      console.log('Some tests failed. Please check the output above.');
       process.exit(1);
     }
   }
@@ -214,7 +214,7 @@ class TestRunner {
     );
 
     if (matchingSuites.length === 0) {
-      console.error(`❌ No test suites found matching pattern: ${pattern}`);
+      console.error(`✗ No test suites found matching pattern: ${pattern}`);
       console.log('\nAvailable test suites:');
       this.testSuites.forEach(suite => {
         console.log(`   - ${suite.name} (${suite.file})`);
@@ -222,7 +222,7 @@ class TestRunner {
       process.exit(1);
     }
 
-    console.log(`🎯 Running ${matchingSuites.length} matching test suite(s):\n`);
+    console.log(`Running ${matchingSuites.length} matching test suite(s):\n`);
     
     for (const suite of matchingSuites) {
       await this.runTestSuite(suite, options);
@@ -234,7 +234,7 @@ class TestRunner {
    */
   showHelp() {
     console.log(`
-🧪 OfflineLeetPractice API Test Runner
+OfflineLeetPractice API Test Runner
 
 Usage: node scripts/test-runner.js [command] [options]
 
@@ -284,14 +284,14 @@ async function main() {
     case 'specific':
       const pattern = args[1];
       if (!pattern) {
-        console.error('❌ Please specify a test pattern');
+        console.error('✗ Please specify a test pattern');
         process.exit(1);
       }
       await runner.runSpecificTest(pattern, options);
       break;
       
     default:
-      console.error(`❌ Unknown command: ${command}`);
+      console.error(`✗ Unknown command: ${command}`);
       runner.showHelp();
       process.exit(1);
   }
@@ -299,16 +299,16 @@ async function main() {
 
 // Handle uncaught errors
 process.on('uncaughtException', (error) => {
-  console.error('💥 Uncaught exception:', error);
+  console.error('Uncaught exception:', error);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
-  console.error('💥 Unhandled rejection:', reason);
+  console.error('Unhandled rejection:', reason);
   process.exit(1);
 });
 
 main().catch(error => {
-  console.error('💥 Test runner error:', error);
+  console.error('Test runner error:', error);
   process.exit(1);
 });

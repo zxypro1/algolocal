@@ -59,7 +59,7 @@
       "solved": "Solved"
     },
     "stats": {
-      "title": "📊 Practice Dashboard",
+      "title": "Practice Dashboard",
       "subtitle": "Local stats (daily aggregated): counts, problem list, accuracy and trends",
       "jumpToDashboard": "Stats",
       "last7Days": "Last 7d",
@@ -127,9 +127,9 @@
   },
   "codeRunner": {
     "title": "Code Editor",
-    "submit": "🚀 Submit & Run Tests",
+    "submit": "Submit & Run Tests",
     "running": "Running...",
-    "testResults": "📋 Test Results",
+    "testResults": "Test Results",
     "passed": "Passed",
     "failed": "Failed",
     "testCase": "Test Case",
@@ -166,11 +166,11 @@
     "aiSolutionConfirmMessage": "You have modified the code. Generating an AI solution will replace your current code. Do you want to continue?",
     "generateAnyway": "Generate Anyway",
     "selectSolution": "Select a Solution",
-    "comparisonAnalysis": "📊 Comparison Analysis",
-    "approach": "💡 Approach",
-    "timeComplexity": "⏱️ Time Complexity",
-    "spaceComplexity": "💾 Space Complexity",
-    "codePreview": "📝 Code Preview",
+    "comparisonAnalysis": "Comparison Analysis",
+    "approach": "Approach",
+    "timeComplexity": "Time Complexity",
+    "spaceComplexity": "Space Complexity",
+    "codePreview": "Code Preview",
     "applySolution": "Apply This Solution"
   },
   "aiChat": {
@@ -202,7 +202,7 @@
     "memoization": "Memoization"
   },
   "statsPage": {
-    "title": "📊 Practice Stats",
+    "title": "Practice Stats",
     "subtitle": "Dashboard: daily counts, solved, accuracy and trends"
   },
   "addProblem": {

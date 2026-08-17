@@ -15,7 +15,7 @@ const outputFile = path.join(root, 'projects', 'projects.json');
 const publicFile = path.join(root, 'public', 'projects.json');
 
 function fail(message) {
-  console.error(`❌ ${message}`);
+  console.error(`✗ ${message}`);
   process.exitCode = 1;
 }
 
@@ -78,7 +78,7 @@ function main() {
   const stageCount = projects.reduce((sum, project) => sum + project.stages.length, 0);
   const withJs = projects.filter((project) => project.variants?.javascript).length;
   console.log(
-    `✅ 已生成 ${projects.length} 个工程实战项目（共 ${stageCount} 关，其中 ${withJs} 个附带 JavaScript 版） ` +
+    `✓ 已生成 ${projects.length} 个工程实战项目（共 ${stageCount} 关，其中 ${withJs} 个附带 JavaScript 版） ` +
       '-> projects/projects.json, public/projects.json'
   );
 }

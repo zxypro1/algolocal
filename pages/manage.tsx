@@ -27,6 +27,7 @@ import {
   Divider,
   ScrollArea,
 } from '@mantine/core';
+import { IconEye, IconPencil, IconTrash } from '@tabler/icons-react';
 import { useTranslation, useI18n } from '../src/contexts/I18nContext';
 import { AppHeader, HEADER_HEIGHT } from '../src/components/AppHeader';
 import ProblemForm from '../src/components/ProblemForm';
@@ -635,7 +636,7 @@ export default function ManageProblems() {
                                     component={Link} 
                                     href={`/problems/${problem.id}`}
                                   >
-                                    👁
+                                    <IconEye size={16} />
                                   </ActionIcon>
                                 </Tooltip>
                                 <Tooltip label={t('manage.editProblem')}>
@@ -644,7 +645,7 @@ export default function ManageProblems() {
                                     color="blue"
                                     onClick={() => handleEdit(problem)}
                                   >
-                                    ✏️
+                                    <IconPencil size={16} />
                                   </ActionIcon>
                                 </Tooltip>
                                 <Tooltip label={t('manage.deleteProblem')}>
@@ -656,7 +657,7 @@ export default function ManageProblems() {
                                       setDeleteModalOpen(true);
                                     }}
                                   >
-                                    🗑
+                                    <IconTrash size={16} />
                                   </ActionIcon>
                                 </Tooltip>
                               </Group>
