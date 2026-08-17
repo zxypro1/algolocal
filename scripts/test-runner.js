@@ -30,6 +30,21 @@ class TestRunner {
         name: 'Solution Validation',
         file: 'tests/api/solutions.test.js',
         description: 'Validates all provided solutions work correctly'
+      },
+      {
+        name: 'Editor Drafts',
+        file: 'tests/editor',
+        description: 'Per-problem, per-language code draft persistence'
+      },
+      {
+        name: 'AI Provider & Streaming',
+        file: 'tests/ai',
+        description: 'Model capability handling, provider selection and the chat streaming protocol'
+      },
+      {
+        name: 'Engineering Practice Runtime',
+        file: 'tests/engineering/runtime.test.ts',
+        description: 'Virtual clock, module runtime, metric gates and preset project solvability'
       }
     ];
   }

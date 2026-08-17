@@ -4,7 +4,7 @@
 
 Quick links: [Discussions](https://github.com/zxypro1/algolocal/discussions) | [Issues](https://github.com/zxypro1/algolocal/issues) | [Pull Requests](https://github.com/zxypro1/algolocal/pulls)
 
-> Practice coding algorithms 100% offline with AI: generate problems, get hints, discuss solutions, and run code in JavaScript, TypeScript, or Python — no internet or setup required.
+> Practice coding algorithms 100% offline with AI: generate problems, get hints, discuss solutions, and run code in JavaScript, TypeScript, or Python, no internet or setup required.
 
 <img width="1909" height="930" alt="2026" src="https://github.com/user-attachments/assets/7292075e-6d1b-4fc3-9019-7a80f17c1711" />
 
@@ -41,7 +41,8 @@ For developers who prefer running from source, see [Development Setup](#developm
 
 ### Core Functionality
 
-- **AI-Powered Practice**: Generate problems, get hints, chat about solutions, and generate detailed explanations with multiple approaches — all powered by AI
+- **Engineering Practice**: Build real multi-file systems stage by stage, reviewed on concurrency, latency, resilience, encapsulation and elegance, not just correctness
+- **AI-Powered Practice**: Generate problems, get hints, chat about solutions, and generate detailed explanations with multiple approaches, all powered by AI
 - **Complete Offline Support**: Works 100% offline after initial setup, no internet required during practice
 - **WASM Code Execution**: Browser-side execution for JavaScript, TypeScript, and Python
 - **Monaco Code Editor**: VS Code-like editing experience with syntax highlighting and autocomplete
@@ -67,6 +68,28 @@ The application includes three AI-powered tools that share the same provider con
 - **AI Solution Generation**: Generate multiple solution approaches (brute force + optimized) with detailed annotations, complexity analysis, and trade-offs explained
 - **AI Chat Assistant**: Get contextual hints while solving problems without spoiling the solution. Ask questions about your current code or approach
 - **Flexible Configuration**: Switch between DeepSeek, OpenAI, Claude, Qwen, or local Ollama models anytime
+
+## Engineering Practice
+
+Algorithm problems ask whether your function is correct. Engineering Practice asks the questions that
+decide whether code ships: does it stay correct under concurrency, does it hold a latency budget, what
+happens when the dependency is down, and can someone else maintain it.
+
+A project is a small system you build across several stages in a real multi-file workspace:
+
+- A file tree, tabbed Monaco editor, read-only contract files, and files that unlock as you go
+- Each stage adds one engineering concern, then unlocks the next
+- Hidden acceptance specs, plus engineering gates on measured metrics ("peak concurrency ≤ 4", "12 requests within 300ms")
+- A virtual clock, so `sleep(200)` costs no real time while latency and concurrency are still measured exactly
+- Scoring across correctness, concurrency, latency, resilience, encapsulation and elegance
+- AI review that reads your code, the latest run and the static metrics, then reviews it like a production pull request
+- AI generation: describe what you want to practise, and the generated project gets executed against its own reference solution before it is accepted
+
+Three projects ship built in: a resilient fetch pipeline (bounded concurrency, backoff, single-flight,
+cancellation), an event-driven order pipeline (event bus, onion middleware, idempotency, DLQ), and a
+resilient API gateway (token bucket, circuit breaker, timeout budgets).
+
+See the [Engineering Practice Guide](./ENGINEERING-PRACTICE-GUIDE.md) to author your own.
 
 ## How to Use
 
@@ -197,6 +220,7 @@ OfflineLeetPractice/
 │   │   ├── add-problem.ts
 │   │   └── ...
 │   ├── problems/[id].tsx   # Problem detail page (with AI chat + AI solution)
+│   ├── projects/           # Engineering Practice: list, workspace, generator
 │   ├── generator.tsx       # AI Generator page
 │   ├── stats.tsx           # Practice Dashboard page
 │   ├── manage.tsx          # Problem management page
@@ -207,11 +231,19 @@ OfflineLeetPractice/
 │   │   ├── ContributionHeatmap.tsx
 │   │   └── ...
 │   ├── hooks/
-│   │   └── useWasmExecutor.ts
-│   └── lib/
-│       └── practiceStats.ts  # Local statistics tracking
+│   │   ├── useWasmExecutor.ts
+│   │   └── useProjectRunner.ts   # Runs a stage in a Web Worker
+│   ├── lib/
+│   │   ├── practiceStats.ts  # Local statistics tracking
+│   │   └── engineering/      # Virtual clock, lab, module runtime, spec runner, scoring
+│   └── workers/
+│       └── projectRunner.worker.ts
+├── projects/
+│   ├── definitions/        # Engineering project sources (compiled to projects.json)
+│   └── projects.json
 ├── public/
-│   └── problems.json       # Problem database
+│   ├── problems.json       # Problem database
+│   └── projects.json       # Engineering project database
 ├── electron-main.js        # Electron main process
 └── electron-builder.config.js
 ```
@@ -231,4 +263,4 @@ MIT License
 
 ---
 
-**Practice algorithms anywhere — on flights, cruises, or any offline environment.**
+**Practice algorithms anywhere, on flights, cruises, or any offline environment.**

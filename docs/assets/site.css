@@ -366,9 +366,12 @@ h2 { font-size: clamp(2.35rem, 4.2vw, 4rem); font-weight: 700; line-height: 1.07
 
 .ai-section { padding: 90px 0 115px; color: var(--white); background: var(--night); }
 .ai-modes { position: relative; margin: 0 4% 85px 31%; display: grid; grid-template-columns: repeat(3, 1fr); gap: 44px; }
-.ai-modes::before { content: ""; position: absolute; left: -42px; right: 9%; top: 18px; height: 3px; border-radius: 3px; background: linear-gradient(90deg, var(--cyan) 0 70%, var(--orange) 70%); }
-.ai-modes > div { position: relative; padding-left: 22px; }
-.ai-modes > div::before { content: ""; position: absolute; z-index: 1; left: -8px; top: 8px; width: 11px; height: 11px; border: 4px solid var(--cyan); border-radius: 50%; background: var(--night); }
+/* 轨道和圆点都贴在顶部，文字靠 padding-top 让开，否则这条线会从标题上横穿过去 */
+.ai-modes::before { content: ""; position: absolute; left: -42px; right: 9%; top: 8px; height: 3px; border-radius: 3px; background: var(--cyan); }
+/* 变橙的位置正好压在第三个圆点下面：66.667% 是第三列的左边，29px 补上 gap */
+.ai-modes::after { content: ""; position: absolute; left: calc(66.667% + 29px); right: 9%; top: 8px; height: 3px; border-radius: 3px; background: var(--orange); }
+.ai-modes > div { position: relative; padding-top: 38px; }
+.ai-modes > div::before { content: ""; position: absolute; z-index: 1; left: 0; top: 0; width: 11px; height: 11px; border: 4px solid var(--cyan); border-radius: 50%; background: var(--night); }
 .ai-modes > div.orange::before { border-color: var(--orange); }
 .ai-modes span { display: block; font-size: 1.25rem; font-weight: 600; }
 .ai-modes p { margin-top: 7px; color: #aeb9c9; font-size: .85rem; }
@@ -509,8 +512,12 @@ h2 { font-size: clamp(2.35rem, 4.2vw, 4rem); font-weight: 700; line-height: 1.07
   .focus-code { padding-inline: 25px; font-size: .7rem; }
   .ai-section { padding: 70px 0 80px; }
   .ai-modes { margin: 0 0 58px; grid-template-columns: 1fr; gap: 30px; }
-  .ai-modes::before { left: 5px; right: auto; top: 4px; bottom: 8px; width: 3px; height: auto; background: linear-gradient(var(--cyan) 0 70%, var(--orange) 70%); }
-  .ai-modes > div { padding-left: 32px; }
+  .ai-modes::before { left: 8px; right: auto; top: 4px; bottom: 8px; width: 3px; height: auto; }
+  /* 竖排时橙色那段挂在 .orange 这一项上，跟着它的圆点走，不用猜百分比 */
+  .ai-modes::after { display: none; }
+  .ai-modes > div.orange::after { content: ""; position: absolute; left: 8px; top: 6px; bottom: 8px; width: 3px; border-radius: 3px; background: var(--orange); }
+  /* 竖排时轨道在左边，文字往右让，不再需要桌面端的上边距 */
+  .ai-modes > div { padding: 0 0 0 32px; }
   .ai-modes > div::before { left: 0; top: 6px; }
   .ai-demo-body { grid-template-columns: 1fr; }
   .ai-context { display: none; }

@@ -4,7 +4,7 @@
 
 Enlaces rápidos: [Discusiones](https://github.com/zxypro1/algolocal/discussions) | [Incidencias](https://github.com/zxypro1/algolocal/issues) | [Pull Requests](https://github.com/zxypro1/algolocal/pulls)
 
-> Practica algoritmos de codificación 100% sin conexión con IA: genera problemas, obtén pistas, discute soluciones y ejecuta código en JavaScript, TypeScript o Python — sin necesidad de internet ni configuración.
+> Practica algoritmos de codificación 100% sin conexión con IA: genera problemas, obtén pistas, discute soluciones y ejecuta código en JavaScript, TypeScript o Python, sin necesidad de internet ni configuración.
 
 <img width="1909" height="930" alt="2026" src="https://github.com/user-attachments/assets/7292075e-6d1b-4fc3-9019-7a80f17c1711" />
 
@@ -41,7 +41,8 @@ Para desarrolladores que prefieren ejecutar desde el código fuente, consulta [C
 
 ### Funcionalidad Principal
 
-- **Práctica con IA**: Genera problemas, obtén pistas, chatea sobre soluciones y genera explicaciones detalladas con múltiples enfoques — todo impulsado por IA
+- **Práctica de Ingeniería**: Construye sistemas reales de múltiples archivos por etapas, evaluados por concurrencia, latencia, resiliencia, encapsulación y elegancia, no solo por corrección
+- **Práctica con IA**: Genera problemas, obtén pistas, chatea sobre soluciones y genera explicaciones detalladas con múltiples enfoques, todo impulsado por IA
 - **Soporte Completo Sin Conexión**: Funciona 100% sin conexión después de la configuración inicial, no se requiere internet durante la práctica
 - **Ejecución de Código en WASM**: Ejecución del lado del navegador para JavaScript, TypeScript y Python
 - **Editor de Código Monaco**: Experiencia de edición similar a VS Code con resaltado de sintaxis y autocompletado
@@ -67,6 +68,30 @@ La aplicación incluye tres herramientas impulsadas por IA que comparten la mism
 - **Generación de Soluciones con IA**: Genera múltiples enfoques de solución (fuerza bruta + optimizada) con anotaciones detalladas, análisis de complejidad y explicación de ventajas y desventajas
 - **Asistente de Chat con IA**: Obtén pistas contextuales mientras resuelves problemas sin revelar la solución. Haz preguntas sobre tu código o enfoque actual
 - **Configuración Flexible**: Cambia entre DeepSeek, OpenAI, Claude, Qwen u modelos locales de Ollama en cualquier momento
+
+## Práctica de Ingeniería
+
+Los problemas de algoritmos preguntan si tu función es correcta. La Práctica de Ingeniería hace las
+preguntas que deciden si el código llega a producción: ¿sigue siendo correcto bajo concurrencia?,
+¿respeta un presupuesto de latencia?, ¿qué pasa cuando la dependencia se cae?, ¿puede alguien más
+mantenerlo?
+
+Un proyecto es un pequeño sistema que construyes por etapas en un espacio de trabajo multi-archivo real:
+
+- Un árbol de archivos, editor Monaco con pestañas, archivos de contrato de solo lectura y ficheros que se desbloquean según avanzas
+- Cada etapa añade una preocupación de ingeniería y desbloquea la siguiente
+- Pruebas de aceptación ocultas, más umbrales de ingeniería sobre métricas medidas ("concurrencia máxima ≤ 4", "12 peticiones en 300ms")
+- Un reloj virtual: `sleep(200)` no cuesta tiempo real, pero la latencia y la concurrencia se siguen midiendo con exactitud
+- Puntuación en corrección, concurrencia, latencia, resiliencia, encapsulación y elegancia
+- Revisión con IA que lee tu código, la última ejecución y las métricas estáticas, y lo revisa como un pull request de producción
+- Generación con IA: describe lo que quieres practicar y el proyecto generado se ejecuta contra su propia solución de referencia antes de aceptarse
+
+Se incluyen tres proyectos: una tubería de descarga resiliente (concurrencia acotada, backoff,
+single-flight, cancelación), una tubería de pedidos dirigida por eventos (bus de eventos, middleware
+tipo cebolla, idempotencia, DLQ) y una pasarela de API resiliente (token bucket, circuit breaker,
+presupuestos de tiempo de espera).
+
+Consulta la [Guía de Práctica de Ingeniería](./ENGINEERING-PRACTICE-GUIDE.md) para crear los tuyos.
 
 ## Cómo Usar
 
@@ -196,6 +221,7 @@ OfflineLeetPractice/
 │   │   ├── ai-chat.ts      # Asistente de chat con IA
 │   │   ├── add-problem.ts
 │   │   └── ...
+│   ├── projects/           # Práctica de Ingeniería: lista, espacio de trabajo, generador
 │   ├── problems/[id].tsx   # Página de detalles de problemas (con chat de IA + solución de IA)
 │   ├── generator.tsx       # Página del Generador de IA
 │   ├── stats.tsx           # Página del Panel de Práctica
@@ -207,11 +233,19 @@ OfflineLeetPractice/
 │   │   ├── ContributionHeatmap.tsx
 │   │   └── ...
 │   ├── hooks/
-│   │   └── useWasmExecutor.ts
-│   └── lib/
-│       └── practiceStats.ts  # Seguimiento local de estadísticas
+│   │   ├── useWasmExecutor.ts
+│   │   └── useProjectRunner.ts   # Ejecuta una etapa en un Web Worker
+│   ├── lib/
+│   │   ├── practiceStats.ts  # Seguimiento local de estadísticas
+│   │   └── engineering/      # Reloj virtual, lab, runtime de módulos, specs, puntuación
+│   └── workers/
+│       └── projectRunner.worker.ts
+├── projects/
+│   ├── definitions/        # Fuentes de los proyectos de ingeniería
+│   └── projects.json
 ├── public/
-│   └── problems.json       # Base de datos de problemas
+│   ├── problems.json       # Base de datos de problemas
+│   └── projects.json       # Base de datos de proyectos de ingeniería
 ├── electron-main.js        # Proceso principal de Electron
 └── electron-builder.config.js
 ```
@@ -231,4 +265,4 @@ Licencia MIT
 
 ---
 
-**Practica algoritmos en cualquier lugar — en aviones, cruceros o cualquier entorno sin conexión.**
+**Practica algoritmos en cualquier lugar, en aviones, cruceros o cualquier entorno sin conexión.**

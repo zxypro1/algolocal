@@ -4,7 +4,7 @@
 
 快速链接: [讨论区](https://github.com/zxypro1/algolocal/discussions) | [Issues](https://github.com/zxypro1/algolocal/issues) | [Pull Requests](https://github.com/zxypro1/algolocal/pulls)
 
-> 100% 离线刷算法，AI 全程辅助：生成题目、获取提示、讨论解法，支持 JavaScript、TypeScript、Python 代码运行——无需联网或配置环境。
+> 100% 离线刷算法，AI 全程辅助：生成题目、获取提示、讨论解法，支持 JavaScript、TypeScript、Python 代码运行，无需联网或配置环境。
 
 <img width="1898" height="932" alt="2026" src="https://github.com/user-attachments/assets/a601c9fb-2e36-4e64-a547-11ed5fbde581" />
 
@@ -41,7 +41,8 @@ xattr -cr "/Applications/AlgoLocal.app"
 
 ### 核心功能
 
-- **AI 全程辅助**：生成题目、获取提示、讨论解法、生成详细题解（含多种方法）——全部由 AI 驱动
+- **工程实战**：在完整的多文件工作区里分关卡构建真实系统，按并发度、延迟、容错、封装与优雅程度评审，而不只是「跑通」
+- **AI 全程辅助**：生成题目、获取提示、讨论解法、生成详细题解（含多种方法），全部由 AI 驱动
 - **完全离线支持**：初始设置后 100% 离线可用，练习时无需联网
 - **WASM 代码执行**：浏览器端执行 JavaScript、TypeScript 和 Python
 - **Monaco 代码编辑器**：VS Code 级别的编辑体验，支持语法高亮和自动补全
@@ -67,6 +68,26 @@ xattr -cr "/Applications/AlgoLocal.app"
 - **AI 题解生成**：生成多种解法（暴力解法 + 优化解法），带详细注释、复杂度分析和权衡说明
 - **AI 聊天助手**：在解题过程中获取上下文提示，不直接透露答案。可以询问当前代码或解题思路
 - **灵活配置**：随时切换 DeepSeek、OpenAI、Claude、Qwen 或本地 Ollama 模型
+
+## 工程实战
+
+算法题只问「函数对不对」。工程实战问的是决定代码能不能上线的问题：并发下还对不对、延迟守不守得住、
+下游挂了会怎样、半年后别人能不能维护。
+
+一道工程题是一个需要分阶段构建的小系统，你在完整的多文件工作区里写代码：
+
+- 文件树、多标签 Monaco 编辑器、只读契约文件，后面的文件随关卡解锁
+- 每一关只引入一个工程关注点，通关后解锁下一关
+- 隐藏的验收用例，外加基于真实度量的工程指标门槛（「峰值并发 ≤ 4」「12 个请求 300ms 内完成」）
+- 虚拟时钟：`sleep(200)` 不花真实时间，但延迟与并发度照样被精确、可复现地量出来
+- 按正确性、并发度、延迟、容错性、封装、优雅程度六个维度评分
+- AI 评审会结合你的代码、运行结果与静态指标，像评审生产环境的 PR 那样给意见
+- AI 生成题目：描述你想练的能力，生成出来的题目要先跑通自己的参考实现才会入库
+
+内置三个项目：高可用抓取管线（并发池、指数退避、缓存单飞、取消）、事件驱动的订单流水线（事件总线、
+洋葱中间件、幂等、死信队列）、有韧性的 API 网关（令牌桶、熔断器、超时预算）。
+
+想自己出题，见 [工程实战指南](./ENGINEERING-PRACTICE-GUIDE.md)。
 
 ## 使用方法
 
@@ -196,6 +217,7 @@ OfflineLeetPractice/
 │   │   ├── ai-chat.ts      # AI 聊天助手
 │   │   ├── add-problem.ts
 │   │   └── ...
+│   ├── projects/           # 工程实战：列表、工作区、生成器
 │   ├── problems/[id].tsx   # 题目详情页面（带 AI 聊天 + AI 题解）
 │   ├── generator.tsx       # AI 生成器页面
 │   ├── stats.tsx           # 练习数据看板页面
@@ -207,11 +229,19 @@ OfflineLeetPractice/
 │   │   ├── ContributionHeatmap.tsx
 │   │   └── ...
 │   ├── hooks/
-│   │   └── useWasmExecutor.ts
-│   └── lib/
-│       └── practiceStats.ts  # 本地统计追踪
+│   │   ├── useWasmExecutor.ts
+│   │   └── useProjectRunner.ts   # 在 Web Worker 里运行一关
+│   ├── lib/
+│   │   ├── practiceStats.ts  # 本地统计追踪
+│   │   └── engineering/      # 虚拟时钟、lab、模块运行时、用例框架、评分
+│   └── workers/
+│       └── projectRunner.worker.ts
+├── projects/
+│   ├── definitions/        # 工程实战题目源文件（编译成 projects.json）
+│   └── projects.json
 ├── public/
-│   └── problems.json       # 题目数据库
+│   ├── problems.json       # 题目数据库
+│   └── projects.json       # 工程实战题库
 ├── electron-main.js        # Electron 主进程
 └── electron-builder.config.js
 ```
@@ -231,4 +261,4 @@ MIT License
 
 ---
 
-**随时随地练习算法——飞机上、游轮上，或任何离线环境。**
+**随时随地练习算法，飞机上、游轮上，或任何离线环境。**

@@ -19,7 +19,8 @@
     "addDesc": "创建新的题目",
     "aiDesc": "使用 AI 生成题目",
     "manageDesc": "导入和管理题目",
-    "settingsDesc": "配置应用设置"
+    "settingsDesc": "配置应用设置",
+    "engineeringDesc": "构建真实的工程项目"
   },
   "header": {
     "title": "AlgoLocal",
@@ -106,7 +107,7 @@
     },
     "difficulty": {
       "Easy": "简单",
-      "Medium": "中等", 
+      "Medium": "中等",
       "Hard": "困难"
     }
   },
@@ -180,7 +181,11 @@
     "assistant": "AI 助手",
     "thinking": "思考中...",
     "inputPlaceholder": "输入你的问题...",
-    "clearChat": "清空对话"
+    "clearChat": "清空对话",
+    "stop": "停止生成",
+    "retry": "重试",
+    "send": "发送",
+    "stopped": "已停止"
   },
   "tags": {
     "array": "数组",
@@ -336,7 +341,8 @@
       "endpointPlaceholder": "输入 Ollama 端点 (例如: http://localhost:11434)",
       "model": "模型",
       "modelPlaceholder": "输入模型名称 (例如: llama3)"
-    }
+    },
+    "modelHint": "留空则使用默认模型。可直接输入任意模型 id。"
   },
   "manage": {
     "title": "管理题目",
@@ -383,5 +389,185 @@
     "cancel": "取消",
     "confirmDelete": "删除",
     "manageProblems": "管理"
+  },
+  "engineering": {
+    "list": {
+      "title": "工程实战",
+      "entryHint": "从做题过渡到造系统。多文件工作区、闯关式教程，按并发度、延迟、封装与优雅程度评审。",
+      "enter": "进入",
+      "heading": "工程实战项目",
+      "subtitle": "每个项目都是一个需要分阶段构建的小系统。你会在一个完整的多文件工作区里写代码，隐藏的验收用例不仅检查对错，还会卡住并发度、延迟这样的工程指标。",
+      "searchPlaceholder": "搜索工程项目…",
+      "generate": "AI 生成项目",
+      "empty": "还没有匹配的工程项目",
+      "stages": "关卡数",
+      "start": "开始构建",
+      "continue": "继续构建"
+    },
+    "stage": {
+      "label": "第 {{current}}/{{total}} 关",
+      "cleared": "已通关",
+      "locked": "通过前一关后解锁",
+      "checklist": "本关要点",
+      "hints": "提示",
+      "revealHint": "解锁提示 {{current}}/{{total}}",
+      "reference": "参考实现",
+      "referenceLocked": "通关后可查看参考实现",
+      "next": "进入下一关",
+      "pitfalls": "常见坑",
+      "pitfallsHint": "这些写法能跑通一部分用例，但在工程上是错的",
+      "extension": "延伸：真实世界里的对应物"
+    },
+    "workspace": {
+      "files": "工作区",
+      "readonlyHint": "平台提供的契约文件，只读",
+      "noFileOpen": "从左侧选择一个文件开始",
+      "run": "运行验收",
+      "running": "运行中…",
+      "resetStage": "重置本关代码",
+      "resetProject": "重置整个工程进度",
+      "notFound": "找不到这个工程项目",
+      "quickOpen": "快速跳转文件",
+      "quickOpenPlaceholder": "输入文件名跳转…",
+      "quickOpenEmpty": "没有匹配的文件",
+      "navigate": "选择",
+      "open": "打开",
+      "dismiss": "关闭",
+      "hideSidebar": "收起文件栏",
+      "showSidebar": "展开文件栏",
+      "toggleWrap": "自动换行",
+      "toggleMinimap": "缩略图",
+      "format": "格式化文档",
+      "fontSize": "字号",
+      "fontLarger": "增大",
+      "fontSmaller": "减小",
+      "resetFile": "还原这个文件",
+      "readonly": "只读",
+      "noProblems": "没有问题",
+      "inThisFile": "本文件",
+      "lineCol": "第 {{line}} 行，第 {{column}} 列",
+      "diff": "与初始版本对比",
+      "diffMode": "正在看差异",
+      "closeTab": "关闭",
+      "edited": "与初始版本不同",
+      "editedHint": "这个文件相对本关的初始骨架有改动，点击查看差异。你的修改是自动保存的。",
+      "savedIdle": "自动保存已开启",
+      "savedJustNow": "已保存 · 刚刚",
+      "savedMinutes": "已保存 · {{minutes}} 分钟前",
+      "savedHours": "已保存 · {{hours}} 小时前",
+      "editedCount": "{{count}} 个文件与初始版本不同",
+      "saveNow": "立即保存",
+      "saving": "保存中…",
+      "language": "编程语言",
+      "languageHint": "切换语言会换一套初始文件与用例，两边的代码各自保存"
+    },
+    "tabs": {
+      "stage": "本关",
+      "brief": "需求",
+      "architecture": "架构",
+      "tests": "验收用例",
+      "metrics": "工程指标",
+      "score": "评分",
+      "review": "AI 评审"
+    },
+    "results": {
+      "empty": "点击「运行验收」查看结果",
+      "runError": "运行出错",
+      "stagePassed": "本关通过",
+      "stageFailed": "未通过",
+      "cases": "个用例通过",
+      "gates": "工程指标门槛",
+      "expected": "期望",
+      "actual": "实际",
+      "console": "控制台输出"
+    },
+    "metrics": {
+      "virtualElapsed": "虚拟总耗时",
+      "maxConcurrency": "峰值并发",
+      "requests": "请求总数",
+      "failed": "失败请求",
+      "throttled": "被限流",
+      "retries": "重试次数",
+      "duplicated": "重复请求",
+      "timeline": "并发时间线",
+      "timelineHint": "横轴是虚拟时间，纵轴是同时在飞行中的请求数，串行实现会是一条贴地的直线。",
+      "counters": "自定义埋点"
+    },
+    "dimensions": {
+      "correctness": "正确性",
+      "concurrency": "并发度",
+      "latency": "延迟",
+      "resilience": "容错性",
+      "encapsulation": "封装",
+      "elegance": "优雅程度"
+    },
+    "score": {
+      "total": "综合评分",
+      "staticFindings": "静态分析发现"
+    },
+    "review": {
+      "title": "AI 工程评审",
+      "subtitle": "像 code review 一样审视你的实现：并发安全、失败行为、模块边界与抽象",
+      "request": "AI 评审",
+      "running": "评审中…",
+      "empty": "让 AI 以资深工程师的视角评审当前工作区的代码。它会看你的实现、最近一次运行结果和静态分析指标。",
+      "issues": "发现的问题",
+      "strengths": "做得好的地方",
+      "nextSteps": "上线前还要做什么"
+    },
+    "chat": {
+      "title": "工程助手",
+      "empty": "我能看到你的工作区代码、本关目标和最近一次运行结果。问我思路、失败原因或者设计取舍都可以。",
+      "placeholder": "问一个关于当前实现的问题…（Enter 发送，Shift+Enter 换行）",
+      "prompts": {
+        "whyFailing": "为什么这个用例过不了？",
+        "metrics": "我的并发/延迟指标为什么没达标？",
+        "review": "帮我 review 一下当前的模块划分",
+        "hint": "给我一个方向性的提示",
+        "howToStart": "这一关应该从哪里入手？",
+        "design": "有哪些设计方案可以选？"
+      }
+    },
+    "generator": {
+      "title": "AI 生成工程项目",
+      "heading": "生成一个工程实战项目",
+      "subtitle": "描述你想练的工程能力，AI 会设计一个分阶段的多文件项目，包含隐藏用例、工程指标门槛和参考实现。",
+      "requestLabel": "你想练什么",
+      "requestHint": "越具体越好：说明系统类型和你想被考察的工程点（并发、缓存、容错、模块划分…）",
+      "placeholder": "例如：实现一个带背压的日志批量上报器，考察缓冲、批量提交与丢弃策略",
+      "suggestions": "试试这些：",
+      "generate": "生成项目",
+      "generating": "生成中…",
+      "verifyNote": "生成后平台会自动运行参考实现来验证题目是否成立",
+      "loadingHint": "正在生成并验证：设计关卡 → 写用例 → 跑参考实现 → 修复问题。这一步通常需要 1-3 分钟。",
+      "verification": "自动验证结果",
+      "verified": "已验证并保存",
+      "unverified": "验证未通过",
+      "problemsTitle": "平台运行这道题时发现的问题",
+      "noDiscrimination": "起始骨架也能通过，用例没有区分度",
+      "open": "开始构建",
+      "retry": "重新生成",
+      "saveAnyway": "仍然保存"
+    },
+    "brief": {
+      "outcomes": "通关后你会掌握",
+      "prerequisites": "前置知识"
+    }
+  },
+  "editor": {
+    "toggleWrap": "自动换行",
+    "toggleMinimap": "缩略图",
+    "format": "格式化代码",
+    "fontSize": "字号",
+    "fontLarger": "增大",
+    "fontSmaller": "减小",
+    "resetToTemplate": "还原成初始模板",
+    "modifiedFromTemplate": "已改动",
+    "noProblems": "没有问题",
+    "lineCol": "第 {{line}} 行，第 {{column}} 列",
+    "saving": "保存中…",
+    "savedJustNow": "已保存 · 刚刚",
+    "savedMinutes": "已保存 · {{minutes}} 分钟前",
+    "autosaveOn": "自动保存已开启"
   }
 }

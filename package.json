@@ -35,6 +35,9 @@
     "test:specific": "node scripts/test-runner.js specific",
     "test:solutions": "node scripts/test-runner.js specific solution",
     "test:data": "node scripts/test-runner.js specific data",
+    "test:engineering": "jest tests/engineering",
+    "test:ai": "jest tests/ai",
+    "test:editor": "jest tests/editor",
     "icons:generate": "node scripts/generate-icons.js",
     "electron:dev": "npm run build && electron .",
     "electron:start": "electron .",
@@ -55,7 +58,9 @@
     "release:patch": "bash scripts/release.sh patch",
     "release:minor": "bash scripts/release.sh minor",
     "release:major": "bash scripts/release.sh major",
-    "release:dry": "bash scripts/release.sh patch --dry-run"
+    "release:dry": "bash scripts/release.sh patch --dry-run",
+    "projects:build": "node scripts/build-projects.js",
+    "projects:verify": "node scripts/build-projects.js && node scripts/verify-projects.js"
   },
   "dependencies": {
     "@mantine/core": "7.6.1",
@@ -81,7 +86,8 @@
     "rehype-mermaid": "^3.0.0",
     "rehype-raw": "^7.0.0",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0"
+    "remark-math": "^6.0.0",
+    "typescript": "5.1.6"
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",
@@ -96,8 +102,7 @@
     "jest-environment-node": "^29.7.0",
     "png-to-ico": "^2.1.8",
     "sharp": "^0.33.5",
-    "supertest": "^6.3.4",
-    "typescript": "5.1.6"
+    "supertest": "^6.3.4"
   },
   "engines": {
     "node": ">=18.0.0",

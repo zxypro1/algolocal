@@ -32,6 +32,7 @@ import {
   IconPlus,
   IconRobot,
   IconPackage,
+  IconBuildingFactory2,
   IconSettings,
   IconSearch,
   IconCircleCheckFilled,
@@ -411,6 +412,38 @@ export default function Home() {
       {/* Main content area with problem list */}
       <AppShell.Main>
         <Container fluid p={0}>
+          {/* 从「做题」通向「造系统」的入口 */}
+          <Card
+            className="app-hover-card"
+            component={Link}
+            href="/projects"
+            withBorder
+            radius="lg"
+            padding="md"
+            mb="md"
+            style={{ display: 'block', cursor: 'pointer' }}
+          >
+            <Group justify="space-between" wrap="nowrap" gap="md">
+              <Group gap="md" wrap="nowrap" style={{ minWidth: 0 }}>
+                <ThemeIcon variant="light" color="orange" size={42} radius="md">
+                  <IconBuildingFactory2 size={22} />
+                </ThemeIcon>
+                <div style={{ minWidth: 0 }}>
+                  <Group gap={8}>
+                    <Text fw={650} size="sm">{t('engineering.list.title')}</Text>
+                    <Badge size="xs" variant="light" color="orange">New</Badge>
+                  </Group>
+                  <Text size="xs" c="dimmed" lineClamp={2}>
+                    {t('engineering.list.entryHint')}
+                  </Text>
+                </div>
+              </Group>
+              <Button variant="light" color="orange" size="xs" style={{ flexShrink: 0 }}>
+                {t('engineering.list.enter')}
+              </Button>
+            </Group>
+          </Card>
+
           {filteredProblems.length === 0 ? (
             <Center mih="60vh">
               <Stack align="center" gap="sm">
@@ -582,6 +615,14 @@ function NavigationDrawer({ opened, onClose }: { opened: boolean; onClose: () =>
       titleKey: 'common.practice',
       titleFallback: 'Practice',
       items: [
+        {
+          href: '/projects',
+          color: 'orange',
+          icon: <IconBuildingFactory2 size={20} />,
+          labelKey: 'engineering.list.title',
+          descKey: 'navigation.engineeringDesc',
+          descFallback: 'Build real systems',
+        },
         {
           href: '/stats',
           color: 'grape',

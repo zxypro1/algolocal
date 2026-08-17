@@ -67,16 +67,16 @@ export function SparkBarChart({
     >
       {/* 隐藏元素用于获取CSS变量颜色值 */}
       <div ref={colorRef} style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }} />
-      {/* @ts-expect-error - recharts ResponsiveContainer type compatibility issue with React types */}
+      {/* @ts-ignore - recharts ResponsiveContainer type compatibility issue with React types */}
       <ResponsiveContainer width="100%" height="100%">
-        {/* @ts-expect-error - recharts BarChart type compatibility issue with React types */}
+        {/* @ts-ignore - recharts BarChart type compatibility issue with React types */}
         <BarChart
           data={data}
           margin={{ top: 5, right: 5, left: 5, bottom: hideXAxis ? 5 : 30 }}
           barCategoryGap="15%"
         >
           {(!hideXAxis ? (
-            // @ts-expect-error - recharts XAxis type compatibility issue
+            // @ts-ignore - recharts XAxis type compatibility issue
             <XAxis
               dataKey="name"
               tick={{ fontSize: 9, fill: 'var(--mantine-color-dimmed)' }}
@@ -88,7 +88,7 @@ export function SparkBarChart({
               interval={0}
             />
           ) : null) as any}
-          {/* @ts-expect-error - recharts YAxis type compatibility issue */}
+          {/* @ts-ignore - recharts YAxis type compatibility issue */}
           <YAxis
             tick={{ fontSize: 9, fill: 'var(--mantine-color-dimmed)' }}
             tickLine={{ stroke: 'var(--mantine-color-gray-4)' }}
@@ -105,11 +105,11 @@ export function SparkBarChart({
             labelStyle={{ color: 'var(--mantine-color-text)' }}
             itemStyle={{ color: 'var(--mantine-color-text)' }}
           />
-          {/* @ts-expect-error - recharts Bar type compatibility issue */}
+          {/* @ts-ignore - recharts Bar type compatibility issue */}
           <Bar dataKey="value" radius={[3, 3, 0, 0]}>
-            {/* @ts-expect-error - recharts Cell type compatibility issue with React types */}
+            {/* @ts-ignore - recharts Cell type compatibility issue with React types */}
             {data.map((entry, index) => (
-              // @ts-expect-error - recharts Cell component type issue
+              // @ts-ignore - recharts Cell component type issue
               <Cell
                 key={`cell-${index}`}
                 fill={entry.value === 0 ? `${fillColor}40` : fillColor}

@@ -199,6 +199,8 @@ type Translations = {
   tags: {
     [key: string]: string;
   };
+  /** 工程实战模块的文案，层级较深，这里不再逐字段展开 */
+  engineering?: Record<string, any>;
   addProblem: {
     title: string;
     manualForm: string;

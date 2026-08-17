@@ -180,3 +180,174 @@ a {
     transform: none;
   }
 }
+
+/* 流式输出时的光标，提示「还在生成」 */
+.app-caret {
+  animation: app-caret-blink 1s steps(2, start) infinite;
+  opacity: 0.7;
+  margin-left: 2px;
+}
+
+@keyframes app-caret-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+/* ==================================================================
+   工程实战工作区（IDE）
+   ================================================================== */
+
+.ide-root {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+  background: var(--app-surface);
+}
+
+/* ---- 侧栏 ---- */
+
+.ide-sidebar {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--app-surface-muted);
+}
+
+.ide-sidebar-head {
+  border-bottom: 1px solid var(--app-border);
+}
+
+.ide-sidebar-resizer {
+  width: 4px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: var(--app-border);
+  transition: background-color 120ms ease;
+}
+
+.ide-sidebar-resizer:hover,
+.ide-sidebar-resizer[data-dragging] {
+  background: var(--mantine-color-brand-filled);
+}
+
+.ide-tree-row {
+  cursor: pointer;
+  position: relative;
+  border-left: 2px solid transparent;
+}
+
+.ide-tree-row:hover {
+  background: color-mix(in srgb, var(--mantine-color-brand-light) 55%, transparent);
+}
+
+.ide-tree-row[data-active] {
+  background: var(--mantine-color-brand-light);
+  border-left-color: var(--mantine-color-brand-filled);
+}
+
+/* 改动过的文件：用颜色区分即可。这里刻意不用圆点，
+   圆点在编辑器里的既有含义是「未保存」，而工作区是自动保存的 */
+.ide-tree-row[data-edited] .mantine-Text-root {
+  color: var(--mantine-color-brand-filled);
+  font-weight: 600;
+}
+
+/* ---- 主区 ---- */
+
+.ide-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ide-tabs {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-surface-muted);
+}
+
+.ide-tabs-scroll {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ide-tabs-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.ide-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  border-right: 1px solid var(--app-border);
+  border-top: 2px solid transparent;
+  color: var(--mantine-color-dimmed);
+}
+
+.ide-tab:hover {
+  background: color-mix(in srgb, var(--app-surface) 70%, transparent);
+}
+
+.ide-tab[data-active] {
+  background: var(--app-surface);
+  border-top-color: var(--mantine-color-brand-filled);
+  color: inherit;
+}
+
+.ide-toolbar {
+  flex-shrink: 0;
+  border-left: 1px solid var(--app-border);
+}
+
+.ide-breadcrumb {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-surface);
+}
+
+.ide-editor {
+  flex: 1;
+  min-height: 0;
+}
+
+.ide-status {
+  height: 24px;
+  flex-shrink: 0;
+  border-top: 1px solid var(--app-border);
+  background: var(--app-surface-muted);
+}
+
+/* 关闭按钮：平时淡出，hover 或激活时出现 */
+.ide-tab-close {
+  opacity: 0;
+  transition: opacity 120ms ease;
+  flex-shrink: 0;
+}
+
+.ide-tab:hover .ide-tab-close,
+.ide-tab[data-active] .ide-tab-close {
+  opacity: 0.65;
+}
+
+.ide-tab-close:hover {
+  opacity: 1 !important;
+}
+
+/* 单文件编辑器（算法题）的工具条 */
+.ide-toolbar-inline {
+  flex-shrink: 0;
+  border-top: 1px solid var(--app-border);
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-surface-muted);
+}

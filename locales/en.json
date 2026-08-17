@@ -19,7 +19,8 @@
     "addDesc": "Create a new problem",
     "aiDesc": "Generate problems with AI",
     "manageDesc": "Import and manage problems",
-    "settingsDesc": "Configure app settings"
+    "settingsDesc": "Configure app settings",
+    "engineeringDesc": "Build real systems"
   },
   "header": {
     "title": "AlgoLocal",
@@ -180,7 +181,11 @@
     "assistant": "AI Assistant",
     "thinking": "Thinking...",
     "inputPlaceholder": "Type your question...",
-    "clearChat": "Clear chat"
+    "clearChat": "Clear chat",
+    "stop": "Stop generating",
+    "retry": "Retry",
+    "send": "Send",
+    "stopped": "Stopped"
   },
   "tags": {
     "array": "Array",
@@ -336,7 +341,8 @@
       "endpointPlaceholder": "Enter Ollama endpoint (e.g., http://localhost:11434)",
       "model": "Model",
       "modelPlaceholder": "Enter model name (e.g., llama3)"
-    }
+    },
+    "modelHint": "Leave empty to use the default. Any model id works."
   },
   "manage": {
     "title": "Manage Problems",
@@ -383,5 +389,185 @@
     "cancel": "Cancel",
     "confirmDelete": "Delete",
     "manageProblems": "Manage"
+  },
+  "engineering": {
+    "list": {
+      "title": "Engineering Practice",
+      "entryHint": "Move from puzzles to systems: a real multi-file workspace, stage-by-stage builds, reviewed on concurrency, latency, encapsulation and elegance.",
+      "enter": "Open",
+      "heading": "Engineering projects",
+      "subtitle": "Each project is a small system you build in stages. You work in a full multi-file workspace, and the hidden acceptance specs check more than correctness, they gate on engineering metrics like concurrency and latency.",
+      "searchPlaceholder": "Search projects…",
+      "generate": "Generate with AI",
+      "empty": "No matching projects",
+      "stages": "Stages",
+      "start": "Start building",
+      "continue": "Continue"
+    },
+    "stage": {
+      "label": "Stage {{current}}/{{total}}",
+      "cleared": "Cleared",
+      "locked": "Clear the previous stage to unlock",
+      "checklist": "What this stage checks",
+      "hints": "Hints",
+      "revealHint": "Reveal hint {{current}}/{{total}}",
+      "reference": "Reference implementation",
+      "referenceLocked": "Clear this stage to see the reference implementation",
+      "next": "Go to next stage",
+      "pitfalls": "Common traps",
+      "pitfallsHint": "These pass some specs but are wrong as engineering",
+      "extension": "Going further: the real-world counterpart"
+    },
+    "workspace": {
+      "files": "Workspace",
+      "readonlyHint": "Contract file provided by the platform, read only",
+      "noFileOpen": "Pick a file on the left to start",
+      "run": "Run acceptance",
+      "running": "Running…",
+      "resetStage": "Reset this stage",
+      "resetProject": "Reset the whole project",
+      "notFound": "Project not found",
+      "quickOpen": "Go to file",
+      "quickOpenPlaceholder": "Type a file name…",
+      "quickOpenEmpty": "No matching files",
+      "navigate": "navigate",
+      "open": "open",
+      "dismiss": "dismiss",
+      "hideSidebar": "Hide file panel",
+      "showSidebar": "Show file panel",
+      "toggleWrap": "Word wrap",
+      "toggleMinimap": "Minimap",
+      "format": "Format document",
+      "fontSize": "Font size",
+      "fontLarger": "Larger",
+      "fontSmaller": "Smaller",
+      "resetFile": "Reset this file",
+      "readonly": "read only",
+      "noProblems": "No problems",
+      "inThisFile": "this file",
+      "lineCol": "Ln {{line}}, Col {{column}}",
+      "diff": "Compare with the starter",
+      "diffMode": "viewing diff",
+      "closeTab": "Close",
+      "edited": "differs from starter",
+      "editedHint": "This file differs from the stage starter. Click to see the diff. Your edits are saved automatically.",
+      "savedIdle": "Autosave on",
+      "savedJustNow": "Saved just now",
+      "savedMinutes": "Saved {{minutes}}m ago",
+      "savedHours": "Saved {{hours}}h ago",
+      "editedCount": "{{count}} file(s) differ from the starter",
+      "saveNow": "Save now",
+      "saving": "Saving…",
+      "language": "Language",
+      "languageHint": "Switching swaps the starter files and specs; each language keeps its own drafts"
+    },
+    "tabs": {
+      "stage": "Stage",
+      "brief": "Brief",
+      "architecture": "Architecture",
+      "tests": "Specs",
+      "metrics": "Metrics",
+      "score": "Score",
+      "review": "AI review"
+    },
+    "results": {
+      "empty": "Hit “Run acceptance” to see results",
+      "runError": "Run error",
+      "stagePassed": "Stage passed",
+      "stageFailed": "Not passing",
+      "cases": "cases passed",
+      "gates": "Engineering gates",
+      "expected": "Expected",
+      "actual": "Actual",
+      "console": "Console output"
+    },
+    "metrics": {
+      "virtualElapsed": "Virtual wall time",
+      "maxConcurrency": "Peak concurrency",
+      "requests": "Requests",
+      "failed": "Failed",
+      "throttled": "Throttled",
+      "retries": "Retries",
+      "duplicated": "Duplicate calls",
+      "timeline": "Concurrency timeline",
+      "timelineHint": "Virtual time on the x-axis, in-flight requests on the y-axis, a sequential implementation is a flat line at 1.",
+      "counters": "Custom counters"
+    },
+    "dimensions": {
+      "correctness": "Correctness",
+      "concurrency": "Concurrency",
+      "latency": "Latency",
+      "resilience": "Resilience",
+      "encapsulation": "Encapsulation",
+      "elegance": "Elegance"
+    },
+    "score": {
+      "total": "Overall score",
+      "staticFindings": "Static analysis findings"
+    },
+    "review": {
+      "title": "AI engineering review",
+      "subtitle": "Reviewed like a pull request: concurrency safety, failure behaviour, module boundaries, abstractions",
+      "request": "AI review",
+      "running": "Reviewing…",
+      "empty": "Ask AI to review the workspace the way a staff engineer would. It sees your code, the latest run and the static analysis metrics.",
+      "issues": "Findings",
+      "strengths": "What works well",
+      "nextSteps": "Before you ship this"
+    },
+    "chat": {
+      "title": "Engineering assistant",
+      "empty": "I can see your workspace code, the stage goal and your latest run. Ask about approach, failures or design trade-offs.",
+      "placeholder": "Ask about the current implementation… (Enter to send, Shift+Enter for a newline)",
+      "prompts": {
+        "whyFailing": "Why is this spec failing?",
+        "metrics": "Why are my concurrency/latency gates failing?",
+        "review": "Review my module boundaries",
+        "hint": "Give me a directional hint",
+        "howToStart": "Where should I start this stage?",
+        "design": "What design options do I have?"
+      }
+    },
+    "generator": {
+      "title": "Generate a project",
+      "heading": "Generate an engineering project",
+      "subtitle": "Describe the engineering skill you want to drill. AI designs a staged, multi-file project with hidden specs, metric gates and a reference solution.",
+      "requestLabel": "What do you want to practise",
+      "requestHint": "Be specific: the kind of system, and the engineering concern you want tested (concurrency, caching, resilience, boundaries…)",
+      "placeholder": "e.g. a log batching uploader with backpressure, batching and drop policy",
+      "suggestions": "Try one of these:",
+      "generate": "Generate project",
+      "generating": "Generating…",
+      "verifyNote": "The platform runs the reference solution to verify the generated project before saving it",
+      "loadingHint": "Generating and verifying: design stages → write specs → execute the reference solution → repair. This usually takes 1-3 minutes.",
+      "verification": "Automatic verification",
+      "verified": "Verified and saved",
+      "unverified": "Verification failed",
+      "problemsTitle": "Problems found while executing this project",
+      "noDiscrimination": "the starter skeleton also passes, specs lack discrimination",
+      "open": "Start building",
+      "retry": "Regenerate",
+      "saveAnyway": "Save anyway"
+    },
+    "brief": {
+      "outcomes": "What you will learn",
+      "prerequisites": "Prerequisites"
+    }
+  },
+  "editor": {
+    "toggleWrap": "Word wrap",
+    "toggleMinimap": "Minimap",
+    "format": "Format code",
+    "fontSize": "Font size",
+    "fontLarger": "Larger",
+    "fontSmaller": "Smaller",
+    "resetToTemplate": "Reset to the starting template",
+    "modifiedFromTemplate": "edited",
+    "noProblems": "No problems",
+    "lineCol": "Ln {{line}}, Col {{column}}",
+    "saving": "Saving…",
+    "savedJustNow": "Saved just now",
+    "savedMinutes": "Saved {{minutes}}m ago",
+    "autosaveOn": "Autosave on"
   }
 }
