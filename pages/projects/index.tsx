@@ -32,9 +32,11 @@ import {
 import { useI18n, useTranslation } from '../../src/contexts/I18nContext';
 import { AppHeader, HEADER_HEIGHT } from '../../src/components/AppHeader';
 import { loadAllProgress, ProjectProgress } from '../../src/lib/engineering/progress';
-import type { EngineeringProject, LocalizedText } from '../../src/lib/engineering/types';
+import type { LocalizedText } from '../../src/lib/engineering/types';
+import type { ProjectSummary } from '../../src/lib/server/projectStore';
 
-type ProjectWithSource = EngineeringProject & { source?: 'preset' | 'user' };
+/** 列表页只拿摘要：完整题库里绝大部分是隐藏用例和参考实现，这里一个都用不上 */
+type ProjectWithSource = ProjectSummary;
 
 const difficultyColor = (difficulty: string) =>
   difficulty === 'Easy' ? 'green' : difficulty === 'Medium' ? 'yellow' : 'red';
@@ -143,7 +145,7 @@ export default function ProjectsPage() {
                 {filtered.map((project) => {
                   const progress = progressMap[project.id];
                   const cleared = progress?.completedStages?.length || 0;
-                  const total = project.stages?.length || 0;
+                  const total = project.stageCount || 0;
                   const percent = total ? (cleared / total) * 100 : 0;
 
                   return (

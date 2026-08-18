@@ -1,14 +1,24 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { deleteUserProject, loadAllProjects } from '../../src/lib/server/projectStore';
+import { deleteUserProject, loadAllProjects, summarizeProject } from '../../src/lib/server/projectStore';
 
 /**
- * GET    /api/projects        列出全部工程实战项目（预置 + 用户生成）
+ * GET    /api/projects        列表用的精简信息（标题、标签、关卡数）
+ * GET    /api/projects?id=xxx 单个工程的完整内容，工作区用
  * DELETE /api/projects?id=xxx 删除一个用户生成的项目
+ *
+ * 列表和工作区分开：以前两个页面都下载整个题库（295KB，且随生成的题目继续增长），
+ * 工作区其实只需要其中一个工程。
  */
 export default function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     if (req.method === 'GET') {
-      return res.status(200).json(loadAllProjects());
+      const id = typeof req.query.id === 'string' ? req.query.id.trim() : '';
+      if (id) {
+        const project = loadAllProjects().find((item) => item.id === id);
+        if (!project) return res.status(404).json({ error: 'Project not found' });
+        return res.status(200).json(project);
+      }
+      return res.status(200).json(loadAllProjects().map(summarizeProject));
     }
 
     if (req.method === 'DELETE') {

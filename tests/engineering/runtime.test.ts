@@ -10,8 +10,9 @@ import * as ts from 'typescript';
 import fs from 'fs';
 import path from 'path';
 
-import { runStage, evaluateGate, getMetricValue } from '../../src/lib/engineering/runner';
-import { createTranspiler } from '../../src/lib/engineering/transpile';
+import { runStage, aggregateMetrics, evaluateGate, getMetricValue } from '../../src/lib/engineering/runner';
+import { createTranspiler, needsTranspiler } from '../../src/lib/engineering/transpile';
+import { deepEqual } from '../../src/lib/engineering/specRunner';
 import { analyzeWorkspace } from '../../src/lib/engineering/analysis';
 import { computeScoreCard } from '../../src/lib/engineering/scoring';
 import { createModuleRuntime } from '../../src/lib/engineering/moduleRuntime';
@@ -322,6 +323,133 @@ describe('virtual clock', () => {
 
     expect(report.status).toBe('failed');
     expect(report.cases[0].error).toMatch(/deadlock/i);
+  });
+});
+
+/** 以下每条都对应一个 review 里查出来的真实缺陷 */
+describe('runtime regressions', () => {
+  it('transpiler detection matches the module runtime', () => {
+    // `export{x}` 后面没有空格：以前这里判定「不需要转译器」，
+    // 而模块运行时判定「需要」，于是整关以 ModuleEvaluationError 失败
+    expect(needsTranspiler({ 'src/a.js': 'const x = 1;\nexport{x};\n' })).toBe(true);
+    expect(needsTranspiler({ 'src/a.js': "import{y}from'./b';\n" })).toBe(true);
+    expect(needsTranspiler({ 'src/a.js': "export*from'./b';\n" })).toBe(true);
+    expect(needsTranspiler({ 'src/a.js': 'module.exports = 1;\n' })).toBe(false);
+    // exports.foo 不是 ESM，别误判
+    expect(needsTranspiler({ 'src/a.js': 'exports.foo = 1;\n' })).toBe(false);
+  });
+
+  it('empty metrics are a fresh object every time', () => {
+    const first = aggregateMetrics([]);
+    first.requests.total = 999;
+    first.counters.hacked = 1;
+
+    const second = aggregateMetrics([]);
+    expect(second.requests.total).toBe(0);
+    expect(second.counters.hacked).toBeUndefined();
+  });
+
+  it('deepEqual compares Date and RegExp by value', () => {
+    // 两者都没有自有可枚举属性，落到通用对象分支会「keys 都是空」从而判定相等，
+    // 于是 expect(时间戳).toEqual(错误的时间戳) 永远通过
+    expect(deepEqual(new Date(1), new Date(2))).toBe(false);
+    expect(deepEqual(new Date(1), new Date(1))).toBe(true);
+    expect(deepEqual(/a/g, /b/g)).toBe(false);
+    expect(deepEqual(/a/g, /a/g)).toBe(true);
+    expect(deepEqual(/a/g, /a/i)).toBe(false);
+    expect(deepEqual(new Date(1), { })).toBe(false);
+  });
+
+  it('a throwing timer callback fails the case instead of escaping', async () => {
+    const report = await runStage({
+      files: {},
+      specs: [
+        {
+          path: 'specs/timer.spec.js',
+          content: `
+            describe('timer', () => {
+              it('reports the error', async () => {
+                setTimeout(() => { throw new Error('boom'); }, 10);
+                await new Promise((resolve) => setTimeout(resolve, 50));
+              });
+            });
+          `,
+        },
+      ],
+    });
+
+    expect(report.totals.failed).toBe(1);
+    expect(report.cases[0].error).toContain('boom');
+  });
+
+  it('afterAll runs after the last case, not the first', async () => {
+    const report = await runStage({
+      files: {},
+      specs: [
+        {
+          path: 'specs/hooks.spec.js',
+          content: `
+            const seen = [];
+            describe('hooks', () => {
+              afterAll(() => { seen.push('afterAll'); });
+              it('one', () => { seen.push('one'); });
+              it('two', () => { seen.push('two'); });
+              it('three', () => {
+                seen.push('three');
+                // 前两条用例跑完时 afterAll 还不该执行
+                expect(seen).toEqual(['one', 'two', 'three']);
+              });
+            });
+          `,
+        },
+      ],
+    });
+
+    expect(report.totals.failed).toBe(0);
+  });
+
+  it('does not hand the lab controls to workspace code', async () => {
+    // configure 能把门槛量的那些参数直接改掉，reset 会换掉驱动器正在推进的时钟
+    const report = await runStage({
+      files: {},
+      specs: [
+        {
+          path: 'specs/surface.spec.js',
+          content: `
+            const net = require('@lab/net');
+            describe('lab surface', () => {
+              it('has no configure/reset', () => {
+                expect(net.configure).toBeUndefined();
+                expect(net.reset).toBeUndefined();
+                expect(typeof net.request).toBe('function');
+              });
+            });
+          `,
+        },
+      ],
+    });
+
+    expect(report.totals.failed).toBe(0);
+  });
+
+  it('keeps totals consistent when a spec file blows up', async () => {
+    const report = await runStage({
+      files: {},
+      specs: [
+        {
+          path: 'specs/broken.spec.js',
+          content: `
+            describe('half', () => {
+              it('passes', () => { expect(1).toBe(1); });
+            });
+            throw new Error('collection exploded');
+          `,
+        },
+      ],
+    });
+
+    expect(report.status).toBe('error');
+    expect(report.totals.passed + report.totals.failed).toBe(report.totals.total);
   });
 });
 

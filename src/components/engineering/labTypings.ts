@@ -66,15 +66,26 @@ declare module '@lab/metrics' {
 }
 `;
 
-/** 让 Monaco 认识 @lab/* 并放宽与本地工程无关的检查 */
-export function configureMonacoForWorkspace(monaco: any): void {
+/**
+ * 让 Monaco 认识 @lab/* 并放宽与本地工程无关的检查。
+ *
+ * monaco 在一个页面里是单例，这些设置是**全局**的：不还原的话，逛过一次工程实战
+ * 之后，算法题编辑器也会继承 CommonJS / strict:false 和 @lab/* 声明，用户依赖的
+ * 严格检查悄悄消失。所以这里返回一个还原函数，组件卸载时调用。
+ */
+export function configureMonacoForWorkspace(monaco: any): () => void {
   const typescript = monaco?.languages?.typescript;
-  if (!typescript) return;
+  if (!typescript) return () => {};
+
+  const restores: Array<() => void> = [];
 
   // JS 关卡走的是 javascriptDefaults，两边都要配，否则用 JavaScript 做题时
   // @lab/* 和相对导入都是「找不到模块」
   for (const defaults of [typescript.typescriptDefaults, typescript.javascriptDefaults]) {
     if (!defaults) continue;
+
+    const previousCompilerOptions = defaults.getCompilerOptions?.();
+    const previousDiagnosticsOptions = defaults.getDiagnosticsOptions?.();
 
     defaults.setCompilerOptions({
       target: typescript.ScriptTarget.ES2020,
@@ -94,6 +105,14 @@ export function configureMonacoForWorkspace(monaco: any): void {
       noSyntaxValidation: false,
     });
 
-    defaults.addExtraLib(LAB_TYPE_DECLARATIONS, 'file:///lab-modules.d.ts');
+    const extraLib = defaults.addExtraLib(LAB_TYPE_DECLARATIONS, 'file:///lab-modules.d.ts');
+
+    restores.push(() => {
+      extraLib?.dispose?.();
+      if (previousCompilerOptions) defaults.setCompilerOptions(previousCompilerOptions);
+      if (previousDiagnosticsOptions) defaults.setDiagnosticsOptions(previousDiagnosticsOptions);
+    });
   }
+
+  return () => restores.forEach((restore) => restore());
 }

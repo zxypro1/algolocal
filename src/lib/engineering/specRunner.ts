@@ -62,6 +62,15 @@ export function deepEqual(a: unknown, b: unknown): boolean {
     if (a.size !== b.size) return false;
     return Array.from(a).every((item) => b.has(item));
   }
+  // Date 和 RegExp 没有自有可枚举属性，落到下面的通用对象分支会「两边 keys 都是空数组」
+  // 从而判定相等：expect(至今为止的时间戳).toEqual(new Date(期望值)) 会永远通过，
+  // 写错的实现被判成对的。
+  if (a instanceof Date || b instanceof Date) {
+    return a instanceof Date && b instanceof Date && a.getTime() === b.getTime();
+  }
+  if (a instanceof RegExp || b instanceof RegExp) {
+    return a instanceof RegExp && b instanceof RegExp && a.source === b.source && a.flags === b.flags;
+  }
   if (typeof a === 'object' && typeof b === 'object') {
     const keysA = Object.keys(a as object);
     const keysB = Object.keys(b as object);
@@ -262,6 +271,8 @@ export interface CollectedCase {
 export interface SpecCollector {
   globals: Record<string, unknown>;
   cases: CollectedCase[];
+  /** spec 文件求值完之后调用，把顶层的 afterAll 挂到最后一个用例上 */
+  finalize(): void;
 }
 
 /**
@@ -273,17 +284,36 @@ export function createSpecCollector(): SpecCollector {
   const suiteStack: string[] = [];
   const beforeEachStack: Array<Array<() => unknown>> = [[]];
   const afterEachStack: Array<Array<() => unknown>> = [[]];
+  const afterAllStack: Array<Array<() => unknown>> = [[]];
+
+  /**
+   * 把一组 afterAll 挂到本 suite 的最后一个用例后面。
+   *
+   * 之前 afterAll 是用「只跑一次的 afterEach」近似的，于是它在**第一个**用例之后
+   * 就执行了 —— 一个用来检查资源泄漏的 afterAll 永远看不到后面几个用例。
+   */
+  function attachAfterAll(hooks: Array<() => unknown>, fromIndex: number) {
+    if (!hooks.length) return;
+    const last = cases[cases.length - 1];
+    if (!last || cases.length === fromIndex) return;
+    last.afterEach = [...last.afterEach, ...hooks];
+  }
 
   function describe(name: string, fn: () => void) {
     suiteStack.push(name);
     beforeEachStack.push([]);
     afterEachStack.push([]);
+    const hooks: Array<() => unknown> = [];
+    afterAllStack.push(hooks);
+    const startIndex = cases.length;
     try {
       fn();
     } finally {
       suiteStack.pop();
       beforeEachStack.pop();
       afterEachStack.pop();
+      afterAllStack.pop();
+      attachAfterAll(hooks, startIndex);
     }
   }
 
@@ -304,6 +334,7 @@ export function createSpecCollector(): SpecCollector {
 
   return {
     cases,
+    finalize: () => attachAfterAll(afterAllStack[0], 0),
     globals: {
       describe,
       it,
@@ -311,7 +342,13 @@ export function createSpecCollector(): SpecCollector {
       expect,
       beforeEach: (fn: () => unknown) => beforeEachStack[beforeEachStack.length - 1].push(fn),
       afterEach: (fn: () => unknown) => afterEachStack[afterEachStack.length - 1].push(fn),
-      // beforeAll/afterAll 用「只跑一次」的 beforeEach 近似实现
+      /**
+       * beforeAll 用「只跑一次的 beforeEach」实现：它确实只在本 suite 第一个用例前跑一次。
+       *
+       * 但注意 lab 是每个用例重建的（时钟和指标都要归零），所以 beforeAll 里建立的
+       * **lab 状态**只对第一个用例有效。要跨用例共享的东西请放在模块作用域里，
+       * 或者干脆用 beforeEach。
+       */
       beforeAll: (fn: () => unknown) => {
         let done = false;
         beforeEachStack[beforeEachStack.length - 1].push(async () => {
@@ -320,14 +357,7 @@ export function createSpecCollector(): SpecCollector {
           await fn();
         });
       },
-      afterAll: (fn: () => unknown) => {
-        let done = false;
-        afterEachStack[afterEachStack.length - 1].push(async () => {
-          if (done) return;
-          done = true;
-          await fn();
-        });
-      },
+      afterAll: (fn: () => unknown) => afterAllStack[afterAllStack.length - 1].push(fn),
     },
   };
 }

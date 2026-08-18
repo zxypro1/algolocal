@@ -175,8 +175,8 @@ sandbox, so say that in a pitfall rather than writing a spec that appears to che
 
 ### Spec files
 
-Specs use a built-in mini framework, `describe`, `it`, `expect`, `beforeEach`, `afterEach` are globals,
-do not import them. Matchers: `toBe`, `toEqual`, `toBeTruthy`, `toBeFalsy`, `toBeNull`, `toBeUndefined`,
+Specs use a built-in mini framework. `describe`, `it`, `expect`, `beforeEach`, `afterEach`,
+`beforeAll` and `afterAll` are globals, do not import them. Matchers: `toBe`, `toEqual`, `toBeTruthy`, `toBeFalsy`, `toBeNull`, `toBeUndefined`,
 `toBeDefined`, `toBeInstanceOf`, `toBeGreaterThan(OrEqual)`, `toBeLessThan(OrEqual)`, `toBeCloseTo`,
 `toContain`, `toHaveLength`, `toHaveProperty`, `toMatch`, `toThrow`, `.not`, and for async:
 
@@ -186,6 +186,13 @@ await expect(async () => doThing()).rejects.toThrow('message');
 
 Each test case gets a fresh lab (clock and metrics reset), while modules stay loaded for the whole
 spec file, which is why preset projects export factories (`createPipeline`) rather than singletons.
+For the same reason `beforeAll` cannot hand lab state to later cases: it runs once, before the first
+case, and the lab it touched is gone by the second one. `afterAll` runs after the last case of its
+suite, so it is the right place for a cross-case check.
+
+Workspace code gets `request`, `LabHttpError` and `getMetrics` from `@lab/net`. The lab's own controls
+(reconfiguring failure rates, resetting the clock) are deliberately not on that surface: they would let
+a stage pass its engineering gates without implementing anything.
 
 ---
 

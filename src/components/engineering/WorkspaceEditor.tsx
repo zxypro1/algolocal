@@ -235,6 +235,8 @@ export default function WorkspaceEditor({
   // beforeMount 拿不到当前渲染的 props，用 ref 带过去
   const filesRef = useRef(files);
   filesRef.current = files;
+  // 还原 monaco 全局配置的函数，卸载时调用
+  const restoreMonacoRef = useRef<(() => void) | null>(null);
 
   const unsaved = unsavedPaths ?? EMPTY_SET;
 
@@ -249,9 +251,19 @@ export default function WorkspaceEditor({
 
   /** 必须在编辑器创建之前跑一次：它会按路径复用已有 model，而旧 model 可能带着上一个工程的内容 */
   const handleBeforeMount = useCallback((monacoInstance: any) => {
-    configureMonacoForWorkspace(monacoInstance);
+    // monaco 的编译选项是全局的，离开工作区要还原，否则算法题编辑器会继承这套配置
+    restoreMonacoRef.current?.();
+    restoreMonacoRef.current = configureMonacoForWorkspace(monacoInstance);
     syncWorkspaceModels(monacoInstance, filesRef.current);
   }, []);
+
+  useEffect(
+    () => () => {
+      restoreMonacoRef.current?.();
+      restoreMonacoRef.current = null;
+    },
+    []
+  );
 
   useEffect(() => {
     setPrefs(loadEditorPrefs());

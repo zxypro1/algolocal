@@ -55,6 +55,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(400).json({ error: 'Messages array is required' });
     }
 
+    // buildWorkspaceContext 会直接读 context 上的字段；缺了它就是 500 + 一句
+    // 「Cannot read properties of undefined」，对调用方毫无意义。
+    if (!context || typeof context !== 'object') {
+      return res.status(400).json({ error: 'Workspace context is required' });
+    }
+
     const fullMessages: ChatMessage[] = [
       { role: 'system', content: systemPrompt(language) },
       { role: 'system', content: buildWorkspaceContext(context, language) },

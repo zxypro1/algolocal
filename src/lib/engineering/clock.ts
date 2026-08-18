@@ -30,9 +30,18 @@ export class VirtualClock {
   private seq = 0;
   private nextId = 1;
   private timers: VirtualTimer[] = [];
+  /** 定时器回调抛出的第一个异常，由驱动器取走并让当前用例失败 */
+  private failure: { error: unknown } | null = null;
 
   now(): number {
     return this.time;
+  }
+
+  /** 取走并清空待上报的定时器异常 */
+  takeFailure(): { error: unknown } | null {
+    const failure = this.failure;
+    this.failure = null;
+    return failure;
   }
 
   get pending(): number {
@@ -100,10 +109,12 @@ export class VirtualClock {
       try {
         timer.fn(...timer.args);
       } catch (error) {
-        // 定时器回调里的异常不应该中断时钟推进，交给外层 promise 捕获
-        queueMicrotask(() => {
-          throw error;
-        });
+        // 定时器回调里的异常不该中断时钟推进（同一时刻的其他定时器还要跑完），
+        // 但也不能像以前那样丢进 queueMicrotask 重抛：那会变成没人接的全局异常，
+        // 在 Worker 里触发 onerror（运行器据此判定 worker 挂了，永久退回主线程），
+        // 在 Node 里直接崩掉进程，而本该失败的那条用例反而被记成通过。
+        // 记下来交给驱动器，让它成为当前用例的失败原因。
+        if (!this.failure) this.failure = { error };
       }
     }
 
@@ -173,6 +184,11 @@ export async function driveVirtualClock<T>(
 
   while (!settled) {
     await flushMicrotasks();
+
+    // 定时器回调里抛出的异常在这里变成用例的失败，而不是全局未捕获异常
+    const timerFailure = clock.takeFailure();
+    if (timerFailure) throw timerFailure.error;
+
     if (settled) break;
 
     if (clock.advance()) {
@@ -199,6 +215,9 @@ export async function driveVirtualClock<T>(
   }
 
   await running;
+  // 任务已经结束，但最后一轮定时器可能刚抛过异常，别把它吞掉
+  const trailingFailure = clock.takeFailure();
   if (failed) throw failure;
+  if (trailingFailure) throw trailingFailure.error;
   return value!;
 }

@@ -111,11 +111,11 @@ export default function ProjectWorkspacePage() {
     let cancelled = false;
     (async () => {
       try {
-        const response = await fetch('/api/projects');
-        if (!response.ok) throw new Error('Failed to load projects');
-        const projects: EngineeringProject[] = await response.json();
-        const found = projects.find((item) => item.id === id);
-        if (!found) throw new Error('Project not found');
+        // 只取这一个工程，不再把整个题库拉下来
+        const response = await fetch(`/api/projects?id=${encodeURIComponent(id)}`);
+        if (response.status === 404) throw new Error('Project not found');
+        if (!response.ok) throw new Error('Failed to load project');
+        const found: EngineeringProject = await response.json();
         if (cancelled) return;
         setProject(found);
 
@@ -183,7 +183,15 @@ export default function ProjectWorkspacePage() {
     [project, language]
   );
 
-  const stageIndex = progress?.currentStage ?? 0;
+  /**
+   * 关卡下标要按当前题目夹一遍。
+   *
+   * 进度存在 localStorage 里，生命周期比题目长：题目被改短（AI 生成的工程重新生成过、
+   * 预置题目减了一关）之后，存着的 currentStage 会指向不存在的关卡，页面直接渲染
+   * 「找不到」——而那个页面没有重置入口，用户就被永久锁在外面了。
+   */
+  const stageCount = view?.stages?.length ?? 0;
+  const stageIndex = stageCount ? Math.min(Math.max(progress?.currentStage ?? 0, 0), stageCount - 1) : 0;
   const stage = view?.stages?.[stageIndex];
 
   /** 本关应该出现的文件（不含用户草稿），编辑器用它判断「改过没有」和单文件还原 */
@@ -247,18 +255,35 @@ export default function ProjectWorkspacePage() {
     };
   }, [flushSave]);
 
-  /** 关卡推进、解锁提示这类离散操作直接落盘，不走防抖 */
-  const persist = useCallback((next: ProjectProgress) => {
-    setProgress(next);
+  /** 取消排队中的防抖落盘。重置类操作必须先做这一步，否则旧值 800ms 后会把新状态盖回去 */
+  const cancelPendingSave = useCallback(() => {
     pendingRef.current = null;
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
-    saveProgress(next);
-    setUnsavedPaths(new Set());
-    setSavedAt(Date.now());
   }, []);
+
+  /** 关卡推进、解锁提示这类离散操作直接落盘，不走防抖 */
+  const persist = useCallback(
+    (next: ProjectProgress) => {
+      setProgress(next);
+      cancelPendingSave();
+      saveProgress(next);
+      setUnsavedPaths(new Set());
+      setSavedAt(Date.now());
+    },
+    [cancelPendingSave]
+  );
+
+  /**
+   * 进度的最新值。
+   *
+   * 跑验收要 await（最长 30 秒），期间用户还在改代码，闭包里的 progress 早就过期了。
+   * 拿它去 persist 会把这段时间里的全部改动从 state 和 localStorage 两边一起抹掉。
+   */
+  const progressRef = useRef<ProjectProgress | null>(null);
+  progressRef.current = progress;
 
   // 草稿写入要用最新的初始内容做对比，用 ref 避免把 handleFileChange 变成每次渲染都新建
   const pristineRef = useRef<Record<string, string>>({});
@@ -312,16 +337,21 @@ export default function ProjectWorkspacePage() {
     setQuality(qualityReport);
     setScoreCard(card);
 
+    // 用 ref 里的最新进度，而不是这个闭包捕获的那份：运行期间用户敲进去的代码
+    // 都在 drafts 里，用旧值 persist 会把它们全部丢掉
+    const latest = progressRef.current;
+    if (!latest) return;
+
     const cleared = result.status === 'passed';
-    const completedStages = cleared && !progress.completedStages.includes(stage.id)
-      ? [...progress.completedStages, stage.id]
-      : progress.completedStages;
+    const completedStages = cleared && !latest.completedStages.includes(stage.id)
+      ? [...latest.completedStages, stage.id]
+      : latest.completedStages;
 
     persist({
-      ...progress,
+      ...latest,
       completedStages,
       attempts: [
-        ...progress.attempts,
+        ...latest.attempts,
         {
           stageId: stage.id,
           at: new Date().toISOString(),
@@ -409,30 +439,15 @@ export default function ProjectWorkspacePage() {
   /** 把单个文件还原成本关的初始内容 */
   const handleResetFile = useCallback(
     (path: string) => {
-      setProgress((prev) => {
-        if (!prev || prev.drafts[path] === undefined) return prev;
-        const drafts = { ...prev.drafts };
-        delete drafts[path];
-        const next = { ...prev, drafts };
-        // 还原是一个明确动作，直接落盘，别留在防抖队列里
-        pendingRef.current = null;
-        if (saveTimerRef.current) {
-          clearTimeout(saveTimerRef.current);
-          saveTimerRef.current = null;
-        }
-        saveProgress(next);
-        setSavedAt(Date.now());
-        return next;
-      });
+      const current = progressRef.current;
+      if (!current || current.drafts[path] === undefined) return;
 
-      setUnsavedPaths((prev) => {
-        if (!prev.has(path)) return prev;
-        const next = new Set(prev);
-        next.delete(path);
-        return next;
-      });
+      const drafts = { ...current.drafts };
+      delete drafts[path];
+      // 还原是一个明确动作，直接落盘，别留在防抖队列里
+      persist({ ...current, drafts });
     },
-    []
+    [persist]
   );
 
   const handleResetStage = useCallback(() => {
@@ -451,13 +466,16 @@ export default function ProjectWorkspacePage() {
 
   const handleResetProject = useCallback(() => {
     if (!project) return;
+    // 先掐掉排队中的落盘：否则 800ms 后那份旧进度会被写回去，重置等于没做
+    cancelPendingSave();
     resetProgress(project.id);
     resetReport();
     setQuality(null);
     setScoreCard(null);
     setReview(null);
+    setUnsavedPaths(new Set());
     setProgress(loadProgress(project.id));
-  }, [project, resetReport]);
+  }, [cancelPendingSave, project, resetReport]);
 
   /* ---------------- 渲染 ---------------- */
 
@@ -486,7 +504,24 @@ export default function ProjectWorkspacePage() {
         <AppShell.Main>
           <Center style={{ minHeight: '60vh' }}>
             <Alert color="red" title={t('common.error')} maw={480}>
-              {loadError || t('engineering.workspace.notFound')}
+              <Stack gap="sm" align="flex-start">
+                <Text size="sm">{loadError || t('engineering.workspace.notFound')}</Text>
+                {/* 存着的进度和题目对不上时，这里是唯一的出口，否则用户被永久挡在外面 */}
+                {typeof id === 'string' && (
+                  <Button
+                    size="xs"
+                    variant="light"
+                    color="red"
+                    leftSection={<IconRefresh size={14} />}
+                    onClick={() => {
+                      resetProgress(id);
+                      router.reload();
+                    }}
+                  >
+                    {t('engineering.workspace.resetProject')}
+                  </Button>
+                )}
+              </Stack>
             </Alert>
           </Center>
         </AppShell.Main>

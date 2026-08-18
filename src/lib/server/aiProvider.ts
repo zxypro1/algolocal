@@ -44,9 +44,17 @@ export interface ResolvedProvider {
 }
 
 export class NoProviderError extends Error {
-  constructor() {
-    super('No AI provider is configured. Please configure one in Settings.');
+  constructor(message = 'No AI provider is configured. Please configure one in Settings.') {
+    super(message);
     this.name = 'NoProviderError';
+  }
+}
+
+/** 用户明确选了某个厂商，但它缺凭据 */
+export class SelectedProviderUnavailableError extends NoProviderError {
+  constructor(kind: string) {
+    super(`The selected AI provider "${kind}" has no API key configured. Add one in Settings, or switch the provider to Auto.`);
+    this.name = 'SelectedProviderUnavailableError';
   }
 }
 
@@ -103,7 +111,12 @@ export function resolveProvider(config?: AIProviderConfig, maxTokens = 4000): Re
   };
 
   const selected = (config?.selectedProvider || 'auto') as ProviderKind | 'auto';
-  if (selected !== 'auto' && candidates[selected]) return candidates[selected]!;
+  if (selected !== 'auto') {
+    // 选定的厂商没配好就直接报错。之前这里会静默回落到 AUTO_ORDER 的第一个可用项，
+    // 于是「我选了 Claude」的用户，代码和提示词被发去了 DeepSeek，还计在另一把 key 上。
+    if (!candidates[selected]) throw new SelectedProviderUnavailableError(selected);
+    return candidates[selected]!;
+  }
 
   for (const kind of AUTO_ORDER) {
     if (candidates[kind]) return candidates[kind]!;

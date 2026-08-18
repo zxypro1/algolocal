@@ -77,12 +77,18 @@ describe('provider resolution', () => {
     expect(provider.kind).toBe('qwen');
   });
 
-  it('ignores a selected provider that has no credentials', () => {
-    const provider = resolveProvider({
-      openAI: { apiKey: 'k', model: '' },
-      selectedProvider: 'claude',
-    });
-    expect(provider.kind).toBe('openai');
+  /**
+   * 这条以前断言的是「静默换一家」，那其实是个 bug：用户在设置里选了 Claude、
+   * 但 Claude 的 key 是空的，请求就被发去了 DeepSeek/OpenAI —— 代码和提示词
+   * 交给了没选的厂商，还计在另一把 key 上，界面上毫无提示。
+   */
+  it('refuses to substitute another vendor for the selected one', () => {
+    expect(() =>
+      resolveProvider({
+        openAI: { apiKey: 'k', model: '' },
+        selectedProvider: 'claude',
+      })
+    ).toThrow(/selected AI provider "claude"/);
   });
 
   it('carries the user model through and derives its capabilities', () => {

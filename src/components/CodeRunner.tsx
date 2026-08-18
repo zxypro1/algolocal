@@ -354,13 +354,22 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
 
   const isModified = code !== template && code !== '';
 
+  // 相对时间要自己走，否则「刚刚保存」会永远停在那儿 —— 这段 useMemo 只依赖
+  // savedAt，而 savedAt 保存完就不再变了，没有 ticker 就再也不会重算
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, [savedAt]);
+
   const savedLabel = useMemo(() => {
     if (isSaving) return t('editor.saving');
     if (!savedAt) return t('editor.autosaveOn');
-    const seconds = Math.max(0, Math.round((Date.now() - savedAt) / 1000));
+    const seconds = Math.max(0, Math.round((now - savedAt) / 1000));
     if (seconds < 45) return t('editor.savedJustNow');
     return t('editor.savedMinutes', { minutes: Math.max(1, Math.round(seconds / 60)) });
-  }, [isSaving, savedAt, t]);
+  }, [isSaving, now, savedAt, t]);
 
   // Generate AI Solution
   const generateAISolution = async () => {

@@ -17,6 +17,39 @@ export interface StoredProject extends EngineeringProject {
   source?: 'preset' | 'user';
 }
 
+/**
+ * 列表页要的字段。
+ *
+ * 完整的题库有 295KB，其中绝大部分是每一关的隐藏用例和参考实现。列表页只渲染
+ * 标题、简介、标签和关卡数，没必要把这些一起发下去 —— 题库还会随着用户生成
+ * 新题目继续变大。
+ */
+export interface ProjectSummary {
+  id: string;
+  title: EngineeringProject['title'];
+  summary: EngineeringProject['summary'];
+  difficulty: EngineeringProject['difficulty'];
+  domain: EngineeringProject['domain'];
+  tags: EngineeringProject['tags'];
+  estimatedMinutes: EngineeringProject['estimatedMinutes'];
+  stageCount: number;
+  source?: 'preset' | 'user';
+}
+
+export function summarizeProject(project: StoredProject): ProjectSummary {
+  return {
+    id: project.id,
+    title: project.title,
+    summary: project.summary,
+    difficulty: project.difficulty,
+    domain: project.domain,
+    tags: project.tags,
+    estimatedMinutes: project.estimatedMinutes,
+    stageCount: project.stages?.length || 0,
+    source: project.source,
+  };
+}
+
 function appRoot(): string {
   return process.env.APP_ROOT || process.cwd();
 }

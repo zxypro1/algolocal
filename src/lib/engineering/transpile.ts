@@ -5,7 +5,7 @@
  * 编译器按需懒加载：只有工程包含 TS 文件时才会拉这个 chunk，
  * 并且走本地 bundle 而不是 CDN，保证离线可用。
  */
-import type { TranspileFn } from './moduleRuntime';
+import { ESM_PATTERN, type TranspileFn } from './moduleRuntime';
 
 let compilerPromise: Promise<any> | null = null;
 
@@ -37,10 +37,16 @@ export function createTranspiler(ts: any): TranspileFn {
     }).outputText;
 }
 
-/** 工作区里是否存在需要转译的文件 */
+/**
+ * 工作区里是否存在需要转译的文件。
+ *
+ * 判断标准必须和 moduleRuntime 里那条完全一致，所以直接复用 ESM_PATTERN：
+ * 两边一旦不一致，就会出现「运行时要求转译器，而这里认为不需要、没加载」，
+ * 结果是整关以 ModuleEvaluationError 失败。
+ */
 export function needsTranspiler(files: Record<string, string>): boolean {
   return Object.entries(files).some(
-    ([path, content]) => /\.tsx?$/.test(path) || /(^|\n)\s*(import\s|export\s)/.test(content)
+    ([path, content]) => /\.tsx?$/.test(path) || ESM_PATTERN.test(content)
   );
 }
 

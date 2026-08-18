@@ -26,14 +26,23 @@ export interface RunStageOptions {
   caseWallClockMs?: number;
 }
 
-const EMPTY_METRICS: LabMetrics = {
-  virtualElapsedMs: 0,
-  maxConcurrency: 0,
-  concurrencyTimeline: [],
-  requests: { total: 0, ok: 0, failed: 0, throttled: 0, retries: 0, duplicated: 0, byUrl: {} },
-  samples: [],
-  counters: {},
-};
+/**
+ * 空指标。
+ *
+ * 每次都新建一份：之前这里是模块级常量 + 浅拷贝返回，嵌套的 requests / counters
+ * 仍然指向同一个对象，任何调用方改一下就永久污染了后面所有次运行 ——
+ * verify 脚本、jest、worker 都是一个进程里连着跑很多关。
+ */
+function emptyMetrics(): LabMetrics {
+  return {
+    virtualElapsedMs: 0,
+    maxConcurrency: 0,
+    concurrencyTimeline: [],
+    requests: { total: 0, ok: 0, failed: 0, throttled: 0, retries: 0, duplicated: 0, byUrl: {} },
+    samples: [],
+    counters: {},
+  };
+}
 
 export function getMetricValue(metrics: LabMetrics, path: string): number {
   const segments = path.split('.');
@@ -98,7 +107,7 @@ export function evaluateGates(gates: MetricGate[], labeled: LabeledMetrics[], ag
 
 /** 把每个用例的指标聚合成一次运行的整体画像 */
 export function aggregateMetrics(snapshots: LabMetrics[]): LabMetrics {
-  if (snapshots.length === 0) return { ...EMPTY_METRICS };
+  if (snapshots.length === 0) return emptyMetrics();
 
   const representative = snapshots.reduce((best, current) =>
     current.requests.total > best.requests.total ? current : best
@@ -182,6 +191,8 @@ export async function runStage(options: RunStageOptions): Promise<StageRunReport
       // 收集阶段：spec 文件同步注册用例
       lab.reset(labConfig);
       runtime.require(`./${spec.path}`);
+      // 顶层的 afterAll 要等整个文件求值完，才知道该挂到哪个用例后面
+      collector.finalize();
 
       for (const testCase of collector.cases) {
         if (testCase.skipped) {
@@ -237,9 +248,12 @@ export async function runStage(options: RunStageOptions): Promise<StageRunReport
     }
   } catch (error) {
     const detail = describeError(error);
+    const passedSoFar = cases.filter((testCase) => testCase.passed).length;
     return {
       status: 'error',
-      totals: { total: cases.length, passed: cases.filter((c) => c.passed).length, failed: 0 },
+      // 已经跑完的用例里该失败的照样算失败，否则 total / passed / failed 三个数对不上，
+      // 面板上会出现「3/4 通过」却一个失败都没有的自相矛盾
+      totals: { total: cases.length, passed: passedSoFar, failed: cases.length - passedSoFar },
       cases,
       gates: [],
       metrics: aggregateMetrics(snapshots),

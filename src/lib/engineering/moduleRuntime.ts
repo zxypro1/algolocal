@@ -40,7 +40,14 @@ export class ModuleEvaluationError extends Error {
 }
 
 const RESOLVE_SUFFIXES = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '/index.ts', '/index.js'];
-const ESM_PATTERN = /(^|\n)\s*(import\s|export\s|export\{|export\*)/;
+/**
+ * 判断一段源码是不是 ESM。
+ *
+ * 关键字后面允许直接跟 `{` `*` 或引号：`export{x}`、`import'./polyfill'` 都是合法写法。
+ * transpile.ts 里也要用同一个判断 —— 之前那边抄了一份更窄的正则，
+ * 于是「运行时认为需要转译」而「加载器认为不需要」，整关直接报错跑不起来。
+ */
+export const ESM_PATTERN = /(^|\n)\s*(import|export)(\s|\{|\*|'|")/;
 
 export function normalizePath(input: string): string {
   const segments = input.replace(/\\/g, '/').split('/');

@@ -245,11 +245,18 @@ export function createLabModules(lab: Lab): Record<string, unknown> {
     random: () => lab.random(),
   };
 
+  /**
+   * 注意这里**不**暴露 configure 和 reset。
+   *
+   * 它们是平台侧的能力，只应由 runner 在每个用例之前调用：
+   *  - configure 能把失败率、并发上限这些参数改掉，而工程门槛量的正是这些指标，
+   *    一句 `configure({ failureRate: 0 })` 就能让容错门槛通过而不写任何逻辑；
+   *  - reset 会换掉 lab.clock，而驱动器驱动的还是旧那个，之后所有 sleep 都排到
+   *    一个没人推进的时钟上，用例挂死并被误报成死锁。
+   */
   const net = {
     request: (url: string, options?: { method?: string; body?: unknown }) => lab.request(url, options),
     LabHttpError,
-    configure: (config: LabNetworkConfig) => lab.configure(config),
-    reset: (config?: LabNetworkConfig) => lab.reset(config),
     getMetrics: () => lab.snapshot(),
   };
 
