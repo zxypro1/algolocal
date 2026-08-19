@@ -95,11 +95,31 @@ export interface ScoreInput {
 export function computeScoreCard({ report, quality, weights }: ScoreInput): ScoreCard {
   const { metrics, gates, totals } = report;
 
-  const correctness = totals.total > 0 ? Math.round((totals.passed / totals.total) * 100) : 0;
+  const passRate = totals.total > 0 ? totals.passed / totals.total : 0;
+  const correctness = Math.round(passRate * 100);
 
   const concurrency = gateScoreFor('concurrency', gates) ?? concurrencyFallback(metrics);
   const latency = gateScoreFor('latency', gates) ?? latencyFallback(metrics);
   const resilience = gateScoreFor('resilience', gates) ?? resilienceFallback(metrics);
+
+  /**
+   * 「什么都没发生」不等于「做得很好」。
+   *
+   * 没有请求时，各个 fallback 都会返回 100，而 `virtualElapsedMs ≤ 360` 这类预算
+   * 门槛在实际耗时为 0 时也会通过 —— 于是一份原样未动的骨架能拿到满分的并发、
+   * 延迟、容错。这几项在没有可测数据时标成未测量，不进总分。
+   */
+  const hasActivity = metrics.requests.total > 0 || metrics.virtualElapsedMs > 0;
+  const staticMeasured = quality.metrics.totalLines > 0;
+
+  const measured: Record<DimensionKey, boolean> = {
+    correctness: true,
+    concurrency: hasActivity,
+    latency: hasActivity,
+    resilience: hasActivity,
+    encapsulation: staticMeasured,
+    elegance: staticMeasured,
+  };
 
   const scores: Record<DimensionKey, { score: number; detail: { zh: string; en: string } }> = {
     correctness: {
@@ -151,12 +171,22 @@ export function computeScoreCard({ report, quality, weights }: ScoreInput): Scor
     score: scores[key].score,
     weight: weights?.[key] ?? DEFAULT_WEIGHTS[key],
     detail: scores[key].detail,
+    measured: measured[key],
   })).filter((dimension) => dimension.weight > 0);
 
-  const weightSum = dimensions.reduce((sum, dimension) => sum + dimension.weight, 0) || 1;
-  const total = Math.round(
-    dimensions.reduce((sum, dimension) => sum + dimension.score * dimension.weight, 0) / weightSum
-  );
+  const counted = dimensions.filter((dimension) => dimension.measured);
+  const weightSum = counted.reduce((sum, dimension) => sum + dimension.weight, 0) || 1;
+  const weighted =
+    counted.reduce((sum, dimension) => sum + dimension.score * dimension.weight, 0) / weightSum;
 
-  return { total, dimensions };
+  /**
+   * 工程分按验收通过率折算。
+   *
+   * 并发、延迟、容错讲的都是「这套能跑的东西表现如何」；实现是错的时候，这些数字
+   * 不构成成绩。以前不折算，于是一份完全没写的骨架能拿 75 分（正确性 0，其余全 100），
+   * 而参考实现才 89~100 —— 整个刻度挤在 75 到 100 之间，基本不区分好坏。
+   */
+  const total = Math.round(weighted * passRate);
+
+  return { total, dimensions, passRate };
 }

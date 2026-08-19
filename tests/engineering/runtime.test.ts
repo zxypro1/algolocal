@@ -432,6 +432,47 @@ describe('runtime regressions', () => {
     expect(report.totals.failed).toBe(0);
   });
 
+  it('does not award engineering points for a run that did nothing', () => {
+    const idleReport = {
+      status: 'failed',
+      totals: { total: 4, passed: 0, failed: 4 },
+      cases: [],
+      gates: [],
+      metrics: aggregateMetrics([]),
+      console: [],
+      wallClockMs: 1,
+    } as any;
+
+    const card = computeScoreCard({
+      report: idleReport,
+      quality: analyzeWorkspace({ 'src/a.ts': 'export function solve() {\n  throw new Error("not implemented");\n}\n' }),
+    });
+
+    expect(card.total).toBe(0);
+    // 没跑出任何东西的维度标成未测量，而不是默认满分
+    const runtimeDims = card.dimensions.filter((d) => ['concurrency', 'latency', 'resilience'].includes(d.key));
+    expect(runtimeDims.every((d) => d.measured)).toBe(false);
+  });
+
+  it('scales the engineering score by the acceptance pass rate', () => {
+    const halfReport = {
+      status: 'failed',
+      totals: { total: 10, passed: 5, failed: 5 },
+      cases: [],
+      gates: [],
+      metrics: { ...aggregateMetrics([]), virtualElapsedMs: 100, requests: { ...aggregateMetrics([]).requests, total: 4, ok: 4 } },
+      console: [],
+      wallClockMs: 1,
+    } as any;
+
+    const quality = analyzeWorkspace({ 'src/a.ts': 'export function solve(n: number) {\n  return n + 1;\n}\n' });
+    const card = computeScoreCard({ report: halfReport, quality });
+
+    expect(card.passRate).toBe(0.5);
+    // 一半用例不过，工程分不该按满分记
+    expect(card.total).toBeLessThan(50);
+  });
+
   it('keeps totals consistent when a spec file blows up', async () => {
     const report = await runStage({
       files: {},
@@ -643,8 +684,9 @@ describe('preset projects', () => {
         });
 
         it(`stage ${stageIndex + 1} (${stage.id}) rejects the starter skeleton`, async () => {
+          const files = workspaceFor(project, stageIndex, false);
           const report = await runStage({
-            files: workspaceFor(project, stageIndex, false),
+            files,
             specs: stage.specs,
             lab: stage.lab,
             gates: stage.gates,
@@ -652,6 +694,28 @@ describe('preset projects', () => {
           });
 
           expect(report.status).not.toBe('passed');
+
+          /**
+           * 而且骨架不该有分。
+           *
+           * 之前一份原样未动的骨架能拿 75：正确性 0，但并发/延迟/容错/封装/优雅全是 100
+           * ——「什么都没发生」被当成了「什么都做对了」，参考实现也才 89~100，
+           * 整个刻度挤在 75 到 100 之间。
+           */
+          const scoreCard = computeScoreCard({
+            report,
+            quality: analyzeWorkspace(files),
+            weights: project.weights,
+          });
+
+          if (stageIndex === 0) {
+            // 第 1 关的骨架是完全空的：一分都不该有
+            expect(scoreCard.total).toBe(0);
+          } else {
+            // 后面几关的「骨架」带着前几关的参考实现，会顺带过掉几条用例，
+            // 拿到的分应该和通过率相称，离通关线（60）很远
+            expect(scoreCard.total).toBeLessThan(30);
+          }
         });
       });
     });

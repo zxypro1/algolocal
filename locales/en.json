@@ -503,7 +503,9 @@
     },
     "score": {
       "total": "Overall score",
-      "staticFindings": "Static analysis findings"
+      "staticFindings": "Static analysis findings",
+      "scaledByPassRate": "Engineering score scaled by the acceptance pass rate ({percent}%): how fast it runs is not credit while it is wrong",
+      "notMeasured": "Nothing to measure in this run"
     },
     "review": {
       "title": "AI engineering review",

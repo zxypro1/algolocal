@@ -291,11 +291,19 @@ export interface DimensionScore {
   weight: number;
   /** 分数的来源说明 */
   detail: LocalizedText;
+  /**
+   * 这一维度这次运行里有没有可测的东西。
+   * 没发过任何请求就谈不上并发和延迟，空工作区也谈不上封装 ——
+   * 这种情况不参与总分，而不是默认给满分。
+   */
+  measured: boolean;
 }
 
 export interface ScoreCard {
   total: number;
   dimensions: DimensionScore[];
+  /** 验收通过率，工程分按它折算：不对的实现谈不上工程质量 */
+  passRate: number;
 }
 
 /* ------------------------------------------------------------------ */

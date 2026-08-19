@@ -326,7 +326,8 @@ export function ScoreCardPanel({
 
   const radarData = scoreCard.dimensions.map((dimension) => ({
     dimension: t(`engineering.dimensions.${dimension.key}` as const),
-    score: dimension.score,
+    // 未测量的维度按 0 画，否则雷达图会给「什么都没跑」画出一个满形状
+    score: dimension.measured ? dimension.score : 0,
   }));
 
   return (
@@ -359,6 +360,12 @@ export function ScoreCardPanel({
         </Group>
       </Card>
 
+      {scoreCard.passRate < 1 && (
+        <Text size="xs" c="dimmed">
+          {t('engineering.score.scaledByPassRate', { percent: Math.round(scoreCard.passRate * 100) })}
+        </Text>
+      )}
+
       <Stack gap={6}>
         {scoreCard.dimensions.map((dimension) => (
           <Card key={dimension.key} withBorder radius="md" padding="sm">
@@ -371,13 +378,20 @@ export function ScoreCardPanel({
                   ×{dimension.weight}
                 </Badge>
               </Group>
-              <Text size="sm" fw={700} c={scoreColor(dimension.score)}>
-                {dimension.score}
+              {/* 没有可测数据的维度显示「—」，给个满分反而是误导 */}
+              <Text size="sm" fw={700} c={dimension.measured ? scoreColor(dimension.score) : 'dimmed'}>
+                {dimension.measured ? dimension.score : '—'}
               </Text>
             </Group>
-            <Progress value={dimension.score} color={scoreColor(dimension.score)} size="xs" radius="xl" mb={6} />
+            <Progress
+              value={dimension.measured ? dimension.score : 0}
+              color={dimension.measured ? scoreColor(dimension.score) : 'gray'}
+              size="xs"
+              radius="xl"
+              mb={6}
+            />
             <Text size="xs" c="dimmed">
-              {localized(dimension.detail)}
+              {dimension.measured ? localized(dimension.detail) : t('engineering.score.notMeasured')}
             </Text>
           </Card>
         ))}

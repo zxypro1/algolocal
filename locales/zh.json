@@ -503,7 +503,9 @@
     },
     "score": {
       "total": "综合评分",
-      "staticFindings": "静态分析发现"
+      "staticFindings": "静态分析发现",
+      "scaledByPassRate": "工程分已按验收通过率折算（{percent}%）：实现不对时，并发和延迟的表现不计入成绩",
+      "notMeasured": "本次运行没有可测数据"
     },
     "review": {
       "title": "AI 工程评审",
