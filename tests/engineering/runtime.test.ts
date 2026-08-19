@@ -706,7 +706,16 @@ describe('preset projects', () => {
             report,
             quality: analyzeWorkspace(files),
             weights: project.weights,
+            // 这就是「一行没改过」的状态
+            workspaceTouched: false,
           });
+
+          // 静态分析这时评的是平台发下来的骨架，不该算成你的封装与优雅
+          expect(
+            scoreCard.dimensions
+              .filter((d) => d.key === 'encapsulation' || d.key === 'elegance')
+              .every((d) => d.measured)
+          ).toBe(false);
 
           if (stageIndex === 0) {
             // 第 1 关的骨架是完全空的：一分都不该有

@@ -90,9 +90,17 @@ export interface ScoreInput {
   report: StageRunReport;
   quality: QualityReport;
   weights?: DimensionWeights;
+  /**
+   * 工作区里有没有用户自己写的东西。
+   *
+   * 一份原样未动的骨架也是「1 个模块、最大出度 0、没有长函数」，静态分析挑不出毛病，
+   * 于是封装和优雅都是 100 —— 可那评的是平台发下来的初始代码，不是你的实现。
+   * 调用方知道初始版本长什么样，由它来判断；不传则视为已经写过。
+   */
+  workspaceTouched?: boolean;
 }
 
-export function computeScoreCard({ report, quality, weights }: ScoreInput): ScoreCard {
+export function computeScoreCard({ report, quality, weights, workspaceTouched = true }: ScoreInput): ScoreCard {
   const { metrics, gates, totals } = report;
 
   const passRate = totals.total > 0 ? totals.passed / totals.total : 0;
@@ -110,7 +118,7 @@ export function computeScoreCard({ report, quality, weights }: ScoreInput): Scor
    * 延迟、容错。这几项在没有可测数据时标成未测量，不进总分。
    */
   const hasActivity = metrics.requests.total > 0 || metrics.virtualElapsedMs > 0;
-  const staticMeasured = quality.metrics.totalLines > 0;
+  const staticMeasured = workspaceTouched && quality.metrics.totalLines > 0;
 
   const measured: Record<DimensionKey, boolean> = {
     correctness: true,

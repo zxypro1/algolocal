@@ -333,7 +333,14 @@ export default function ProjectWorkspacePage() {
     if (!result) return;
 
     const qualityReport = analyzeWorkspace(toFileMap(editableFiles(files)));
-    const card = computeScoreCard({ report: result, quality: qualityReport, weights: project.weights });
+    // 一行没改过时，静态分析评的是初始骨架而不是你的代码，那两项该标成未测量
+    const workspaceTouched = editableFiles(files).some((file) => pristine[file.path] !== file.content);
+    const card = computeScoreCard({
+      report: result,
+      quality: qualityReport,
+      weights: project.weights,
+      workspaceTouched,
+    });
     setQuality(qualityReport);
     setScoreCard(card);
 
@@ -362,7 +369,7 @@ export default function ProjectWorkspacePage() {
         },
       ],
     });
-  }, [files, persist, progress, project, run, stage]);
+  }, [files, persist, pristine, progress, project, run, stage]);
 
   /* ---------------- AI 评审 ---------------- */
 
