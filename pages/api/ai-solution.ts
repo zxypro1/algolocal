@@ -1,13 +1,19 @@
-import { NextApiRequest, NextApiResponse } from 'next';
+import type { NextApiRequest, NextApiResponse } from 'next';
+import {
+  abortSignalFor,
+  AIProviderConfig,
+  callAI,
+  ChatMessage,
+  NoProviderError,
+  streamAI,
+} from '../../src/lib/server/aiProvider';
 
-interface AIProviderConfig {
-  deepSeek?: { apiKey: string; model: string; timeout?: string; maxTokens?: string };
-  openAI?: { apiKey: string; model: string };
-  qwen?: { apiKey: string; model: string };
-  claude?: { apiKey: string; model: string };
-  ollama?: { endpoint: string; model: string };
-  selectedProvider?: string;
-}
+/**
+ * 生成「一份文件里包含多个解法」的题解。
+ *
+ * 输出会被直接灌进 Monaco 编辑器，所以这里用裸文本流（format: 'text'），
+ * 而不是聊天用的 SSE 事件流。
+ */
 
 interface SolutionRequest {
   problem: {
@@ -27,135 +33,6 @@ interface SolutionRequest {
 }
 
 // AI Provider API functions
-async function callDeepSeekAPI(prompt: string, systemPrompt: string, apiKey: string, model: string): Promise<string> {
-  const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: model || 'deepseek-chat',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.7,
-      max_tokens: 8000,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`DeepSeek API error: ${response.status} - ${errorText}`);
-  }
-
-  const data = await response.json();
-  return data.choices[0].message.content;
-}
-
-async function callOpenAIAPI(prompt: string, systemPrompt: string, apiKey: string, model: string): Promise<string> {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: model || 'gpt-4-turbo',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.7,
-      max_tokens: 8000,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
-  }
-
-  const data = await response.json();
-  return data.choices[0].message.content;
-}
-
-async function callQwenAPI(prompt: string, systemPrompt: string, apiKey: string, model: string): Promise<string> {
-  const response = await fetch('https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: model || 'qwen-turbo',
-      input: {
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: prompt }
-        ]
-      },
-      parameters: { temperature: 0.7, max_tokens: 8000 }
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Qwen API error: ${response.status} - ${errorText}`);
-  }
-
-  const data = await response.json();
-  return data.output.text;
-}
-
-async function callClaudeAPI(prompt: string, systemPrompt: string, apiKey: string, model: string): Promise<string> {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: model || 'claude-3-haiku-20240307',
-      system: systemPrompt,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 8000,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Claude API error: ${response.status} - ${errorText}`);
-  }
-
-  const data = await response.json();
-  return data.content[0].text;
-}
-
-async function callOllamaAPI(prompt: string, systemPrompt: string, endpoint: string, model: string): Promise<string> {
-  const response = await fetch(`${endpoint}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: model || 'llama3',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt }
-      ],
-      stream: false,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Ollama API error: ${response.status} - ${errorText}`);
-  }
-
-  const data = await response.json();
-  return data.message.content;
-}
 
 function getSystemPrompt(language: 'en' | 'zh', codeLanguage: string): string {
   const langName = {
@@ -243,294 +120,46 @@ function cleanCode(code: string): string {
   return trimmed;
 }
 
-function writeStreamHeaders(res: NextApiResponse) {
-  res.writeHead(200, {
-    'Content-Type': 'text/plain; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    Connection: 'keep-alive',
-  });
-  // Next.js response may have flushHeaders in some runtimes
-  (res as any).flushHeaders?.();
-}
-
-async function streamSSEFromProvider(upstream: Response, onChunk: (text: string) => void) {
-  const reader = upstream.body?.getReader();
-  if (!reader) return;
-  const decoder = new TextDecoder('utf-8');
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    // SSE frames separated by \n\n
-    const parts = buffer.split('\n\n');
-    buffer = parts.pop() || '';
-    for (const part of parts) {
-      const lines = part.split('\n');
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) continue;
-        const payload = trimmed.slice(5).trim();
-        if (!payload || payload === '[DONE]') continue;
-        try {
-          const json = JSON.parse(payload);
-          const delta = json?.choices?.[0]?.delta?.content ?? json?.choices?.[0]?.message?.content ?? '';
-          if (delta) onChunk(delta);
-        } catch {
-          // ignore parse errors for non-json lines
-        }
-      }
-    }
-  }
-}
-
-async function streamOllamaNDJSON(upstream: Response, onChunk: (text: string) => void) {
-  const reader = upstream.body?.getReader();
-  if (!reader) return;
-  const decoder = new TextDecoder('utf-8');
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t) continue;
-      try {
-        const json = JSON.parse(t);
-        const chunk = json?.message?.content || '';
-        if (chunk) onChunk(chunk);
-        if (json?.done) return;
-      } catch {
-        // ignore
-      }
-    }
-  }
-}
-
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
-    const { problem, language, codeLanguage, provider, config, stream } = req.body as SolutionRequest;
+    const { problem, language = 'zh', codeLanguage = 'javascript', provider, config, stream } =
+      req.body as SolutionRequest;
 
     if (!problem) {
-      return res.status(400).json({ error: 'Problem data is required' });
+      return res.status(400).json({ error: 'Problem is required' });
     }
 
-    const systemPrompt = getSystemPrompt(language || 'en', codeLanguage || 'javascript');
-    const prompt = buildPrompt(problem, language || 'en', codeLanguage || 'javascript');
+    const messages: ChatMessage[] = [
+      { role: 'system', content: getSystemPrompt(language, codeLanguage) },
+      { role: 'user', content: buildPrompt(problem, language, codeLanguage) },
+    ];
 
-    // Determine which provider to use
-    // Priority: explicit provider param > config.selectedProvider > auto
-    const selectedProviderChoice = provider || config?.selectedProvider || 'auto';
-    let response: string;
+    const effectiveConfig: AIProviderConfig = provider
+      ? { ...config, selectedProvider: provider }
+      : config || {};
 
-    // Get API keys and configs - prefer config from frontend, fallback to environment
-    const deepseekKey = config?.deepSeek?.apiKey || process.env.DEEPSEEK_API_KEY;
-    const deepseekModel = config?.deepSeek?.model || process.env.DEEPSEEK_MODEL || 'deepseek-chat';
-    const openaiKey = config?.openAI?.apiKey || process.env.OPENAI_API_KEY;
-    const openaiModel = config?.openAI?.model || process.env.OPENAI_MODEL || 'gpt-4-turbo';
-    const qwenKey = config?.qwen?.apiKey || process.env.QWEN_API_KEY;
-    const qwenModel = config?.qwen?.model || process.env.QWEN_MODEL || 'qwen-turbo';
-    const claudeKey = config?.claude?.apiKey || process.env.CLAUDE_API_KEY;
-    const claudeModel = config?.claude?.model || process.env.CLAUDE_MODEL || 'claude-3-haiku-20240307';
-    const ollamaEndpoint = config?.ollama?.endpoint || process.env.OLLAMA_ENDPOINT || 'http://localhost:11434';
-    const ollamaModel = config?.ollama?.model || process.env.OLLAMA_MODEL || 'llama3';
-
-    const wantsStream = stream !== false;
-    if (wantsStream) {
-      writeStreamHeaders(res);
+    if (stream === false) {
+      const raw = await callAI(messages, effectiveConfig, { temperature: 0.7, maxTokens: 8000 });
+      return res.status(200).json({ code: cleanCode(raw) });
     }
 
-    if (selectedProviderChoice === 'deepseek' && deepseekKey) {
-      if (wantsStream) {
-        const upstream = await fetch('https://api.deepseek.com/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
-          body: JSON.stringify({
-            model: deepseekModel || 'deepseek-chat',
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: prompt }
-            ],
-            temperature: 0.7,
-            max_tokens: 8000,
-            stream: true,
-          }),
-        });
-        if (!upstream.ok) {
-          const errorText = await upstream.text();
-          if (!res.headersSent) return res.status(500).json({ error: errorText });
-          res.write(errorText);
-          return res.end();
-        }
-        await streamSSEFromProvider(upstream, (t) => res.write(t));
-        return res.end();
-      }
-
-      response = await callDeepSeekAPI(prompt, systemPrompt, deepseekKey, deepseekModel);
-    } else if (selectedProviderChoice === 'openai' && openaiKey) {
-      if (wantsStream) {
-        const upstream = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
-          body: JSON.stringify({
-            model: openaiModel || 'gpt-4-turbo',
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: prompt }
-            ],
-            temperature: 0.7,
-            max_tokens: 8000,
-            stream: true,
-          }),
-        });
-        if (!upstream.ok) {
-          const errorText = await upstream.text();
-          if (!res.headersSent) return res.status(500).json({ error: errorText });
-          res.write(errorText);
-          return res.end();
-        }
-        await streamSSEFromProvider(upstream, (t) => res.write(t));
-        return res.end();
-      }
-
-      response = await callOpenAIAPI(prompt, systemPrompt, openaiKey, openaiModel);
-    } else if (selectedProviderChoice === 'qwen' && qwenKey) {
-      response = await callQwenAPI(prompt, systemPrompt, qwenKey, qwenModel);
-    } else if (selectedProviderChoice === 'claude' && claudeKey) {
-      response = await callClaudeAPI(prompt, systemPrompt, claudeKey, claudeModel);
-    } else if (selectedProviderChoice === 'ollama' && ollamaEndpoint) {
-      if (wantsStream) {
-        const upstream = await fetch(`${ollamaEndpoint}/api/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: ollamaModel || 'llama3',
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: prompt }
-            ],
-            stream: true,
-          }),
-        });
-        if (!upstream.ok) {
-          const errorText = await upstream.text();
-          if (!res.headersSent) return res.status(500).json({ error: errorText });
-          res.write(errorText);
-          return res.end();
-        }
-        await streamOllamaNDJSON(upstream, (t) => res.write(t));
-        return res.end();
-      }
-
-      response = await callOllamaAPI(prompt, systemPrompt, ollamaEndpoint, ollamaModel);
-    } else if (selectedProviderChoice === 'auto') {
-      // Auto-select first available provider
-      if (deepseekKey) {
-        if (wantsStream) {
-          const upstream = await fetch('https://api.deepseek.com/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekKey}` },
-            body: JSON.stringify({
-              model: deepseekModel || 'deepseek-chat',
-              messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: prompt }
-              ],
-              temperature: 0.7,
-              max_tokens: 8000,
-              stream: true,
-            }),
-          });
-          if (!upstream.ok) {
-            const errorText = await upstream.text();
-            if (!res.headersSent) return res.status(500).json({ error: errorText });
-            res.write(errorText);
-            return res.end();
-          }
-          await streamSSEFromProvider(upstream, (t) => res.write(t));
-          return res.end();
-        }
-        response = await callDeepSeekAPI(prompt, systemPrompt, deepseekKey, deepseekModel);
-      } else if (openaiKey) {
-        if (wantsStream) {
-          const upstream = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}` },
-            body: JSON.stringify({
-              model: openaiModel || 'gpt-4-turbo',
-              messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: prompt }
-              ],
-              temperature: 0.7,
-              max_tokens: 8000,
-              stream: true,
-            }),
-          });
-          if (!upstream.ok) {
-            const errorText = await upstream.text();
-            if (!res.headersSent) return res.status(500).json({ error: errorText });
-            res.write(errorText);
-            return res.end();
-          }
-          await streamSSEFromProvider(upstream, (t) => res.write(t));
-          return res.end();
-        }
-        response = await callOpenAIAPI(prompt, systemPrompt, openaiKey, openaiModel);
-      } else if (qwenKey) {
-        response = await callQwenAPI(prompt, systemPrompt, qwenKey, qwenModel);
-      } else if (claudeKey) {
-        response = await callClaudeAPI(prompt, systemPrompt, claudeKey, claudeModel);
-      } else if (ollamaEndpoint) {
-        if (wantsStream) {
-          const upstream = await fetch(`${ollamaEndpoint}/api/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              model: ollamaModel || 'llama3',
-              messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: prompt }
-              ],
-              stream: true,
-            }),
-          });
-          if (!upstream.ok) {
-            const errorText = await upstream.text();
-            if (!res.headersSent) return res.status(500).json({ error: errorText });
-            res.write(errorText);
-            return res.end();
-          }
-          await streamOllamaNDJSON(upstream, (t) => res.write(t));
-          return res.end();
-        }
-        response = await callOllamaAPI(prompt, systemPrompt, ollamaEndpoint, ollamaModel);
-      } else {
-        return res.status(400).json({ error: 'No AI provider configured. Please configure an AI provider in Settings.' });
-      }
-    } else {
-      return res.status(400).json({ error: 'No AI provider configured or selected provider not available' });
-    }
-
-    const code = cleanCode(response);
-    if (wantsStream) {
-      res.write(code);
-      return res.end();
-    }
-    res.status(200).json({ code });
+    // 流式：编辑器一边收一边显示，前端负责剥掉可能的 markdown 围栏
+    await streamAI(res, messages, effectiveConfig, {
+      temperature: 0.7,
+      maxTokens: 8000,
+      format: 'text',
+      signal: abortSignalFor(res),
+    });
   } catch (error: any) {
     console.error('AI Solution error:', error);
-    res.status(500).json({ error: error.message || 'Failed to generate solution' });
+    const message =
+      error instanceof NoProviderError ? error.message : error.message || 'Failed to generate solution';
+    if (!res.headersSent) return res.status(500).json({ error: message });
+    res.write(`\n\n[error] ${message}`);
+    res.end();
   }
 }
-

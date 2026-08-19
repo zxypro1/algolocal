@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { 
   Button, 
   Paper, 
@@ -13,22 +13,34 @@ import {
   Select,
   Tooltip,
   Modal,
-  Loader
+  Loader,
+  ActionIcon,
+  Box,
+  Menu,
 } from '@mantine/core';
-import { IconWand } from '@tabler/icons-react';
+import {
+  IconAlertTriangle,
+  IconArrowBackUp,
+  IconDeviceFloppy,
+  IconDotsVertical,
+  IconMap2,
+  IconPlayerPlay,
+  IconTextWrap,
+  IconWand,
+} from '@tabler/icons-react';
 import Editor from '@monaco-editor/react';
 import { useTranslation, useI18n } from '../contexts/I18nContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { useWasmExecutor } from '../hooks/useWasmExecutor';
-
-interface AIProviderConfig {
-  deepSeek?: { apiKey: string; model: string; timeout?: string; maxTokens?: string };
-  openAI?: { apiKey: string; model: string };
-  qwen?: { apiKey: string; model: string };
-  claude?: { apiKey: string; model: string };
-  ollama?: { endpoint: string; model: string };
-  selectedProvider?: string;
-}
+import {
+  DEFAULT_PREFS,
+  EditorPrefs,
+  FONT_SIZE_RANGE,
+  loadEditorPrefs,
+  saveEditorPrefs,
+} from '../lib/editorPrefs';
+import { clearDraft, loadDraft, saveDraft } from '../lib/problemDrafts';
+import { useAiConfig } from '../hooks/useAiConfig';
 
 // WASM 支持的语言配置
 const WASM_SUPPORTED_LANGUAGES = [
@@ -77,60 +89,107 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
   const [isGeneratingSolution, setIsGeneratingSolution] = useState(false);
   const [solutionError, setSolutionError] = useState<string | null>(null);
   const [confirmModalOpen, setConfirmModalOpen] = useState(false);
-  const [aiConfig, setAiConfig] = useState<AIProviderConfig | null>(null);
+  // AI 配置读取在 useAiConfig 里，别再在组件里抄一份
+  const { config: aiConfig } = useAiConfig();
   
   // WASM 执行器 hook
   const { runTests: runWasmTests, runtimeStatus, preloadRuntime } = useWasmExecutor();
 
-  // Load AI configuration
-  const loadAIConfig = useCallback(async () => {
-    try {
-      // Check if running in Electron
-      if (typeof window !== 'undefined' && (window as any).electronAPI) {
-        const result = await (window as any).electronAPI.loadConfiguration();
-        if (result.success && result.data) {
-          setAiConfig(result.data);
-        }
-      } else {
-        // Web mode: Load from localStorage
-        const savedConfig = localStorage.getItem('ai-provider-config');
-        if (savedConfig) {
-          setAiConfig(JSON.parse(savedConfig));
-        }
-      }
-    } catch (err) {
-      console.error('Failed to load AI config:', err);
-    }
-  }, []);
+  // 编辑器偏好与工程实战工作区共用一份，改一次两边都生效
+  const [prefs, setPrefs] = useState<EditorPrefs>(DEFAULT_PREFS);
+  const [cursor, setCursor] = useState({ line: 1, column: 1 });
+  const [problemCount, setProblemCount] = useState(0);
+  const [savedAt, setSavedAt] = useState<number | undefined>(undefined);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const editorRef = useRef<any>(null);
+  const disposablesRef = useRef<any[]>([]);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingRef = useRef<{ code: string; language: string } | null>(null);
+  const runRef = useRef<() => void>(() => {});
 
   useEffect(() => {
-    loadAIConfig();
-  }, [loadAIConfig]);
+    setPrefs(loadEditorPrefs());
+  }, []);
+
+  const updatePrefs = useCallback((patch: Partial<EditorPrefs>) => {
+    setPrefs((prev) => {
+      const next = { ...prev, ...patch };
+      saveEditorPrefs(next);
+      return next;
+    });
+  }, []);
+
+  /** 当前语言对应的初始模板 */
+  const template = useMemo(() => {
+    const langConfig = WASM_SUPPORTED_LANGUAGES.find((l) => l.value === selectedLanguage);
+    const templateKey = langConfig?.templateKey || 'js';
+    return problem.template?.[templateKey] || problem.template?.js || '';
+  }, [problem, selectedLanguage]);
+
   
   // 预加载选中语言的 WASM 运行时
   useEffect(() => {
     preloadRuntime(selectedLanguage);
   }, [selectedLanguage, preloadRuntime]);
   
-  // Update code when language changes
+  // 切题 / 切语言时：有草稿就接着写，没有才回到模板
   useEffect(() => {
-    const langConfig = WASM_SUPPORTED_LANGUAGES.find(l => l.value === selectedLanguage);
-    const templateKey = langConfig?.templateKey || 'js';
-    let template = problem.template?.[templateKey];
-    
-    // Fallback to 'js' template for JavaScript compatibility
-    if (!template && selectedLanguage === 'javascript' && problem.template?.js) {
-      template = problem.template.js;
+    // 切换前先把上一份待写内容落盘，否则换语言会丢掉刚敲的东西
+    flushDraft();
+    setCode(loadDraft(problem.id, selectedLanguage) ?? template);
+    // flushDraft 会随语言变化重建，这里只关心「题目/语言/模板」变了要重新载入
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [problem.id, selectedLanguage, template]);
+
+  /** 立刻把草稿落盘（防抖之外的强制保存） */
+  const flushDraft = useCallback(() => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
     }
-    
-    // TypeScript can use JavaScript template as base (since TS is superset of JS)
-    if (!template && selectedLanguage === 'typescript' && problem.template?.js) {
-      // Convert JS template to TS by adding type annotations hint
-      template = problem.template.js;
-    }
-    
-    setCode(template || '');
-  }, [selectedLanguage, problem]);
+    const pending = pendingRef.current;
+    if (!pending) return;
+    pendingRef.current = null;
+
+    if (pending.code === template) clearDraft(problem.id, pending.language);
+    else saveDraft(problem.id, pending.language, pending.code);
+
+    setIsSaving(false);
+    setSavedAt(Date.now());
+  }, [problem.id, template]);
+
+  /**
+   * 改代码的唯一入口：更新状态并安排一次延迟落盘。
+   *
+   * 这里刻意不用 useEffect 监听 code。effect 拿到的是本次渲染闭包里的 code，
+   * 而首次挂载时「载入模板」和「保存」两个 effect 在同一次提交里依次执行，
+   * 保存拿到的还是上一帧的空字符串，于是会存下一条空草稿，把模板顶掉。
+   */
+  const updateCode = useCallback(
+    (next: string) => {
+      setCode(next);
+      pendingRef.current = { code: next, language: selectedLanguage };
+      setIsSaving(true);
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = setTimeout(flushDraft, 800);
+    },
+    [flushDraft, selectedLanguage]
+  );
+
+  // 关页面、切后台、组件卸载前把待写内容落下去
+  useEffect(() => {
+    const onHidden = () => {
+      if (document.visibilityState === 'hidden') flushDraft();
+    };
+    window.addEventListener('pagehide', flushDraft);
+    document.addEventListener('visibilitychange', onHidden);
+    return () => {
+      window.removeEventListener('pagehide', flushDraft);
+      document.removeEventListener('visibilitychange', onHidden);
+      flushDraft();
+    };
+  }, [flushDraft]);
 
   // Notify parent of code changes
   useEffect(() => {
@@ -195,6 +254,92 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
     }
   };
 
+  runRef.current = runTests;
+
+  // ⌘/Ctrl + Enter 运行，⌘/Ctrl + S 保存草稿
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey)) return;
+
+      const target = event.target as HTMLElement | null;
+      const inMonaco = target?.closest('.monaco-editor');
+      const typingElsewhere =
+        !inMonaco &&
+        target &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+      if (typingElsewhere) return;
+
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        runRef.current();
+      } else if (event.key === 's' || event.key === 'S') {
+        event.preventDefault();
+        flushDraft();
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [flushDraft]);
+
+  const handleEditorMount = useCallback((editor: any, monaco: any) => {
+    editorRef.current = editor;
+
+    disposablesRef.current.push(
+      editor.onDidChangeCursorPosition((event: any) => {
+        setCursor({ line: event.position.lineNumber, column: event.position.column });
+      })
+    );
+
+    // 焦点在 Monaco 里时浏览器快捷键会被它吃掉，这里再绑一份
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runRef.current());
+
+    const syncMarkers = () => {
+      const errors = monaco.editor
+        .getModelMarkers({})
+        .filter((marker: any) => marker.severity === monaco.MarkerSeverity.Error);
+      setProblemCount(errors.length);
+    };
+    disposablesRef.current.push(monaco.editor.onDidChangeMarkers(syncMarkers));
+    syncMarkers();
+  }, []);
+
+  useEffect(
+    () => () => {
+      disposablesRef.current.forEach((item) => item?.dispose?.());
+      disposablesRef.current = [];
+    },
+    []
+  );
+
+  /** 把代码还原成初始模板 */
+  const resetToTemplate = useCallback(() => {
+    setCode(template);
+    clearDraft(problem.id, selectedLanguage);
+    pendingRef.current = null;
+    setSavedAt(Date.now());
+    setIsSaving(false);
+  }, [problem.id, selectedLanguage, template]);
+
+  const isModified = code !== template && code !== '';
+
+  // 相对时间要自己走，否则「刚刚保存」会永远停在那儿 —— 这段 useMemo 只依赖
+  // savedAt，而 savedAt 保存完就不再变了，没有 ticker 就再也不会重算
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, [savedAt]);
+
+  const savedLabel = useMemo(() => {
+    if (isSaving) return t('editor.saving');
+    if (!savedAt) return t('editor.autosaveOn');
+    const seconds = Math.max(0, Math.round((now - savedAt) / 1000));
+    if (seconds < 45) return t('editor.savedJustNow');
+    return t('editor.savedMinutes', { minutes: Math.max(1, Math.round(seconds / 60)) });
+  }, [isSaving, now, savedAt, t]);
+
   // Generate AI Solution
   const generateAISolution = async () => {
     setIsGeneratingSolution(true);
@@ -235,7 +380,7 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
       const reader = response.body?.getReader();
       if (!reader) {
         const text = await response.text();
-        setCode(cleanCodeFromResponse(text));
+        updateCode(cleanCodeFromResponse(text));
         return;
       }
 
@@ -249,7 +394,7 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
       }
 
       buffer += decoder.decode();
-      setCode(cleanCodeFromResponse(buffer));
+      updateCode(cleanCodeFromResponse(buffer));
     } catch (error: any) {
       setSolutionError(error.message || 'Failed to generate AI solution');
     } finally {
@@ -421,10 +566,14 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
   
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', gap: '15px' }}>
-      <Paper shadow="sm" p="md" withBorder style={{ position: 'relative', flex: 1, display: 'flex', flexDirection: 'column' }}>
+      <Paper
+        shadow="sm"
+        withBorder
+        style={{ position: 'relative', flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+      >
         <LoadingOverlay visible={isRunning} />
         
-        <Group justify="space-between" mb={15}>
+        <Group justify="space-between" p="md" pb="xs">
           <Title order={4}>
             {t('codeRunner.title')}
           </Title>
@@ -442,7 +591,6 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
                   runtimeStatus[selectedLanguage as 'javascript' | 'typescript' | 'python'] === 'error' ? 'red' : 'gray'
                 }
                 variant="light"
-                leftSection={<Text size="xs">⚡</Text>}
               >
                 {runtimeStatus[selectedLanguage as 'javascript' | 'typescript' | 'python'] === 'ready' ? 'WASM Ready' :
                  runtimeStatus[selectedLanguage as 'javascript' | 'typescript' | 'python'] === 'loading' ? 'Loading...' :
@@ -472,46 +620,149 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
               size="sm"
               w={130}
             />
-            <Button 
-              onClick={runTests} 
-              disabled={isRunning || runtimeStatus[selectedLanguage as 'javascript' | 'typescript' | 'python'] === 'loading'}
-              color="blue"
-              variant="filled"
-            >
-              {isRunning ? t('codeRunner.running') : t('codeRunner.submit')}
-            </Button>
+            <Tooltip label="⌘/Ctrl + Enter" position="bottom">
+              <Button
+                onClick={runTests}
+                disabled={isRunning || runtimeStatus[selectedLanguage as 'javascript' | 'typescript' | 'python'] === 'loading'}
+                color="blue"
+                variant="filled"
+                leftSection={isRunning ? <Loader size={14} color="white" /> : <IconPlayerPlay size={15} />}
+              >
+                {isRunning ? t('codeRunner.running') : t('codeRunner.submit')}
+              </Button>
+            </Tooltip>
           </Group>
         </Group>
         
         {/* AI Solution Error */}
         {solutionError && (
-          <Alert color="red" mb="sm" withCloseButton onClose={() => setSolutionError(null)}>
+          <Alert color="red" mx="md" mb="xs" withCloseButton onClose={() => setSolutionError(null)}>
             {solutionError}
           </Alert>
         )}
         
+        {/* 编辑器工具条 */}
+        <Group gap={2} justify="flex-end" px={4} py={2} className="ide-toolbar-inline">
+          <Tooltip label={t('editor.toggleWrap')}>
+            <ActionIcon
+              size="sm"
+              variant={prefs.wordWrap ? 'light' : 'subtle'}
+              color={prefs.wordWrap ? 'brand' : 'gray'}
+              onClick={() => updatePrefs({ wordWrap: !prefs.wordWrap })}
+            >
+              <IconTextWrap size={14} />
+            </ActionIcon>
+          </Tooltip>
+          <Tooltip label={t('editor.toggleMinimap')}>
+            <ActionIcon
+              size="sm"
+              variant={prefs.minimap ? 'light' : 'subtle'}
+              color={prefs.minimap ? 'brand' : 'gray'}
+              onClick={() => updatePrefs({ minimap: !prefs.minimap })}
+            >
+              <IconMap2 size={14} />
+            </ActionIcon>
+          </Tooltip>
+          <Tooltip label={t('editor.format')}>
+            <ActionIcon
+              size="sm"
+              variant="subtle"
+              color="gray"
+              onClick={() => editorRef.current?.getAction('editor.action.formatDocument')?.run()}
+            >
+              <IconWand size={14} />
+            </ActionIcon>
+          </Tooltip>
+          <Tooltip label={t('editor.resetToTemplate')}>
+            <ActionIcon
+              size="sm"
+              variant="subtle"
+              color="orange"
+              onClick={resetToTemplate}
+              disabled={!isModified}
+            >
+              <IconArrowBackUp size={14} />
+            </ActionIcon>
+          </Tooltip>
+          <Menu position="bottom-end" withinPortal>
+            <Menu.Target>
+              <ActionIcon size="sm" variant="subtle" color="gray">
+                <IconDotsVertical size={14} />
+              </ActionIcon>
+            </Menu.Target>
+            <Menu.Dropdown>
+              <Menu.Label>{t('editor.fontSize')}</Menu.Label>
+              <Menu.Item
+                onClick={() => updatePrefs({ fontSize: Math.min(FONT_SIZE_RANGE.max, prefs.fontSize + 1) })}
+              >
+                {t('editor.fontLarger')} ({prefs.fontSize}px)
+              </Menu.Item>
+              <Menu.Item
+                onClick={() => updatePrefs({ fontSize: Math.max(FONT_SIZE_RANGE.min, prefs.fontSize - 1) })}
+              >
+                {t('editor.fontSmaller')}
+              </Menu.Item>
+            </Menu.Dropdown>
+          </Menu>
+        </Group>
+
         <div style={{ flex: 1, minHeight: '300px' }}>
           <Editor
             height="100%"
+            path={`problem:///${problem.id}.${selectedLanguage}`}
             language={WASM_SUPPORTED_LANGUAGES.find(l => l.value === selectedLanguage)?.monacoLang || 'javascript'}
             value={code}
-            onChange={(v) => setCode(v || '')}
+            onChange={(v) => updateCode(v || '')}
+            onMount={handleEditorMount}
             theme={colorScheme === 'dark' ? 'vs-dark' : 'light'}
             options={{
-              minimap: { enabled: false },
-              fontSize: 14,
+              minimap: { enabled: prefs.minimap },
+              fontSize: prefs.fontSize,
+              fontLigatures: true,
+              lineHeight: 1.6,
               lineNumbers: 'on',
               roundedSelection: false,
               scrollBeyondLastLine: false,
               automaticLayout: true,
               tabSize: 2,
               insertSpaces: true,
-              wordWrap: 'on',
-              contextmenu: false,
-              folding: false
+              wordWrap: prefs.wordWrap ? 'on' : 'off',
+              smoothScrolling: true,
+              cursorBlinking: 'smooth',
+              padding: { top: 10, bottom: 10 },
+              bracketPairColorization: { enabled: true },
+              guides: { bracketPairs: true, indentation: true },
+              scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
             }}
           />
         </div>
+
+        {/* 状态栏 */}
+        <Group className="ide-status" gap="md" px="sm" wrap="nowrap">
+          <Group gap={4} wrap="nowrap">
+            {problemCount > 0 ? (
+              <>
+                <IconAlertTriangle size={11} color="var(--mantine-color-red-6)" />
+                <Text size="xs" c="red">{problemCount}</Text>
+              </>
+            ) : (
+              <Text size="xs" c="dimmed">{t('editor.noProblems')}</Text>
+            )}
+          </Group>
+
+          <Box style={{ flex: 1 }} />
+
+          {isModified && (
+            <Text size="xs" c="dimmed">{t('editor.modifiedFromTemplate')}</Text>
+          )}
+          <Group gap={4} wrap="nowrap">
+            <IconDeviceFloppy size={11} style={{ opacity: 0.6 }} />
+            <Text size="xs" c="dimmed">{savedLabel}</Text>
+          </Group>
+          <Text size="xs" c="dimmed">
+            {t('editor.lineCol', { line: cursor.line, column: cursor.column })}
+          </Text>
+        </Group>
       </Paper>
       
       {showResults && result && (

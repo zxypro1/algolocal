@@ -72,7 +72,7 @@ jobs:
         run: |
           # 检查是否配置了证书
           if [ -z "$APPLE_CERTIFICATE_BASE64" ]; then
-            echo "⚠️ No signing certificate configured, skipping code signing"
+            echo "No signing certificate configured, skipping code signing"
             echo "HAS_CERTIFICATE=false" >> $GITHUB_ENV
             exit 0
           fi
@@ -101,7 +101,7 @@ jobs:
           # 清理证书文件
           rm -f $RUNNER_TEMP/certificate.p12
           
-          echo "✅ Code signing certificate imported successfully"
+          echo "✓ Code signing certificate imported successfully"
 
       - name: Build Electron app (macOS ${{ matrix.arch }})
         run: |
@@ -254,11 +254,11 @@ jobs:
           name: AlgoLocal v${{ needs.changelog.outputs.version }}
           tag_name: ${{ github.ref_name }}
           body: |
-            ## 🚀 AlgoLocal v${{ needs.changelog.outputs.version }}
+            ## AlgoLocal v${{ needs.changelog.outputs.version }}
             
             Practice coding algorithms 100% offline with AI: generate problems, get hints, discuss solutions, and run code in JavaScript, TypeScript, or Python — no internet or setup required.
             
-            ### 📦 Downloads
+            ### Downloads
             
             | Platform | Architecture | File |
             |----------|--------------|------|
@@ -270,7 +270,7 @@ jobs:
             | **Linux** | Debian/Ubuntu | `AlgoLocal-*-Linux.deb` |
             | **Linux** | Fedora/RHEL | `AlgoLocal-*-Linux.rpm` |
             
-            ### ⚠️ macOS Installation Note
+            ### macOS Installation Note
             
             If you see **"damaged"** or **"cannot verify developer"** message when opening the app, run this command in Terminal:
             
@@ -282,7 +282,7 @@ jobs:
             sudo xattr -rd com.apple.quarantine ~/Downloads/AlgoLocal.app
             ```
             
-            ### 📝 Changelog
+            ### Changelog
             
             ${{ needs.changelog.outputs.changelog }}
             
@@ -306,7 +306,7 @@ jobs:
 
       - name: Release Summary
         run: |
-          echo "✅ Release created successfully!"
-          echo "📦 Version: v${{ needs.changelog.outputs.version }}"
-          echo "🔗 Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
+          echo "✓ Release created successfully!"
+          echo "Version: v${{ needs.changelog.outputs.version }}"
+          echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
 

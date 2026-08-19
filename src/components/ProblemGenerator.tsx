@@ -425,7 +425,7 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
           {/* Suggested Requests */}
           <div>
             <Title order={4} mb="md">
-              💡 {t('aiGenerator.suggestedRequests')}:
+              {t('aiGenerator.suggestedRequests')}:
             </Title>
             <Group gap="xs">
               {suggestedRequests.map((suggestion, index) => (
@@ -478,7 +478,7 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
               <Stack gap="md">
                 <Group justify="space-between">
                   <Title order={4} c={colorScheme === 'dark' ? 'red.4' : 'red.6'}>
-                    🛠️ {t('aiGenerator.fixJsonTitle')}
+                    {t('aiGenerator.fixJsonTitle')}
                   </Title>
                   <Button
                     leftSection={<IconDeviceFloppy size={16} />}
@@ -537,7 +537,7 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
             <Card withBorder mt="md">
               <Stack gap="md">
                 <Title order={4} c={colorScheme === 'dark' ? 'blue.4' : 'blue.6'}>
-                  🎉 {t('aiGenerator.previewTitle')}
+                  {t('aiGenerator.previewTitle')}
                 </Title>
                 
                 <Group>
@@ -595,7 +595,7 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
           >
             <Stack gap="sm">
               <Title order={5}>
-                📝 {t('aiGenerator.howToUse')}:
+                {t('aiGenerator.howToUse')}:
               </Title>
               <div style={{ fontSize: '14px' }}>
                 <ul style={{ margin: 0, paddingLeft: 20 }}>

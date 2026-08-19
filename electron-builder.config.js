@@ -28,6 +28,7 @@ module.exports = {
     '.next/**/*',
     'public/**/*',
     'problems/**/*',
+    'projects/**/*',
     'locales/**/*',
     'node_modules/**/*',
     // 排除不必要的文件以减小体积
@@ -78,6 +79,11 @@ module.exports = {
       from: 'problems',
       to: 'problems',
       filter: ['**/*']
+    },
+    {
+      from: 'projects',
+      to: 'projects',
+      filter: ['**/*']
     }
   ],
   
@@ -87,6 +93,7 @@ module.exports = {
   asarUnpack: [
     // 需要直接文件访问的资源
     'public/problems.json',
+    'public/projects.json',
     'public/icon.png',
     'public/favicon.ico'
   ],

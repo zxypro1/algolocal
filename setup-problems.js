@@ -14,8 +14,8 @@ try {
 
   // Copy the file
   fs.copyFileSync(sourceFile, targetFile);
-  console.log('✅ Copied problems.json to public folder for runtime access');
+  console.log('✓ Copied problems.json to public folder for runtime access');
 } catch (error) {
-  console.error('❌ Failed to copy problems.json:', error);
+  console.error('✗ Failed to copy problems.json:', error);
   process.exit(1);
 }

@@ -1,14 +1,14 @@
 const fs = require('fs');
 const path = require('path');
 
-console.log('🧪 Testing dynamic problems.json modification...\n');
+console.log('Testing dynamic problems.json modification...\n');
 
 // Read the current problems.json
 const problemsPath = path.join(__dirname, 'public', 'problems.json');
 const originalData = fs.readFileSync(problemsPath, 'utf8');
 const problems = JSON.parse(originalData);
 
-console.log(`📊 Current number of problems: ${problems.length}`);
+console.log(`Current number of problems: ${problems.length}`);
 
 // Add a test problem
 const testProblem = {
@@ -41,10 +41,10 @@ problems.push(testProblem);
 // Write back to file
 fs.writeFileSync(problemsPath, JSON.stringify(problems, null, 2));
 
-console.log(`✅ Added test problem. New count: ${problems.length}`);
-console.log('🔗 Visit http://localhost:3002 to see the new problem!');
-console.log('🔗 Direct link: http://localhost:3002/problems/test-problem');
-console.log('\n💡 The test problem should appear immediately without rebuilding!');
+console.log(`✓ Added test problem. New count: ${problems.length}`);
+console.log('Visit http://localhost:3002 to see the new problem!');
+console.log('Direct link: http://localhost:3002/problems/test-problem');
+console.log('\nThe test problem should appear immediately without rebuilding!');
 
 // Provide cleanup instructions
-console.log('\n🧹 To remove the test problem, run: npm run test:cleanup');
+console.log('\nTo remove the test problem, run: npm run test:cleanup');

@@ -7,6 +7,7 @@ import {
   Group, 
   Stack,
   TextInput,
+  Autocomplete,
   Button,
   Alert,
   Loader,
@@ -21,6 +22,7 @@ import {
 import { IconRobot } from '@tabler/icons-react';
 import { useTranslation, useI18n } from '../src/contexts/I18nContext';
 import { AppHeader, HEADER_HEIGHT } from '../src/components/AppHeader';
+import { DEFAULT_MODELS, SUGGESTED_MODELS } from '../src/lib/aiModels';
 
 export default function SettingsPage() {
   const { t } = useTranslation();
@@ -301,11 +303,13 @@ export default function SettingsPage() {
                   value={deepSeekConfig.apiKey}
                   onChange={(e) => setDeepSeekConfig({...deepSeekConfig, apiKey: e.target.value})}
                 />
-                <TextInput
+                <Autocomplete
                   label={t('settings.deepseek.model')}
-                  placeholder={t('settings.deepseek.modelPlaceholder')}
+                  placeholder={DEFAULT_MODELS.deepseek}
+                  description={t('settings.modelHint')}
+                  data={SUGGESTED_MODELS.deepseek}
                   value={deepSeekConfig.model}
-                  onChange={(e) => setDeepSeekConfig({...deepSeekConfig, model: e.target.value})}
+                  onChange={(value) => setDeepSeekConfig({...deepSeekConfig, model: value})}
                 />
                 <TextInput
                   label={t('settings.deepseek.timeout')}
@@ -336,11 +340,13 @@ export default function SettingsPage() {
                   value={openAIConfig.apiKey}
                   onChange={(e) => setOpenAIConfig({...openAIConfig, apiKey: e.target.value})}
                 />
-                <TextInput
+                <Autocomplete
                   label={t('settings.openai.model')}
-                  placeholder={t('settings.openai.modelPlaceholder')}
+                  placeholder={DEFAULT_MODELS.openai}
+                  description={t('settings.modelHint')}
+                  data={SUGGESTED_MODELS.openai}
                   value={openAIConfig.model}
-                  onChange={(e) => setOpenAIConfig({...openAIConfig, model: e.target.value})}
+                  onChange={(value) => setOpenAIConfig({...openAIConfig, model: value})}
                 />
               </Stack>
             </Box>
@@ -357,11 +363,13 @@ export default function SettingsPage() {
                   value={qwenConfig.apiKey}
                   onChange={(e) => setQwenConfig({...qwenConfig, apiKey: e.target.value})}
                 />
-                <TextInput
+                <Autocomplete
                   label={t('settings.qwen.model')}
-                  placeholder={t('settings.qwen.modelPlaceholder')}
+                  placeholder={DEFAULT_MODELS.qwen}
+                  description={t('settings.modelHint')}
+                  data={SUGGESTED_MODELS.qwen}
                   value={qwenConfig.model}
-                  onChange={(e) => setQwenConfig({...qwenConfig, model: e.target.value})}
+                  onChange={(value) => setQwenConfig({...qwenConfig, model: value})}
                 />
               </Stack>
             </Box>
@@ -378,11 +386,13 @@ export default function SettingsPage() {
                   value={claudeConfig.apiKey}
                   onChange={(e) => setClaudeConfig({...claudeConfig, apiKey: e.target.value})}
                 />
-                <TextInput
+                <Autocomplete
                   label={t('settings.claude.model')}
-                  placeholder={t('settings.claude.modelPlaceholder')}
+                  placeholder={DEFAULT_MODELS.claude}
+                  description={t('settings.modelHint')}
+                  data={SUGGESTED_MODELS.claude}
                   value={claudeConfig.model}
-                  onChange={(e) => setClaudeConfig({...claudeConfig, model: e.target.value})}
+                  onChange={(value) => setClaudeConfig({...claudeConfig, model: value})}
                 />
               </Stack>
             </Box>
@@ -399,11 +409,13 @@ export default function SettingsPage() {
                   value={ollamaConfig.endpoint}
                   onChange={(e) => setOllamaConfig({...ollamaConfig, endpoint: e.target.value})}
                 />
-                <TextInput
+                <Autocomplete
                   label={t('settings.ollama.model')}
-                  placeholder={t('settings.ollama.modelPlaceholder')}
+                  placeholder={DEFAULT_MODELS.ollama}
+                  description={t('settings.modelHint')}
+                  data={SUGGESTED_MODELS.ollama}
                   value={ollamaConfig.model}
-                  onChange={(e) => setOllamaConfig({...ollamaConfig, model: e.target.value})}
+                  onChange={(value) => setOllamaConfig({...ollamaConfig, model: value})}
                 />
               </Stack>
             </Box>

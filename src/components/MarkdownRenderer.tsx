@@ -12,6 +12,14 @@ import 'katex/dist/katex.min.css';
 
 interface MarkdownRendererProps {
   content: string;
+  /**
+   * 内容仍在流式生成中。
+   *
+   * 生成过程中代码围栏是残缺的，对着半截 mermaid 源码反复调用 mermaid.render()
+   * 只会不断失败并抖动布局；这里在流式期间把它降级成普通代码块，
+   * 等内容收尾后再渲染成图。
+   */
+  streaming?: boolean;
 }
 
 // Mermaid component that loads dynamically
@@ -67,20 +75,24 @@ const MermaidChart: React.FC<{ chart: string }> = ({ chart }) => {
   );
 };
 
-export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
+const MarkdownRendererBase: React.FC<MarkdownRendererProps> = ({ content, streaming = false }) => {
   const { colorScheme } = useTheme();
-  const components = {
+  const components = React.useMemo(() => ({
     // Custom code block renderer with syntax highlighting
     code({ node, inline, className, children, ...props }: any) {
       const match = /language-(\w+)/.exec(className || '');
       const language = match ? match[1] : '';
       const codeContent = String(children).replace(/\n$/, '');
-      
+
       // Handle Mermaid diagrams
       if (language === 'mermaid') {
-        return <MermaidChart chart={codeContent} />;
+        return streaming ? (
+          <Code block>{codeContent}</Code>
+        ) : (
+          <MermaidChart chart={codeContent} />
+        );
       }
-      
+
       // Handle other code blocks with syntax highlighting
       if (!inline && match) {
         return (
@@ -186,7 +198,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) =
         </Paper>
       );
     }
-  };
+  }), [colorScheme, streaming]);
 
   return (
     <Box>
@@ -200,5 +212,11 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) =
     </Box>
   );
 };
+
+/**
+ * 聊天里同屏会有很多条消息，但流式期间只有最后一条在变。
+ * 加上 memo 之后，其余消息不会跟着每次刷新重新解析 markdown。
+ */
+export const MarkdownRenderer = React.memo(MarkdownRendererBase);
 
 export default MarkdownRenderer;

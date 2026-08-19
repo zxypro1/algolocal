@@ -7,3 +7,6 @@ dist
 # Debug logs
 *.log
 .cursor/debug.log
+
+# TypeScript incremental build info
+tsconfig.tsbuildinfo
