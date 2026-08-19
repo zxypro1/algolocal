@@ -16,6 +16,7 @@ import { deepEqual } from '../../src/lib/engineering/specRunner';
 import { analyzeWorkspace } from '../../src/lib/engineering/analysis';
 import { computeScoreCard } from '../../src/lib/engineering/scoring';
 import { createModuleRuntime } from '../../src/lib/engineering/moduleRuntime';
+import { describeVerification, verifyProject } from '../../src/lib/engineering/validateProject';
 import {
   allProjectFiles,
   applyDrafts,
@@ -209,6 +210,42 @@ describe('open files', () => {
         expect(new Set(mains).size).toBe(view.stages.length);
       }
     }
+  });
+});
+
+/**
+ * 生成题目的自动验证。
+ *
+ * 执行器由调用方注入：这里跑的是模型生成的代码，只能在浏览器的 Web Worker 里执行，
+ * 服务端进程里 new Function 一下就能被一个死循环挂住、也能读到 process.env。
+ */
+describe('verifyProject', () => {
+  const project = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), 'projects', 'projects.json'), 'utf8')
+  ).find((item: any) => item.id === 'order-event-pipeline') as EngineeringProject;
+
+  it('accepts a project whose reference implementation passes', async () => {
+    const verifications = await verifyProject(project, (options) =>
+      runStage({ ...options, transpile, caseWallClockMs: 5000 })
+    );
+
+    expect(verifications.every((item) => item.ok)).toBe(true);
+    expect(describeVerification(verifications)).toBe('');
+  });
+
+  it('rejects a project whose specs also pass without the implementation', async () => {
+    const calls: string[] = [];
+    const verifications = await verifyProject(project, async (options) => {
+      calls.push(Object.keys(options.files).sort().join(','));
+      return { status: 'passed', totals: { total: 1, passed: 1, failed: 0 }, cases: [], gates: [] } as any;
+    });
+
+    // 参考实现和骨架都「通过」，说明用例没有区分度
+    expect(verifications.every((item) => item.starterAlsoPasses)).toBe(true);
+    expect(verifications.every((item) => item.ok)).toBe(false);
+    expect(describeVerification(verifications)).not.toBe('');
+    // 每一关都跑了两遍：一遍带参考实现，一遍只有骨架
+    expect(calls.length).toBe(project.stages.length * 2);
   });
 });
 
@@ -473,6 +510,57 @@ describe('runtime regressions', () => {
     expect(card.total).toBeLessThan(50);
   });
 
+  it('treats a counter that was never incremented as zero', () => {
+    const metrics = aggregateMetrics([]);
+    // 没重试过就是 0 次，不是「测不出来」—— 返回 NaN 会让 lte 门槛把最优实现判负
+    expect(getMetricValue(metrics, 'counters.retries')).toBe(0);
+    expect(evaluateGate(metrics, { metric: 'counters.retries', op: 'lte', value: 3 } as any).passed).toBe(true);
+    // 写错的指标名仍然是 NaN
+    expect(Number.isNaN(getMetricValue(metrics, 'requets.total'))).toBe(true);
+  });
+
+  it('runs hooks declared after the test they apply to', async () => {
+    const report = await runStage({
+      files: {},
+      specs: [
+        {
+          path: 'specs/hooks-order.spec.js',
+          content: `
+            let ready = false;
+            describe('late hook', () => {
+              it('sees it', () => { expect(ready).toBe(true); });
+              beforeEach(() => { ready = true; });
+            });
+          `,
+        },
+      ],
+    });
+
+    expect(report.cases[0].error).toBeUndefined();
+    expect(report.totals.failed).toBe(0);
+  });
+
+  it('it.only skips everything else', async () => {
+    const report = await runStage({
+      files: {},
+      specs: [
+        {
+          path: 'specs/only.spec.js',
+          content: `
+            describe('only', () => {
+              it('skipped one', () => { throw new Error('should not run'); });
+              it.only('the chosen one', () => { expect(1).toBe(1); });
+              it('skipped two', () => { throw new Error('should not run'); });
+            });
+          `,
+        },
+      ],
+    });
+
+    expect(report.totals.failed).toBe(0);
+    expect(report.cases.filter((testCase) => testCase.error === 'skipped')).toHaveLength(2);
+  });
+
   it('keeps totals consistent when a spec file blows up', async () => {
     const report = await runStage({
       files: {},
@@ -491,6 +579,62 @@ describe('runtime regressions', () => {
 
     expect(report.status).toBe('error');
     expect(report.totals.passed + report.totals.failed).toBe(report.totals.total);
+  });
+});
+
+describe('lab endpoints', () => {
+  it('matches the longest wildcard prefix, not the first one declared', async () => {
+    const report = await runStage({
+      files: {},
+      lab: {
+        defaultLatencyMs: 10,
+        endpoints: {
+          '/api/*': { latencyMs: 10 },
+          '/api/items/*': { failFirstN: 1, status: 503 },
+        },
+      },
+      specs: [
+        {
+          path: 'specs/endpoints.spec.js',
+          content: `
+            const { request } = require('@lab/net');
+            describe('wildcards', () => {
+              it('injects the failure configured for the deeper prefix', async () => {
+                // /api/items/7 命中的应该是 '/api/items/*'，第一次必失败
+                await expect(async () => request('/api/items/7')).rejects.toThrow('503');
+              });
+            });
+          `,
+        },
+      ],
+    });
+
+    expect(report.cases[0].error).toBeUndefined();
+  });
+
+  it('keeps per-method call state apart', async () => {
+    const report = await runStage({
+      files: {},
+      lab: { defaultLatencyMs: 1 },
+      specs: [
+        {
+          path: 'specs/methods.spec.js',
+          content: `
+            const { request } = require('@lab/net');
+            const { getMetrics } = require('@lab/metrics');
+            describe('methods', () => {
+              it('a POST after a GET is not a duplicate', async () => {
+                await request('/api/orders');
+                await request('/api/orders', { method: 'POST', body: { id: 1 } });
+                expect(getMetrics().requests.duplicated).toBe(0);
+              });
+            });
+          `,
+        },
+      ],
+    });
+
+    expect(report.cases[0].error).toBeUndefined();
   });
 });
 

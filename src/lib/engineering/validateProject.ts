@@ -5,8 +5,6 @@
  * 参考实现其实跑不过自己的用例。所以生成之后我们**真的把它跑一遍**——
  * 用参考实现跑该关的隐藏用例，全绿才算这道题成立。
  */
-import { runStage } from './runner';
-import type { TranspileFn } from './moduleRuntime';
 import type { EngineeringProject, ProjectStage, StageRunReport, WorkspaceFile } from './types';
 
 const DIFFICULTIES = ['Easy', 'Medium', 'Hard'];
@@ -161,36 +159,45 @@ function workspaceFor(project: EngineeringProject, stageIndex: number, solved: b
   return files;
 }
 
+/** 跑一关的执行器。由调用方注入，决定这段模型生成的代码在哪儿跑 */
+export type StageExecutor = (options: {
+  files: Record<string, string>;
+  specs: ProjectStage['specs'];
+  lab: ProjectStage['lab'];
+  gates: ProjectStage['gates'];
+}) => Promise<StageRunReport>;
+
 /**
  * 用参考实现真跑一遍每一关，确认题目是可解的。
+ *
+ * 执行器必须由调用方给：这里跑的是**模型生成的代码**，绝不能在服务端进程里
+ * 直接 `new Function` 执行 —— 一个同步死循环就能把整个 Next 进程挂住，
+ * 而且那段代码能看到 `process.env`，把用户配置的所有厂商 key 带出去。
+ * 浏览器侧的 Web Worker 有独立的全局环境，也能 terminate，是唯一合适的落点。
  */
 export async function verifyProject(
   project: EngineeringProject,
-  transpile: TranspileFn
+  execute: StageExecutor
 ): Promise<StageVerification[]> {
   const verifications: StageVerification[] = [];
 
   for (let index = 0; index < project.stages.length; index += 1) {
     const stage = project.stages[index];
 
-    const report = await runStage({
+    const report = await execute({
       files: workspaceFor(project, index, true),
       specs: stage.specs,
       lab: stage.lab,
       gates: stage.gates,
-      transpile,
-      caseWallClockMs: 5000,
     });
 
     let starterAlsoPasses = false;
     if (report.status === 'passed') {
-      const starterReport = await runStage({
+      const starterReport = await execute({
         files: workspaceFor(project, index, false),
         specs: stage.specs,
         lab: stage.lab,
         gates: stage.gates,
-        transpile,
-        caseWallClockMs: 5000,
       });
       starterAlsoPasses = starterReport.status === 'passed';
     }

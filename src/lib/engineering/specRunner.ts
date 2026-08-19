@@ -263,9 +263,16 @@ export interface CollectedCase {
   suite: string[];
   name: string;
   fn: () => unknown;
-  beforeEach: Array<() => unknown>;
-  afterEach: Array<() => unknown>;
+  /**
+   * 按 suite 分组的钩子。存的是**数组本身**而不是当时的快照：
+   * Jest 里 `describe(() => { it(...); beforeEach(setup); })` 的 setup 对前面的
+   * 用例同样生效，注册时就 flat() 的话，写在测试后面的钩子会被静默丢掉。
+   */
+  beforeEach: Array<Array<() => unknown>>;
+  afterEach: Array<Array<() => unknown>>;
   skipped: boolean;
+  /** it.only：一旦出现，其余用例都跳过 */
+  only?: boolean;
 }
 
 export interface SpecCollector {
@@ -296,7 +303,7 @@ export function createSpecCollector(): SpecCollector {
     if (!hooks.length) return;
     const last = cases[cases.length - 1];
     if (!last || cases.length === fromIndex) return;
-    last.afterEach = [...last.afterEach, ...hooks];
+    last.afterEach = [...last.afterEach, hooks];
   }
 
   function describe(name: string, fn: () => void) {
@@ -317,24 +324,35 @@ export function createSpecCollector(): SpecCollector {
     }
   }
 
-  function register(name: string, fn: () => unknown, skipped = false) {
+  function register(name: string, fn: () => unknown, options: { skipped?: boolean; only?: boolean } = {}) {
     cases.push({
       suite: [...suiteStack],
       name,
       fn,
-      beforeEach: beforeEachStack.flat(),
-      afterEach: afterEachStack.flat(),
-      skipped,
+      // 存数组引用，之后往里 push 的钩子这个用例也能拿到
+      beforeEach: [...beforeEachStack],
+      afterEach: [...afterEachStack],
+      skipped: Boolean(options.skipped),
+      only: options.only,
     });
   }
 
   const it = (name: string, fn: () => unknown) => register(name, fn);
-  (it as any).skip = (name: string, fn: () => unknown) => register(name, fn, true);
-  (it as any).only = (name: string, fn: () => unknown) => register(name, fn);
+  (it as any).skip = (name: string, fn: () => unknown) => register(name, fn, { skipped: true });
+  (it as any).only = (name: string, fn: () => unknown) => register(name, fn, { only: true });
 
   return {
     cases,
-    finalize: () => attachAfterAll(afterAllStack[0], 0),
+    finalize: () => {
+      attachAfterAll(afterAllStack[0], 0);
+      // it.only 出现过就只跑它们，其余标成跳过 —— 以前 only 被实现成普通注册，
+      // 写了 only 反而整个文件都跑，和作者的意图正相反
+      if (cases.some((testCase) => testCase.only)) {
+        for (const testCase of cases) {
+          if (!testCase.only) testCase.skipped = true;
+        }
+      }
+    },
     globals: {
       describe,
       it,

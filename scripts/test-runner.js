@@ -55,9 +55,11 @@ class TestRunner {
   checkEnvironment() {
     console.log('Checking test environment...');
     
+    // pages/api/run.ts 早就删掉了：代码现在在浏览器里执行（WASM / Web Worker）。
+    // 把它留在这里的后果是 checkEnvironment 永远返回 false，
+    // runAllTests 在跑任何一个套件之前就 exit(1) —— 整份套件列表形同虚设。
     const requiredFiles = [
       'public/problems.json',
-      'pages/api/run.ts',
       'jest.config.js',
       'jest.setup.js'
     ];

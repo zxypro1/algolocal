@@ -37,11 +37,11 @@ function createWorker(): Worker | null {
 }
 
 async function runInline(payload: RunPayload): Promise<StageRunReport> {
-  const [{ runStage }, { resolveTranspiler }] = await Promise.all([
+  const [{ runStage }, { resolveTranspiler, sourcesOf }] = await Promise.all([
     import('../lib/engineering/runner'),
     import('../lib/engineering/transpile'),
   ]);
-  const transpile = await resolveTranspiler(payload.files);
+  const transpile = await resolveTranspiler(sourcesOf(payload));
   return runStage({ ...payload, transpile });
 }
 
@@ -55,13 +55,22 @@ export function useProjectRunner() {
   const requestIdRef = useRef(0);
   const workerBrokenRef = useRef(false);
 
-  const disposeWorker = useCallback(() => {
+  /**
+   * 干掉 worker，并且把还挂在上面的运行**拒绝掉**。
+   *
+   * 只 clearTimeout 不 reject 的话，被顺带干掉的那次运行的 promise 永远不 settle：
+   * run() 里的 await 不返回，finally 里的 setIsRunning(false) 也就不会执行，
+   * 「运行验收」按钮从此一直是禁用状态，只能刷新页面。
+   */
+  const disposeWorker = useCallback((reason?: string) => {
     workerRef.current?.terminate();
     workerRef.current = null;
-    for (const pending of Array.from(pendingRef.current.values())) {
-      clearTimeout(pending.timer);
-    }
+    const pendings = Array.from(pendingRef.current.values());
     pendingRef.current.clear();
+    for (const pending of pendings) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason || 'The run was cancelled because the worker was disposed.'));
+    }
   }, []);
 
   useEffect(() => disposeWorker, [disposeWorker]);
@@ -117,8 +126,9 @@ export function useProjectRunner() {
             result = await new Promise<StageRunReport>((resolve, reject) => {
               const timer = setTimeout(() => {
                 pendingRef.current.delete(id);
-                // 超时几乎都意味着用户代码里有死循环，直接掐掉这个 worker
-                disposeWorker();
+                // 超时几乎都意味着用户代码里有死循环，直接掐掉这个 worker。
+                // 同一个 worker 上并发的其他运行会被 disposeWorker 一并拒绝。
+                disposeWorker('The worker was terminated because another run timed out.');
                 reject(new RunTimeoutError(`Execution timed out after ${timeoutMs / 1000}s — check for an infinite loop.`));
               }, timeoutMs);
 

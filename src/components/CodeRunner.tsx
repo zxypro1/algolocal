@@ -40,15 +40,7 @@ import {
   saveEditorPrefs,
 } from '../lib/editorPrefs';
 import { clearDraft, loadDraft, saveDraft } from '../lib/problemDrafts';
-
-interface AIProviderConfig {
-  deepSeek?: { apiKey: string; model: string; timeout?: string; maxTokens?: string };
-  openAI?: { apiKey: string; model: string };
-  qwen?: { apiKey: string; model: string };
-  claude?: { apiKey: string; model: string };
-  ollama?: { endpoint: string; model: string };
-  selectedProvider?: string;
-}
+import { useAiConfig } from '../hooks/useAiConfig';
 
 // WASM 支持的语言配置
 const WASM_SUPPORTED_LANGUAGES = [
@@ -97,7 +89,8 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
   const [isGeneratingSolution, setIsGeneratingSolution] = useState(false);
   const [solutionError, setSolutionError] = useState<string | null>(null);
   const [confirmModalOpen, setConfirmModalOpen] = useState(false);
-  const [aiConfig, setAiConfig] = useState<AIProviderConfig | null>(null);
+  // AI 配置读取在 useAiConfig 里，别再在组件里抄一份
+  const { config: aiConfig } = useAiConfig();
   
   // WASM 执行器 hook
   const { runTests: runWasmTests, runtimeStatus, preloadRuntime } = useWasmExecutor();
@@ -134,30 +127,6 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
     return problem.template?.[templateKey] || problem.template?.js || '';
   }, [problem, selectedLanguage]);
 
-  // Load AI configuration
-  const loadAIConfig = useCallback(async () => {
-    try {
-      // Check if running in Electron
-      if (typeof window !== 'undefined' && (window as any).electronAPI) {
-        const result = await (window as any).electronAPI.loadConfiguration();
-        if (result.success && result.data) {
-          setAiConfig(result.data);
-        }
-      } else {
-        // Web mode: Load from localStorage
-        const savedConfig = localStorage.getItem('ai-provider-config');
-        if (savedConfig) {
-          setAiConfig(JSON.parse(savedConfig));
-        }
-      }
-    } catch (err) {
-      console.error('Failed to load AI config:', err);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadAIConfig();
-  }, [loadAIConfig]);
   
   // 预加载选中语言的 WASM 运行时
   useEffect(() => {

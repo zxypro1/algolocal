@@ -48,7 +48,10 @@ function viewOf(project, language) {
   if (!language || language === 'typescript') return project;
   const variant = project.variants?.[language];
   if (!variant) return null;
+  // 要把工程本身的字段带上（尤其是 weights），否则另一种语言会用默认权重评分，
+  // 同一份逻辑两种语言跑出不同的分数，作者置零的维度还会被悄悄算回来
   return {
+    ...project,
     files: variant.files,
     stages: project.stages.map((stage, index) => ({
       ...stage,

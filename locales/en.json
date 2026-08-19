@@ -549,7 +549,11 @@
       "noDiscrimination": "the starter skeleton also passes, specs lack discrimination",
       "open": "Start building",
       "retry": "Regenerate",
-      "saveAnyway": "Save anyway"
+      "saveAnyway": "Save anyway",
+      "drafting": "Drafting the project…",
+      "verifying": "Running it locally to verify…",
+      "repairing": "Verification failed, asking for a fix…",
+      "saving": "Verified, saving…"
     },
     "brief": {
       "outcomes": "What you will learn",

@@ -441,20 +441,47 @@ export function abortSignalFor(res: NextApiResponse): AbortSignal {
  * 从模型回复里抠出 JSON。
  * 模型经常会加 ```json 围栏或前后寒暄，这里做一次尽力而为的提取。
  */
+/**
+ * 从模型回复里取出 JSON。
+ *
+ * 难点在于我们要的 JSON 内部**本来就带着 markdown 和代码块**（题面、mermaid 架构图、
+ * 参考实现都是提示词明确要求的）。所以：
+ *  1. 先直接 parse，多数模型本来就只回 JSON；
+ *  2. 再按围栏取，但要取「最外层」—— 懒惰匹配会在内嵌代码块的第一个 ``` 处截断，
+ *     把一段 ts 片段当成整个回复；
+ *  3. 最后退回到第一个 { 到最后一个 } 之间。
+ */
 export function extractJson<T = unknown>(raw: string): T {
   const text = (raw || '').trim();
 
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const candidate = fenced ? fenced[1].trim() : text;
+  const candidates: string[] = [text];
 
-  try {
-    return JSON.parse(candidate) as T;
-  } catch {
+  const fenceStart = text.match(/```(?:json)?[^\S\n]*\n?/);
+  if (fenceStart) {
+    const bodyStart = (fenceStart.index ?? 0) + fenceStart[0].length;
+    const lastFence = text.lastIndexOf('```');
+    if (lastFence > bodyStart) candidates.push(text.slice(bodyStart, lastFence).trim());
+  }
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate) as T;
+    } catch {
+      // 试下一个
+    }
+  }
+
+  for (const candidate of candidates) {
     const start = candidate.indexOf('{');
     const end = candidate.lastIndexOf('}');
     if (start >= 0 && end > start) {
-      return JSON.parse(candidate.slice(start, end + 1)) as T;
+      try {
+        return JSON.parse(candidate.slice(start, end + 1)) as T;
+      } catch {
+        // 试下一个
+      }
     }
-    throw new Error('The model did not return valid JSON');
   }
+
+  throw new Error('The model did not return valid JSON');
 }

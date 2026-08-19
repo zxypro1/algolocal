@@ -549,7 +549,11 @@
       "noDiscrimination": "起始骨架也能通过，用例没有区分度",
       "open": "开始构建",
       "retry": "重新生成",
-      "saveAnyway": "仍然保存"
+      "saveAnyway": "仍然保存",
+      "drafting": "正在生成题目…",
+      "verifying": "正在本地跑一遍验证…",
+      "repairing": "验证没过，正在让模型修一轮…",
+      "saving": "验证通过，正在保存…"
     },
     "brief": {
       "outcomes": "通关后你会掌握",

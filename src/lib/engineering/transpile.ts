@@ -50,6 +50,22 @@ export function needsTranspiler(files: Record<string, string>): boolean {
   );
 }
 
+/**
+ * 一次运行真正会被编译的所有源码：工作区文件 + 该关的隐藏用例。
+ *
+ * runStage 编译的是 `{ ...files, [spec.path]: spec.content }`。只看 files 的话，
+ * 「CommonJS 工作区 + ESM 用例」会被判成不需要转译器，然后模块运行时在编译用例时
+ * 抛 ModuleEvaluationError，整关跑不起来。
+ */
+export function sourcesOf(payload: {
+  files: Record<string, string>;
+  specs?: Array<{ path: string; content: string }>;
+}): Record<string, string> {
+  const sources = { ...payload.files };
+  for (const spec of payload.specs || []) sources[spec.path] = spec.content;
+  return sources;
+}
+
 export async function resolveTranspiler(files: Record<string, string>): Promise<TranspileFn | undefined> {
   if (!needsTranspiler(files)) return undefined;
   const ts = await loadTypeScriptCompiler();

@@ -54,6 +54,14 @@ function appRoot(): string {
   return process.env.APP_ROOT || process.cwd();
 }
 
+/**
+ * 预置题库随应用分发、进程生命周期内不会变，按 mtime 缓存解析结果。
+ *
+ * 之前每个请求都要重读并解析一遍 295KB：列表页一次、工作区一次，保存一道生成的
+ * 题目更是要读三次文件、解析两遍 —— 都发生在服务 UI 的同一个线程上。
+ */
+let presetCache: { key: string; projects: StoredProject[] } | null = null;
+
 export function loadPresetProjects(): StoredProject[] {
   const candidates = [
     path.join(appRoot(), 'public', 'projects.json'),
@@ -63,9 +71,16 @@ export function loadPresetProjects(): StoredProject[] {
   for (const file of candidates) {
     try {
       if (!fs.existsSync(file)) continue;
+
+      const stat = fs.statSync(file);
+      const key = `${file}:${stat.mtimeMs}:${stat.size}`;
+      if (presetCache && presetCache.key === key) return presetCache.projects;
+
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (Array.isArray(parsed)) {
-        return parsed.map((project) => ({ ...project, source: 'preset' as const }));
+        const projects = parsed.map((project) => ({ ...project, source: 'preset' as const }));
+        presetCache = { key, projects };
+        return projects;
       }
     } catch (error) {
       console.error(`Failed to read preset projects from ${file}:`, error);

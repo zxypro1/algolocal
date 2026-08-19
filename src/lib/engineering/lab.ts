@@ -95,8 +95,14 @@ export class Lab {
       concurrencyTimeline: [...this.timeline],
       requests: {
         ...this.totals,
-        byUrl: Object.fromEntries(
-          Array.from(this.urlState.entries()).map(([url, state]) => [url, state.calls])
+        // 内部按「方法 + 地址」记账，对外仍按地址聚合：门槛里写的是地址
+        byUrl: Array.from(this.urlState.entries()).reduce<Record<string, number>>(
+          (acc, [key, state]) => {
+            const url = key.slice(key.indexOf(' ') + 1);
+            acc[url] = (acc[url] || 0) + state.calls;
+            return acc;
+          },
+          {}
         ),
       },
       samples: [...this.samples],
@@ -107,11 +113,32 @@ export class Lab {
   private endpointConfig(url: string): LabEndpointConfig {
     const endpoints = this.config.endpoints || {};
     if (endpoints[url]) return endpoints[url];
-    // 支持前缀匹配，方便配置 '/api/items/' 这样的一族地址
-    const prefixKey = Object.keys(endpoints)
-      .filter((key) => key.endsWith('*'))
-      .find((key) => url.startsWith(key.slice(0, -1)));
-    return prefixKey ? endpoints[prefixKey] : {};
+
+    /**
+     * 前缀匹配取**最长**的那条，而不是对象里排在最前面的那条。
+     *
+     * `{ '/api/*': {...}, '/api/items/*': { failFirstN: 3 } }` 里，/api/items/7
+     * 命中的应该是后者。按插入顺序取第一个的话，故障注入永远不会触发 ——
+     * 不写任何重试逻辑也能过容错门槛。
+     */
+    let matched: { key: string; length: number } | null = null;
+    for (const key of Object.keys(endpoints)) {
+      if (!key.endsWith('*')) continue;
+      const prefix = key.slice(0, -1);
+      if (!url.startsWith(prefix)) continue;
+      if (!matched || prefix.length > matched.length) matched = { key, length: prefix.length };
+    }
+    return matched ? endpoints[matched.key] : {};
+  }
+
+  /**
+   * 每次调用的状态按「方法 + 地址」记。
+   *
+   * 只按地址记的话，同一个 URL 上不同 method / body 的两次调用会被算成重复请求，
+   * 而 failFirstN 也会被它们共同消耗掉 —— 做幂等那一关时数字会莫名其妙。
+   */
+  private stateKey(url: string, method?: string): string {
+    return `${(method || 'GET').toUpperCase()} ${url}`;
   }
 
   private track(): void {
@@ -130,13 +157,14 @@ export class Lab {
     }
 
     const endpoint = this.endpointConfig(url);
-    const state = this.urlState.get(url) || { calls: 0, lastFailed: false };
+    const key = this.stateKey(url, options.method);
+    const state = this.urlState.get(key) || { calls: 0, lastFailed: false };
     state.calls += 1;
     if (state.calls > 1) {
       if (state.lastFailed) this.totals.retries += 1;
       else this.totals.duplicated += 1;
     }
-    this.urlState.set(url, state);
+    this.urlState.set(key, state);
 
     this.totals.total += 1;
     this.inFlight += 1;

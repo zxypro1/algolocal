@@ -21,6 +21,8 @@ import { IconAlertTriangle, IconCheck, IconSparkles, IconX } from '@tabler/icons
 import { useI18n, useTranslation } from '../../src/contexts/I18nContext';
 import { AppHeader, HEADER_HEIGHT } from '../../src/components/AppHeader';
 import { useAiConfig } from '../../src/hooks/useAiConfig';
+import { useProjectRunner } from '../../src/hooks/useProjectRunner';
+import { describeVerification, verifyProject } from '../../src/lib/engineering/validateProject';
 import type { EngineeringProject } from '../../src/lib/engineering/types';
 
 interface VerificationSummary {
@@ -48,6 +50,8 @@ export default function ProjectGeneratorPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<GenerateResult | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const { run } = useProjectRunner();
 
   const suggestions =
     locale === 'zh'
@@ -64,24 +68,92 @@ export default function ProjectGeneratorPage() {
           'A config-center client with LRU caching and warm-up',
         ];
 
+  /**
+   * 生成 → 在浏览器里真跑一遍 → 不过就带着失败原因让模型修一轮 → 再跑一遍。
+   *
+   * 「真跑一遍」发生在 useProjectRunner 的 Web Worker 里：模型生成的代码有独立的
+   * 全局环境、看不到任何密钥，死循环也能被 terminate。服务端只负责调模型和结构校验。
+   */
   const generate = async () => {
     if (!request.trim()) return;
     setLoading(true);
     setError(null);
     setResult(null);
 
-    try {
+    const ask = async (body: Record<string, unknown>) => {
       const response = await fetch('/api/generate-project', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ request: request.trim(), config, language: locale }),
+        body: JSON.stringify(body),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Failed to generate project');
-      setResult(data);
+      return data as GenerateResult;
+    };
+
+    const check = async (candidate: EngineeringProject) => {
+      setStatus(t('engineering.generator.verifying'));
+      const verifications = await verifyProject(candidate, (options) => run(options) as any);
+      const failureReport = describeVerification(verifications);
+      return {
+        verification: verifications.map((item) => ({
+          stageId: item.stageId,
+          ok: item.ok,
+          starterAlsoPasses: item.starterAlsoPasses,
+          summary: `${item.report.totals.passed}/${item.report.totals.total} cases, ${
+            item.report.gates.filter((gate) => gate.passed).length
+          }/${item.report.gates.length} gates`,
+        })),
+        problems: failureReport ? failureReport.split('\n') : [],
+      };
+    };
+
+    try {
+      setStatus(t('engineering.generator.drafting'));
+      let data = await ask({ request: request.trim(), config, language: locale });
+      let project = data.project;
+      let problems = data.problems || [];
+      let verification: VerificationSummary[] = [];
+
+      if (project && problems.length === 0) {
+        const checked = await check(project);
+        verification = checked.verification;
+        problems = checked.problems;
+      }
+
+      // 一轮自动修复：结构问题和真实运行失败一起喂回去
+      if (project && problems.length > 0) {
+        setStatus(t('engineering.generator.repairing'));
+        data = await ask({
+          request: request.trim(),
+          config,
+          language: locale,
+          previous: project,
+          problems,
+        });
+        project = data.project;
+        problems = data.problems || [];
+        verification = [];
+
+        if (project && problems.length === 0) {
+          const checked = await check(project);
+          verification = checked.verification;
+          problems = checked.problems;
+        }
+      }
+
+      const verified = Boolean(project) && problems.length === 0;
+      if (verified && project) {
+        setStatus(t('engineering.generator.saving'));
+        const saved = await ask({ project, force: true });
+        setResult({ project: saved.project, verification, saved: true });
+      } else {
+        setResult({ project, verification, problems, saved: false });
+      }
     } catch (generateError) {
       setError((generateError as Error).message);
     } finally {
+      setStatus(null);
       setLoading(false);
     }
   };
@@ -169,7 +241,8 @@ export default function ProjectGeneratorPage() {
 
             {loading && (
               <Alert color="violet" icon={<Loader size={14} />}>
-                {t('engineering.generator.loadingHint')}
+                {/* 生成 / 验证 / 修复 是三个阶段，验证阶段会跑好几关，得让人知道进行到哪儿了 */}
+                {status || t('engineering.generator.loadingHint')}
               </Alert>
             )}
 

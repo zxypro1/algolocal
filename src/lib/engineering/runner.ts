@@ -60,7 +60,18 @@ export function getMetricValue(metrics: LabMetrics, path: string): number {
     current = (current as any)[segments[index]];
   }
 
-  return typeof current === 'number' ? current : Number.NaN;
+  if (typeof current === 'number') return current;
+
+  /**
+   * 没被自增过的计数器就是 0，不是「测不出来」。
+   *
+   * 返回 NaN 的话，`counters.retries lte 3` 这种门槛会把「一次都没重试」的最优实现
+   * 判成失败（evaluateGate 见到非有限值直接判负）。未知的顶层指标仍然返回 NaN，
+   * 那才是真的写错了指标名。
+   */
+  if (current === undefined && path.startsWith('counters.')) return 0;
+
+  return Number.NaN;
 }
 
 export function evaluateGate(metrics: LabMetrics, gate: MetricGate): GateResult {
@@ -214,11 +225,11 @@ export async function runStage(options: RunStageOptions): Promise<StageRunReport
           await driveVirtualClock(
             lab.clock,
             async () => {
-              for (const hook of testCase.beforeEach) await hook();
+              for (const hook of testCase.beforeEach.flat()) await hook();
               try {
                 await testCase.fn();
               } finally {
-                for (const hook of testCase.afterEach) await hook();
+                for (const hook of testCase.afterEach.flat()) await hook();
               }
             },
             { maxWallClockMs: options.caseWallClockMs ?? 8000 }

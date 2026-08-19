@@ -289,32 +289,42 @@ export default function ProjectWorkspacePage() {
   const pristineRef = useRef<Record<string, string>>({});
   pristineRef.current = pristine;
 
-  const handleFileChange = useCallback((path: string, content: string) => {
-    setProgress((prev) => {
-      if (!prev) return prev;
+  /**
+   * 改一个文件。
+   *
+   * 落盘安排放在 setState **外面**：updater 必须是纯函数，React 可能重复执行它，
+   * 也可能在更新的基准状态上重跑一次 —— 那样 pendingRef 里会留下一份基于旧 prev
+   * 算出来的进度，800ms 后把中间的按键覆盖掉。CodeRunner 那边也是同样的写法。
+   */
+  const handleFileChange = useCallback(
+    (path: string, content: string) => {
+      const current = progressRef.current;
+      if (!current) return;
 
-      const drafts = { ...prev.drafts };
+      const drafts = { ...current.drafts };
       if (pristineRef.current[path] === content) {
         // 改回原样就不该再算作草稿，否则这个文件会一直挂着「已修改」
-        if (drafts[path] === undefined) return prev;
+        if (drafts[path] === undefined) return;
         delete drafts[path];
       } else {
-        if (drafts[path] === content) return prev;
+        if (drafts[path] === content) return;
         drafts[path] = content;
       }
 
-      const next = { ...prev, drafts };
+      const next = { ...current, drafts };
+      progressRef.current = next;
+      setProgress(next);
       scheduleSave(next);
-      return next;
-    });
 
-    setUnsavedPaths((prev) => {
-      if (prev.has(path)) return prev;
-      const next = new Set(prev);
-      next.add(path);
-      return next;
-    });
-  }, [scheduleSave]);
+      setUnsavedPaths((prev) => {
+        if (prev.has(path)) return prev;
+        const updated = new Set(prev);
+        updated.add(path);
+        return updated;
+      });
+    },
+    [scheduleSave]
+  );
 
   /* ---------------- 运行 ---------------- */
 
@@ -458,18 +468,25 @@ export default function ProjectWorkspacePage() {
   );
 
   const handleResetStage = useCallback(() => {
-    if (!project || !progress || !stage) return;
+    const current = progressRef.current;
+    if (!project || !current || !stage) return;
+
+    /**
+     * 只还原**本关**解锁的文件。
+     *
+     * buildStageFiles 是累积的（基础文件 + 第 1..N 关的初始文件），拿它当作
+     * 「本关的文件」会把前几关写的实现一起删掉 —— 在第 4 关点一下「重置本关」，
+     * 第 1、2、3 关的代码从内存和 localStorage 一起消失，且不可撤销。
+     */
     const stagePaths = new Set(
-      buildStageFiles(view ?? project, stageIndex)
-        .filter((file) => !file.readonly)
-        .map((file) => file.path)
+      (stage.starterFiles || []).filter((file) => !file.readonly).map((file) => file.path)
     );
     const drafts = Object.fromEntries(
-      Object.entries(progress.drafts).filter(([path]) => !stagePaths.has(path))
+      Object.entries(current.drafts).filter(([path]) => !stagePaths.has(path))
     );
     resetReport();
-    persist({ ...progress, drafts });
-  }, [persist, progress, project, resetReport, stage, stageIndex]);
+    persist({ ...current, drafts });
+  }, [persist, project, resetReport, stage]);
 
   const handleResetProject = useCallback(() => {
     if (!project) return;

@@ -9,7 +9,7 @@
 // "window is not defined"。静态导入把编译器打进 worker 自己的 bundle。
 import * as ts from 'typescript';
 import { runStage } from '../lib/engineering/runner';
-import { createTranspiler, needsTranspiler } from '../lib/engineering/transpile';
+import { createTranspiler, needsTranspiler, sourcesOf } from '../lib/engineering/transpile';
 import type { RunStageOptions } from '../lib/engineering/runner';
 
 export interface RunRequestMessage {
@@ -23,7 +23,8 @@ context.onmessage = async (event: MessageEvent<RunRequestMessage>) => {
   const { id, payload } = event.data;
 
   try {
-    const transpile = needsTranspiler(payload.files) ? createTranspiler(ts) : undefined;
+    // 用例文件也要算进来：它们和工作区一起被编译
+    const transpile = needsTranspiler(sourcesOf(payload)) ? createTranspiler(ts) : undefined;
     const report = await runStage({ ...payload, transpile });
     context.postMessage({ id, report });
   } catch (error) {
