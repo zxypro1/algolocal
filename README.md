@@ -10,66 +10,62 @@ Quick links: [Discussions](https://github.com/zxypro1/algolocal/discussions) | [
 
 <img alt="Engineering Practice: a multi-file workspace with hidden specs and engineering gates" src="./docs/screenshots/engineering-en.png" />
 
-## Quick Start
+## Quick start
 
-### Desktop Application (Recommended)
+### Desktop app
 
-The desktop application provides the best experience with zero environment setup required. Simply download and run.
+Nothing to install or configure. Download it and run it.
 
-**[Download Latest Release](https://github.com/zxypro1/algolocal/releases/latest)**
+[Download the latest release](https://github.com/zxypro1/algolocal/releases/latest)
 
 | Platform | Download |
 |----------|----------|
-| **macOS** (Apple Silicon) | `AlgoLocal-*-macOS-arm64.dmg` |
-| **macOS** (Intel) | `AlgoLocal-*-macOS-x64.dmg` |
-| **Windows** (Installer) | `AlgoLocal-*-Windows-Setup.exe` |
-| **Windows** (Portable) | `AlgoLocal-*-Windows-Portable.exe` |
-| **Linux** (AppImage) | `AlgoLocal-*-Linux.AppImage` |
-| **Linux** (Debian/Ubuntu) | `AlgoLocal-*-Linux.deb` |
-| **Linux** (Fedora/RHEL) | `AlgoLocal-*-Linux.rpm` |
+| macOS (Apple Silicon) | `AlgoLocal-*-macOS-arm64.dmg` |
+| macOS (Intel) | `AlgoLocal-*-macOS-x64.dmg` |
+| Windows (Installer) | `AlgoLocal-*-Windows-Setup.exe` |
+| Windows (Portable) | `AlgoLocal-*-Windows-Portable.exe` |
+| Linux (AppImage) | `AlgoLocal-*-Linux.AppImage` |
+| Linux (Debian/Ubuntu) | `AlgoLocal-*-Linux.deb` |
+| Linux (Fedora/RHEL) | `AlgoLocal-*-Linux.rpm` |
 
-**macOS Users**: If you encounter "App is damaged and can't be opened", run in Terminal:
+If macOS says the app is damaged and cannot be opened, clear the quarantine attribute:
 ```bash
 xattr -cr "/Applications/AlgoLocal.app"
 ```
 
-### Web Version (Alternative)
+### From source
 
-For developers who prefer running from source, see [Development Setup](#development-setup) below.
+See [running locally](#running-locally) below.
 
 ## Features
 
-### Core Functionality
+Two ways to practise. Algorithm problems are the familiar kind: read the statement, write a function, run the tests. Engineering Practice is the other half, described below, where you build a small multi-file system across several stages and get judged on concurrency, latency, resilience and how the code reads.
 
-- **Engineering Practice**: Build real multi-file systems stage by stage, reviewed on concurrency, latency, resilience, encapsulation and elegance, not just correctness
-- **AI-Powered Practice**: Generate problems, get hints, chat about solutions, and generate detailed explanations with multiple approaches, all powered by AI
-- **Complete Offline Support**: Works 100% offline after initial setup, no internet required during practice
-- **WASM Code Execution**: Browser-side execution for JavaScript, TypeScript, and Python
-- **Monaco Code Editor**: VS Code-like editing experience with syntax highlighting and autocomplete
-- **Practice Dashboard**: Track your progress with daily statistics, accuracy metrics, heatmap visualization, and performance trends
-- **Built-in Problem Library**: 10+ classic algorithm problems included, easily expandable
-- **Cross-platform**: Windows, macOS, and Linux supported
+Everything runs on your machine. After the first setup the app needs no internet, code executes in the browser through WebAssembly, and your attempts stay in local storage rather than on someone's server. AI help is there when you want it and idle when you don't.
 
-### Supported Languages
+The editor is Monaco, the same one VS Code uses, with syntax highlighting, autocomplete and your drafts saved per problem and per language. The dashboard tracks what you solved and when, with accuracy by difficulty and tag, a heatmap of daily activity, and your recent attempts. 29 problems ship with the app and you can add your own.
 
-| Language | Status | Implementation |
-|----------|--------|----------------|
-| **JavaScript** | Supported | Native browser execution |
-| **TypeScript** | Supported | TypeScript compiler transpilation |
-| **Python** | Supported | Pyodide (CPython WASM) |
+Windows, macOS and Linux are all supported.
 
-All code execution happens in the browser using WebAssembly. No server-side execution required.
+### Languages
 
-### AI-Powered Features
+| Language | How it runs |
+|----------|-------------|
+| JavaScript | Natively in the browser |
+| TypeScript | Transpiled by the TypeScript compiler, then run |
+| Python | Pyodide, CPython compiled to WebAssembly |
 
-The application includes three AI-powered tools that share the same provider configuration:
+No server-side execution is involved.
 
-- **AI Problem Generator**: Describe what you want to practice in natural language, and AI creates a complete problem with test cases and reference solutions
-- **AI Solution Generation**: Generate multiple solution approaches (brute force + optimized) with detailed annotations, complexity analysis, and trade-offs explained
-- **AI Chat Assistant**: Get contextual hints while solving problems without spoiling the solution. Ask questions about your current code or approach
-- **Flexible Configuration**: Switch between DeepSeek, OpenAI, Claude, Qwen, or local Ollama models anytime
+### What the AI does
 
-## Engineering Practice
+Four features share one provider configuration, so you set your key once.
+
+The problem generator takes a description in plain language and writes a complete problem: statement, test cases including edge cases, starter templates and a reference solution. The solution generator produces several approaches for a problem you are stuck on, brute force through optimised, each annotated with its complexity and the trade-off it makes. The chat assistant answers questions about the code you have written without handing you the answer, and the engineering review comments on a finished stage the way a reviewer would on a production pull request.
+
+Bring DeepSeek, OpenAI, Claude, Qwen, or a local Ollama model, and switch between them whenever you like. See [AI_PROVIDER_GUIDE.md](./AI_PROVIDER_GUIDE.md).
+
+## Engineering practice
 
 Algorithm problems ask whether your function is correct. Engineering Practice asks the questions that
 decide whether code ships: does it stay correct under concurrency, does it hold a latency budget, what
@@ -91,83 +87,34 @@ resilient API gateway (token bucket, circuit breaker, timeout budgets).
 
 See the [Engineering Practice Guide](./ENGINEERING-PRACTICE-GUIDE.md) to author your own.
 
-## How to Use
+## Using it
 
-### Problem Solving
+Pick a problem from the list, choose a language, and write your solution in the editor. "Submit & Run Tests" runs it in the browser and shows each case with its execution time. If you get stuck, the AI chat gives hints about your actual code, and the AI solution generator writes out several approaches once you want to see them. Your progress shows up in the dashboard.
 
-1. **Browse Problems**: View the problem list with difficulty and tags
-2. **Select a Problem**: Click on any problem to open the detail page
-3. **Choose Language**: Select JavaScript, TypeScript, or Python
-4. **Write Solution**: Use the Monaco editor with full IDE features
-5. **Get AI Help** (Optional):
-   - **AI Chat**: Ask for hints or discuss your approach without getting the full solution
-   - **AI Solution**: Generate complete annotated solutions with multiple approaches
-6. **Run Tests**: Click "Submit & Run Tests" to execute your code
-7. **View Results**: See detailed test results with execution time
-8. **Track Progress**: Check the Practice Dashboard to see your statistics and performance trends
+For Engineering Practice, open a project, read the stage brief on the left, write code in the workspace, and click "Run acceptance". You get the spec results, the measured metrics, the engineering gates, a score across the six dimensions, and an AI review if you ask for one. Clear a stage and the next one unlocks.
 
-### AI Problem Generation
+To generate a problem, open the AI Generator and describe what you want to practise, for example "binary search tree" or "dynamic programming with an optimal substructure". The generated problem lands in your library.
 
-1. **Access Generator**: Click "AI Generator" on the homepage
-2. **Describe Requirements**: Enter what type of problem you want (e.g., "binary search tree", "dynamic programming")
-3. **Generate**: AI creates a complete problem with test cases and solutions
-4. **Practice**: Generated problem is automatically available in your library
+Settings is where the AI providers live: the Settings button or application menu in the desktop app, `/settings` in the browser. Desktop configuration is written to `~/.offline-leet-practice/config.json`.
 
-### Practice Analytics
+You can add problems through the "Add Problem" page, by pasting or uploading JSON, or by editing `public/problems.json` directly. [MODIFY-PROBLEMS-GUIDE.md](./MODIFY-PROBLEMS-GUIDE.md) covers the format.
 
-1. **Access Dashboard**: Click "Practice Stats" or "Dashboard" on the homepage
-2. **View Statistics**: See your total problems attempted, solved, and accuracy rate
-3. **Analyze Performance**: Review accuracy breakdown by difficulty level and problem tags
-4. **Track Streaks**: Visualize your daily practice activity with an interactive heatmap
-5. **Review History**: Check your recent attempts and identify areas for improvement
+## Running locally
 
-### Settings Configuration
+You need Node.js 18 or newer ([download](https://nodejs.org/)) and npm 8 or newer.
 
-Access the settings page to configure AI providers:
-
-- **Desktop Mode**: Via "Settings" button or application menu
-- **Web Mode**: Navigate to `/settings` (e.g., http://localhost:3000/settings)
-
-Supported AI providers:
-- DeepSeek
-- OpenAI
-- Qwen (Alibaba Cloud)
-- Claude (Anthropic)
-- Ollama (Local)
-
-Configuration is saved to `~/.offline-leet-practice/config.json` in desktop mode. See [AI_PROVIDER_GUIDE.md](./AI_PROVIDER_GUIDE.md) for detailed configuration.
-
-### Adding Custom Problems
-
-1. **Via UI**: Use the "Add Problem" page in the application
-2. **JSON Import**: Upload or paste problem data in JSON format
-3. **Direct Edit**: Modify `public/problems.json` for immediate changes
-
-See [MODIFY-PROBLEMS-GUIDE.md](./MODIFY-PROBLEMS-GUIDE.md) for the complete guide.
-
-## Development Setup
-
-For developers who want to run from source or contribute to the project.
-
-### Prerequisites
-
-- Node.js 18+ ([Download](https://nodejs.org/))
-- npm 8+
-
-### Running Locally
-
-**Windows:**
+Windows:
 ```bash
 start-local.bat
 ```
 
-**macOS / Linux:**
+macOS and Linux:
 ```bash
 chmod +x start-local.sh
 ./start-local.sh
 ```
 
-**Manual Setup:**
+Or do it by hand:
 ```bash
 git clone https://github.com/zxypro1/algolocal.git
 cd algolocal
@@ -178,7 +125,7 @@ npm start
 
 Then open http://localhost:3000 in your browser.
 
-### Building Desktop Application
+### Building the desktop app
 
 ```bash
 # macOS
@@ -194,23 +141,16 @@ npm run dist:linux
 npm run dist:all
 ```
 
-See [DESKTOP-APP-GUIDE.md](./DESKTOP-APP-GUIDE.md) for detailed build instructions.
+[DESKTOP-APP-GUIDE.md](./DESKTOP-APP-GUIDE.md) has the details.
 
-## Technology Stack
+## Built with
 
-- **Frontend**: React 18, Next.js 13, TypeScript
-- **UI Framework**: Mantine v7
-- **Code Editor**: Monaco Editor
-- **Code Execution**: WebAssembly
-  - JavaScript: Native browser `Function` constructor
-  - TypeScript: TypeScript compiler (CDN)
-  - Python: Pyodide (CPython compiled to WASM)
-- **Desktop**: Electron
+React 18 and Next.js 13 in TypeScript, Mantine v7 for the interface, Monaco for the editor, and Electron for the desktop builds. Code execution is WebAssembly: JavaScript runs through the browser's `Function` constructor, TypeScript is transpiled by the TypeScript compiler first, and Python runs on Pyodide.
 
-## Project Structure
+## Project structure
 
 ```
-OfflineLeetPractice/
+algolocal/
 ├── pages/                  # Next.js pages and API routes
 │   ├── api/
 │   │   ├── problems.ts     # Problem data API
@@ -250,12 +190,7 @@ OfflineLeetPractice/
 
 ## Contributing
 
-Contributions are welcome. Areas for improvement:
-
-- Additional algorithm problems
-- Performance analytics features
-- User experience enhancements
-- Documentation improvements
+Contributions are welcome. More algorithm problems and more engineering projects are the most useful thing to add; fixes to the analytics, the interface and these docs are equally welcome.
 
 ## License
 
@@ -263,4 +198,4 @@ MIT License
 
 ---
 
-**Practice algorithms anywhere, on flights, cruises, or any offline environment.**
+Practise anywhere: on a plane, on a boat, or anywhere else without a connection.

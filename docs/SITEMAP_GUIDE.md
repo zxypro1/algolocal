@@ -1,41 +1,27 @@
-# Google Search Console 站点地图提交指南
+# 向 Google Search Console 提交站点地图
 
-## 步骤 1: 访问 Google Search Console
-访问：https://search.google.com/search-console
+站点地图在 `docs/sitemap.xml`，线上地址是 `https://zxypro1.github.io/algolocal/sitemap.xml`，`robots.txt` 里已经声明过，所以 Google 也能自己发现它。手动提交只是让它早一点被抓到。
 
-## 步骤 2: 添加网站属性（如果还没有）
-1. 点击左侧 "添加属性" 或 "Add property"
-2. 选择 "网址前缀" (URL prefix)
-3. 输入：`https://zxypro1.github.io/OfflineCodePractice`
-4. 验证所有权：
-   - 选择 "HTML 标记" (HTML tag) 方式
-   - 你的网站已包含验证代码：`<meta name="google-site-verification" content="polTjQtkihIv7LZ-5RVl19ejDTy6ZU9TTX6xiDBKgUg" />`
-   - 点击 "验证"
+## 添加网站属性
 
-## 步骤 3: 提交站点地图
-1. 在左侧菜单选择 "站点地图" (Sitemaps)
-2. 在 "添加新的站点地图" 输入框中输入：`sitemap.xml`
-3. 点击 "提交" (Submit)
+打开 https://search.google.com/search-console，如果还没有这个站点的属性，点「添加属性」，选「网址前缀」，填 `https://zxypro1.github.io/algolocal/`。
 
-## 步骤 4: 验证站点地图状态
-提交后，Google 会显示：
-- **成功**：状态为 "成功" 或 "Success"
-- **警告**：可能有部分 URL 无法抓取（通常可忽略）
-- **错误**：检查站点地图格式
+验证方式选「HTML 标记」。页面里已经带了验证码，不用再改文件：
 
-## 步骤 5: 请求重新索引（可选）
-如果站点地图已提交，但 Google 仍显示旧的标题：
-1. 在 Search Console 左侧选择 "网址检查" (URL Inspection)
-2. 输入你的网站 URL：`https://zxypro1.github.io/OfflineCodePractice/`
-3. 点击 "请求编入索引" (Request Indexing)
+```html
+<meta name="google-site-verification" content="polTjQtkihIv7LZ-5RVl19ejDTy6ZU9TTX6xiDBKgUg" />
+```
 
-## 站点地图位置
-- **URL**: `https://zxypro1.github.io/OfflineCodePractice/sitemap.xml`
-- **文件位置**: `docs/sitemap.xml`
-- **自动发现**: 已在 `robots.txt` 中声明
+## 提交
 
-## 预期结果
-- Google 会在 1-2 天内抓取站点地图
-- 索引更新可能需要几天到几周时间
-- 可通过 Search Console 监控索引状态
+左侧菜单进「站点地图」，在输入框里填 `sitemap.xml`，提交。
 
+提交后的状态有三种。「成功」就是抓到了。「警告」通常是部分 URL 抓不到，一般可以不管。「错误」说明格式有问题，回去检查 `docs/sitemap.xml`。
+
+## 让某个页面重新索引
+
+改了标题或描述之后，Google 可能还显示旧的。左侧选「网址检查」，输入 `https://zxypro1.github.io/algolocal/`，点「请求编入索引」。
+
+## 大概多久
+
+站点地图一般 1 到 2 天内被抓取，索引更新则可能要几天到几周。进度在 Search Console 里能看到。

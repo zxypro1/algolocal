@@ -2,26 +2,15 @@
 
 This guide explains how to add or modify problems in the application without rebuilding or requiring internet access.
 
-## Overview
+## Where the problems live
 
-The application supports modifying the problem database in offline environments such as flights, remote locations, or secure networks. All problem data is stored in a single JSON file that can be edited directly.
-
-## Problem File Location
-
-After building or installing the application, the problem database is located at:
+Every problem is in one JSON file, which you can edit by hand with no internet and no rebuild:
 
 ```
 your-app-folder/public/problems.json
 ```
 
-**Important**: Always edit the file in the `public` folder, not the original `problems` folder, as the application reads from the public location at runtime.
-
-## How It Works
-
-1. **No Rebuild Required**: Changes to `problems.json` take effect immediately
-2. **Runtime Loading**: The application reads the file on each request
-3. **Offline Friendly**: Works completely without internet connection
-4. **Real-time Updates**: Refresh your browser to see changes
+Edit the copy in `public`, not the one in the `problems` folder. The app reads the public copy at runtime, so that is the one that takes effect. It re-reads the file on each request, so saving your edit and refreshing the browser is enough to see it.
 
 ## Adding a New Problem
 
@@ -107,9 +96,9 @@ Copy this template and add it to the problems array:
 ### Automated Testing
 
 ```bash
-npm run test:dynamic   # Add a test problem
+node test-dynamic-problems.js   # Add a test problem
 # Visit the app to verify it appears
-npm run test:cleanup   # Remove the test problem
+node cleanup-test-problem.js    # Remove the test problem
 ```
 
 ## Best Practices
@@ -232,4 +221,4 @@ Create your own tag system:
 
 ---
 
-**Practice algorithms offline, anywhere.**
+Practise offline, anywhere.

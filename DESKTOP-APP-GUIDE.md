@@ -2,22 +2,15 @@
 
 This guide covers building AlgoLocal as a cross-platform desktop application for Windows, macOS, and Linux.
 
-## Overview
+## What gets built
 
-The desktop application is a standalone, self-contained package that requires no external dependencies. Users can download and run the application immediately without installing Node.js, Python, or any development tools.
+A self-contained package. Whoever downloads it does not need Node.js, Python or any development tools installed.
 
-## Technology Stack
+Inside it is the Next.js and React app running in Electron. Code executes in the browser layer through WebAssembly: JavaScript natively, TypeScript transpiled by the TypeScript compiler first, Python on Pyodide.
 
-- **Frontend Framework**: Next.js + React
-- **Desktop Framework**: Electron
-- **Code Execution**: Browser-side WASM
-  - JavaScript: Native browser execution
-  - TypeScript: TypeScript compiler transpilation
-  - Python: Pyodide (CPython WASM)
+## What you need to build it
 
-## Prerequisites (For Building Only)
-
-These requirements apply only to developers building from source:
+Only for building from source:
 
 - Node.js >= 18.x
 - npm >= 8.x
@@ -158,8 +151,7 @@ Solution: Click "More info" > "Run anyway"
 
 For production distribution, code signing is recommended:
 
-- **macOS**: Requires Apple Developer certificate
-- **Windows**: Requires EV code signing certificate
+macOS needs an Apple Developer certificate, Windows an EV code signing certificate.
 
 ## Changelog
 

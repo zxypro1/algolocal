@@ -2,22 +2,15 @@
 
 本指南介绍如何将离线算法练习构建为跨平台桌面应用，支持 Windows、macOS 和 Linux。
 
-## 概述
+## 打包出来的是什么
 
-桌面应用是一个独立的、自包含的软件包，无需任何外部依赖。用户可以直接下载运行，无需安装 Node.js、Python 或任何开发工具。
+一个自包含的软件包。拿到它的人不需要装 Node.js、Python 或任何开发工具。
 
-## 技术架构
+里面是跑在 Electron 里的 Next.js + React 应用。代码在浏览器层通过 WebAssembly 执行：JavaScript 原生跑，TypeScript 先经 TypeScript 编译器转译，Python 跑在 Pyodide 上。
 
-- **前端框架**：Next.js + React
-- **桌面框架**：Electron
-- **代码执行**：浏览器端 WASM
-  - JavaScript：浏览器原生执行
-  - TypeScript：TypeScript 编译器转译
-  - Python：Pyodide (CPython WASM)
+## 构建需要什么
 
-## 前置要求（仅限构建）
-
-以下要求仅适用于从源码构建的开发者：
+只有从源码构建才需要：
 
 - Node.js >= 18.x
 - npm >= 8.x
@@ -156,10 +149,7 @@ Windows 可能对未签名的应用显示 SmartScreen 警告。
 
 ### 代码签名
 
-生产环境分发建议进行代码签名：
-
-- **macOS**：需要 Apple Developer 证书
-- **Windows**：需要 EV 代码签名证书
+对外分发建议做代码签名：macOS 需要 Apple Developer 证书，Windows 需要 EV 代码签名证书。
 
 ## 更新日志
 
