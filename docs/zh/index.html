@@ -47,7 +47,7 @@
     "author": { "@type": "Person", "name": "zxypro1" }
   }
   </script>
-  <link rel="stylesheet" href="../assets/site.css?v=6">
+  <link rel="stylesheet" href="../assets/site.css?v=7">
 </head>
 <body>
   <a class="skip-link" href="#main">跳到主要内容</a>
@@ -59,7 +59,7 @@
         <span>AlgoLocal</span>
       </a>
       <nav class="desktop-nav" aria-label="主要导航">
-        <a href="#product">产品</a><a href="#workflow">流程</a><a href="#ai">AI</a><a href="#download">下载</a>
+        <a href="#product">产品</a><a href="#workflow">流程</a><a href="#engineering">工程实战</a><a href="#ai">AI</a><a href="#download">下载</a>
       </nav>
       <div class="nav-actions">
         <a class="language-link" href="../" aria-label="Switch to English">EN</a>
@@ -70,7 +70,7 @@
       </div>
     </div>
     <nav class="mobile-nav" aria-label="移动端导航" data-mobile-nav>
-      <a href="#product">产品</a><a href="#workflow">流程</a><a href="#ai">AI</a><a href="#download">下载</a><a href="../">English</a>
+      <a href="#product">产品</a><a href="#workflow">流程</a><a href="#engineering">工程实战</a><a href="#ai">AI</a><a href="#download">下载</a><a href="../">English</a>
     </nav>
   </header>
 
@@ -142,6 +142,53 @@
           <div class="dashboard-window"><div class="mini-bar"><div class="window-dots"><i></i><i></i><i></i></div><span>AlgoLocal / 进度</span></div><div class="dashboard-body"><div><small>已解决</small><strong>12<span>/28</span></strong><p>继续保持。</p></div><div class="heatmap-wrap"><small>最近 12 周</small><div class="heatmap" aria-hidden="true"></div><p>少 <span></span><span></span><span></span><span></span> 多</p></div></div></div>
         </div>
       </div></div>
+    </section>
+
+
+    <section class="eng-section" id="engineering">
+      <div class="site-container">
+        <div class="eng-grid">
+          <div class="eng-copy reveal">
+            <h2>并发、延迟，<br>和别人要读的那份代码。</h2>
+            <p>第二种练法把你放进一个多文件工作区，一次通一关。隐藏用例检查它对不对，工程门槛检查它表现如何：峰值并发、虚拟耗时、重试次数、重复请求。静态分析则看你写出来的东西是什么形状。</p>
+            <ul class="eng-projects">
+              <li class="cyan"><b>高可用抓取管线</b><span>并发池、指数退避、缓存单飞、取消</span></li>
+              <li class="cyan"><b>事件驱动的订单流水线</b><span>事件总线、洋葱中间件、幂等、死信队列</span></li>
+              <li class="orange"><b>有韧性的 API 网关</b><span>令牌桶、熔断器、超时预算</span></li>
+            </ul>
+            <a class="text-link" href="https://github.com/zxypro1/algolocal/blob/main/ENGINEERING-PRACTICE-GUIDE.md" target="_blank" rel="noopener">一道工程题是怎么做出来的 <span>&rarr;</span></a>
+          </div>
+
+          <div class="eng-window reveal" aria-label="工程实战工作区预览">
+            <div class="mini-bar"><div class="window-dots"><i></i><i></i><i></i></div><span>AlgoLocal / 高可用抓取管线</span><b>TypeScript&#8964;</b></div>
+            <div class="eng-stages">
+              <span class="done">1. 打通契约</span><span class="active">2. 有上限的并发</span><span>3. 重试退避</span><span>4. 缓存去重</span><span>5. 收敛为组件</span>
+            </div>
+            <div class="eng-body">
+              <div class="eng-tree">
+                <i class="lock">contract.ts</i><i>fetcher.ts</i><i class="active">pool.ts</i>
+              </div>
+              <div class="eng-code">
+                <span>export async function</span> <b>mapWithConcurrency</b>(items, limit, worker) {<br>
+                &nbsp;&nbsp;<span>const</span> results = <span>new</span> Array(items.length);<br>
+                &nbsp;&nbsp;<span>const</span> size = Math.min(limit, items.length);<br>
+                &nbsp;&nbsp;<i>// 每个槽位一个取号式的 worker</i><br>
+                &nbsp;&nbsp;<span>await</span> Promise.all(runners);<br>
+                &nbsp;&nbsp;<span>return</span> results;<br>
+                }
+              </div>
+            </div>
+            <div class="eng-verdict">
+              <div class="eng-verdict-head"><b>本关通过</b><span>10/10 个用例</span><em>100</em></div>
+              <ul class="eng-gates">
+                <li>峰值并发不超过 4<b>4 / 4</b></li>
+                <li>不被下游限流<b>0 / 0</b></li>
+                <li>12 个请求 300ms 内跑完<b>300ms / 300ms</b></li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
 
     <section class="ai-section" id="ai">

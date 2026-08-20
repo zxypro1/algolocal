@@ -47,7 +47,7 @@
     "author": { "@type": "Person", "name": "zxypro1" }
   }
   </script>
-  <link rel="stylesheet" href="assets/site.css?v=6">
+  <link rel="stylesheet" href="assets/site.css?v=7">
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -61,6 +61,7 @@
       <nav class="desktop-nav" aria-label="Primary navigation">
         <a href="#product">Product</a>
         <a href="#workflow">Workflow</a>
+        <a href="#engineering">Engineering</a>
         <a href="#ai">AI</a>
         <a href="#download">Download</a>
       </nav>
@@ -78,6 +79,7 @@
     <nav class="mobile-nav" aria-label="Mobile navigation" data-mobile-nav>
       <a href="#product">Product</a>
       <a href="#workflow">Workflow</a>
+      <a href="#engineering">Engineering</a>
       <a href="#ai">AI</a>
       <a href="#download">Download</a>
       <a href="./zh/">中文</a>
@@ -182,6 +184,53 @@
                 <div><small>Solved</small><strong>12<span>/28</span></strong><p>Keep practicing.</p></div>
                 <div class="heatmap-wrap"><small>Past 12 weeks</small><div class="heatmap" aria-hidden="true"></div><p>Less <span></span><span></span><span></span><span></span> More</p></div>
               </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+
+    <section class="eng-section" id="engineering">
+      <div class="site-container">
+        <div class="eng-grid">
+          <div class="eng-copy reveal">
+            <h2>Concurrency, latency, and the code someone else reads.</h2>
+            <p>The second mode drops you into a multi-file workspace with a stage to clear. Hidden specs check that it works. Measured gates check how it behaves: peak concurrency, virtual latency, retries, duplicate calls. Static analysis looks at the shape of what you wrote.</p>
+            <ul class="eng-projects">
+              <li class="cyan"><b>Resilient fetch pipeline</b><span>Bounded concurrency, backoff, single-flight caching, cancellation</span></li>
+              <li class="cyan"><b>Event-driven order pipeline</b><span>Event bus, onion middleware, idempotency, dead letter queue</span></li>
+              <li class="orange"><b>Resilient API gateway</b><span>Token bucket, circuit breaker, timeout budgets</span></li>
+            </ul>
+            <a class="text-link" href="https://github.com/zxypro1/algolocal/blob/main/ENGINEERING-PRACTICE-GUIDE.md" target="_blank" rel="noopener">How a project is built <span>&rarr;</span></a>
+          </div>
+
+          <div class="eng-window reveal" aria-label="Engineering Practice workspace preview">
+            <div class="mini-bar"><div class="window-dots"><i></i><i></i><i></i></div><span>AlgoLocal / Resilient fetch pipeline</span><b>TypeScript&#8964;</b></div>
+            <div class="eng-stages">
+              <span class="done">1. Contract</span><span class="active">2. Bounded concurrency</span><span>3. Retry</span><span>4. Caching</span><span>5. Ship it</span>
+            </div>
+            <div class="eng-body">
+              <div class="eng-tree">
+                <i class="lock">contract.ts</i><i>fetcher.ts</i><i class="active">pool.ts</i>
+              </div>
+              <div class="eng-code">
+                <span>export async function</span> <b>mapWithConcurrency</b>(items, limit, worker) {<br>
+                &nbsp;&nbsp;<span>const</span> results = <span>new</span> Array(items.length);<br>
+                &nbsp;&nbsp;<span>const</span> size = Math.min(limit, items.length);<br>
+                &nbsp;&nbsp;<i>// one pull-based worker per slot</i><br>
+                &nbsp;&nbsp;<span>await</span> Promise.all(runners);<br>
+                &nbsp;&nbsp;<span>return</span> results;<br>
+                }
+              </div>
+            </div>
+            <div class="eng-verdict">
+              <div class="eng-verdict-head"><b>STAGE PASSED</b><span>10/10 cases</span><em>100</em></div>
+              <ul class="eng-gates">
+                <li>Peak concurrency at most 4<b>4 / 4</b></li>
+                <li>Never throttled by upstream<b>0 / 0</b></li>
+                <li>12 requests within 300ms<b>300ms / 300ms</b></li>
+              </ul>
             </div>
           </div>
         </div>
