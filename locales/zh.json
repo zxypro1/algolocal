@@ -24,11 +24,11 @@
   },
   "header": {
     "title": "AlgoLocal",
-    "subtitle": "本地题库，支持在浏览器内编辑并运行测试（JavaScript、TypeScript、Python）"
+    "subtitle": "本地刷题 + 工程实战：浏览器内编辑并运行 JavaScript、TypeScript、Python"
   },
   "homepage": {
     "title": "AlgoLocal",
-    "subtitle": "本地题库，支持在浏览器内编辑并运行测试（JavaScript、TypeScript、Python）",
+    "subtitle": "本地刷题 + 工程实战：浏览器内编辑并运行 JavaScript、TypeScript、Python",
     "problemList": "题目列表",
     "problems": "题",
     "addProblem": "添加题目",

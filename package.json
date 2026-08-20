@@ -3,7 +3,7 @@
   "version": "0.4.0",
   "private": true,
   "main": "electron-main.js",
-  "description": "Practice coding algorithms 100% offline with AI: generate problems, get hints, discuss solutions, and run code in JavaScript, TypeScript, or Python",
+  "description": "Offline coding practice on your own machine: LeetCode-style algorithm problems plus multi-stage engineering projects reviewed on concurrency, latency and code quality. Runs JavaScript, TypeScript and Python in the browser, with optional AI from the provider you choose.",
   "author": {
     "name": "zxypro1",
     "url": "https://github.com/zxypro1"
@@ -15,12 +15,31 @@
     "url": "https://github.com/zxypro1/algolocal.git"
   },
   "keywords": [
+    "leetcode",
+    "leetcode-alternative",
+    "coding-practice",
+    "coding-interview",
+    "interview-preparation",
     "algorithm",
-    "code-practice",
-    "programming",
+    "algorithms",
+    "data-structures",
+    "engineering-practice",
+    "system-design",
+    "concurrency",
+    "code-review",
+    "javascript",
+    "typescript",
+    "python",
     "wasm",
+    "webassembly",
+    "pyodide",
+    "monaco-editor",
     "electron",
-    "offline"
+    "offline",
+    "local-first",
+    "self-hosted",
+    "ai-assistant",
+    "open-source"
   ],
   "scripts": {
     "dev": "next dev",

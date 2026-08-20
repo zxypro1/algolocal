@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <title>AlgoLocal — Local-first algorithm practice with optional AI</title>
-  <meta name="description" content="Practice algorithms in a focused local-first desktop workspace. Run JavaScript, TypeScript, and Python on your machine, track progress, and bring your preferred AI provider when you want help.">
-  <meta name="keywords" content="algorithm practice, coding interview, offline coding, local-first, AI coding assistant, JavaScript, TypeScript, Python, WASM, open source">
+  <title>AlgoLocal: offline coding practice, from LeetCode-style problems to real engineering projects</title>
+  <meta name="description" content="A free, open-source desktop app for coding practice that runs entirely on your machine. Solve LeetCode-style algorithm problems in JavaScript, TypeScript or Python, then build multi-stage engineering projects judged on concurrency, latency, resilience and code quality. Optional AI from DeepSeek, OpenAI, Claude, Qwen or a local Ollama model.">
+  <meta name="keywords" content="leetcode, leetcode alternative, offline leetcode, coding practice, coding interview preparation, algorithm practice, data structures and algorithms, engineering practice, system design practice, concurrency, code review, javascript, typescript, python, wasm, webassembly, pyodide, monaco editor, electron desktop app, offline ide, local-first, self-hosted, ai coding assistant, deepseek, ollama, open source">
   <meta name="author" content="zxypro1">
   <meta name="robots" content="index, follow">
   <meta name="msvalidate.01" content="851E8929724BC064EAFA2D4AAE903E09">
@@ -16,12 +16,12 @@
   <link rel="alternate" href="https://zxypro1.github.io/algolocal/zh/" hreflang="zh-CN">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://zxypro1.github.io/algolocal/">
-  <meta property="og:title" content="AlgoLocal — Practice algorithms. Keep everything local.">
-  <meta property="og:description" content="A focused, local-first algorithm practice workspace with optional AI help.">
+  <meta property="og:title" content="AlgoLocal: practice coding offline, from algorithms to real systems">
+  <meta property="og:description" content="LeetCode-style problems and multi-stage engineering projects, all running on your own machine. Free and open source.">
   <meta property="og:image" content="https://zxypro1.github.io/algolocal/icon.png">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="AlgoLocal — Practice algorithms. Keep everything local.">
-  <meta name="twitter:description" content="A focused, local-first algorithm practice workspace with optional AI help.">
+  <meta name="twitter:title" content="AlgoLocal: practice coding offline, from algorithms to real systems">
+  <meta name="twitter:description" content="LeetCode-style problems and multi-stage engineering projects, all running on your own machine. Free and open source.">
   <meta name="twitter:image" content="https://zxypro1.github.io/algolocal/icon.png">
   <link rel="icon" href="favicon.ico" sizes="any">
   <link rel="icon" type="image/svg+xml" href="favicon.svg?v=4">
@@ -40,7 +40,7 @@
     "operatingSystem": "Windows, macOS, Linux",
     "applicationCategory": "DeveloperApplication",
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
-    "description": "A local-first desktop workspace for algorithm practice with optional AI help.",
+    "description": "A local-first desktop workspace for coding practice: LeetCode-style algorithm problems and multi-stage engineering projects, with optional AI help.",
     "downloadUrl": "https://github.com/zxypro1/algolocal/releases",
     "softwareVersion": "0.4.0",
     "license": "https://opensource.org/license/mit",
@@ -88,8 +88,8 @@
     <section class="hero" id="top">
       <div class="site-container hero-grid">
         <div class="hero-copy reveal">
-          <h1>Practice algorithms.<br>Keep everything <span>local.</span></h1>
-          <p>A focused desktop workspace to solve problems, run JavaScript, TypeScript and Python, and get AI help—without handing your practice data to another platform.</p>
+          <h1>Practice coding.<br>Keep everything <span>local.</span></h1>
+          <p>Solve LeetCode-style problems in JavaScript, TypeScript or Python, then build engineering projects that are judged on concurrency, latency and how the code reads. Everything runs on your machine, and the AI is yours to configure.</p>
           <div class="hero-actions">
             <a class="button button-dark" href="#download">
               <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 20h14"/></svg>
@@ -160,12 +160,12 @@
         <div class="workflow-grid">
           <div class="workflow-copy reveal">
             <h2>Everything between the prompt and the breakthrough.</h2>
-            <p class="section-intro">A local-first workspace that keeps you in flow.</p>
+            <p class="section-intro">Two ways to practise, one local workspace.</p>
             <ol class="route-list">
-              <li><span>01</span><div><h3>Pick your problem</h3><p>Search by topic, tag or difficulty.</p></div></li>
-              <li><span>02</span><div><h3>Work in a real editor</h3><p>Write JavaScript, TypeScript or Python with Monaco.</p></div></li>
+              <li><span>01</span><div><h3>Pick a problem or a project</h3><p>LeetCode-style problems by topic and difficulty, or a multi-stage engineering build.</p></div></li>
+              <li><span>02</span><div><h3>Work in a real editor</h3><p>Monaco, with a full file tree when the project needs one.</p></div></li>
               <li class="orange"><span>03</span><div><h3>Run it right here</h3><p>WASM executes every test on your machine.</p></div></li>
-              <li class="orange"><span>04</span><div><h3>Learn from every attempt</h3><p>Review results and track progress over time.</p></div></li>
+              <li class="orange"><span>04</span><div><h3>Get reviewed like production</h3><p>Test results for problems; concurrency, latency and code quality for projects.</p></div></li>
             </ol>
             <a class="text-link" href="https://github.com/zxypro1/algolocal#features" target="_blank" rel="noopener">Explore the product <span>→</span></a>
           </div>
@@ -198,7 +198,7 @@
         <div class="ai-grid">
           <div class="ai-copy reveal">
             <h2>AI when you want it.<br>Focus when you don’t.</h2>
-            <p>Generate a new problem, ask for a hint, or compare solutions. Bring DeepSeek, OpenAI, Claude, Qwen or a local Ollama model—and stay in control of the setup.</p>
+            <p>Generate a new problem, ask for a hint, or compare solutions. Bring DeepSeek, OpenAI, Claude, Qwen or a local Ollama model, and stay in control of the setup.</p>
             <a class="text-link text-link-light" href="https://github.com/zxypro1/algolocal/blob/main/AI_PROVIDER_GUIDE.md" target="_blank" rel="noopener">See how AI works <span>→</span></a>
           </div>
           <div class="ai-demo reveal">

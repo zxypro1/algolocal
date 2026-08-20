@@ -4,7 +4,7 @@
 
 快速链接: [讨论区](https://github.com/zxypro1/algolocal/discussions) | [Issues](https://github.com/zxypro1/algolocal/issues) | [Pull Requests](https://github.com/zxypro1/algolocal/pulls)
 
-> 100% 离线刷算法，AI 全程辅助：生成题目、获取提示、讨论解法，支持 JavaScript、TypeScript、Python 代码运行，无需联网或配置环境。
+> 完全跑在自己机器上的编程练习。用 JavaScript、TypeScript 或 Python 刷 LeetCode（力扣）风格的算法题，再进工程实战：多关卡的真实项目，按并发度、延迟、容错和代码质量评审。AI 可选、服务商自选，不用注册也不用联网。
 
 <img alt="做算法题，测试在浏览器里直接跑" src="./docs/screenshots/practice-zh.png" />
 
@@ -39,7 +39,7 @@ xattr -cr "/Applications/AlgoLocal.app"
 
 ## 功能特性
 
-两种练法。算法题是熟悉的那种：读题、写函数、跑用例。工程实战是另一半，下面单独讲，你在多文件工作区里分关卡搭一个小系统，评的是并发度、延迟、容错和代码本身好不好读。
+两种练法。算法题是熟悉的那种，面试前在力扣上刷的就是它：读题、写函数、跑用例。工程实战是另一半，下面单独讲，你在多文件工作区里分关卡搭一个小系统，评的是并发度、延迟、容错和代码本身好不好读。
 
 所有东西都在你自己机器上跑。初次配置之后不需要联网，代码通过 WebAssembly 在浏览器里执行，练习记录存在本地而不是别人的服务器上。AI 想用的时候在，不用的时候不打扰。
 
@@ -196,4 +196,4 @@ MIT License
 
 ---
 
-随时随地练：飞机上、游轮上，或者任何没网的地方。
+随时随地练：飞机上、游轮上、内网办公环境，或者任何没网的地方。

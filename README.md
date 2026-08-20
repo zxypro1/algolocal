@@ -4,7 +4,7 @@
 
 Quick links: [Discussions](https://github.com/zxypro1/algolocal/discussions) | [Issues](https://github.com/zxypro1/algolocal/issues) | [Pull Requests](https://github.com/zxypro1/algolocal/pulls)
 
-> Practice coding algorithms 100% offline with AI: generate problems, get hints, discuss solutions, and run code in JavaScript, TypeScript, or Python, no internet or setup required.
+> Coding practice that runs entirely on your own machine. Solve LeetCode-style algorithm problems in JavaScript, TypeScript or Python, then build multi-stage engineering projects that are reviewed on concurrency, latency, resilience and code quality. Optional AI, your own provider, no account and no internet required.
 
 <img alt="Solving an algorithm problem, tests running in the browser" src="./docs/screenshots/practice-en.png" />
 
@@ -39,7 +39,7 @@ See [running locally](#running-locally) below.
 
 ## Features
 
-Two ways to practise. Algorithm problems are the familiar kind: read the statement, write a function, run the tests. Engineering Practice is the other half, described below, where you build a small multi-file system across several stages and get judged on concurrency, latency, resilience and how the code reads.
+Two ways to practise. Algorithm problems are the familiar kind, the sort you would grind on LeetCode before an interview: read the statement, write a function, run the tests. Engineering Practice is the other half, described below, where you build a small multi-file system across several stages and get judged on concurrency, latency, resilience and how the code reads. Interview prep and the work you do after you get the job, in one app.
 
 Everything runs on your machine. After the first setup the app needs no internet, code executes in the browser through WebAssembly, and your attempts stay in local storage rather than on someone's server. AI help is there when you want it and idle when you don't.
 
@@ -198,4 +198,4 @@ MIT License
 
 ---
 
-Practise anywhere: on a plane, on a boat, or anywhere else without a connection.
+Practise anywhere: on a plane, on a boat, behind a corporate firewall, or anywhere else without a connection.

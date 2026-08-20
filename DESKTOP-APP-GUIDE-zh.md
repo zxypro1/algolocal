@@ -1,6 +1,6 @@
 # 桌面应用构建指南
 
-本指南介绍如何将离线算法练习构建为跨平台桌面应用，支持 Windows、macOS 和 Linux。
+本指南介绍如何把 AlgoLocal 打包成跨平台桌面应用，支持 Windows、macOS 和 Linux。
 
 ## 打包出来的是什么
 

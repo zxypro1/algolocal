@@ -4,7 +4,7 @@
 
 Enlaces rápidos: [Discusiones](https://github.com/zxypro1/algolocal/discussions) | [Incidencias](https://github.com/zxypro1/algolocal/issues) | [Pull Requests](https://github.com/zxypro1/algolocal/pulls)
 
-> Practica algoritmos de codificación 100% sin conexión con IA: genera problemas, obtén pistas, discute soluciones y ejecuta código en JavaScript, TypeScript o Python, sin necesidad de internet ni configuración.
+> Práctica de programación que se ejecuta por completo en tu propia máquina. Resuelve problemas de algoritmos al estilo LeetCode en JavaScript, TypeScript o Python, y luego construye proyectos de ingeniería por etapas que se evalúan por concurrencia, latencia, resiliencia y calidad del código. IA opcional, con el proveedor que tú elijas, sin cuenta y sin conexión.
 
 <img alt="Resolviendo un problema de algoritmos, con las pruebas ejecutándose en el navegador" src="./docs/screenshots/practice-en.png" />
 
@@ -39,7 +39,7 @@ Consulta [ejecutar en local](#ejecutar-en-local) más abajo.
 
 ## Características
 
-Dos formas de practicar. Los problemas de algoritmos son los de siempre: lee el enunciado, escribe una función, ejecuta las pruebas. La Práctica de Ingeniería es la otra mitad, descrita más abajo: construyes un sistema pequeño de varios archivos por etapas y se te evalúa por concurrencia, latencia, resiliencia y por cómo se lee el código.
+Dos formas de practicar. Los problemas de algoritmos son los de siempre, los que repasas en LeetCode antes de una entrevista: lee el enunciado, escribe una función, ejecuta las pruebas. La Práctica de Ingeniería es la otra mitad, descrita más abajo: construyes un sistema pequeño de varios archivos por etapas y se te evalúa por concurrencia, latencia, resiliencia y por cómo se lee el código.
 
 Todo se ejecuta en tu máquina. Después de la configuración inicial no hace falta internet, el código corre en el navegador mediante WebAssembly y tus intentos se quedan en el almacenamiento local, no en el servidor de nadie. La IA está cuando la quieres y callada cuando no.
 
@@ -200,4 +200,4 @@ Licencia MIT
 
 ---
 
-Practica donde sea: en un avión, en un crucero o en cualquier sitio sin conexión.
+Practica donde sea: en un avión, en un crucero, detrás del cortafuegos de la empresa o en cualquier sitio sin conexión.

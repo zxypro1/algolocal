@@ -24,11 +24,11 @@
   },
   "header": {
     "title": "AlgoLocal",
-    "subtitle": "Local problem set, supports editing and running tests in browser (JavaScript, TypeScript, Python)"
+    "subtitle": "Algorithm problems and engineering projects, edited and run right in the browser (JavaScript, TypeScript, Python)"
   },
   "homepage": {
     "title": "AlgoLocal",
-    "subtitle": "Local problem set, supports editing and running tests in browser (JavaScript, TypeScript, Python)",
+    "subtitle": "Algorithm problems and engineering projects, edited and run right in the browser (JavaScript, TypeScript, Python)",
     "problemList": "Problem List",
     "problems": "problems",
     "addProblem": "Add Problem",
@@ -471,7 +471,7 @@
       "review": "AI review"
     },
     "results": {
-      "empty": "Hit “Run acceptance” to see results",
+      "empty": "Hit \"Run acceptance\" to see results",
       "runError": "Run error",
       "stagePassed": "Stage passed",
       "stageFailed": "Not passing",
