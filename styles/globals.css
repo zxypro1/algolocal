@@ -351,3 +351,22 @@ a {
   border-bottom: 1px solid var(--app-border);
   background: var(--app-surface-muted);
 }
+
+/*
+ * ScrollArea 里的说明面板：文字优先换行，宽内容自己滚。
+ *
+ * Radix（Mantine 的 ScrollArea 基于它）给视口内容层加了内联的
+ * `min-width: 100%; display: table`，宽度由内容决定。关卡说明里只要出现一个宽代码块，
+ * 整块内容就按代码块的宽度排版，旁边的段落被视口裁掉半句话。内联样式只能用
+ * !important 覆盖。
+ */
+.panel-scroll .mantine-ScrollArea-viewport > div {
+  display: block !important;
+  min-width: 0 !important;
+}
+
+.panel-scroll pre,
+.panel-scroll .mantine-Code-root {
+  max-width: 100%;
+  overflow-x: auto;
+}

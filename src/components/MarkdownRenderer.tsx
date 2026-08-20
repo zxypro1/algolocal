@@ -100,6 +100,8 @@ const MarkdownRendererBase: React.FC<MarkdownRendererProps> = ({ content, stream
             style={atomDark}
             language={language}
             PreTag="div"
+            // 长行自己横向滚动，不要把容器撑宽
+            customStyle={{ maxWidth: '100%', overflowX: 'auto' }}
             {...props}
           >
             {codeContent}
@@ -201,7 +203,13 @@ const MarkdownRendererBase: React.FC<MarkdownRendererProps> = ({ content, stream
   }), [colorScheme, streaming]);
 
   return (
-    <Box>
+    /**
+     * `minWidth: 0` 是关键：这个 Box 常常放在 flex 容器里（关卡说明、聊天气泡），
+     * flex item 的默认最小宽度是内容宽度，于是一段很宽的代码块会把整个容器撑开，
+     * 旁边的段落跟着按更宽的宽度排版，最后被外层裁掉半句话。
+     * 宽内容自己横向滚动，文字照常换行。
+     */
+    <Box style={{ minWidth: 0, maxWidth: '100%', overflowWrap: 'anywhere' }}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeRaw, rehypeKatex]}

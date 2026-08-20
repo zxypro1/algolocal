@@ -6,9 +6,9 @@
 
 > 100% 离线刷算法，AI 全程辅助：生成题目、获取提示、讨论解法，支持 JavaScript、TypeScript、Python 代码运行，无需联网或配置环境。
 
-<img width="1898" height="932" alt="2026" src="https://github.com/user-attachments/assets/a601c9fb-2e36-4e64-a547-11ed5fbde581" />
+<img alt="做算法题，测试在浏览器里直接跑" src="./docs/screenshots/practice-zh.png" />
 
-<img width="1898" height="932" alt="2025-08-2165223" src="https://github.com/user-attachments/assets/5b9298e2-fa5b-4596-9694-733132ea509f" />
+<img alt="工程实战：多文件工作区、隐藏验收用例与工程指标门槛" src="./docs/screenshots/engineering-zh.png" />
 
 ## 快速开始
 

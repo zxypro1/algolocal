@@ -674,7 +674,16 @@ export default function ProjectWorkspacePage() {
                   )}
                 </Tabs.List>
 
-                <ScrollArea style={{ flex: 1 }} p="md">
+                {/*
+                  Mantine 的 ScrollArea 视口里那层子元素是 display: table，宽度由内容决定。
+                  关卡说明里只要有一个宽代码块，整块内容就按代码块的宽度排版，旁边的段落跟着
+                  被裁掉半句。改成 block 之后，文字按视口宽度换行，宽内容自己横向滚动。
+                */}
+                <ScrollArea
+                  style={{ flex: 1 }}
+                  p="md"
+                  className="panel-scroll"
+                >
                   <Tabs.Panel value="stage">
                     <StagePanel
                       stage={stage}
@@ -821,7 +830,16 @@ export default function ProjectWorkspacePage() {
                     </Tabs.Tab>
                   </Tabs.List>
 
-                  <ScrollArea style={{ flex: 1 }} p="md">
+                  {/*
+                    Mantine 的 ScrollArea 视口里那层子元素是 display: table，宽度由内容决定。
+                    关卡说明里只要有一个宽代码块，整块内容就按代码块的宽度排版，旁边的段落跟着
+                    被裁掉半句。改成 block 之后，文字按视口宽度换行，宽内容自己横向滚动。
+                  */}
+                  <ScrollArea
+                    style={{ flex: 1 }}
+                    p="md"
+                    className="panel-scroll"
+                  >
                     {runError && (
                       <Alert color="red" mb="md" title={t('engineering.results.runError')}>
                         {runError}

@@ -6,9 +6,9 @@ Enlaces rápidos: [Discusiones](https://github.com/zxypro1/algolocal/discussions
 
 > Practica algoritmos de codificación 100% sin conexión con IA: genera problemas, obtén pistas, discute soluciones y ejecuta código en JavaScript, TypeScript o Python, sin necesidad de internet ni configuración.
 
-<img width="1909" height="930" alt="2026" src="https://github.com/user-attachments/assets/7292075e-6d1b-4fc3-9019-7a80f17c1711" />
+<img alt="Resolviendo un problema de algoritmos, con las pruebas ejecutándose en el navegador" src="./docs/screenshots/practice-en.png" />
 
-<img width="1909" height="930" alt="2025-08-24165302" src="https://github.com/user-attachments/assets/93116550-60af-41aa-b0f3-cc2b10fd5ac5" />
+<img alt="Práctica de Ingeniería: espacio de trabajo multi-archivo con pruebas ocultas y umbrales de ingeniería" src="./docs/screenshots/engineering-en.png" />
 
 ## Inicio Rápido
 
