@@ -10,13 +10,49 @@
 
 <img alt="Práctica de Ingeniería: espacio de trabajo multi-archivo con pruebas ocultas y umbrales de ingeniería" src="./docs/screenshots/engineering-en.png" />
 
+## Inicio rápido
+
+### Aplicación de escritorio
+
+No requiere dependencias. [Descargar la última versión](https://github.com/zxypro1/algolocal/releases/latest):
+
+| Plataforma | Archivo |
+|---|---|
+| macOS (Apple Silicon) | `AlgoLocal-*-macOS-arm64.dmg` |
+| macOS (Intel) | `AlgoLocal-*-macOS-x64.dmg` |
+| Windows (Instalador) | `AlgoLocal-*-Windows-Setup.exe` |
+| Windows (Portátil) | `AlgoLocal-*-Windows-Portable.exe` |
+| Linux (AppImage) | `AlgoLocal-*-Linux.AppImage` |
+| Linux (Debian, Ubuntu) | `AlgoLocal-*-Linux.deb` |
+| Linux (Fedora, RHEL) | `AlgoLocal-*-Linux.rpm` |
+
+Si macOS indica que la aplicación está dañada, quita el atributo de cuarentena:
+
+```bash
+xattr -cr "/Applications/AlgoLocal.app"
+```
+
+### Desde el código fuente
+
+Requiere Node.js 18 o superior y npm 8 o superior.
+
+```bash
+git clone https://github.com/zxypro1/algolocal.git
+cd algolocal
+npm install
+npm run build
+npm start
+```
+
+La aplicación queda disponible en http://localhost:3000. `start-local.bat` (Windows) y `start-local.sh` (macOS, Linux) hacen lo mismo y ofrecen escribir un archivo de configuración de IA en la primera ejecución.
+
 ## Contenido
 
+- [Inicio rápido](#inicio-rápido)
 - [Características](#características)
 - [Modos de práctica](#modos-de-práctica)
 - [Lenguajes](#lenguajes)
 - [Funciones de IA](#funciones-de-ia)
-- [Instalación](#instalación)
 - [Uso](#uso)
 - [Desarrollo](#desarrollo)
 - [Estructura del proyecto](#estructura-del-proyecto)
@@ -83,42 +119,6 @@ Las cuatro funciones comparten una única configuración de proveedor.
 | Revisión de ingeniería | Revisa una etapa terminada por seguridad ante concurrencia, comportamiento ante fallos, límites de módulo y estilo |
 
 Proveedores soportados: DeepSeek, OpenAI, Claude, Qwen y modelos locales mediante Ollama. Consulta [AI_PROVIDER_GUIDE.md](./AI_PROVIDER_GUIDE.md).
-
-## Instalación
-
-### Aplicación de escritorio
-
-No requiere dependencias. [Descargar la última versión](https://github.com/zxypro1/algolocal/releases/latest):
-
-| Plataforma | Archivo |
-|---|---|
-| macOS (Apple Silicon) | `AlgoLocal-*-macOS-arm64.dmg` |
-| macOS (Intel) | `AlgoLocal-*-macOS-x64.dmg` |
-| Windows (Instalador) | `AlgoLocal-*-Windows-Setup.exe` |
-| Windows (Portátil) | `AlgoLocal-*-Windows-Portable.exe` |
-| Linux (AppImage) | `AlgoLocal-*-Linux.AppImage` |
-| Linux (Debian, Ubuntu) | `AlgoLocal-*-Linux.deb` |
-| Linux (Fedora, RHEL) | `AlgoLocal-*-Linux.rpm` |
-
-Si macOS indica que la aplicación está dañada, quita el atributo de cuarentena:
-
-```bash
-xattr -cr "/Applications/AlgoLocal.app"
-```
-
-### Desde el código fuente
-
-Requiere Node.js 18 o superior y npm 8 o superior.
-
-```bash
-git clone https://github.com/zxypro1/algolocal.git
-cd algolocal
-npm install
-npm run build
-npm start
-```
-
-La aplicación queda disponible en http://localhost:3000. `start-local.bat` (Windows) y `start-local.sh` (macOS, Linux) hacen lo mismo y ofrecen escribir un archivo de configuración de IA en la primera ejecución.
 
 ## Uso
 

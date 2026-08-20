@@ -10,13 +10,49 @@
 
 <img alt="Engineering Practice: a multi-file workspace with hidden specs and engineering gates" src="./docs/screenshots/engineering-en.png" />
 
+## Quick start
+
+### Desktop application
+
+No runtime dependencies are required. [Download the latest release](https://github.com/zxypro1/algolocal/releases/latest):
+
+| Platform | Artifact |
+|---|---|
+| macOS (Apple Silicon) | `AlgoLocal-*-macOS-arm64.dmg` |
+| macOS (Intel) | `AlgoLocal-*-macOS-x64.dmg` |
+| Windows (Installer) | `AlgoLocal-*-Windows-Setup.exe` |
+| Windows (Portable) | `AlgoLocal-*-Windows-Portable.exe` |
+| Linux (AppImage) | `AlgoLocal-*-Linux.AppImage` |
+| Linux (Debian, Ubuntu) | `AlgoLocal-*-Linux.deb` |
+| Linux (Fedora, RHEL) | `AlgoLocal-*-Linux.rpm` |
+
+If macOS reports that the application is damaged, clear the quarantine attribute:
+
+```bash
+xattr -cr "/Applications/AlgoLocal.app"
+```
+
+### From source
+
+Requires Node.js 18 or later and npm 8 or later.
+
+```bash
+git clone https://github.com/zxypro1/algolocal.git
+cd algolocal
+npm install
+npm run build
+npm start
+```
+
+The application is then available at http://localhost:3000. `start-local.bat` (Windows) and `start-local.sh` (macOS, Linux) perform the same steps and offer to write an AI configuration file on first run.
+
 ## Contents
 
+- [Quick start](#quick-start)
 - [Features](#features)
 - [Practice modes](#practice-modes)
 - [Language support](#language-support)
 - [AI features](#ai-features)
-- [Installation](#installation)
 - [Usage](#usage)
 - [Development](#development)
 - [Project structure](#project-structure)
@@ -83,42 +119,6 @@ All four features share a single provider configuration.
 | Engineering review | Reviews a completed stage on concurrency safety, failure behaviour, module boundaries and style |
 
 Supported providers: DeepSeek, OpenAI, Claude, Qwen, and local models through Ollama. See [AI_PROVIDER_GUIDE.md](./AI_PROVIDER_GUIDE.md).
-
-## Installation
-
-### Desktop application
-
-No runtime dependencies are required. [Download the latest release](https://github.com/zxypro1/algolocal/releases/latest):
-
-| Platform | Artifact |
-|---|---|
-| macOS (Apple Silicon) | `AlgoLocal-*-macOS-arm64.dmg` |
-| macOS (Intel) | `AlgoLocal-*-macOS-x64.dmg` |
-| Windows (Installer) | `AlgoLocal-*-Windows-Setup.exe` |
-| Windows (Portable) | `AlgoLocal-*-Windows-Portable.exe` |
-| Linux (AppImage) | `AlgoLocal-*-Linux.AppImage` |
-| Linux (Debian, Ubuntu) | `AlgoLocal-*-Linux.deb` |
-| Linux (Fedora, RHEL) | `AlgoLocal-*-Linux.rpm` |
-
-If macOS reports that the application is damaged, clear the quarantine attribute:
-
-```bash
-xattr -cr "/Applications/AlgoLocal.app"
-```
-
-### From source
-
-Requires Node.js 18 or later and npm 8 or later.
-
-```bash
-git clone https://github.com/zxypro1/algolocal.git
-cd algolocal
-npm install
-npm run build
-npm start
-```
-
-The application is then available at http://localhost:3000. `start-local.bat` (Windows) and `start-local.sh` (macOS, Linux) perform the same steps and offer to write an AI configuration file on first run.
 
 ## Usage
 

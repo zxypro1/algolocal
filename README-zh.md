@@ -10,13 +10,49 @@
 
 <img alt="工程实战：多文件工作区、隐藏验收用例与工程指标门槛" src="./docs/screenshots/engineering-zh.png" />
 
+## 快速开始
+
+### 桌面应用
+
+无需任何运行时依赖。[下载最新版本](https://github.com/zxypro1/algolocal/releases/latest)：
+
+| 平台 | 安装包 |
+|---|---|
+| macOS（Apple 芯片） | `AlgoLocal-*-macOS-arm64.dmg` |
+| macOS（Intel） | `AlgoLocal-*-macOS-x64.dmg` |
+| Windows（安装版） | `AlgoLocal-*-Windows-Setup.exe` |
+| Windows（便携版） | `AlgoLocal-*-Windows-Portable.exe` |
+| Linux（AppImage） | `AlgoLocal-*-Linux.AppImage` |
+| Linux（Debian、Ubuntu） | `AlgoLocal-*-Linux.deb` |
+| Linux（Fedora、RHEL） | `AlgoLocal-*-Linux.rpm` |
+
+macOS 若提示应用已损坏，清除隔离属性即可：
+
+```bash
+xattr -cr "/Applications/AlgoLocal.app"
+```
+
+### 从源码运行
+
+需要 Node.js 18 及以上、npm 8 及以上。
+
+```bash
+git clone https://github.com/zxypro1/algolocal.git
+cd algolocal
+npm install
+npm run build
+npm start
+```
+
+随后访问 http://localhost:3000。`start-local.bat`（Windows）与 `start-local.sh`（macOS、Linux）执行相同步骤，并在首次运行时可选地写入 AI 配置文件。
+
 ## 目录
 
+- [快速开始](#快速开始)
 - [特性](#特性)
 - [两种练习模式](#两种练习模式)
 - [语言支持](#语言支持)
 - [AI 功能](#ai-功能)
-- [安装](#安装)
 - [使用](#使用)
 - [开发](#开发)
 - [项目结构](#项目结构)
@@ -83,42 +119,6 @@
 | 工程评审 | 从并发安全、失败行为、模块边界与风格评审已完成的关卡 |
 
 支持的服务商：DeepSeek、OpenAI、Claude、Qwen，以及通过 Ollama 运行的本地模型。详见 [AI_PROVIDER_GUIDE.md](./AI_PROVIDER_GUIDE.md)。
-
-## 安装
-
-### 桌面应用
-
-无需任何运行时依赖。[下载最新版本](https://github.com/zxypro1/algolocal/releases/latest)：
-
-| 平台 | 安装包 |
-|---|---|
-| macOS（Apple 芯片） | `AlgoLocal-*-macOS-arm64.dmg` |
-| macOS（Intel） | `AlgoLocal-*-macOS-x64.dmg` |
-| Windows（安装版） | `AlgoLocal-*-Windows-Setup.exe` |
-| Windows（便携版） | `AlgoLocal-*-Windows-Portable.exe` |
-| Linux（AppImage） | `AlgoLocal-*-Linux.AppImage` |
-| Linux（Debian、Ubuntu） | `AlgoLocal-*-Linux.deb` |
-| Linux（Fedora、RHEL） | `AlgoLocal-*-Linux.rpm` |
-
-macOS 若提示应用已损坏，清除隔离属性即可：
-
-```bash
-xattr -cr "/Applications/AlgoLocal.app"
-```
-
-### 从源码运行
-
-需要 Node.js 18 及以上、npm 8 及以上。
-
-```bash
-git clone https://github.com/zxypro1/algolocal.git
-cd algolocal
-npm install
-npm run build
-npm start
-```
-
-随后访问 http://localhost:3000。`start-local.bat`（Windows）与 `start-local.sh`（macOS、Linux）执行相同步骤，并在首次运行时可选地写入 AI 配置文件。
 
 ## 使用
 
