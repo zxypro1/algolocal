@@ -1,14 +1,28 @@
+<div align="center">
+
+<img src="./docs/icon.png" width="96" alt="AlgoLocal" />
+
 # AlgoLocal
 
-[中文](./README-zh.md) | [Español](./README.es-ES.md)
+**Offline coding practice, from LeetCode-style problems to real engineering projects.**
 
-[Discussions](https://github.com/zxypro1/algolocal/discussions) | [Issues](https://github.com/zxypro1/algolocal/issues) | [Pull Requests](https://github.com/zxypro1/algolocal/pulls)
+<p>
+  <a href="https://github.com/zxypro1/algolocal/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/zxypro1/algolocal?style=flat-square&color=14c8ff" /></a>
+  <a href="https://github.com/zxypro1/algolocal/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/zxypro1/algolocal/total?style=flat-square&color=14c8ff" /></a>
+  <a href="https://github.com/zxypro1/algolocal/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/zxypro1/algolocal?style=flat-square&color=ff7a32" /></a>
+  <img alt="Platforms" src="https://img.shields.io/badge/macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square" />
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" />
+</p>
 
-> A local-first desktop application for coding practice. Solve LeetCode-style algorithm problems in JavaScript, TypeScript or Python, then build multi-stage engineering projects that are graded on concurrency, latency, resilience and code quality. Runs fully offline; AI assistance is optional and uses the provider you configure.
+[中文](./README-zh.md) &nbsp;·&nbsp; [Español](./README.es-ES.md) &nbsp;·&nbsp; [Website](https://zxypro1.github.io/algolocal/) &nbsp;·&nbsp; [Discussions](https://github.com/zxypro1/algolocal/discussions) &nbsp;·&nbsp; [Issues](https://github.com/zxypro1/algolocal/issues)
+
+</div>
+
+<br />
+
+Solve LeetCode-style algorithm problems in JavaScript, TypeScript or Python, then build multi-stage engineering projects that are graded on concurrency, latency, resilience and code quality. Everything runs on your own machine; AI assistance is optional and uses the provider you configure.
 
 <img alt="Solving an algorithm problem, tests running in the browser" src="./docs/screenshots/practice-en.png" />
-
-<img alt="Engineering Practice: a multi-file workspace with hidden specs and engineering gates" src="./docs/screenshots/engineering-en.png" />
 
 ## Quick start
 
@@ -60,7 +74,7 @@ The application is then available at http://localhost:3000. `start-local.bat` (W
 
 ## Features
 
-| | |
+| Capability | Detail |
 |---|---|
 | Two practice modes | Algorithm problems and multi-stage engineering projects |
 | Offline execution | Code runs in the browser through WebAssembly, with no server-side execution |
@@ -79,6 +93,8 @@ Standard interview-style practice: read the statement, implement the function, r
 ### Engineering practice
 
 A project is a small system built across several stages in a multi-file workspace. Correctness is necessary but not sufficient; each stage also measures behaviour.
+
+<img alt="Engineering Practice: a multi-file workspace with hidden specs and engineering gates" src="./docs/screenshots/engineering-en.png" />
 
 | Component | Description |
 |---|---|

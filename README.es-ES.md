@@ -1,14 +1,28 @@
+<div align="center">
+
+<img src="./docs/icon.png" width="96" alt="AlgoLocal" />
+
 # AlgoLocal
 
-[English](./README.md) | [中文](./README-zh.md)
+**Práctica de programación sin conexión: de problemas al estilo LeetCode a proyectos de ingeniería reales.**
 
-[Discusiones](https://github.com/zxypro1/algolocal/discussions) | [Incidencias](https://github.com/zxypro1/algolocal/issues) | [Pull Requests](https://github.com/zxypro1/algolocal/pulls)
+<p>
+  <a href="https://github.com/zxypro1/algolocal/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/zxypro1/algolocal?style=flat-square&color=14c8ff" /></a>
+  <a href="https://github.com/zxypro1/algolocal/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/zxypro1/algolocal/total?style=flat-square&color=14c8ff" /></a>
+  <a href="https://github.com/zxypro1/algolocal/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/zxypro1/algolocal?style=flat-square&color=ff7a32" /></a>
+  <img alt="Platforms" src="https://img.shields.io/badge/macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square" />
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" />
+</p>
 
-> Aplicación de escritorio local-first para practicar programación. Resuelve problemas de algoritmos al estilo LeetCode en JavaScript, TypeScript o Python, y después construye proyectos de ingeniería por etapas evaluados por concurrencia, latencia, resiliencia y calidad del código. Funciona sin conexión; la asistencia de IA es opcional y usa el proveedor que configures.
+[English](./README.md) &nbsp;·&nbsp; [中文](./README-zh.md) &nbsp;·&nbsp; [Sitio web](https://zxypro1.github.io/algolocal/) &nbsp;·&nbsp; [Discusiones](https://github.com/zxypro1/algolocal/discussions) &nbsp;·&nbsp; [Incidencias](https://github.com/zxypro1/algolocal/issues)
+
+</div>
+
+<br />
+
+Resuelve problemas de algoritmos al estilo LeetCode en JavaScript, TypeScript o Python, y después construye proyectos de ingeniería por etapas evaluados por concurrencia, latencia, resiliencia y calidad del código. Todo se ejecuta en tu propia máquina; la asistencia de IA es opcional y usa el proveedor que configures.
 
 <img alt="Resolviendo un problema de algoritmos, con las pruebas ejecutándose en el navegador" src="./docs/screenshots/practice-en.png" />
-
-<img alt="Práctica de Ingeniería: espacio de trabajo multi-archivo con pruebas ocultas y umbrales de ingeniería" src="./docs/screenshots/engineering-en.png" />
 
 ## Inicio rápido
 
@@ -60,7 +74,7 @@ La aplicación queda disponible en http://localhost:3000. `start-local.bat` (Win
 
 ## Características
 
-| | |
+| Capacidad | Detalle |
 |---|---|
 | Dos modos de práctica | Problemas de algoritmos y proyectos de ingeniería por etapas |
 | Ejecución sin conexión | El código se ejecuta en el navegador mediante WebAssembly, sin ejecución en servidor |
@@ -79,6 +93,8 @@ Práctica de estilo entrevista: lee el enunciado, implementa la función, ejecut
 ### Práctica de ingeniería
 
 Un proyecto es un sistema pequeño que se construye por etapas en un espacio de trabajo multi-archivo. Que funcione es necesario pero no suficiente: cada etapa mide además su comportamiento.
+
+<img alt="Práctica de Ingeniería: espacio de trabajo multi-archivo con pruebas ocultas y umbrales de ingeniería" src="./docs/screenshots/engineering-en.png" />
 
 | Componente | Descripción |
 |---|---|

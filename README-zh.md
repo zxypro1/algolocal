@@ -1,14 +1,28 @@
+<div align="center">
+
+<img src="./docs/icon.png" width="96" alt="AlgoLocal" />
+
 # AlgoLocal
 
-[English](./README.md) | [Español](./README.es-ES.md)
+**离线编程练习：从 LeetCode 风格的算法题，到真实的工程项目。**
 
-[讨论区](https://github.com/zxypro1/algolocal/discussions) | [Issues](https://github.com/zxypro1/algolocal/issues) | [Pull Requests](https://github.com/zxypro1/algolocal/pulls)
+<p>
+  <a href="https://github.com/zxypro1/algolocal/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/zxypro1/algolocal?style=flat-square&color=14c8ff" /></a>
+  <a href="https://github.com/zxypro1/algolocal/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/zxypro1/algolocal/total?style=flat-square&color=14c8ff" /></a>
+  <a href="https://github.com/zxypro1/algolocal/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/zxypro1/algolocal?style=flat-square&color=ff7a32" /></a>
+  <img alt="Platforms" src="https://img.shields.io/badge/macOS%20%7C%20Windows%20%7C%20Linux-lightgrey?style=flat-square" />
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" />
+</p>
 
-> 本地优先的编程练习桌面应用。用 JavaScript、TypeScript 或 Python 刷 LeetCode（力扣）风格的算法题，再进入工程实战：多关卡的真实项目，按并发度、延迟、容错和代码质量评分。全程离线可用，AI 辅助可选，且由你自行配置服务商。
+[English](./README.md) &nbsp;·&nbsp; [Español](./README.es-ES.md) &nbsp;·&nbsp; [官网](https://zxypro1.github.io/algolocal/zh/) &nbsp;·&nbsp; [讨论区](https://github.com/zxypro1/algolocal/discussions) &nbsp;·&nbsp; [Issues](https://github.com/zxypro1/algolocal/issues)
+
+</div>
+
+<br />
+
+用 JavaScript、TypeScript 或 Python 刷 LeetCode（力扣）风格的算法题，再进入工程实战：多关卡的真实项目，按并发度、延迟、容错和代码质量评分。全部运行在你自己的机器上，AI 辅助可选，且由你自行配置服务商。
 
 <img alt="做算法题，测试在浏览器里直接跑" src="./docs/screenshots/practice-zh.png" />
-
-<img alt="工程实战：多文件工作区、隐藏验收用例与工程指标门槛" src="./docs/screenshots/engineering-zh.png" />
 
 ## 快速开始
 
@@ -60,7 +74,7 @@ npm start
 
 ## 特性
 
-| | |
+| 能力 | 说明 |
 |---|---|
 | 两种练习模式 | 算法题与多关卡工程实战项目 |
 | 离线执行 | 代码通过 WebAssembly 在浏览器内运行，无服务端执行 |
@@ -79,6 +93,8 @@ npm start
 ### 工程实战
 
 一道工程题是一个分关卡构建的小系统，在多文件工作区里完成。跑通只是必要条件，每一关还会度量它的运行表现。
+
+<img alt="工程实战：多文件工作区、隐藏验收用例与工程指标门槛" src="./docs/screenshots/engineering-zh.png" />
 
 | 组成 | 说明 |
 |---|---|
