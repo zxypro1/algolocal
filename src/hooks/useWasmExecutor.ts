@@ -74,7 +74,7 @@ let globalRuntime: WasmRuntimeState = {
  * 使用 Function 构造函数安全执行 JavaScript 代码
  * 比 iframe 更可靠，适用于用户自己编写的代码
  */
-function executeCode(code: string): any {
+export function executeCode(code: string): any {
   try {
     // 使用 Function 构造函数创建一个新的函数作用域
     const fn = new Function(code);
@@ -212,8 +212,13 @@ async function loadPyodide(): Promise<any> {
 
 /**
  * 执行 JavaScript 代码（使用 Function 构造函数）
+ *
+ * 这个函数和下面的 parseTestInput / deepEqual 之所以导出，是为了让
+ * tests/api/solutions.test.ts 能用**同一段代码**去验证题库里每一份参考实现。
+ * 测试里复制一份执行逻辑的话，测的就是那份副本，题库和线上执行器之间的
+ * 分歧反而看不见。
  */
-async function executeJavaScript(
+export async function executeJavaScript(
   code: string,
   args: any[],
   isLinkedListProblem: boolean = false
@@ -448,7 +453,7 @@ function extractFunctionName(template: string, language: string): string {
 /**
  * 解析测试输入
  */
-function parseTestInput(input: string): any[] {
+export function parseTestInput(input: string): any[] {
   try {
     // 处理多个参数的情况
     if (input.includes(',')) {
@@ -650,7 +655,7 @@ function calculatePerformanceStats(
 /**
  * 深度比较两个值
  */
-function deepEqual(a: any, b: any): boolean {
+export function deepEqual(a: any, b: any): boolean {
   if (Array.isArray(a) && Array.isArray(b)) {
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) {

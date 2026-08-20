@@ -76,6 +76,20 @@ function text(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+/**
+ * 测试用例的 input/output 名义上是字符串，实际的题库里混着数字。
+ *
+ * 直接走 text() 会把 `output: 2` 变成空字符串 —— 一道题被导进工坊或者发到
+ * 市场之后，期望输出静默变空，然后所有用例都「不通过」。这类损坏比报错难查
+ * 得多，所以这里把标量原样序列化，只有对象和数组才当作坏数据丢掉。
+ */
+function scalarText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return JSON.stringify(value);
+  if (value === null) return 'null';
+  return '';
+}
+
 export function normalizeLocalized(value: unknown, fallback = ''): LocalizedText {
   if (typeof value === 'string') return { en: value, zh: value };
   if (value && typeof value === 'object') {
@@ -116,10 +130,10 @@ export function coerceProblem(raw: unknown): AlgorithmProblem {
     description: normalizeLocalized(source.description),
     examples: Array.isArray(source.examples)
       ? source.examples
-          .filter((example: any) => example && (typeof example.input === 'string' || typeof example.output === 'string'))
+          .filter((example: any) => example && (example.input !== undefined || example.output !== undefined))
           .map((example: any) => ({
-            input: text(example.input),
-            output: text(example.output),
+            input: scalarText(example.input),
+            output: scalarText(example.output),
             ...(example.explanation ? { explanation: normalizeLocalized(example.explanation) } : {}),
           }))
           .slice(0, 20)
@@ -140,7 +154,7 @@ export function coerceProblem(raw: unknown): AlgorithmProblem {
     tests: Array.isArray(source.tests)
       ? source.tests
           .filter((testCase: any) => testCase && typeof testCase === 'object')
-          .map((testCase: any) => ({ input: text(testCase.input), output: text(testCase.output) }))
+          .map((testCase: any) => ({ input: scalarText(testCase.input), output: scalarText(testCase.output) }))
           .slice(0, 200)
       : [],
   };

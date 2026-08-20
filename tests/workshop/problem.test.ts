@@ -157,3 +157,30 @@ describe('validateProblem', () => {
     }
   });
 });
+
+describe('non-string test values', () => {
+  it('keeps a numeric expected output instead of blanking it', () => {
+    // 题库里真的有这种数据（binary-search-implementation 的 output 存成了数字）。
+    // 空字符串的期望输出会让所有用例都判失败，而且完全看不出原因。
+    const problem = coerceProblem({
+      tests: [
+        { input: '[1,2,3],2', output: 1 },
+        { input: '[1],9', output: -1 },
+        { input: '[],0', output: false },
+        { input: 'x', output: null },
+      ],
+    });
+
+    expect(problem.tests.map((testCase) => testCase.output)).toEqual(['1', '-1', 'false', 'null']);
+  });
+
+  it('keeps a numeric example instead of dropping the row', () => {
+    const problem = coerceProblem({ examples: [{ input: 5, output: 25 }] });
+    expect(problem.examples).toEqual([{ input: '5', output: '25' }]);
+  });
+
+  it('still drops a structured value, which is not a valid expectation string', () => {
+    const problem = coerceProblem({ tests: [{ input: 'x', output: { a: 1 } }] });
+    expect(problem.tests[0].output).toBe('');
+  });
+});

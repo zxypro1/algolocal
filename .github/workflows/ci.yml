@@ -15,12 +15,6 @@ jobs:
     name: Typecheck, test and build
     runs-on: ubuntu-latest
 
-    env:
-      # 云端测试跑在内存仓储上，不需要真的数据库。这两个变量让路由认为
-      # 自己「配好了」，从而走完整的鉴权和发布链路。
-      ALGOLOCAL_CLOUD_MEMORY: '1'
-      AUTH_SECRET: ci-secret-not-used-anywhere-real
-
     steps:
       - uses: actions/checkout@v4
 
@@ -38,8 +32,10 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Unit and integration tests
-        run: npx jest tests/cloud tests/workshop tests/engineering tests/ai tests/editor
+      - name: Tests
+        # 云端那部分跑在内存仓储上，不需要数据库，也不需要环境变量：
+        # tests/cloud/harness.ts 自己把配置装好。
+        run: npm test
 
       - name: Verify the preset engineering projects still solve
         run: npm run projects:verify

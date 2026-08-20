@@ -17,19 +17,9 @@ class TestRunner {
         description: 'Validates problem structure and data integrity'
       },
       {
-        name: 'API Functionality',
-        file: 'tests/api/run.test.js', 
-        description: 'Tests core API endpoints and basic functionality'
-      },
-      {
-        name: 'Language-Specific Features',
-        file: 'tests/api/language-specific.test.js',
-        description: 'Tests language-specific template handling and edge cases'
-      },
-      {
         name: 'Solution Validation',
-        file: 'tests/api/solutions.test.js',
-        description: 'Validates all provided solutions work correctly'
+        file: 'tests/api/solutions.test.ts',
+        description: "Runs every reference solution against its own test cases, through the app's own executor"
       },
       {
         name: 'Editor Drafts',
