@@ -35,15 +35,19 @@ export function isLibraryWritable(): boolean {
 /**
  * 写题库之前调它。不可写时直接把响应写完并返回 false，调用方 return 即可。
  *
- * 用 501 而不是 403：这不是权限问题，是这个部署形态压根没有实现这个能力。
+ * 用 501 而不是 403：在网页版上这不是权限问题，是这个部署形态压根没有实现
+ * 这个能力。之前这里没有检查，写失败会变成一个语焉不详的 500。
  */
 export function ensureLibraryWritable(res: NextApiResponse): boolean {
   if (isLibraryWritable()) return true;
 
-  res.status(501).json({
-    error:
-      'This deployment has a read-only problem library. Editing problems works in the desktop app or a local server.',
-    code: 'read_only_library',
-  });
+  // 两种不可写的情况分开说。桌面端装在只读目录里（比如 macOS 的
+  // /Applications 且当前用户没有写权限）也会走到这里，这时让用户去
+  // 「用桌面端」是一句废话。
+  const message = isServerlessDeployment()
+    ? 'This deployment has a read-only problem library. Use the desktop app or a local server to edit problems, or export the JSON instead.'
+    : 'The problem library is not writable. Check the permissions on public/problems.json.';
+
+  res.status(501).json({ error: message, code: 'read_only_library' });
   return false;
 }
