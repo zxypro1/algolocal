@@ -65,6 +65,8 @@ La aplicación queda disponible en http://localhost:3000. `start-local.bat` (Win
 - [Inicio rápido](#inicio-rápido)
 - [Características](#características)
 - [Modos de práctica](#modos-de-práctica)
+- [Taller](#taller)
+- [Mercado de problemas](#mercado-de-problemas)
 - [Lenguajes](#lenguajes)
 - [Funciones de IA](#funciones-de-ia)
 - [Uso](#uso)
@@ -82,6 +84,8 @@ La aplicación queda disponible en http://localhost:3000. `start-local.bat` (Win
 | IA opcional | Generación de problemas, pistas, soluciones y revisión de ingeniería con tu propio proveedor |
 | Editor | Monaco, con borradores guardados por problema y por lenguaje |
 | Panel | Precisión por dificultad y etiqueta, mapa de calor de actividad, intentos recientes |
+| Taller | Escribe, verifica y publica tus propios problemas, con una cadena de herramientas de IA |
+| Mercado de problemas | Opcional. Descarga y comparte problemas con una cuenta. |
 | Plataformas | Windows, macOS, Linux |
 
 ## Modos de práctica
@@ -114,6 +118,47 @@ Se incluyen tres proyectos:
 | Pasarela de API resiliente | Token bucket, circuit breaker, presupuestos de tiempo de espera |
 
 Los proyectos también pueden generarse con IA. Un proyecto generado se ejecuta contra su propia solución de referencia antes de aceptarse. El formato de autoría está en la [Guía de Práctica de Ingeniería](./ENGINEERING-PRACTICE-GUIDE.md).
+
+## Taller
+
+El taller es donde se escriben los problemas. Edita los dos tipos: los de algoritmos como un
+formulario sobre enunciado, plantillas, solución de referencia y casos de prueba; los proyectos
+de ingeniería etapa por etapa, hasta las pruebas ocultas y los umbrales de métricas.
+
+| Paso | Qué ocurre |
+|---|---|
+| Borrador | Empieza en blanco, deriva algo de tu biblioteca o importa JSON. Los borradores viven en el navegador. |
+| Asistencia | Pulir el enunciado, completar traducciones, proponer casos de prueba, escribir una solución de referencia, revisar el conjunto |
+| Verificación | Ejecuta la solución de referencia contra los casos; en un proyecto, ejecuta cada etapa y confirma que el esqueleto inicial falla |
+| Entrega | Guarda en tu biblioteca local, o publica en el mercado |
+
+La verificación es la parte que importa. Un problema cuyas pruebas no concuerdan con su propia
+solución de referencia parece correcto hasta que alguien intenta resolverlo, y ese es
+exactamente el fallo que el taller existe para detectar antes.
+
+El taller funciona sin conexión: los borradores son locales, la verificación se ejecuta en tu
+máquina y el asistente de IA usa el proveedor que hayas configurado, incluido uno local mediante
+Ollama. Solo publicar necesita red.
+
+## Mercado de problemas
+
+Opcional y fuera del camino principal. Explora lo que otras personas han escrito, descárgalo a
+tu biblioteca local y publica lo tuyo. Publicar y marcar con estrella requieren una cuenta;
+descargar no.
+
+| Capacidad | Requiere cuenta |
+|---|---|
+| Explorar y buscar | No |
+| Descargar a tu biblioteca | No |
+| Marcar con estrella | Sí |
+| Publicar y actualizar | Sí |
+
+Inicia sesión con correo y contraseña, o con GitHub. Todo lo demás sigue funcionando tengas
+cuenta o no: si el mercado no está disponible, la página lo dice y el resto de la aplicación
+queda intacta.
+
+Alojar tu propio backend requiere una base de datos Postgres y dos variables de entorno. Consulta
+la [Guía de Despliegue en la Nube](./CLOUD-DEPLOYMENT-GUIDE.md).
 
 ## Lenguajes
 
@@ -166,6 +211,10 @@ Configuración y gestión de problemas:
 | `npm run test:engineering` | Pruebas del runtime de ingeniería y de los proyectos incluidos |
 | `npm run test:ai` | Pruebas de proveedor, streaming y extracción de JSON |
 | `npm run test:editor` | Pruebas de persistencia de borradores |
+| `npm run test:workshop` | Validación de problemas, borradores y resolubilidad de las plantillas |
+| `npm run test:cloud` | Cuentas, mercado, paridad de repositorios y la garantía sin conexión |
+| `npm run db:migrate` | Crea o actualiza el esquema de la base de datos |
+| `npm run smoke:cloud <url>` | Ejecuta un ciclo completo de publicación y borrado contra un despliegue |
 | `npm run projects:build` | Compila `projects/definitions` en `projects.json` |
 | `npm run projects:verify` | Ejecuta cada etapa contra su solución de referencia |
 | `npm run dist:mac` / `dist:win` / `dist:linux` / `dist:all` | Compilaciones de escritorio, ver [DESKTOP-APP-GUIDE.md](./DESKTOP-APP-GUIDE.md) |
@@ -179,6 +228,8 @@ algolocal/
 ├── pages/
 │   ├── api/                    # Endpoints de problemas, IA y proyectos
 │   ├── problems/[id].tsx       # Detalle del problema, con chat y soluciones de IA
+│   ├── cloud/                  # Páginas de cuenta y mercado de problemas
+│   ├── workshop/               # Creación de problemas
 │   ├── projects/               # Práctica de Ingeniería: lista, espacio de trabajo, generador
 │   ├── generator.tsx           # Generador de problemas con IA
 │   ├── stats.tsx               # Panel de práctica
@@ -188,7 +239,10 @@ algolocal/
 │   ├── components/             # Componentes de React
 │   ├── hooks/                  # Ejecutor WASM, ejecutor de etapas, configuración de IA
 │   ├── lib/engineering/        # Reloj virtual, lab, runtime de módulos, runner de specs, puntuación
+│   ├── lib/cloud/              # Cliente de nube: resolución de dirección, sesión, modo sin conexión
+│   ├── lib/workshop/           # Modelo de problema, validación, borradores
 │   ├── lib/server/             # Proveedor de IA, almacén de proyectos, prompts
+│   ├── lib/server/cloud/       # Cuentas, mercado, repositorios, migraciones
 │   └── workers/                # Worker que ejecuta una etapa
 ├── projects/definitions/       # Fuentes de los proyectos de ingeniería
 ├── public/
@@ -205,6 +259,7 @@ algolocal/
 | [ENGINEERING-PRACTICE-GUIDE.md](./ENGINEERING-PRACTICE-GUIDE.md) | Cómo funciona el runtime de ingeniería y cómo crear proyectos |
 | [AI_PROVIDER_GUIDE.md](./AI_PROVIDER_GUIDE.md) | Configuración de proveedores, modelos, resolución de problemas |
 | [MODIFY-PROBLEMS-GUIDE.md](./MODIFY-PROBLEMS-GUIDE.md) | Formato de los problemas y edición sin conexión |
+| [CLOUD-DEPLOYMENT-GUIDE.md](./CLOUD-DEPLOYMENT-GUIDE.md) | Despliegue del backend opcional y su sistema de pruebas |
 | [DESKTOP-APP-GUIDE.md](./DESKTOP-APP-GUIDE.md) | Compilación y empaquetado de escritorio |
 
 ## Contribuir

@@ -44,6 +44,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "vercel-build": "node scripts/db-migrate.js --if-configured && next build",
     "start": "next start",
     "deploy-local": "npm run build && npm start",
     "setup": "npm install && npm run build",
@@ -57,6 +58,9 @@
     "test:engineering": "jest tests/engineering",
     "test:ai": "jest tests/ai",
     "test:editor": "jest tests/editor",
+    "test:cloud": "jest tests/cloud",
+    "test:workshop": "jest tests/workshop",
+    "typecheck": "tsc --noEmit",
     "icons:generate": "node scripts/generate-icons.js",
     "electron:dev": "npm run build && electron .",
     "electron:start": "electron .",
@@ -79,13 +83,16 @@
     "release:major": "bash scripts/release.sh major",
     "release:dry": "bash scripts/release.sh patch --dry-run",
     "projects:build": "node scripts/build-projects.js",
-    "projects:verify": "node scripts/build-projects.js && node scripts/verify-projects.js"
+    "projects:verify": "node scripts/build-projects.js && node scripts/verify-projects.js",
+    "db:migrate": "node scripts/db-migrate.js",
+    "smoke:cloud": "node scripts/smoke-cloud.js"
   },
   "dependencies": {
     "@mantine/core": "7.6.1",
     "@mantine/hooks": "7.6.1",
     "@mantine/notifications": "7.6.1",
     "@monaco-editor/react": "^4.7.0",
+    "@neondatabase/serverless": "^0.10.4",
     "@reduxjs/toolkit": "^2.0.1",
     "@tabler/icons-react": "^3.36.1",
     "@types/katex": "^0.16.7",

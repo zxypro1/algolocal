@@ -65,6 +65,8 @@ npm start
 - [快速开始](#快速开始)
 - [特性](#特性)
 - [两种练习模式](#两种练习模式)
+- [题目工坊](#题目工坊)
+- [题目市场](#题目市场)
 - [语言支持](#语言支持)
 - [AI 功能](#ai-功能)
 - [使用](#使用)
@@ -82,6 +84,8 @@ npm start
 | AI 可选 | 题目生成、提示、题解与工程评审，使用你自己配置的服务商 |
 | 编辑器 | Monaco，按「题目 + 语言」分别保存草稿 |
 | 数据看板 | 按难度与标签的正确率、活跃热力图、最近尝试记录 |
+| 题目工坊 | 编辑、验证、发布自己的题目，配套一整条 AI 工具链 |
+| 题目市场 | 可选。登录后可以下载和分享题目。 |
 | 平台 | Windows、macOS、Linux |
 
 ## 两种练习模式
@@ -114,6 +118,41 @@ npm start
 | 有韧性的 API 网关 | 令牌桶、熔断器、超时预算 |
 
 工程题也可以由 AI 生成。生成结果会先用其自带的参考实现执行一遍，通过后才入库。出题格式见[工程实战指南](./ENGINEERING-PRACTICE-GUIDE.md)。
+
+## 题目工坊
+
+工坊是出题的地方，两类题都能编：算法题是一张表单，覆盖题面、模板、参考实现和测试用例；
+工程题按关卡编辑，一直深入到隐藏用例和指标门槛。
+
+| 步骤 | 做什么 |
+|---|---|
+| 起草 | 从空白开始、从题库派生，或者导入 JSON。草稿存在浏览器里。 |
+| 辅助 | 润色题面、补全翻译、补充测试用例、生成参考实现、整体评审 |
+| 验证 | 用参考实现跑一遍测试用例；工程题则逐关运行，并确认起始骨架跑不过 |
+| 交付 | 存进本地题库，或者发布到市场 |
+
+关键是「验证」这一步。一道测试用例和参考实现对不上的题目，在有人真去做之前看起来毫无问题，
+而工坊存在的意义就是在那之前把它拦下来。
+
+工坊全程离线可用：草稿在本地，验证跑在本机，AI 助手用你自己配置的服务商（可以是本地的
+Ollama）。只有发布到市场需要联网。
+
+## 题目市场
+
+可选功能，不在主链路上。可以浏览别人写的题目、下载到本地题库，也可以发布自己的。
+发布和 star 需要登录，下载不需要。
+
+| 能力 | 需要账号 |
+|---|---|
+| 浏览与搜索 | 否 |
+| 下载到本地题库 | 否 |
+| Star | 是 |
+| 发布与更新 | 是 |
+
+支持邮箱密码和 GitHub 两种登录方式。不注册也不影响任何其他功能：市场连不上时，
+市场页会明说，应用的其余部分毫无变化。
+
+自建后端需要一个 Postgres 数据库和两个环境变量，详见[云端部署指南](./CLOUD-DEPLOYMENT-GUIDE.md)。
 
 ## 语言支持
 
@@ -166,6 +205,10 @@ npm start
 | `npm run test:engineering` | 工程运行时与预置题目测试 |
 | `npm run test:ai` | 服务商、流式协议与 JSON 解析测试 |
 | `npm run test:editor` | 草稿持久化测试 |
+| `npm run test:workshop` | 题目校验、草稿存储与起始模板的可解性 |
+| `npm run test:cloud` | 账号、市场、仓储一致性与离线保证 |
+| `npm run db:migrate` | 建立或升级云端数据库结构 |
+| `npm run smoke:cloud <url>` | 对着一个部署跑一遍完整的发布与删除流程 |
 | `npm run projects:build` | 把 `projects/definitions` 编译为 `projects.json` |
 | `npm run projects:verify` | 用参考实现执行每一关 |
 | `npm run dist:mac` / `dist:win` / `dist:linux` / `dist:all` | 桌面端打包，详见 [DESKTOP-APP-GUIDE-zh.md](./DESKTOP-APP-GUIDE-zh.md) |
@@ -179,6 +222,8 @@ algolocal/
 ├── pages/
 │   ├── api/                    # 题目、AI 与工程项目接口
 │   ├── problems/[id].tsx       # 题目详情，含 AI 聊天与题解
+│   ├── cloud/                  # 账号与题目市场页面
+│   ├── workshop/               # 题目工坊
 │   ├── projects/               # 工程实战：列表、工作区、生成器
 │   ├── generator.tsx           # AI 题目生成器
 │   ├── stats.tsx               # 练习数据看板
@@ -188,7 +233,10 @@ algolocal/
 │   ├── components/             # React 组件
 │   ├── hooks/                  # WASM 执行器、关卡运行器、AI 配置
 │   ├── lib/engineering/        # 虚拟时钟、lab、模块运行时、用例框架、评分
+│   ├── lib/cloud/              # 云端客户端：地址解析、登录态、离线处理
+│   ├── lib/workshop/           # 题目模型、校验、草稿
 │   ├── lib/server/             # AI 服务商、题库存储、提示词
+│   ├── lib/server/cloud/       # 账号、市场、仓储、迁移
 │   └── workers/                # 关卡运行 Worker
 ├── projects/definitions/       # 工程实战题目源文件
 ├── public/
@@ -205,6 +253,7 @@ algolocal/
 | [ENGINEERING-PRACTICE-GUIDE.md](./ENGINEERING-PRACTICE-GUIDE.md) | 工程运行时的原理与出题方式 |
 | [AI_PROVIDER_GUIDE.md](./AI_PROVIDER_GUIDE.md) | 服务商配置、模型、故障排查 |
 | [MODIFY-PROBLEMS-GUIDE.md](./MODIFY-PROBLEMS-GUIDE.md) | 题目格式与离线编辑 |
+| [CLOUD-DEPLOYMENT-GUIDE.md](./CLOUD-DEPLOYMENT-GUIDE.md) | 可选后端的部署方式与配套测试体系 |
 | [DESKTOP-APP-GUIDE-zh.md](./DESKTOP-APP-GUIDE-zh.md) | 桌面端构建与打包 |
 
 ## 贡献

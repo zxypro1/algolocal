@@ -5,6 +5,7 @@ import '@mantine/core/styles.css';
 import '../styles/globals.css';
 import { I18nProvider, useI18n } from '../src/contexts/I18nContext';
 import { ThemeProvider, useTheme } from '../src/contexts/ThemeContext';
+import { CloudProvider } from '../src/contexts/CloudContext';
 
 // AlgoLocal 品牌青色：与新的本地执行回路标志保持一致
 const brand: MantineColorsTuple = [
@@ -122,7 +123,10 @@ export default function App(props: AppProps) {
       <I18nProvider>
         <AppHead />
         <ThemeProvider>
-          <AppContent {...props} />
+          {/* 只提供状态，挂载时不发请求 —— 离线主链路不受影响 */}
+          <CloudProvider>
+            <AppContent {...props} />
+          </CloudProvider>
         </ThemeProvider>
       </I18nProvider>
     </>

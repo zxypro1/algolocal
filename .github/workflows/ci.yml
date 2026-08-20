@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck, test and build
+    runs-on: ubuntu-latest
+
+    env:
+      # 云端测试跑在内存仓储上，不需要真的数据库。这两个变量让路由认为
+      # 自己「配好了」，从而走完整的鉴权和发布链路。
+      ALGOLOCAL_CLOUD_MEMORY: '1'
+      AUTH_SECRET: ci-secret-not-used-anywhere-real
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 和 release.yml 保持一致。npm 的版本会影响 peer/optional 依赖的
+          # 解析结果，本地和 CI 用不同的 Node 装出来的依赖树可能不一样，
+          # 而那种差异只会在构建时暴露出来。
+          node-version: '20'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit and integration tests
+        run: npx jest tests/cloud tests/workshop tests/engineering tests/ai tests/editor
+
+      - name: Verify the preset engineering projects still solve
+        run: npm run projects:verify
+
+      - name: Build
+        run: npm run build

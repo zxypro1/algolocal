@@ -8,6 +8,7 @@ import {
 } from '../../src/lib/server/aiProvider';
 import { coerceProject, validateProjectShape } from '../../src/lib/engineering/validateProject';
 import { addUserProject } from '../../src/lib/server/projectStore';
+import { ensureLibraryWritable } from '../../src/lib/server/localLibrary';
 import type { EngineeringProject } from '../../src/lib/engineering/types';
 
 export const config = {
@@ -172,6 +173,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // 保存：用户接受了一份生成结果（可能是验证通过的，也可能是「仍然保存」）
     if (presetProject && force) {
+      if (!ensureLibraryWritable(res)) return;
+
       const saved = addUserProject(coerceProject(presetProject));
       return res.status(200).json({ success: true, project: saved, saved: true });
     }

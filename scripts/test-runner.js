@@ -45,6 +45,16 @@ class TestRunner {
         name: 'Engineering Practice Runtime',
         file: 'tests/engineering/runtime.test.ts',
         description: 'Virtual clock, module runtime, metric gates and preset project solvability'
+      },
+      {
+        name: 'Problem Workshop',
+        file: 'tests/workshop',
+        description: 'Problem validation, draft storage and the solvability of the starter templates'
+      },
+      {
+        name: 'Cloud Backend',
+        file: 'tests/cloud',
+        description: 'Accounts, the problem market, repository parity and the offline guarantee'
       }
     ];
   }

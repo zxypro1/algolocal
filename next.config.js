@@ -67,6 +67,17 @@ const nextConfig = {
   },
   // Transpile packages that need it
   transpilePackages: [],
+  experimental: {
+    /**
+     * 题库是用 path.join(APP_ROOT, 'public', ...) 动态拼出来读的，Next 的依赖
+     * 追踪看不出这层关系，打包到 Vercel 的函数里就会少掉这两个文件，网页版
+     * 于是变成一个没有题目的空列表。这里显式告诉它带上。
+     */
+    outputFileTracingIncludes: {
+      '/api/**/*': ['./public/problems.json', './public/projects.json'],
+      '/': ['./public/problems.json'],
+    },
+  },
   // Disable telemetry for desktop app
   env: {
     NEXT_TELEMETRY_DISABLED: '1'

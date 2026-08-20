@@ -33,7 +33,10 @@ import {
   IconRobot,
   IconPackage,
   IconBuildingFactory2,
+  IconBuildingStore,
   IconSettings,
+  IconTool,
+  IconUser,
   IconSearch,
   IconCircleCheckFilled,
   IconProgress,
@@ -444,6 +447,32 @@ export default function Home() {
             </Group>
           </Card>
 
+          {/* 出题与分享。放成一条细带而不是第二个横幅：它们是可选路径，不该和
+              主链路抢注意力，但也不能只藏在抽屉里。 */}
+          <Group gap="xs" mb="md" wrap="wrap">
+            <Button
+              component={Link}
+              href="/workshop"
+              variant="default"
+              size="xs"
+              leftSection={<IconTool size={14} />}
+            >
+              {t('workshop.title')}
+            </Button>
+            <Button
+              component={Link}
+              href="/market"
+              variant="default"
+              size="xs"
+              leftSection={<IconBuildingStore size={14} />}
+            >
+              {t('market.title')}
+            </Button>
+            <Text size="xs" c="dimmed">
+              {t('workshop.subtitle')}
+            </Text>
+          </Group>
+
           {filteredProblems.length === 0 ? (
             <Center mih="60vh">
               <Stack align="center" gap="sm">
@@ -661,12 +690,37 @@ function NavigationDrawer({ opened, onClose }: { opened: boolean; onClose: () =>
           descKey: 'navigation.manageDesc',
           descFallback: 'Manage problems',
         },
+        {
+          href: '/workshop',
+          color: 'cyan',
+          icon: <IconTool size={20} />,
+          labelKey: 'workshop.title',
+          descKey: 'navigation.workshopDesc',
+          descFallback: 'Write and publish your own',
+        },
       ],
     },
     {
       titleKey: 'common.system',
       titleFallback: 'System',
       items: [
+        // 市场和账号是可选的联网功能，点进去之后才会探测；这里只是入口
+        {
+          href: '/market',
+          color: 'indigo',
+          icon: <IconBuildingStore size={20} />,
+          labelKey: 'market.title',
+          descKey: 'navigation.marketDesc',
+          descFallback: 'Download and share problems',
+        },
+        {
+          href: '/account',
+          color: 'pink',
+          icon: <IconUser size={20} />,
+          labelKey: 'account.title',
+          descKey: 'navigation.accountDesc',
+          descFallback: 'Sign in to publish',
+        },
         {
           href: '/settings',
           color: 'gray',

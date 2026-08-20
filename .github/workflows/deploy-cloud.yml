@@ -1,0 +1,74 @@
+name: Deploy cloud backend (Vercel)
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "pages/**"
+      - "src/**"
+      - "public/**"
+      - "scripts/db-migrate.js"
+      - "scripts/smoke-cloud.js"
+      - "package.json"
+      - "package-lock.json"
+      - "next.config.js"
+      - "vercel.json"
+      - ".github/workflows/deploy-cloud.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cloud
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Migrate, deploy, smoke test
+    runs-on: ubuntu-latest
+
+    # 没配 VERCEL_TOKEN 的 fork 不会尝试部署，也不会因此让 CI 变红
+    if: ${{ github.repository == 'zxypro1/algolocal' }}
+
+    environment:
+      name: cloud
+      url: ${{ steps.deploy.outputs.url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Migrate the database
+        # 迁移在部署之前跑：新代码可能依赖新表，反过来会有一个短暂的
+        # 「代码已上线、表还不存在」窗口。迁移本身是幂等且只增不减的，
+        # 所以旧代码在新结构上照样能跑。
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run db:migrate
+
+      - name: Deploy to Vercel
+        id: deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          npx --yes vercel@latest pull --yes --environment=production --token="$VERCEL_TOKEN"
+          npx --yes vercel@latest build --prod --token="$VERCEL_TOKEN"
+          url=$(npx --yes vercel@latest deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Deployed to $url"
+
+      - name: Smoke test the deployment
+        # 注册、发布、star、下载、改版本、删除，对着真实的部署跑一遍。
+        # 单元测试用的是内存仓储，证明不了连接串、迁移和环境变量是对的。
+        run: node scripts/smoke-cloud.js "${{ steps.deploy.outputs.url }}"
+
+      - name: Smoke test the production domain
+        # 上一步打的是这次部署的专属地址；这一步确认别名已经切过去了
+        run: node scripts/smoke-cloud.js "https://algolocal.vercel.app"

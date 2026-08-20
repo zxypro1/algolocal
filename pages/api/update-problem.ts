@@ -1,6 +1,7 @@
 import { NextApiRequest, NextApiResponse } from 'next';
 import fs from 'fs';
 import path from 'path';
+import { ensureLibraryWritable } from '../../src/lib/server/localLibrary';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
@@ -8,6 +9,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   try {
+    if (!ensureLibraryWritable(res)) return;
+
     const { problem, originalId } = req.body;
 
     if (!problem) {

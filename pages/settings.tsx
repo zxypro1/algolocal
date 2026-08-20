@@ -22,6 +22,7 @@ import {
 import { IconRobot } from '@tabler/icons-react';
 import { useTranslation, useI18n } from '../src/contexts/I18nContext';
 import { AppHeader, HEADER_HEIGHT } from '../src/components/AppHeader';
+import { CloudSettingsCard } from '../src/components/cloud/CloudSettingsCard';
 import { DEFAULT_MODELS, SUGGESTED_MODELS } from '../src/lib/aiModels';
 
 export default function SettingsPage() {
@@ -431,6 +432,8 @@ export default function SettingsPage() {
             </Group>
           </Stack>
           </Card>
+
+          <CloudSettingsCard />
         </Stack>
       </Container>
       </AppShell.Main>

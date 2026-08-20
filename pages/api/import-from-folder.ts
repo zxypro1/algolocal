@@ -1,6 +1,7 @@
 import { NextApiRequest, NextApiResponse } from 'next';
 import fs from 'fs';
 import path from 'path';
+import { ensureLibraryWritable } from '../../src/lib/server/localLibrary';
 
 interface Problem {
   id: string;
@@ -98,6 +99,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   try {
+    if (!ensureLibraryWritable(res)) return;
+
     const { folderPath, useProblemsFolder } = req.body;
     const appRoot = process.env.APP_ROOT || process.cwd();
     

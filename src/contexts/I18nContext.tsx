@@ -285,11 +285,20 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       }
       
       if (typeof value === 'string') {
-        // 简单的参数替换
+        // 参数替换。
+        //
+        // 两个坑都在这一行里：
+        //  - 用全局正则而不是 String.replace(string, ...)，后者只替换第一处，
+        //    「通过了 {{total}} 个用例（{{passed}}/{{total}}）」会漏掉后面那个；
+        //  - 替换值走函数形式，不走字符串形式。字符串形式里的 $& 有特殊含义，
+        //    而这些值经常是用户输入的题目标题。
         if (params) {
           return Object.entries(params).reduce(
-            (str, [paramKey, paramValue]) => 
-              str.replace(`{{${paramKey}}}`, String(paramValue)),
+            (str, [paramKey, paramValue]) =>
+              str.replace(
+                new RegExp(`\\{\\{${paramKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\}\\}`, 'g'),
+                () => String(paramValue)
+              ),
             value
           );
         }
