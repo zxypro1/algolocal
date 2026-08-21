@@ -21,7 +21,7 @@ function BrandMark() {
   return (
     <Box
       component="img"
-      src="/favicon.svg?v=4"
+      src="/favicon.svg?v=5"
       alt=""
       aria-hidden="true"
       style={{
