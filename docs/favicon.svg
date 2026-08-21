@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
   <title id="title">AlgoLocal</title>
-  <desc id="desc">An algorithmic path leading into a local core</desc>
-  <rect x="20" y="20" width="472" height="472" rx="104" fill="#11182f"/>
-  <path d="M132 128h258v260H122V210h202v118H210v-72h8"
-        fill="none" stroke="#14c8ff" stroke-width="54" stroke-linecap="square" stroke-linejoin="round"/>
-  <rect x="224" y="224" width="64" height="64" rx="10" fill="#ff7a32"/>
+  <desc id="desc">A stepped path climbing to a cleared stage</desc>
+  <rect width="512" height="512" rx="120" fill="#11182f"/>
+  <path d="M64 384 H192 V256 H320 V128 H448" fill="none" stroke="#14c8ff"
+        stroke-width="64" stroke-linecap="butt" stroke-linejoin="miter"/>
+  <rect x="288" y="96" width="160" height="64" fill="#ff7a32"/>
 </svg>

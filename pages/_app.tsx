@@ -109,7 +109,7 @@ function AppHead() {
     <Head>
       <title>{title}</title>
       <meta name="viewport" content="minimum-scale=1, initial-scale=1, width=device-width" />
-      <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=4" />
+      <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=5" />
       <link rel="icon" type="image/x-icon" href="/favicon.ico" />
       <ColorSchemeScript />
     </Head>
