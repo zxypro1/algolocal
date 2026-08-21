@@ -1,6 +1,6 @@
 {
   "name": "algolocal",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "main": "electron-main.js",
   "description": "Offline coding practice on your own machine: LeetCode-style algorithm problems plus multi-stage engineering projects reviewed on concurrency, latency and code quality. Runs JavaScript, TypeScript and Python in the browser, with optional AI from the provider you choose.",
