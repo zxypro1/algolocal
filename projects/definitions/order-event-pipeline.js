@@ -35,8 +35,455 @@ const contract = readonlyFile(
 /* ------------------------------------------------------------------ */
 
 const stage1 = {
+  id: 'schema-evolution',
+  title: t('第 1 关 · 事件模式与版本演进', 'Stage 1 · Event schemas and versioning'),
+  goal: t(
+    [
+      '在写任何事件系统之前，先回答一个会困扰你三年的问题：**事件的结构变了怎么办？**',
+      '',
+      '数据库表结构变了可以写迁移脚本，一次性把所有行改掉。事件不行——',
+      '事件是**已经发生的事实**，存在日志里、在别人的消费队列里、在备份磁带里。',
+      '你改不了它们，只能让新代码有能力读懂旧格式。',
+      '',
+      '标准做法叫 **upcasting**：注册一串「从版本 N 升到版本 N+1」的转换函数，',
+      '读到旧事件时顺着链条一路升到最新版本，业务代码只面对最新格式。',
+      '',
+      '在 `src/schema.ts` 实现 `createRegistry()`：',
+      '',
+      '- `register(type, fromVersion, upcaster)`：登记一次升级；',
+      '- `upcast(event)`：把任意版本的事件升到最新，**逐级升，不能跳**；',
+      '- `latestVersion(type)`：这个类型当前的最新版本；',
+      '- 遇到比最新版本还新的事件（老消费者读到新数据）要**抛错**，不能当作最新处理。',
+      '',
+      '门槛量的是「逐级」这件事：一个 v1 的事件在最新版本是 v3 时被读到，',
+      '必须经过 **2 次**转换（1→2、2→3）。只调用最后一个 upcaster 的实现',
+      '会得到一个字段缺失的对象，而且不报错——它会在下游某个远处炸掉。',
+    ].join('\n'),
+    [
+      'Before writing any event system, answer a question that will follow you for three years: what',
+      'happens when the shape of an event changes?',
+      '',
+      'A database schema change gets a migration script that rewrites every row. Events do not — an event',
+      'is something that already happened, sitting in a log, in somebody else\'s queue, on a backup tape.',
+      'You cannot change them; you can only make new code able to read old formats.',
+      '',
+      'The standard technique is upcasting: register a chain of "version N to version N+1" transforms, and',
+      'when an old event arrives, walk it up the chain so business code only ever sees the latest shape.',
+      '',
+      'Implement `createRegistry()` in `src/schema.ts`:',
+      '',
+      '- `register(type, fromVersion, upcaster)` records one upgrade step;',
+      '- `upcast(event)` raises any version to the latest, one step at a time and never skipping;',
+      '- `latestVersion(type)` reports the current version of a type;',
+      '- an event newer than the latest known version — old consumer, new data — must throw rather than be',
+      '  treated as current.',
+      '',
+      'The gate measures the "one step at a time" part: a v1 event read when the latest is v3 must pass',
+      'through two transforms. Calling only the last upcaster produces an object missing fields, without',
+      'error, that explodes somewhere far downstream.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('旧版本事件被逐级升到最新', 'Old events are raised one version at a time'),
+    t('已经是最新版本的事件原样通过', 'An already-current event passes through unchanged'),
+    t('比最新还新的版本会抛错', 'A version newer than the latest throws'),
+    t('不同类型的版本链互相独立', 'Version chains are independent per type'),
+    t('upcast 不修改传入的事件对象', 'upcast does not mutate the event it is given'),
+  ],
+  pitfalls: [
+    t(
+      '只应用最后一个 upcaster，假设事件都是从上一个版本来的。生产里同时存在 v1、v2、v3 的事件是常态——老服务还没升级、消息队列里有积压、重放历史数据。跳级转换会产出一个缺字段的对象，而且不抛错，问题在下游很远的地方才暴露出来。',
+      'Applying only the last upcaster on the assumption that every event comes from the previous version. Having v1, v2 and v3 events in flight simultaneously is normal — an unupgraded service, a backlog in the queue, a historical replay. Skipping steps produces an object missing fields, silently, and the problem surfaces far downstream.'
+    ),
+    t(
+      '遇到未知的高版本时当作最新处理。这是老消费者读到新数据的场景，而它读到的字段可能已经改变了语义（比如 `amount` 从「分」变成了「元」）。静默接受会产生一百倍的金额错误；抛错至少让问题在正确的地方停下来。向前兼容做不到就该明确失败。',
+      'Treating an unknown higher version as current. That is an old consumer reading new data, and a field it recognises may have changed meaning — `amount` moving from cents to units, say. Accepting silently produces a hundredfold error; throwing at least stops the problem where it belongs. When forward compatibility is impossible, fail explicitly.'
+    ),
+    t(
+      'upcaster 直接改传入的 payload 对象。同一个事件可能被多个消费者读取，如果 upcast 是原地修改，第二个消费者拿到的就是已经被改过的对象——而它自己的 upcast 会在这个基础上再升一次。每一级都返回新对象，是这类转换链的基本要求。',
+      'Having upcasters mutate the incoming payload. The same event may be read by several consumers, and in-place upcasting hands the second one an already-transformed object which it then upgrades again. Each step returning a new object is the basic requirement for a transform chain.'
+    ),
+    t(
+      '把版本号存在事件外面（比如队列的元数据里）而不是事件本身。事件被持久化、被复制、被重放，任何一次搬运都可能丢掉外部元数据——而丢了版本号的事件是无法解读的。版本号必须是事件结构的一部分，和 payload 一起走。',
+      'Storing the version outside the event, in queue metadata rather than the event itself. Events get persisted, copied and replayed, and any of those moves can drop external metadata — and an event without its version cannot be interpreted at all. The version must be part of the event and travel with the payload.'
+    ),
+  ],
+  hints: [
+    t(
+      '每个 type 存一个 `Map<fromVersion, upcaster>`。`upcast` 就是 `while (v < latest) { payload = map.get(v)(payload); v += 1; }`。',
+      'Keep a `Map<fromVersion, upcaster>` per type. `upcast` is `while (v < latest) { payload = map.get(v)(payload); v += 1; }`.'
+    ),
+    t(
+      '`latestVersion` = 已登记的最大 fromVersion + 1。没登记过任何升级的类型，最新版本就是 1。',
+      '`latestVersion` is the highest registered `fromVersion` plus one; a type with no registered upgrades is at version 1.'
+    ),
+  ],
+  extension: t(
+    [
+      '事件模式演进有一条几乎所有团队都会撞到的铁律：**只加不删不改**。',
+      '加一个可选字段是安全的，老消费者忽略它就行；',
+      '删掉一个字段、改一个字段的类型或含义，都会让老消费者以未定义的方式出错。',
+      'Protobuf 和 Avro 的设计目标很大一部分就是把这条铁律编码进工具里——',
+      'Protobuf 的字段编号一旦用过就永久保留（`reserved`），Avro 有正式的兼容性检查。',
+      '',
+      'Upcasting 在读路径上做转换，还有一种流派是在写路径上做：**双写**。',
+      '新旧两种格式同时写，等所有消费者都升级完了再停掉旧的。',
+      '它的好处是消费端完全不用改；代价是写入量翻倍，而且「所有消费者都升级完了」',
+      '这件事在大组织里可能永远不会发生。',
+      '',
+      '还有一个更激进的方案：**不演进，只加新类型**。',
+      '`OrderPlaced` 需要改结构时，不改它，而是新增一个 `OrderPlacedV2`。',
+      '两种事件长期共存，消费者按需订阅。这避免了所有版本转换的复杂度，',
+      '代价是事件类型会越来越多，而且「同一件事有两种事件」本身会引起混乱。',
+      '',
+      '真实系统通常混用：小改动用可选字段（不升版本），中等改动用 upcasting，',
+      '语义级的大改动直接开新类型。判断标准是「老消费者按旧语义处理这个事件，',
+      '会不会做出错误的业务决策」——会，就必须开新类型。',
+    ].join('\n'),
+    [
+      'Schema evolution has an iron rule nearly every team eventually meets: add, never remove or change.',
+      'Adding an optional field is safe because old consumers ignore it; removing a field or changing its',
+      'type or meaning breaks them in undefined ways. A large part of the design of Protobuf and Avro is',
+      'encoding that rule into tooling — Protobuf reserves field numbers permanently once used, and Avro',
+      'has formal compatibility checks.',
+      '',
+      'Upcasting transforms on read. The other school transforms on write: dual writing, emitting both',
+      'formats until every consumer has upgraded, then dropping the old one. Consumers need no changes at',
+      'all; the cost is doubled write volume, and in a large organisation "every consumer has upgraded"',
+      'may never actually happen.',
+      '',
+      'A more radical option is not evolving at all, only adding types. When `OrderPlaced` needs a new',
+      'shape, leave it alone and introduce `OrderPlacedV2`. Both coexist indefinitely and consumers',
+      'subscribe to what they want. This avoids all conversion complexity at the cost of an ever-growing',
+      'type list, and "one thing has two events" is confusing in its own right.',
+      '',
+      'Real systems mix all three: optional fields for small changes with no version bump, upcasting for',
+      'moderate ones, and a brand-new type for semantic changes. The test is whether an old consumer',
+      'applying old semantics to this event would make a wrong business decision — if so, it needs a new type.',
+    ].join('\n')
+  ),
+  focus: ['correctness', 'encapsulation', 'resilience'],
+  lab: {},
+  starterFiles: [
+    contract,
+    file(
+      'src/schema.ts',
+      code`
+        export interface VersionedEvent {
+          id: string;
+          type: string;
+          /** 版本号必须是事件自己的一部分，不能存在外部元数据里 */
+          version: number;
+          payload: Record<string, unknown>;
+        }
+
+        export type Upcaster = (payload: Record<string, unknown>) => Record<string, unknown>;
+
+        export interface SchemaRegistry {
+          /** 登记一次「从 fromVersion 升到 fromVersion + 1」的转换 */
+          register(type: string, fromVersion: number, upcaster: Upcaster): void;
+          /** 逐级升到最新版本；版本高于最新时抛错 */
+          upcast(event: VersionedEvent): VersionedEvent;
+          latestVersion(type: string): number;
+        }
+
+        export function createRegistry(): SchemaRegistry {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-1.spec.ts',
+      code`
+        import { createRegistry } from '../src/schema';
+        import { count } from '@lab/metrics';
+
+        function registryWithChain(applied?: string[]) {
+          const registry = createRegistry();
+          registry.register('OrderPlaced', 1, (payload) => {
+            if (applied) applied.push('1->2');
+            return { ...payload, currency: 'CNY' };
+          });
+          registry.register('OrderPlaced', 2, (payload) => {
+            if (applied) applied.push('2->3');
+            return { ...payload, amountCents: Number(payload.amount) * 100 };
+          });
+          return registry;
+        }
+
+        describe('阶段1 · 事件模式演进', () => {
+          it('没登记过升级的类型版本是 1', () => {
+            expect(createRegistry().latestVersion('Unknown')).toBe(1);
+          });
+
+          it('登记两级之后最新版本是 3', () => {
+            expect(registryWithChain().latestVersion('OrderPlaced')).toBe(3);
+          });
+
+          it('已经是最新版本的事件原样通过', () => {
+            const registry = registryWithChain();
+            const event = {
+              id: 'e1',
+              type: 'OrderPlaced',
+              version: 3,
+              payload: { amount: 10, currency: 'CNY', amountCents: 1000 },
+            };
+            expect(registry.upcast(event)).toEqual(event);
+          });
+
+          it('v1 的事件被逐级升到 v3 [gate:chain]', () => {
+            const applied: string[] = [];
+            const registry = registryWithChain(applied);
+
+            const upcasted = registry.upcast({
+              id: 'e1',
+              type: 'OrderPlaced',
+              version: 1,
+              payload: { amount: 10 },
+            });
+
+            count('upcastSteps', applied.length);
+            // 只调最后一个 upcaster 的实现在这里只有 1 步，而且缺 currency 字段
+            expect(applied).toEqual(['1->2', '2->3']);
+            expect(upcasted.version).toBe(3);
+            expect(upcasted.payload).toEqual({ amount: 10, currency: 'CNY', amountCents: 1000 });
+          });
+
+          it('v2 的事件只升一级', () => {
+            const applied: string[] = [];
+            const registry = registryWithChain(applied);
+
+            registry.upcast({
+              id: 'e1',
+              type: 'OrderPlaced',
+              version: 2,
+              payload: { amount: 7, currency: 'USD' },
+            });
+            expect(applied).toEqual(['2->3']);
+          });
+
+          it('比最新还新的版本会抛错', () => {
+            const registry = registryWithChain();
+            let thrown = false;
+            try {
+              registry.upcast({ id: 'e1', type: 'OrderPlaced', version: 9, payload: {} });
+            } catch (caught) {
+              thrown = true;
+            }
+            // 老消费者读到新数据时，字段语义可能已经变了，静默接受会算错
+            expect(thrown).toBe(true);
+          });
+
+          it('不同类型的版本链互相独立', () => {
+            const registry = registryWithChain();
+            registry.register('OrderShipped', 1, (payload) => ({ ...payload, carrier: 'sf' }));
+
+            expect(registry.latestVersion('OrderPlaced')).toBe(3);
+            expect(registry.latestVersion('OrderShipped')).toBe(2);
+            expect(
+              registry.upcast({ id: 'e2', type: 'OrderShipped', version: 1, payload: {} }).payload
+            ).toEqual({ carrier: 'sf' });
+          });
+
+          it('upcast 不修改传入的事件', () => {
+            const registry = registryWithChain();
+            const original = {
+              id: 'e1',
+              type: 'OrderPlaced',
+              version: 1,
+              payload: { amount: 10 },
+            };
+            registry.upcast(original);
+
+            // 同一个事件可能被多个消费者读取，原地修改会让第二个消费者升两次
+            expect(original.version).toBe(1);
+            expect(original.payload).toEqual({ amount: 10 });
+          });
+
+          it('同一个事件升两次结果相同', () => {
+            const registry = registryWithChain();
+            const event = { id: 'e1', type: 'OrderPlaced', version: 1, payload: { amount: 10 } };
+            expect(registry.upcast(event)).toEqual(registry.upcast(event));
+          });
+
+          it('没登记过的类型只接受 v1', () => {
+            const registry = createRegistry();
+            const event = { id: 'e1', type: 'Unknown', version: 1, payload: { a: 1 } };
+            expect(registry.upcast(event)).toEqual(event);
+
+            let thrown = false;
+            try {
+              registry.upcast({ id: 'e2', type: 'Unknown', version: 2, payload: {} });
+            } catch (caught) {
+              thrown = true;
+            }
+            expect(thrown).toBe(true);
+          });
+
+          it('版本链中间缺一环会抛错而不是跳过', () => {
+            const registry = createRegistry();
+            registry.register('Gappy', 1, (payload) => payload);
+            registry.register('Gappy', 3, (payload) => payload);
+
+            let thrown = false;
+            try {
+              registry.upcast({ id: 'e1', type: 'Gappy', version: 1, payload: {} });
+            } catch (caught) {
+              thrown = true;
+            }
+            // 缺 2->3 这一环，静默跳过会产出一个谁也不认识的中间态
+            expect(thrown).toBe(true);
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'counters.upcastSteps',
+      op: 'eq',
+      value: 2,
+      unit: 'steps',
+      zh: 'v1 升到 v3 必须逐级经过两次转换',
+      en: 'Raising v1 to v3 must pass through both transforms',
+      dimension: 'correctness',
+      scope: 'gate:chain',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/schema.ts',
+      code`
+        export interface VersionedEvent {
+          id: string;
+          type: string;
+          version: number;
+          payload: Record<string, unknown>;
+        }
+
+        export type Upcaster = (payload: Record<string, unknown>) => Record<string, unknown>;
+
+        export interface SchemaRegistry {
+          register(type: string, fromVersion: number, upcaster: Upcaster): void;
+          upcast(event: VersionedEvent): VersionedEvent;
+          latestVersion(type: string): number;
+        }
+
+        export function createRegistry(): SchemaRegistry {
+          const chains = new Map<string, Map<number, Upcaster>>();
+
+          function chainOf(type: string): Map<number, Upcaster> {
+            const existing = chains.get(type);
+            if (existing) return existing;
+            const created = new Map<number, Upcaster>();
+            chains.set(type, created);
+            return created;
+          }
+
+          function latest(type: string): number {
+            const chain = chains.get(type);
+            if (!chain || chain.size === 0) return 1;
+            let highest = 1;
+            for (const from of Array.from(chain.keys())) highest = Math.max(highest, from + 1);
+            return highest;
+          }
+
+          return {
+            register(type: string, fromVersion: number, upcaster: Upcaster): void {
+              chainOf(type).set(fromVersion, upcaster);
+            },
+
+            upcast(event: VersionedEvent): VersionedEvent {
+              const target = latest(event.type);
+              if (event.version > target) {
+                // 老消费者读到了新数据。字段语义可能已经变了，
+                // 静默当作最新处理会产生业务错误，明确失败才拦得住
+                throw new Error(
+                  'event ' + event.id + ' is version ' + event.version + ' but this consumer only knows ' + target
+                );
+              }
+
+              const chain = chainOf(event.type);
+              let version = event.version;
+              // 每一级都返回新对象：同一个事件可能被多个消费者读取，
+              // 原地修改会让第二个消费者在已经升过的对象上再升一次
+              let payload: Record<string, unknown> = { ...event.payload };
+
+              while (version < target) {
+                const upcaster = chain.get(version);
+                // 链断了就停下来报错。静默跳过会产出一个
+                // 既不是旧格式也不是新格式的中间态
+                if (!upcaster) {
+                  throw new Error(
+                    'no upcaster from version ' + version + ' for event type ' + event.type
+                  );
+                }
+                payload = upcaster(payload);
+                version += 1;
+              }
+
+              return { id: event.id, type: event.type, version, payload };
+            },
+
+            latestVersion(type: string): number {
+              return latest(type);
+            },
+          };
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**`while (version < target)` 而不是「取出最后一个 upcaster 调一次」。** 这是这一关的全部。',
+      '生产里 v1、v2、v3 的事件同时存在是常态，跳级转换产出的对象缺字段但不抛错，',
+      '会在下游很远的地方以一个看不懂的错误暴露出来。',
+      '',
+      '**`event.version > target` 抛错，而不是当作最新。** 这是「向前兼容做不到时明确失败」。',
+      '老消费者读到新事件，最危险的不是缺字段——那通常会报错——',
+      '而是字段还在但语义变了（`amount` 从元变成分）。静默处理会算出一个错一百倍的数字，',
+      '而且一路通过所有校验。',
+      '',
+      '**链断了也抛错。** 登记了 1→2 和 3→4 但缺 2→3 时，静默跳过会产出一个',
+      '「payload 是 v2 格式、version 标着 4」的对象，比缺字段更难查。',
+      '转换链的完整性应该在第一次用到时就被发现。',
+      '',
+      '**`latest()` 从已登记的 fromVersion 推导，而不是单独维护一个版本号字段。**',
+      '两处状态就有两处会不一致的地方——注册了 upcaster 但忘了改版本号，',
+      '或者反过来。让它只有一个真相来源。',
+    ].join('\n'),
+    [
+      '`while (version < target)` rather than fetching the last upcaster and calling it once. That is the',
+      'whole stage. Having v1, v2 and v3 events in flight simultaneously is normal in production, and a',
+      'skipped step produces an object missing fields without throwing, surfacing far downstream as an',
+      'error nobody can interpret.',
+      '',
+      '`event.version > target` throws rather than being treated as current — failing explicitly when',
+      'forward compatibility is impossible. The dangerous case for an old consumer reading a new event is',
+      'not a missing field, which usually errors, but a field that still exists with changed meaning',
+      '(`amount` moving from units to cents). Handling it silently computes a number wrong by a hundredfold',
+      'that passes every validation on the way.',
+      '',
+      'A broken chain throws too. With 1→2 and 3→4 registered but 2→3 missing, skipping silently yields an',
+      'object whose payload is v2-shaped while its version says 4, which is harder to diagnose than a',
+      'missing field. Chain completeness should surface the first time it is needed.',
+      '',
+      '`latest()` is derived from the registered `fromVersion`s rather than maintained as a separate field.',
+      'Two pieces of state means two places to disagree — an upcaster registered without bumping the',
+      'version, or the reverse. Give it one source of truth.',
+    ].join('\n')
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+
+const stage2 = {
   id: 'event-bus',
-  title: t('第 1 关 · 事件总线', 'Stage 1 · Event bus'),
+  title: t('第 2 关 · 事件总线', 'Stage 2 · Event bus'),
   goal: t(
     [
       '订单系统里，「下单成功」要同时触发库存扣减、积分发放、消息通知。',
@@ -173,12 +620,12 @@ const stage1 = {
   ],
   specs: [
     spec(
-      'specs/stage-1.spec.ts',
+      'specs/stage-2.spec.ts',
       code`
         import { createEventBus } from '../src/bus';
         import { sleep, now } from '@lab/env';
 
-        describe('阶段1 · 事件总线', () => {
+        describe('阶段2 · 事件总线', () => {
           it('所有监听都会收到事件', async () => {
             const bus = createEventBus();
             const seen: string[] = [];
@@ -422,9 +869,506 @@ const stage1 = {
 
 /* ------------------------------------------------------------------ */
 
-const stage2 = {
+const stage3 = {
+  id: 'partition-ordering',
+  title: t('第 3 关 · 分区与顺序保证', 'Stage 3 · Partitioning and ordering'),
+  goal: t(
+    [
+      '上一关的事件总线把所有 handler 并行触发，因为它假设事件之间没有先后关系。',
+      '订单系统里这个假设不成立：同一个订单的「已支付」必须在「已创建」之后处理，',
+      '否则你会给一个还不存在的订单标记支付成功。',
+      '',
+      '但也不能因此把所有事件串行化——不同订单之间毫无关系，串行会让吞吐塌到 1。',
+      '',
+      '正确的粒度是**分区**：按订单号哈希分到 N 个分区，',
+      '**分区内严格有序，分区间完全并行**。',
+      '',
+      '在 `src/partition.ts` 实现 `createPartitionedBus(options)`：',
+      '',
+      '- `publish(event)`：返回的 Promise 在这个事件被处理完时 resolve；',
+      '- `partitionOf(key)`：这个 key 归哪个分区；',
+      '- 同一分区的事件按 publish 顺序**逐个**处理，前一个没完成不能开始下一个；',
+      '- 不同分区并行推进。',
+      '',
+      '两个门槛缺一不可：',
+      '',
+      '1. **顺序**：同一个订单的 12 个事件，处理顺序必须和发布顺序完全一致，乱序次数为 0；',
+      '2. **并行**：4 个分区各 3 个事件、每个 100ms，总耗时必须是 300ms 而不是 1200ms。',
+      '',
+      '只满足第一条的实现是「全局串行」，只满足第二条的是「全部并行」，',
+      '两条都要才是分区。',
+    ].join('\n'),
+    [
+      'The event bus from the previous stage fans out to handlers in parallel because it assumes events are',
+      'independent. In an order system that assumption fails: "paid" for one order must be processed after',
+      '"created" for the same order, or you mark a nonexistent order as paid.',
+      '',
+      'Serialising everything is not the answer either — different orders have nothing to do with each',
+      'other, and serialising collapses throughput to one.',
+      '',
+      'The right granularity is partitioning: hash the order id into N partitions, with strict ordering',
+      'inside a partition and full parallelism across them.',
+      '',
+      'Implement `createPartitionedBus(options)` in `src/partition.ts`:',
+      '',
+      '- `publish(event)` returns a promise that resolves when that event has been handled;',
+      '- `partitionOf(key)` reports which partition a key belongs to;',
+      '- events in one partition are handled one at a time in publish order, the next never starting',
+      '  before the previous finishes;',
+      '- partitions advance in parallel.',
+      '',
+      'Both gates are required:',
+      '',
+      '1. ordering — twelve events for one order must be handled in exactly publish order, zero inversions;',
+      '2. parallelism — four partitions of three events at 100ms each must take 300ms, not 1200ms.',
+      '',
+      'Satisfying only the first is global serialisation; only the second is unrestricted parallelism.',
+      'Partitioning is both at once.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('同一个 key 的事件严格按发布顺序处理', 'Events for one key are handled in publish order'),
+    t('不同分区的事件并行推进', 'Different partitions advance in parallel'),
+    t('同一个 key 永远落到同一个分区', 'One key always lands in the same partition'),
+    t('handler 抛错不会卡死整个分区', 'A throwing handler does not wedge its partition'),
+    t('publish 的 Promise 在该事件处理完时 resolve', "publish resolves when that event's handling completes"),
+  ],
+  pitfalls: [
+    t(
+      '用一个全局队列串行处理所有事件。顺序当然是对的，吞吐也当然是 1——四个分区的活儿排成一队，本来 300ms 能做完的事要 1200ms。而且这个退化在小数据量的测试里完全看不出来，只有在压测或者线上才暴露。',
+      'Serialising everything through one global queue. Ordering is trivially correct and throughput is one: four partitions of work in a single line, taking 1200ms for what should be 300ms. The degradation is invisible in small tests and only appears under load or in production.'
+    ),
+    t(
+      '分区内也用 `Promise.all` 并行。吞吐很好看，但同一个订单的「已支付」可能在「已创建」之前完成——而这类 bug 是概率性的：handler 快的时候顺序碰巧是对的，某次 GC 或者网络抖动就错了。它在测试里几乎不可复现。',
+      'Using `Promise.all` inside a partition as well. Throughput looks great and "paid" can complete before "created" for the same order — a probabilistic bug that happens to be ordered correctly while handlers are fast and inverts after one GC pause or network hiccup. It is nearly impossible to reproduce in a test.'
+    ),
+    t(
+      'handler 抛错时没有 catch，导致该分区的链断掉。分区是靠「前一个 promise 完成后接着下一个」串起来的，一旦某一环 reject 且没人处理，后面所有事件的 promise 都永远不会 resolve——这个订单的后续事件全部卡死，而且没有任何错误日志。',
+      'Letting a throwing handler break the partition chain. A partition is a chain of "when the previous promise settles, start the next"; one unhandled rejection leaves every subsequent event\'s promise permanently pending, so that order\'s later events wedge forever with no error logged.'
+    ),
+    t(
+      '按事件到达顺序而不是按 key 分区，比如轮询分配。吞吐和并行度都很好，顺序保证却完全没有了——同一个订单的两个事件可能落在不同分区上并行处理。分区键的选择是这个机制唯一的正确性来源，它必须来自业务语义。',
+      'Assigning partitions by arrival order — round robin — rather than by key. Throughput and parallelism are fine and the ordering guarantee is gone entirely, since two events for one order can land in different partitions and run concurrently. The partition key is the sole source of correctness here and must come from business semantics.'
+    ),
+  ],
+  hints: [
+    t(
+      '每个分区维护一个「尾部 promise」。publish 时把新任务接在尾部后面：`tail = tail.then(() => handle(event))`，然后把新的 tail 存回去。',
+      'Keep a tail promise per partition. On publish, chain onto it: `tail = tail.then(() => handle(event))`, and store the new tail back.'
+    ),
+    t(
+      '接链的时候记得吞掉异常：`tail = tail.then(run, run)` 或者在 handle 里面 try/catch，否则一次失败会让这个分区的后续事件永远悬着。',
+      'Swallow errors when chaining — `tail = tail.then(run, run)` or a try/catch inside the handler — otherwise one failure leaves the rest of that partition pending forever.'
+    ),
+  ],
+  extension: t(
+    [
+      '「分区内有序、分区间并行」是 Kafka 的核心设计，也是它和传统消息队列最大的区别。',
+      'RabbitMQ 这类队列的顺序保证是「整个队列有序」，想并行就得开多个消费者，',
+      '而多个消费者就没有顺序了——两者不可兼得。Kafka 把顺序的粒度降到分区，',
+      '于是「有序」和「并行」第一次可以同时成立。',
+      '',
+      '代价是**分区键的选择变成了架构决策**。选订单号，同一订单有序但热点订单会让某个分区过载；',
+      '选用户 id，同一用户的所有订单有序但粒度更粗；选随机值，完全没有顺序保证。',
+      '而且分区键一旦定了就极难改——改了之后历史事件和新事件的分区不一致，',
+      '同一个订单的事件会横跨两个分区，顺序保证当场失效。',
+      '',
+      '分区数同样难改。Kafka 支持增加分区，但增加之后同一个 key 的哈希结果会变，',
+      '新事件去了新分区、老事件还在老分区，顺序保证在扩容那一刻断掉。',
+      '所以生产上的常见做法是**一开始就把分区数开大**（比如 100 个），',
+      '宁可每个分区流量小一点，也不要面对扩容时的顺序断裂。',
+      '',
+      '还有一个这一关没做的问题：**分区内的队头阻塞**。',
+      '一个处理特别慢的事件会把它后面同分区的所有事件都堵住，',
+      '哪怕那些事件本来毫无关系（只是碰巧哈希到了一起）。',
+      '这是分区模型的固有代价，缓解手段是把慢处理异步化，或者用更细的分区键。',
+    ].join('\n'),
+    [
+      'Ordered within a partition, parallel across them is the core of Kafka\'s design and its biggest',
+      'difference from traditional queues. RabbitMQ-style queues guarantee ordering across the whole queue,',
+      'so parallelism requires several consumers and several consumers mean no ordering — you cannot have',
+      'both. Kafka lowers the granularity of ordering to the partition, and for the first time ordered and',
+      'parallel can hold simultaneously.',
+      '',
+      'The cost is that choosing the partition key becomes an architectural decision. By order id, each',
+      'order is ordered but a hot order overloads its partition; by user id, all of a user\'s orders are',
+      'ordered at a coarser grain; by a random value, there is no ordering at all. And the key is extremely',
+      'hard to change afterwards: historical and new events would partition differently, one order\'s events',
+      'would straddle two partitions, and the guarantee evaporates immediately.',
+      '',
+      'The partition count is equally hard to change. Kafka can add partitions, and afterwards the hash of',
+      'a key changes, so new events go to a new partition while old ones remain — the ordering guarantee',
+      'breaks at the moment of scaling. The common production answer is to over-provision partitions from',
+      'the start, say a hundred, preferring less traffic per partition to an ordering break during growth.',
+      '',
+      'One problem this stage does not address: head-of-line blocking inside a partition. One unusually slow',
+      'event blocks everything behind it in the same partition even when those events are entirely unrelated',
+      'and merely hashed together. That is inherent to the model; the mitigations are making slow handling',
+      'asynchronous or choosing a finer partition key.',
+    ].join('\n')
+  ),
+  focus: ['concurrency', 'correctness', 'latency'],
+  lab: {},
+  starterFiles: [
+    file(
+      'src/partition.ts',
+      code`
+        import type { OrderEvent } from './contract';
+
+        export interface PartitionOptions {
+          partitions: number;
+          /** 从事件里取出分区键 */
+          keyOf(event: OrderEvent): string;
+        }
+
+        export interface PartitionedBus {
+          /** 返回的 Promise 在这个事件被处理完时 resolve */
+          publish(event: OrderEvent): Promise<void>;
+          subscribe(handler: (event: OrderEvent) => Promise<void> | void): void;
+          partitionOf(key: string): number;
+          /** 还有多少事件没处理完 */
+          pending(): number;
+        }
+
+        export function createPartitionedBus(options: PartitionOptions): PartitionedBus {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-3.spec.ts',
+      code`
+        import { createPartitionedBus } from '../src/partition';
+        import { now, sleep } from '@lab/env';
+        import { count } from '@lab/metrics';
+
+        function event(id: string, orderId: string) {
+          return { id, type: 'order.event', payload: { orderId } };
+        }
+
+        const OPTIONS = {
+          partitions: 4,
+          keyOf: (e: any) => String(e.payload.orderId),
+        };
+
+        describe('阶段3 · 分区与顺序', () => {
+          it('同一个 key 稳定落到同一个分区', () => {
+            const bus = createPartitionedBus(OPTIONS);
+            const first = bus.partitionOf('order-1');
+            for (let index = 0; index < 10; index += 1) {
+              expect(bus.partitionOf('order-1')).toBe(first);
+            }
+            expect(first).toBeGreaterThanOrEqual(0);
+            expect(first).toBeLessThan(4);
+          });
+
+          it('publish 的 Promise 在处理完成时 resolve', async () => {
+            const bus = createPartitionedBus(OPTIONS);
+            let handled = false;
+            bus.subscribe(async () => {
+              await sleep(50);
+              handled = true;
+            });
+
+            await bus.publish(event('e1', 'order-1'));
+            expect(handled).toBe(true);
+          });
+
+          it('同一个订单的事件严格按发布顺序处理 [gate:ordering]', async () => {
+            const bus = createPartitionedBus(OPTIONS);
+            const seen: number[] = [];
+            bus.subscribe(async (incoming: any) => {
+              // 故意让先来的慢、后来的快，乱序的实现在这里必然翻车
+              await sleep(incoming.payload.index === 0 ? 80 : 10);
+              seen.push(incoming.payload.index);
+            });
+
+            const published: Array<Promise<void>> = [];
+            for (let index = 0; index < 12; index += 1) {
+              published.push(
+                bus.publish({ id: 'e' + index, type: 'x', payload: { orderId: 'order-1', index } })
+              );
+            }
+            await Promise.all(published);
+
+            let violations = 0;
+            for (let index = 1; index < seen.length; index += 1) {
+              if (seen[index] < seen[index - 1]) violations += 1;
+            }
+            count('orderViolations', violations);
+
+            expect(seen).toHaveLength(12);
+            expect(violations).toBe(0);
+          });
+
+          it('不同分区并行推进 [gate:parallel]', async () => {
+            const bus = createPartitionedBus(OPTIONS);
+            bus.subscribe(async () => {
+              await sleep(100);
+            });
+
+            // 找出四个落在不同分区上的 key
+            const keys: string[] = [];
+            const used = new Set<number>();
+            for (let index = 0; keys.length < 4 && index < 200; index += 1) {
+              const key = 'order-' + index;
+              const partition = bus.partitionOf(key);
+              if (!used.has(partition)) {
+                used.add(partition);
+                keys.push(key);
+              }
+            }
+            expect(keys).toHaveLength(4);
+
+            const startedAt = now();
+            const published: Array<Promise<void>> = [];
+            for (const key of keys) {
+              for (let index = 0; index < 3; index += 1) {
+                published.push(bus.publish(event(key + '-' + index, key)));
+              }
+            }
+            await Promise.all(published);
+
+            // 分区内串行 3 × 100ms，四个分区并行 = 300ms。
+            // 全局串行的实现在这里是 1200ms
+            expect(now() - startedAt).toBe(300);
+          });
+
+          it('没有订阅者时 publish 也能完成', async () => {
+            const bus = createPartitionedBus(OPTIONS);
+            await bus.publish(event('e1', 'order-1'));
+            expect(bus.pending()).toBe(0);
+          });
+
+          it('handler 抛错不会卡死这个分区', async () => {
+            const bus = createPartitionedBus(OPTIONS);
+            const seen: string[] = [];
+            bus.subscribe(async (incoming: any) => {
+              if (incoming.id === 'bad') throw new Error('handler exploded');
+              seen.push(incoming.id);
+            });
+
+            await bus.publish({ id: 'first', type: 'x', payload: { orderId: 'order-1' } });
+            await bus.publish({ id: 'bad', type: 'x', payload: { orderId: 'order-1' } });
+            await bus.publish({ id: 'after', type: 'x', payload: { orderId: 'order-1' } });
+
+            // 链断掉的实现里 'after' 的 promise 永远不会 resolve
+            expect(seen).toEqual(['first', 'after']);
+          });
+
+          it('pending 反映未处理完的数量', async () => {
+            const bus = createPartitionedBus(OPTIONS);
+            bus.subscribe(async () => {
+              await sleep(100);
+            });
+
+            const published = [
+              bus.publish(event('e1', 'order-1')),
+              bus.publish(event('e2', 'order-1')),
+            ];
+            await sleep(1);
+            expect(bus.pending()).toBe(2);
+
+            await Promise.all(published);
+            expect(bus.pending()).toBe(0);
+          });
+
+          it('多个订阅者都会收到事件', async () => {
+            const bus = createPartitionedBus(OPTIONS);
+            const seen: string[] = [];
+            bus.subscribe(async () => {
+              seen.push('a');
+            });
+            bus.subscribe(async () => {
+              seen.push('b');
+            });
+
+            await bus.publish(event('e1', 'order-1'));
+            expect(seen.sort()).toEqual(['a', 'b']);
+          });
+
+          it('不同订单互不阻塞', async () => {
+            const bus = createPartitionedBus({ partitions: 8, keyOf: OPTIONS.keyOf });
+            bus.subscribe(async (incoming: any) => {
+              await sleep(incoming.payload.orderId === 'slow' ? 500 : 20);
+            });
+
+            const slow = bus.publish(event('s1', 'slow'));
+            await sleep(1);
+
+            const startedAt = now();
+            await bus.publish(event('f1', 'fast'));
+            // slow 那个订单在别的分区上，不该拖住这个
+            expect(now() - startedAt).toBeLessThanOrEqual(30);
+
+            await slow;
+          });
+
+          it('分区数为 1 时退化成全局有序', async () => {
+            const bus = createPartitionedBus({ partitions: 1, keyOf: OPTIONS.keyOf });
+            const seen: string[] = [];
+            bus.subscribe(async (incoming: any) => {
+              await sleep(incoming.id === 'a' ? 50 : 5);
+              seen.push(incoming.id);
+            });
+
+            await Promise.all([
+              bus.publish(event('a', 'order-1')),
+              bus.publish(event('b', 'order-2')),
+            ]);
+            expect(seen).toEqual(['a', 'b']);
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'counters.orderViolations',
+      op: 'eq',
+      value: 0,
+      zh: '同一个订单的事件零乱序',
+      en: 'Zero ordering inversions within one order',
+      dimension: 'correctness',
+      scope: 'gate:ordering',
+    }),
+    gate({
+      metric: 'virtualElapsedMs',
+      op: 'lte',
+      value: 350,
+      unit: 'ms',
+      zh: '四个分区并行推进，不是排成一队',
+      en: 'Four partitions advance in parallel rather than in one queue',
+      dimension: 'concurrency',
+      scope: 'gate:parallel',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/partition.ts',
+      code`
+        import type { OrderEvent } from './contract';
+
+        export interface PartitionOptions {
+          partitions: number;
+          keyOf(event: OrderEvent): string;
+        }
+
+        export interface PartitionedBus {
+          publish(event: OrderEvent): Promise<void>;
+          subscribe(handler: (event: OrderEvent) => Promise<void> | void): void;
+          partitionOf(key: string): number;
+          pending(): number;
+        }
+
+        function hash(text: string): number {
+          let value = 2166136261;
+          for (let index = 0; index < text.length; index += 1) {
+            value ^= text.charCodeAt(index);
+            value = Math.imul(value, 16777619);
+          }
+          return value >>> 0;
+        }
+
+        export function createPartitionedBus(options: PartitionOptions): PartitionedBus {
+          const handlers: Array<(event: OrderEvent) => Promise<void> | void> = [];
+          // 每个分区一条「尾部 promise」，新任务接在它后面，
+          // 于是分区内天然串行，分区之间互不相干
+          const tails: Array<Promise<void>> = [];
+          for (let index = 0; index < Math.max(1, options.partitions); index += 1) {
+            tails.push(Promise.resolve());
+          }
+          let inFlight = 0;
+
+          return {
+            partitionOf(key: string): number {
+              return hash(key) % tails.length;
+            },
+
+            subscribe(handler: (event: OrderEvent) => Promise<void> | void): void {
+              handlers.push(handler);
+            },
+
+            publish(event: OrderEvent): Promise<void> {
+              const partition = hash(options.keyOf(event)) % tails.length;
+              inFlight += 1;
+
+              const run = async (): Promise<void> => {
+                try {
+                  for (const handler of handlers.slice()) {
+                    // 分区内逐个 await：这里用 Promise.all 的话顺序保证就没了
+                    await handler(event);
+                  }
+                } catch (error) {
+                  // 吞掉：一次未处理的 reject 会把这条链断掉，
+                  // 该分区后续事件的 promise 全部永远悬着
+                } finally {
+                  inFlight -= 1;
+                }
+              };
+
+              const queued = tails[partition].then(run, run);
+              tails[partition] = queued;
+              return queued;
+            },
+
+            pending(): number {
+              return inFlight;
+            },
+          };
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**整个分区机制就是一个 promise 数组。** `tails[p].then(run)` 保证了',
+      '「前一个完成才开始下一个」，而每个分区各有一条链，天然并行。',
+      '不需要队列、不需要 worker、不需要调度器——JavaScript 的 promise 链本身',
+      '就是一个 FIFO 的串行执行器。',
+      '',
+      '**`tails[partition].then(run, run)` 传了两个相同的回调。** 这不是笔误：',
+      '无论上一个任务成功还是失败，这一个都必须开始。只写 `.then(run)` 的话，',
+      '前一个失败会让链进入 rejected 状态，后面所有任务都被跳过——',
+      '一个订单的一次处理失败会让它之后的所有事件永久卡住。',
+      '',
+      '**`run` 里的 try/catch 和链上的双回调是两道独立的防线。** 前者保证',
+      '`run` 自己永远 resolve，后者保证即使 `run` 之外出了问题链也能继续。',
+      '看起来冗余，但少了任一个，某条特定路径上就会出现「事件默默消失」。',
+      '',
+      '**`handlers.slice()` 复制一份再遍历。** 和第 2 关事件总线同一个理由：',
+      'handler 在执行过程中可能调用 `subscribe`，直接遍历原数组会在迭代中改变它。',
+    ].join('\n'),
+    [
+      'The entire partitioning mechanism is an array of promises. `tails[p].then(run)` enforces "the next',
+      'starts only after the previous finishes", and each partition has its own chain so they run in',
+      'parallel by construction. No queue, no workers, no scheduler — a JavaScript promise chain is already',
+      'a FIFO serial executor.',
+      '',
+      '`tails[partition].then(run, run)` passes the same callback twice, and that is not a typo: this task',
+      'must start whether the previous succeeded or failed. With only `.then(run)`, one failure puts the',
+      'chain into a rejected state and every later task is skipped — one failed handling wedges every',
+      'subsequent event for that order permanently.',
+      '',
+      'The try/catch inside `run` and the two-callback `then` are independent defences. The first',
+      'guarantees `run` always resolves, the second keeps the chain moving even if something outside `run`',
+      'goes wrong. It looks redundant, and dropping either one produces a path where events silently vanish.',
+      '',
+      '`handlers.slice()` copies before iterating, for the same reason as the event bus stage: a handler',
+      'may call `subscribe` while running, and iterating the live array mutates what you are walking.',
+    ].join('\n')
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+
+const stage4 = {
   id: 'middleware',
-  title: t('第 2 关 · 洋葱式中间件', 'Stage 2 · Onion middleware'),
+  title: t('第 4 关 · 洋葱式中间件', 'Stage 4 · Onion middleware'),
   goal: t(
     [
       '每个订单事件都要经过：日志 → 鉴权 → 限流 → 业务处理。',
@@ -549,7 +1493,7 @@ const stage2 = {
   ],
   specs: [
     spec(
-      'specs/stage-2.spec.ts',
+      'specs/stage-4.spec.ts',
       code`
         import { compose } from '../src/compose';
         import { sleep } from '@lab/env';
@@ -558,7 +1502,7 @@ const stage2 = {
           return { event: { id: 'e1', type: 'order.created', payload: {} }, state: {} } as any;
         }
 
-        describe('阶段2 · 洋葱式中间件', () => {
+        describe('阶段4 · 洋葱式中间件', () => {
           it('按洋葱顺序执行', async () => {
             const trace: string[] = [];
             const run = compose([
@@ -801,9 +1745,1039 @@ const stage2 = {
 
 /* ------------------------------------------------------------------ */
 
-const stage3 = {
+const stage5 = {
+  id: 'consumer-group',
+  title: t('第 5 关 · 消费者组与再平衡', 'Stage 5 · Consumer groups and rebalancing'),
+  goal: t(
+    [
+      '上一关把事件分到了 N 个分区。现在的问题是：谁来消费它们？',
+      '',
+      '一个进程消费全部分区，扩容就没意义了。多个进程各消费一部分，',
+      '就需要一个分配机制回答两个问题：**每个分区归谁**，以及**有人加入或退出时怎么办**。',
+      '',
+      '在 `src/group.ts` 实现 `createConsumerGroup(options)`：',
+      '',
+      '- `join(consumerId)` / `leave(consumerId)`：成员变化触发再平衡；',
+      '- `assignmentOf(consumerId)`：这个消费者负责哪些分区；',
+      '- `ownerOf(partition)`：这个分区归谁；',
+      '- `rebalances()`：一共再平衡了几次。',
+      '',
+      '两条硬性要求：',
+      '',
+      '1. **每个分区恰好一个主人**。两个消费者同时消费一个分区，',
+      '   就是同一个订单被处理两次——第 7 关的幂等能兜住一部分，但这里本来就不该发生。',
+      '',
+      '2. **再平衡要「粘」**。12 个分区 3 个消费者，加入第 4 个时，',
+      '   只需要移动 3 个分区就能达到均衡（4/4/4 → 3/3/3/3）。',
+      '   一个「全部推倒重分」的实现会移动 9 个——而每次移动都意味着',
+      '   一个分区的消费停顿、本地缓存失效、进度重新加载。',
+      '',
+      '门槛量的正是移动量：新成员加入时，移动的分区数不许超过 4。',
+    ].join('\n'),
+    [
+      'The previous stage split events into N partitions. The question now is who consumes them.',
+      '',
+      'One process consuming everything makes scaling pointless. Several processes each taking a share',
+      'needs an assignment mechanism answering two questions: who owns each partition, and what happens',
+      'when a member joins or leaves.',
+      '',
+      'Implement `createConsumerGroup(options)` in `src/group.ts`:',
+      '',
+      '- `join(consumerId)` and `leave(consumerId)` trigger a rebalance;',
+      '- `assignmentOf(consumerId)` lists the partitions a consumer owns;',
+      '- `ownerOf(partition)` names the owner of a partition;',
+      '- `rebalances()` counts how many rebalances have occurred.',
+      '',
+      'Two hard requirements:',
+      '',
+      '1. exactly one owner per partition. Two consumers on one partition means the same order processed',
+      '   twice — stage 7\'s idempotency covers some of that, and it should not be happening here at all.',
+      '',
+      '2. rebalancing must be sticky. With twelve partitions and three consumers, adding a fourth needs',
+      '   only three partitions to move (4/4/4 becomes 3/3/3/3). A tear-down-and-redistribute',
+      '   implementation moves nine — and every move means a partition stops being consumed, its local',
+      '   cache is lost and its progress must be reloaded.',
+      '',
+      'The gate measures exactly that: a new member joining may move at most four partitions.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('每个分区恰好一个主人', 'Exactly one owner per partition'),
+    t('分配尽量均匀', 'Assignment is as even as possible'),
+    t('成员退出后它的分区被接管', "A departing member's partitions are taken over"),
+    t('再平衡尽量少移动分区', 'Rebalancing moves as few partitions as possible'),
+    t('没有成员时所有分区无主', 'With no members, no partition has an owner'),
+  ],
+  pitfalls: [
+    t(
+      '再平衡时先清空所有分配再重新分。结果是均匀的，代价是每个分区都换了主人——所有消费者的本地状态作废、消费位点重新加载、处理停顿。Kafka 早期的 range 和 round-robin 分配器就是这样，直到 2.4 才引入 sticky 分配器，因为大集群的再平衡停顿能到分钟级。',
+      'Clearing every assignment and redistributing on rebalance. The result is even and every partition has changed hands, so all local state is void, offsets are reloaded and consumption pauses. Kafka\'s early range and round-robin assignors did this, and sticky assignment only arrived in 2.4, because rebalance pauses on large clusters reached minutes.'
+    ),
+    t(
+      '成员退出时只把它的分区标成无主，不重新分配。分区从此没人消费，事件无声地堆积——而监控上「消费者数量」是正常的（剩下的都活着），只有消费延迟在悄悄上涨。退出必须触发一次真正的再分配。',
+      "Marking a departing member's partitions as unowned without reassigning them. Nobody consumes them and events pile up silently, while the consumer-count metric looks fine because the survivors are all alive and only lag creeps upward. Leaving must trigger a real reassignment."
+    ),
+    t(
+      '用 `分区号 % 消费者数` 直接算主人。简单，而且消费者数一变几乎所有分区都换主——这是一致性哈希那一课在另一个场景的重演。分配必须是有状态的：记住现在谁拥有什么，在此基础上做最小调整。',
+      'Computing the owner as `partition % consumerCount`. Simple, and changing the consumer count moves nearly every partition — the consistent-hashing lesson replayed in another setting. Assignment must be stateful: remember who owns what and adjust minimally from there.'
+    ),
+    t(
+      '允许分配不均，比如 12 个分区 4 个消费者分成 6/2/2/2。每个分区确实有唯一主人，粘性也很好，但那个拿了 6 个分区的消费者会成为瓶颈。再平衡要同时满足「唯一」「均匀」「少移动」三条，前两条是硬约束，第三条是在满足前两条的前提下优化。',
+      'Tolerating uneven assignment such as 6/2/2/2 across twelve partitions and four consumers. Every partition has a unique owner and stickiness is excellent, and the consumer holding six becomes the bottleneck. Rebalancing must satisfy uniqueness, evenness and minimal movement together — the first two are constraints and the third is what you optimise within them.'
+    ),
+  ],
+  hints: [
+    t(
+      '再平衡分三步：算出每个消费者的目标数量；把超额的分区收回来（连同无主的）；把收回来的分给不足的。前两步之外的分配原封不动，粘性就自然有了。',
+      'Rebalance in three steps: compute each consumer\'s target count, reclaim surplus partitions (along with unowned ones), and hand the reclaimed set to those below target. Everything not touched by the first two steps stays put, which is where stickiness comes from.'
+    ),
+    t(
+      '目标数量：`base = floor(P / C)`，前 `P % C` 个消费者多分一个。',
+      'Target counts: `base = floor(P / C)`, with the first `P % C` consumers taking one extra.'
+    ),
+  ],
+  extension: t(
+    [
+      '再平衡的代价在真实系统里比想象中大。Kafka 早期用的是 **stop-the-world 再平衡**：',
+      '任何成员变化都会让**整个组**停止消费，重新协商分配，然后恢复。',
+      '一个 200 个消费者的组，滚动重启时会触发 200 次全组停顿。',
+      '',
+      'Kafka 2.4 引入了两个改进。**Sticky 分配器**就是这一关做的事——尽量不动。',
+      '**增量协作式再平衡**（incremental cooperative rebalancing）更进一步：',
+      '不停整个组，只让需要交出分区的消费者交出，其他人继续消费。',
+      '代价是需要两轮协商（先撤销，再分配），协议复杂度显著上升。',
+      '',
+      '另一个方向是**静态成员**（static membership）：给消费者一个固定 id，',
+      '短暂断线重连时不触发再平衡，直接把原来的分区还给它。',
+      '这专门解决滚动重启和 K8s 滚动更新的场景——那种情况下成员其实没变，',
+      '只是同一个成员换了个进程。',
+      '',
+      '还有一个这一关刻意回避的问题：**再平衡期间的重复消费**。',
+      '消费者 A 交出分区 3 的那一刻，它可能还有一个事件正在处理中。',
+      'B 接管后从上次提交的位点开始消费，于是那个事件被处理两次。',
+      '这是 at-least-once 语义的直接来源，也是第 7 关幂等存在的理由——',
+      '再平衡做得再好，都消除不了这个窗口。',
+    ].join('\n'),
+    [
+      'Rebalancing costs more in real systems than one expects. Early Kafka used stop-the-world',
+      'rebalancing: any membership change halted the entire group, renegotiated assignments and resumed. A',
+      'group of two hundred consumers triggers two hundred full-group pauses during a rolling restart.',
+      '',
+      'Kafka 2.4 brought two improvements. The sticky assignor is what this stage builds — move as little',
+      'as possible. Incremental cooperative rebalancing goes further: rather than stopping the group, only',
+      'consumers that must surrender partitions do so while everyone else keeps consuming. The price is two',
+      'rounds of negotiation (revoke, then assign) and a substantially more complex protocol.',
+      '',
+      'Another direction is static membership: give each consumer a fixed id so a brief disconnect and',
+      'reconnect does not trigger a rebalance and its partitions are simply returned. That targets rolling',
+      'restarts and Kubernetes rolling updates specifically, where membership has not really changed and',
+      'the same member merely moved to a new process.',
+      '',
+      'One problem this stage deliberately avoids: duplicate consumption during a rebalance. At the moment',
+      'consumer A surrenders partition 3 it may still have an event in flight; B takes over from the last',
+      'committed offset and processes that event again. This is the direct source of at-least-once',
+      "semantics and the reason stage 7's idempotency exists — no amount of rebalancing finesse closes",
+      'that window.',
+    ].join('\n')
+  ),
+  focus: ['correctness', 'resilience', 'concurrency'],
+  lab: {},
+  starterFiles: [
+    file(
+      'src/group.ts',
+      code`
+        export interface GroupOptions {
+          partitions: number;
+        }
+
+        export interface ConsumerGroup {
+          join(consumerId: string): void;
+          leave(consumerId: string): void;
+          /** 这个消费者负责的分区，升序 */
+          assignmentOf(consumerId: string): number[];
+          /** 这个分区归谁，无主返回 null */
+          ownerOf(partition: number): string | null;
+          members(): string[];
+          rebalances(): number;
+        }
+
+        export function createConsumerGroup(options: GroupOptions): ConsumerGroup {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-5.spec.ts',
+      code`
+        import { createConsumerGroup } from '../src/group';
+        import { count } from '@lab/metrics';
+
+        function snapshot(group: any, partitions: number): Array<string | null> {
+          const owners: Array<string | null> = [];
+          for (let index = 0; index < partitions; index += 1) owners.push(group.ownerOf(index));
+          return owners;
+        }
+
+        describe('阶段5 · 消费者组', () => {
+          it('没有成员时所有分区无主', () => {
+            const group = createConsumerGroup({ partitions: 6 });
+            expect(snapshot(group, 6)).toEqual([null, null, null, null, null, null]);
+          });
+
+          it('单个消费者拿走全部分区', () => {
+            const group = createConsumerGroup({ partitions: 6 });
+            group.join('c1');
+            expect(group.assignmentOf('c1')).toEqual([0, 1, 2, 3, 4, 5]);
+          });
+
+          it('两个消费者平分', () => {
+            const group = createConsumerGroup({ partitions: 6 });
+            group.join('c1');
+            group.join('c2');
+            expect(group.assignmentOf('c1')).toHaveLength(3);
+            expect(group.assignmentOf('c2')).toHaveLength(3);
+          });
+
+          it('分不整齐时相差不超过 1', () => {
+            const group = createConsumerGroup({ partitions: 7 });
+            group.join('c1');
+            group.join('c2');
+            group.join('c3');
+            const sizes = ['c1', 'c2', 'c3'].map((id) => group.assignmentOf(id).length).sort();
+            expect(sizes).toEqual([2, 2, 3]);
+          });
+
+          it('每个分区恰好一个主人 [gate:exclusive]', () => {
+            const group = createConsumerGroup({ partitions: 12 });
+            for (const id of ['c1', 'c2', 'c3', 'c4', 'c5']) group.join(id);
+
+            const seen = new Map<number, number>();
+            for (const id of group.members()) {
+              for (const partition of group.assignmentOf(id)) {
+                seen.set(partition, (seen.get(partition) || 0) + 1);
+              }
+            }
+
+            let doubleOwned = 0;
+            let unowned = 0;
+            for (let index = 0; index < 12; index += 1) {
+              const owners = seen.get(index) || 0;
+              if (owners > 1) doubleOwned += 1;
+              if (owners === 0) unowned += 1;
+            }
+            count('doubleOwned', doubleOwned + unowned);
+
+            expect(doubleOwned).toBe(0);
+            expect(unowned).toBe(0);
+          });
+
+          it('成员退出后它的分区被接管', () => {
+            const group = createConsumerGroup({ partitions: 6 });
+            group.join('c1');
+            group.join('c2');
+            const orphaned = group.assignmentOf('c2');
+
+            group.leave('c2');
+            expect(group.assignmentOf('c1')).toHaveLength(6);
+            for (const partition of orphaned) {
+              expect(group.ownerOf(partition)).toBe('c1');
+            }
+          });
+
+          it('全部退出后分区重新无主', () => {
+            const group = createConsumerGroup({ partitions: 4 });
+            group.join('c1');
+            group.leave('c1');
+            expect(snapshot(group, 4)).toEqual([null, null, null, null]);
+          });
+
+          it('重复 join 同一个 id 不会重复分配', () => {
+            const group = createConsumerGroup({ partitions: 6 });
+            group.join('c1');
+            group.join('c1');
+            expect(group.members()).toEqual(['c1']);
+            expect(group.assignmentOf('c1')).toHaveLength(6);
+          });
+
+          it('leave 不存在的成员是无操作', () => {
+            const group = createConsumerGroup({ partitions: 4 });
+            group.join('c1');
+            const before = group.rebalances();
+            group.leave('ghost');
+            expect(group.rebalances()).toBe(before);
+          });
+
+          it('rebalances 统计再平衡次数', () => {
+            const group = createConsumerGroup({ partitions: 4 });
+            group.join('c1');
+            group.join('c2');
+            group.leave('c1');
+            expect(group.rebalances()).toBe(3);
+          });
+
+          it('新成员加入时只移动必要的分区 [gate:sticky]', () => {
+            const group = createConsumerGroup({ partitions: 12 });
+            for (const id of ['c1', 'c2', 'c3']) group.join(id);
+            const before = snapshot(group, 12);
+
+            group.join('c4');
+            const after = snapshot(group, 12);
+
+            let moved = 0;
+            for (let index = 0; index < 12; index += 1) {
+              if (before[index] !== after[index]) moved += 1;
+            }
+            count('partitionsMoved', moved);
+
+            // 4/4/4 -> 3/3/3/3 只需要动 3 个。
+            // 推倒重分的实现在这里会移动 9 个
+            expect(moved).toBeLessThanOrEqual(4);
+            expect(group.assignmentOf('c4')).toHaveLength(3);
+          });
+
+          it('成员退出时不动其他人已有的分区', () => {
+            const group = createConsumerGroup({ partitions: 12 });
+            for (const id of ['c1', 'c2', 'c3', 'c4']) group.join(id);
+            const keptBefore = group.assignmentOf('c1');
+
+            group.leave('c4');
+            const keptAfter = group.assignmentOf('c1');
+
+            // c1 原有的分区应该全部还在它手上，只是可能又多接了几个
+            for (const partition of keptBefore) {
+              expect(keptAfter).toContain(partition);
+            }
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'counters.doubleOwned',
+      op: 'eq',
+      value: 0,
+      zh: '每个分区恰好一个主人，不重不漏',
+      en: 'Exactly one owner per partition, none doubled or dropped',
+      dimension: 'correctness',
+      scope: 'gate:exclusive',
+    }),
+    gate({
+      metric: 'counters.partitionsMoved',
+      op: 'lte',
+      value: 4,
+      zh: '新成员加入只移动必要的分区',
+      en: 'A joining member moves only the partitions it must',
+      dimension: 'resilience',
+      scope: 'gate:sticky',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/group.ts',
+      code`
+        export interface GroupOptions {
+          partitions: number;
+        }
+
+        export interface ConsumerGroup {
+          join(consumerId: string): void;
+          leave(consumerId: string): void;
+          assignmentOf(consumerId: string): number[];
+          ownerOf(partition: number): string | null;
+          members(): string[];
+          rebalances(): number;
+        }
+
+        export function createConsumerGroup(options: GroupOptions): ConsumerGroup {
+          const order: string[] = [];
+          // 分配是有状态的：记住现在谁拥有什么，在此基础上做最小调整。
+          // 用 partition % memberCount 算出来的分配没有状态，
+          // 成员数一变几乎所有分区都会换主
+          const assignments = new Map<string, number[]>();
+          let rebalanceCount = 0;
+
+          function rebalance(): void {
+            rebalanceCount += 1;
+            if (order.length === 0) {
+              assignments.clear();
+              return;
+            }
+
+            const base = Math.floor(options.partitions / order.length);
+            const extra = options.partitions % order.length;
+            const targetOf = (index: number) => base + (index < extra ? 1 : 0);
+
+            // 先记下「调整之前谁都持有什么」。用调整之后的 keep 来算无主分区的话，
+            // 刚被收回的那些会同时出现在 surplus 和「无主」里，被分配两次
+            const heldBefore = new Set<number>();
+            for (const id of order) {
+              for (const partition of assignments.get(id) || []) heldBefore.add(partition);
+            }
+
+            // 第一步：收回超额的
+            const orphans: number[] = [];
+            order.forEach((id, index) => {
+              const current = (assignments.get(id) || []).slice().sort((a, b) => a - b);
+              assignments.set(id, current.slice(0, targetOf(index)));
+              for (const partition of current.slice(targetOf(index))) orphans.push(partition);
+            });
+            // 再加上从来没被认领过的
+            for (let partition = 0; partition < options.partitions; partition += 1) {
+              if (!heldBefore.has(partition)) orphans.push(partition);
+            }
+            orphans.sort((a, b) => a - b);
+
+            // 第二步：把收回来的分给还不够的。没被这两步碰到的分配原封不动，
+            // 粘性就是这么来的
+            let cursor = 0;
+            order.forEach((id, index) => {
+              const current = assignments.get(id) as number[];
+              while (current.length < targetOf(index) && cursor < orphans.length) {
+                current.push(orphans[cursor]);
+                cursor += 1;
+              }
+              current.sort((a, b) => a - b);
+            });
+          }
+
+          return {
+            join(consumerId: string): void {
+              if (order.indexOf(consumerId) !== -1) return;
+              order.push(consumerId);
+              assignments.set(consumerId, []);
+              rebalance();
+            },
+
+            leave(consumerId: string): void {
+              const index = order.indexOf(consumerId);
+              if (index === -1) return;
+              order.splice(index, 1);
+              assignments.delete(consumerId);
+              // 退出必须触发真正的再分配：只标成无主的话
+              // 那些分区从此没人消费，而监控上看不出任何异常
+              rebalance();
+            },
+
+            assignmentOf(consumerId: string): number[] {
+              return (assignments.get(consumerId) || []).slice();
+            },
+
+            ownerOf(partition: number): string | null {
+              for (const entry of Array.from(assignments.entries())) {
+                if (entry[1].indexOf(partition) !== -1) return entry[0];
+              }
+              return null;
+            },
+
+            members(): string[] {
+              return order.slice();
+            },
+
+            rebalances(): number {
+              return rebalanceCount;
+            },
+          };
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**再平衡的两步结构是粘性的全部来源。** 第一步只收回「超出目标数量」的部分，',
+      '第二步只填补「不足目标数量」的部分。中间那些正好达标的消费者，',
+      '它们的分区从头到尾没被碰过。写成「先全清空再重分」，代码更短，',
+      '但每个分区都会换主人。',
+      '',
+      '**`current.slice(0, target)` 保留的是排序后的前 N 个。** 保留哪几个其实无所谓，',
+      '重要的是**确定性**——同样的输入必须得到同样的输出，否则再平衡会在',
+      '「没有实际变化」的情况下也产生移动。排序是最简单的确定性来源。',
+      '',
+      '**`targetOf` 让前 `extra` 个消费者多拿一个。** 12 个分区 5 个消费者时是',
+      '3/3/2/2/2，任意两个消费者的差不超过 1。允许 6/2/2/2 这种分配的实现',
+      '在唯一性和粘性上都完美，但那个拿 6 个的消费者会成为瓶颈——',
+      '均匀是硬约束，不是优化目标。',
+      '',
+      '**`leave` 里的 `rebalance()` 不能省。** 只把成员从列表里删掉、',
+      '把它的分配删掉，那些分区就变成无主状态了。',
+      '而「无主」在这个模型里不会自动被谁接管——事件会一直堆积，',
+      '而消费者数量、错误率这些指标全都正常。',
+    ].join('\n'),
+    [
+      'The two-step structure of the rebalance is where all the stickiness comes from. The first step',
+      'reclaims only what exceeds the target, the second fills only what falls short, and consumers already',
+      'exactly at target are never touched. Clearing everything and redistributing is shorter code and',
+      'moves every partition.',
+      '',
+      '`current.slice(0, target)` keeps the first N after sorting. Which ones are kept does not matter; what',
+      'matters is determinism — the same input must give the same output, or a rebalance produces movement',
+      'even when nothing actually changed. Sorting is the simplest source of that.',
+      '',
+      '`targetOf` gives the first `extra` consumers one more each, so twelve partitions across five',
+      'consumers is 3/3/2/2/2 and no two differ by more than one. An implementation allowing 6/2/2/2 is',
+      'perfect on uniqueness and stickiness, and the consumer holding six becomes the bottleneck. Evenness',
+      'is a constraint, not an optimisation target.',
+      '',
+      'The `rebalance()` inside `leave` cannot be omitted. Removing the member and deleting its assignment',
+      'leaves those partitions unowned, and unowned partitions are not adopted by anyone in this model —',
+      'events accumulate indefinitely while consumer count, error rate and every other metric look normal.',
+    ].join('\n')
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+
+const databaseSupport = readonlyFile(
+  'src/support/db.ts',
+  code`
+    /**
+     * 极简数据库（只读，平台提供）
+     *
+     * 只提供这一关需要的东西：一个真正会回滚的事务。
+     * work 抛错时，事务里所有写入一起撤销。
+     */
+    export interface Tx {
+      insert(table: string, row: Record<string, unknown>): void;
+      update(table: string, match: (row: Record<string, unknown>) => boolean, patch: Record<string, unknown>): void;
+    }
+
+    export interface Database {
+      /** work 抛错则整个事务回滚，异常继续向上抛 */
+      transaction<T>(work: (tx: Tx) => T): T;
+      rows(table: string): Array<Record<string, unknown>>;
+    }
+
+    export function createDatabase(): Database {
+      const tables = new Map<string, Array<Record<string, unknown>>>();
+
+      function tableOf(name: string): Array<Record<string, unknown>> {
+        const existing = tables.get(name);
+        if (existing) return existing;
+        const created: Array<Record<string, unknown>> = [];
+        tables.set(name, created);
+        return created;
+      }
+
+      return {
+        transaction<T>(work: (tx: Tx) => T): T {
+          const snapshot = new Map<string, Array<Record<string, unknown>>>();
+          for (const entry of Array.from(tables.entries())) {
+            snapshot.set(entry[0], entry[1].map((row) => ({ ...row })));
+          }
+
+          const tx: Tx = {
+            insert(table: string, row: Record<string, unknown>): void {
+              tableOf(table).push({ ...row });
+            },
+            update(table, match, patch): void {
+              for (const row of tableOf(table)) {
+                if (match(row)) Object.assign(row, patch);
+              }
+            },
+          };
+
+          try {
+            return work(tx);
+          } catch (error) {
+            tables.clear();
+            for (const entry of Array.from(snapshot.entries())) tables.set(entry[0], entry[1]);
+            throw error;
+          }
+        },
+
+        rows(table: string): Array<Record<string, unknown>> {
+          return tableOf(table).map((row) => ({ ...row }));
+        },
+      };
+    }
+  `
+);
+
+const stage6 = {
+  id: 'outbox',
+  title: t('第 6 关 · 事务性 outbox', 'Stage 6 · The transactional outbox'),
+  goal: t(
+    [
+      '到这里，事件的分发、排序、消费都做完了。但有一个问题一直被回避着：',
+      '**事件是怎么产生的？**',
+      '',
+      '最直觉的写法是：',
+      '',
+      '```ts',
+      'await db.insert(\'orders\', order);',
+      'await bus.publish({ type: \'order.created\', ... });',
+      '```',
+      '',
+      '这两行之间有一个致命的缝隙。进程在第一行之后崩溃——',
+      '订单落库了，事件没发出去，下游永远不知道有这个订单。',
+      '把两行调换顺序也不行：事件发出去了，订单没落库，下游收到一个不存在订单的通知。',
+      '**数据库事务和消息队列不在同一个事务里**，这个缝隙无法用重试或者小心翼翼消除。',
+      '',
+      'Outbox 模式的答案是：**先别发消息**。把事件当作一行数据，',
+      '和业务数据写在**同一个数据库事务**里；再由一个独立的投递器把它读出来发走。',
+      '',
+      '在 `src/outbox.ts` 实现 `createOutbox(db)`：',
+      '',
+      '- `commit(work)`：在一个事务里执行 work，work 返回的事件写进 outbox 表；',
+      '  work 抛错则业务数据和事件**一起回滚**；',
+      '- `dispatch(publish)`：把未投递的事件依次发出去，',
+      '  发送成功的标记为已投递，**失败的留着下次再发**；',
+      '- `pending()`：还有多少事件没投递。',
+      '',
+      '两个门槛：业务写入失败时 outbox 里不许留下孤儿事件；',
+      '投递失败的事件一个都不许丢，重试之后必须全部送达。',
+    ].join('\n'),
+    [
+      'Dispatch, ordering and consumption are all done. One question has been dodged throughout: where do',
+      'events come from?',
+      '',
+      'The intuitive version is:',
+      '',
+      '```ts',
+      "await db.insert('orders', order);",
+      "await bus.publish({ type: 'order.created', ... });",
+      '```',
+      '',
+      'There is a fatal gap between those two lines. The process dies after the first — the order is',
+      'stored and no event was published, so nothing downstream ever learns it exists. Swapping the lines',
+      'does not help: the event goes out, the order does not persist, and downstream is notified about an',
+      'order that never existed. The database and the message broker are not in one transaction, and no',
+      'amount of retrying or care closes that gap.',
+      '',
+      'The outbox answer is: do not publish yet. Treat the event as a row and write it in the same database',
+      'transaction as the business data, then let a separate dispatcher read and deliver it.',
+      '',
+      'Implement `createOutbox(db)` in `src/outbox.ts`:',
+      '',
+      '- `commit(work)` runs `work` in a transaction and stores the events it returns in the outbox table;',
+      '  if `work` throws, business data and events roll back together;',
+      '- `dispatch(publish)` sends undelivered events in order, marking the successful ones and leaving',
+      '  failures for the next attempt;',
+      '- `pending()` reports how many are still undelivered.',
+      '',
+      'Two gates: a failed business write must leave no orphan event in the outbox, and no event that',
+      'failed to publish may be lost — a later dispatch must deliver every one of them.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('业务数据和事件在同一个事务里写入', 'Business data and events are written in one transaction'),
+    t('业务失败时事件一起回滚', 'A failed business write rolls the events back with it'),
+    t('投递成功的事件被标记，不会重发', 'Delivered events are marked and not resent'),
+    t('投递失败的事件保留，下次继续', 'Failed deliveries stay pending for the next attempt'),
+    t('投递顺序与写入顺序一致', 'Delivery order matches write order'),
+  ],
+  pitfalls: [
+    t(
+      '在事务提交之后再往 outbox 表里写事件。这就退回到了原来的两步问题，只是把「数据库和队列」换成了「数据库和数据库」——中间崩溃仍然会产生孤儿。事件的写入必须发生在业务写入的**同一个** `transaction` 回调里面。',
+      'Inserting into the outbox after the transaction commits. That is the original two-step problem again with "database and queue" replaced by "database and database" — a crash in between still orphans data. The event insert must happen inside the very same `transaction` callback as the business write.'
+    ),
+    t(
+      '投递前先标记为已发送，再调用 publish。发送失败时事件已经被标成已投递，永远不会重试——静默丢失一个事件。顺序必须是「先发送成功，再标记」，这样最坏情况是重复投递，而重复正是第 7 关幂等要解决的问题。',
+      'Marking an event delivered before calling publish. When publishing fails the event is already marked and never retried — a silently lost event. The order must be publish first, mark second, so the worst case is a duplicate delivery, and duplicates are exactly what stage 7 addresses.'
+    ),
+    t(
+      '投递时用 `Promise.all` 并行发送所有待发事件。吞吐更好，顺序没了——同一个订单的「已创建」和「已支付」可能倒过来送达。outbox 的投递必须保持写入顺序，这是它相对于「直接发消息」的一个额外保证。',
+      'Dispatching with `Promise.all` across all pending events. Throughput improves and ordering is gone, so "created" and "paid" for one order can arrive reversed. Outbox delivery must preserve insertion order, which is an extra guarantee it offers over publishing directly.'
+    ),
+    t(
+      '一个事件发送失败就中断整批投递，但已经发出去的没有标记。下次投递会把它们重发一遍——虽然幂等能兜住，但这是白白产生的重复。中断是对的（保持顺序），但已成功的必须先标记。',
+      'Aborting the whole batch on one failure without marking the ones already sent. The next dispatch resends them — idempotency absorbs it, and the duplicates were manufactured for nothing. Aborting is right, to preserve ordering, and the successful ones must be marked first.'
+    ),
+  ],
+  hints: [
+    t(
+      'outbox 就是一张普通的表：`{ id, type, payload, delivered }`。`commit` 里把 work 返回的事件逐个 `tx.insert(\'outbox\', ...)`。',
+      'The outbox is an ordinary table of `{ id, type, payload, delivered }`. In `commit`, insert each event `work` returned with `tx.insert(\'outbox\', ...)`.'
+    ),
+    t(
+      '`dispatch` 遍历 `delivered === false` 的行，逐个 await publish，成功后用 `tx.update` 标记；遇到失败就 break，保持顺序。',
+      "`dispatch` walks rows with `delivered === false`, awaits publish for each, marks it with `tx.update` on success, and breaks on failure to preserve order."
+    ),
+  ],
+  extension: t(
+    [
+      'Outbox 解决的是**双写问题**（dual write）——同一个逻辑操作要更新两个独立的存储，',
+      '而它们之间没有共同的事务。这个问题在微服务里无处不在：',
+      '数据库和缓存、数据库和搜索引擎、数据库和消息队列。',
+      'Outbox 的通用形式是：**只写一个存储，让其他存储从它派生**。',
+      '',
+      '投递器的实现有两派。**轮询派**（这一关的做法）定期扫 outbox 表，',
+      '简单可靠，代价是延迟等于轮询间隔、而且给数据库持续加读负载。',
+      '**日志捕获派**（CDC，change data capture）直接读数据库的事务日志——',
+      'Debezium 读 MySQL binlog 和 PostgreSQL WAL 就是这个思路。',
+      '延迟低到毫秒级，对业务库零额外负载，代价是需要额外的基础设施。',
+      '',
+      'Outbox 天然是 **at-least-once**：投递成功了但标记失败（进程恰好在两步之间崩溃），',
+      '重启后会重发一次。想变成 exactly-once 的唯一办法仍然是消费端幂等——',
+      '这也是为什么这个项目的下一关就是幂等。',
+      '',
+      '还有一个运维上的坑：**outbox 表会一直长**。已投递的行如果不清理，',
+      '几个月后这张表会比业务表还大，而且每次扫描都要跳过大量已投递的行。',
+      '真实实现要么定期删除，要么用分区表按时间滚动删除。',
+    ].join('\n'),
+    [
+      'The outbox addresses the dual-write problem: one logical operation must update two independent',
+      'stores with no shared transaction between them. That shape is everywhere in microservices —',
+      'database and cache, database and search index, database and message broker. The general form of the',
+      'answer is to write to one store and derive the others from it.',
+      '',
+      'Dispatchers come in two schools. Polling, which this stage implements, periodically scans the outbox',
+      'table: simple and reliable, with latency equal to the polling interval and a continuous read load on',
+      'the database. Log capture (CDC) reads the transaction log directly — Debezium consuming MySQL binlog',
+      'or PostgreSQL WAL — with millisecond latency and no extra load on the business database, at the cost',
+      'of additional infrastructure.',
+      '',
+      'An outbox is inherently at-least-once: publishing may succeed and the marking fail, when a process',
+      'dies exactly between the two, and the event is resent on restart. The only route to exactly-once is',
+      'still idempotent consumption — which is why the next stage of this project is idempotency.',
+      '',
+      'One operational trap: the outbox table grows forever. Unless delivered rows are cleaned up, within',
+      'months it is larger than the business table and every scan skips over a mass of delivered rows. Real',
+      'implementations either delete periodically or use a time-partitioned table rolled off by age.',
+    ].join('\n')
+  ),
+  focus: ['correctness', 'resilience', 'encapsulation'],
+  lab: {},
+  starterFiles: [
+    databaseSupport,
+    file(
+      'src/outbox.ts',
+      code`
+        import type { OrderEvent } from './contract';
+        import type { Database, Tx } from './support/db';
+
+        export interface Outbox {
+          /** work 在一个事务里执行，它返回的事件和业务数据一起提交或一起回滚 */
+          commit(work: (tx: Tx) => OrderEvent[]): void;
+          /** 把未投递的事件按写入顺序发出去，返回本次投递成功的数量 */
+          dispatch(publish: (event: OrderEvent) => Promise<void>): Promise<number>;
+          pending(): number;
+        }
+
+        export function createOutbox(db: Database): Outbox {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-6.spec.ts',
+      code`
+        import { createOutbox } from '../src/outbox';
+        import { createDatabase } from '../src/support/db';
+        import { count } from '@lab/metrics';
+
+        function orderEvent(id: string, orderId: string) {
+          return { id, type: 'order.created', payload: { orderId } };
+        }
+
+        describe('阶段6 · 事务性 outbox', () => {
+          it('业务数据和事件一起写入', () => {
+            const db = createDatabase();
+            const outbox = createOutbox(db);
+
+            outbox.commit((tx) => {
+              tx.insert('orders', { id: 'o1', total: 100 });
+              return [orderEvent('e1', 'o1')];
+            });
+
+            expect(db.rows('orders')).toHaveLength(1);
+            expect(outbox.pending()).toBe(1);
+          });
+
+          it('业务写入失败时事件一起回滚 [gate:atomic]', () => {
+            const db = createDatabase();
+            const outbox = createOutbox(db);
+
+            let thrown = false;
+            try {
+              outbox.commit((tx) => {
+                tx.insert('orders', { id: 'o1', total: 100 });
+                throw new Error('validation failed');
+              });
+            } catch (caught) {
+              thrown = true;
+            }
+
+            count('orphanEvents', outbox.pending());
+            expect(thrown).toBe(true);
+            expect(db.rows('orders')).toHaveLength(0);
+            // 事务外面写 outbox 的实现会在这里留下一个孤儿事件
+            expect(outbox.pending()).toBe(0);
+          });
+
+          it('投递成功后标记，不会重发', async () => {
+            const db = createDatabase();
+            const outbox = createOutbox(db);
+            outbox.commit(() => [orderEvent('e1', 'o1')]);
+
+            const sent: string[] = [];
+            expect(await outbox.dispatch(async (event) => {
+              sent.push(event.id);
+            })).toBe(1);
+            expect(outbox.pending()).toBe(0);
+
+            await outbox.dispatch(async (event) => {
+              sent.push(event.id);
+            });
+            expect(sent).toEqual(['e1']);
+          });
+
+          it('投递顺序与写入顺序一致', async () => {
+            const db = createDatabase();
+            const outbox = createOutbox(db);
+            outbox.commit(() => [orderEvent('e1', 'o1'), orderEvent('e2', 'o1')]);
+            outbox.commit(() => [orderEvent('e3', 'o1')]);
+
+            const sent: string[] = [];
+            await outbox.dispatch(async (event) => {
+              sent.push(event.id);
+            });
+            expect(sent).toEqual(['e1', 'e2', 'e3']);
+          });
+
+          it('投递失败的事件一个都不丢 [gate:no-loss]', async () => {
+            const db = createDatabase();
+            const outbox = createOutbox(db);
+            outbox.commit(() => [orderEvent('e1', 'o1'), orderEvent('e2', 'o1'), orderEvent('e3', 'o1')]);
+
+            // 第一次投递：第二个开始全部失败
+            const firstRound: string[] = [];
+            await outbox.dispatch(async (event) => {
+              if (event.id !== 'e1') throw new Error('broker is down');
+              firstRound.push(event.id);
+            });
+
+            // 第二次投递：broker 恢复
+            const secondRound: string[] = [];
+            await outbox.dispatch(async (event) => {
+              secondRound.push(event.id);
+            });
+
+            const delivered = firstRound.concat(secondRound).sort();
+            count('lostEvents', 3 - new Set(delivered).size);
+
+            expect(new Set(delivered).size).toBe(3);
+            expect(outbox.pending()).toBe(0);
+          });
+
+          it('失败时已成功的那些已经被标记，不会重发', async () => {
+            const db = createDatabase();
+            const outbox = createOutbox(db);
+            outbox.commit(() => [orderEvent('e1', 'o1'), orderEvent('e2', 'o1')]);
+
+            await outbox.dispatch(async (event) => {
+              if (event.id === 'e2') throw new Error('broker is down');
+            });
+            expect(outbox.pending()).toBe(1);
+
+            const second: string[] = [];
+            await outbox.dispatch(async (event) => {
+              second.push(event.id);
+            });
+            expect(second).toEqual(['e2']);
+          });
+
+          it('没有待投递事件时 dispatch 返回 0', async () => {
+            const outbox = createOutbox(createDatabase());
+            expect(await outbox.dispatch(async () => undefined)).toBe(0);
+          });
+
+          it('work 不返回事件也能正常提交', () => {
+            const db = createDatabase();
+            const outbox = createOutbox(db);
+            outbox.commit((tx) => {
+              tx.insert('orders', { id: 'o1' });
+              return [];
+            });
+            expect(db.rows('orders')).toHaveLength(1);
+            expect(outbox.pending()).toBe(0);
+          });
+
+          it('多次 commit 累积在 outbox 里', () => {
+            const outbox = createOutbox(createDatabase());
+            outbox.commit(() => [orderEvent('e1', 'o1')]);
+            outbox.commit(() => [orderEvent('e2', 'o2')]);
+            expect(outbox.pending()).toBe(2);
+          });
+
+          it('回滚之后业务数据也不留痕迹', () => {
+            const db = createDatabase();
+            const outbox = createOutbox(db);
+            outbox.commit((tx) => {
+              tx.insert('orders', { id: 'o1' });
+              return [orderEvent('e1', 'o1')];
+            });
+
+            try {
+              outbox.commit((tx) => {
+                tx.insert('orders', { id: 'o2' });
+                return [orderEvent('e2', 'o2')];
+              });
+            } catch (caught) {
+              // 这一次不会抛
+            }
+            expect(db.rows('orders')).toHaveLength(2);
+
+            try {
+              outbox.commit((tx) => {
+                tx.insert('orders', { id: 'o3' });
+                throw new Error('nope');
+              });
+            } catch (caught) {
+              // 预期之内
+            }
+            // 第三次回滚了，前两次的数据必须还在
+            expect(db.rows('orders')).toHaveLength(2);
+            expect(outbox.pending()).toBe(2);
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'counters.orphanEvents',
+      op: 'eq',
+      value: 0,
+      zh: '业务写入回滚时不留下孤儿事件',
+      en: 'A rolled-back write leaves no orphan event',
+      dimension: 'correctness',
+      scope: 'gate:atomic',
+    }),
+    gate({
+      metric: 'counters.lostEvents',
+      op: 'eq',
+      value: 0,
+      zh: '投递失败的事件重试后全部送达',
+      en: 'Every event that failed to publish is delivered on retry',
+      dimension: 'resilience',
+      scope: 'gate:no-loss',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/outbox.ts',
+      code`
+        import type { OrderEvent } from './contract';
+        import type { Database, Tx } from './support/db';
+
+        export interface Outbox {
+          commit(work: (tx: Tx) => OrderEvent[]): void;
+          dispatch(publish: (event: OrderEvent) => Promise<void>): Promise<number>;
+          pending(): number;
+        }
+
+        const TABLE = 'outbox';
+
+        export function createOutbox(db: Database): Outbox {
+          return {
+            commit(work: (tx: Tx) => OrderEvent[]): void {
+              db.transaction((tx) => {
+                const events = work(tx);
+                // 关键就是这一行的位置：事件的写入在业务写入的同一个事务回调里。
+                // 挪到 transaction 外面，就退回成了「先写库再写 outbox」的两步问题
+                for (const event of events) {
+                  tx.insert(TABLE, {
+                    id: event.id,
+                    type: event.type,
+                    payload: event.payload,
+                    delivered: false,
+                  });
+                }
+              });
+            },
+
+            async dispatch(publish: (event: OrderEvent) => Promise<void>): Promise<number> {
+              const rows = db.rows(TABLE).filter((row) => row.delivered === false);
+              let sent = 0;
+
+              for (const row of rows) {
+                const event: OrderEvent = {
+                  id: String(row.id),
+                  type: String(row.type),
+                  payload: row.payload as Record<string, unknown>,
+                };
+
+                try {
+                  // 先发送、成功了再标记。反过来的话，
+                  // 发送失败的事件已经被标成已投递，永远不会重试——静默丢失
+                  await publish(event);
+                } catch (error) {
+                  // 保持顺序：中断整批，剩下的留到下一轮。
+                  // 跳过继续发会让同一个订单的事件倒序送达
+                  break;
+                }
+
+                db.transaction((tx) => {
+                  tx.update(TABLE, (candidate) => candidate.id === row.id, { delivered: true });
+                });
+                sent += 1;
+              }
+
+              return sent;
+            },
+
+            pending(): number {
+              return db.rows(TABLE).filter((row) => row.delivered === false).length;
+            },
+          };
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**整关的重点是 `tx.insert(TABLE, ...)` 所在的位置。** 它在 `db.transaction` 的回调里，',
+      '和业务写入共享同一个事务边界。挪到 `transaction` 外面一行，代码看起来几乎一样，',
+      '但双写问题原封不动地回来了——只是从「数据库 + 队列」变成了「数据库 + 数据库」。',
+      '',
+      '**先 publish 再标记。** 这个顺序决定了失败模式：',
+      '「发了但没标记」会导致重复投递，「标记了但没发」会导致永久丢失。',
+      '重复可以被消费端幂等消化（下一关就是干这个的），丢失不能被任何下游手段补救。',
+      '在两种失败之间做选择时，永远选可以被下游修复的那一种。',
+      '',
+      '**失败时 `break` 而不是 `continue`。** 跳过失败的继续发下一个，能提高投递成功率，',
+      '代价是顺序保证没了——同一个订单的「已支付」可能先于「已创建」送达。',
+      'outbox 的一个隐含承诺就是保持写入顺序，`continue` 会悄悄破坏它。',
+      '',
+      '**标记用一个独立的小事务。** 它和 publish 之间仍然有缝隙（发了但还没标记时崩溃），',
+      '这个缝隙是 outbox 模式固有的、无法消除的——它正是 at-least-once 语义的来源。',
+    ].join('\n'),
+    [
+      'The stage turns on where `tx.insert(TABLE, ...)` sits. It is inside the `db.transaction` callback,',
+      'sharing a transaction boundary with the business write. Move it one line outside and the code looks',
+      'almost identical while the dual-write problem returns untouched — merely transformed from "database',
+      'and queue" into "database and database".',
+      '',
+      'Publish first, mark second. That order chooses the failure mode: "sent but not marked" causes a',
+      'duplicate, "marked but not sent" causes permanent loss. A duplicate can be absorbed by idempotent',
+      'consumption, which is exactly the next stage; loss cannot be repaired by anything downstream. Given',
+      'a choice between two failures, always take the one something downstream can fix.',
+      '',
+      '`break` rather than `continue` on failure. Skipping a failure to keep sending raises the delivery',
+      'rate at the cost of ordering, so "paid" can arrive before "created" for one order. Preserving',
+      'insertion order is an implicit promise of the outbox, and `continue` quietly breaks it.',
+      '',
+      'Marking happens in its own small transaction. A gap remains between publishing and marking — a',
+      'crash right there — and that gap is inherent to the pattern and cannot be closed. It is precisely',
+      'where at-least-once semantics come from.',
+    ].join('\n')
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+
+const stage7 = {
   id: 'idempotency',
-  title: t('第 3 关 · 幂等与死信队列', 'Stage 3 · Idempotency and dead letters'),
+  title: t('第 7 关 · 幂等与死信队列', 'Stage 7 · Idempotency and dead letters'),
   goal: t(
     [
       '消息队列只保证 at-least-once：同一个事件会重复投递。',
@@ -972,7 +2946,7 @@ const stage3 = {
   ],
   specs: [
     spec(
-      'specs/stage-3.spec.ts',
+      'specs/stage-7.spec.ts',
       code`
         import { createOrderProcessor } from '../src/processor';
         import { getCounters } from '@lab/metrics';
@@ -982,7 +2956,7 @@ const stage3 = {
           return { id, type, payload: { orderId: id } };
         }
 
-        describe('阶段3 · 幂等与死信', () => {
+        describe('阶段7 · 幂等与死信', () => {
           it('正常事件跑完中间件链', async () => {
             const trace: string[] = [];
             const processor = createOrderProcessor({
@@ -1288,17 +3262,1846 @@ const stage3 = {
   ),
 };
 
+/* ------------------------------------------------------------------ */
+
+const stage8 = {
+  id: 'saga',
+  title: t('第 8 关 · Saga 与补偿事务', 'Stage 8 · Sagas and compensation'),
+  goal: t(
+    [
+      '一次下单要做四件事：扣库存、扣余额、创建物流单、发通知。',
+      '它们分属四个服务，各有各的数据库——**没有一个事务能同时覆盖它们**。',
+      '扣完库存扣余额时余额不足，怎么办？库存已经扣了。',
+      '',
+      'Saga 的答案是：**不做回滚，做补偿**。',
+      '每一步都配一个「反向操作」，失败时**按相反顺序**依次执行已完成步骤的补偿。',
+      '扣了库存就还库存，扣了余额就退余额。',
+      '',
+      '在 `src/saga.ts` 实现 `runSaga(steps, ctx)`：',
+      '',
+      '- 按顺序执行每一步的 `invoke`；',
+      '- 某一步失败时，把**已经成功的**步骤按**逆序**补偿；',
+      '- 失败的那一步本身不补偿——它没做成，没什么可撤销的；',
+      '- 补偿本身失败时记下来，但**继续补偿剩下的**；',
+      '- 返回 `{ ok, completed, compensated, failedAt, compensationFailures }`。',
+      '',
+      '逆序是硬性要求，不是风格问题。后面的步骤可能依赖前面的结果——',
+      '「创建物流单」用了「扣库存」锁定的那批货，先还库存再撤物流单，',
+      '中间会出现一个「物流单指向已经被别人买走的库存」的窗口。',
+      '',
+      '两个门槛：补偿必须严格逆序；失败之后不许留下任何未补偿的已完成步骤。',
+    ].join('\n'),
+    [
+      'Placing an order does four things: reserve stock, charge the balance, create a shipment, send a',
+      'notification. They belong to four services with four databases, and no transaction spans them. What',
+      'happens when the balance is insufficient after stock was already reserved?',
+      '',
+      'The saga answer is: do not roll back, compensate. Every step carries an inverse, and on failure the',
+      'compensations for the completed steps run in reverse order. Stock reserved gets released, money',
+      'charged gets refunded.',
+      '',
+      'Implement `runSaga(steps, ctx)` in `src/saga.ts`:',
+      '',
+      "- run each step's `invoke` in order;",
+      '- when one fails, compensate the steps that already succeeded, in reverse;',
+      '- the failing step is not compensated — it did not complete, so there is nothing to undo;',
+      '- record a failing compensation and continue compensating the rest;',
+      '- return `{ ok, completed, compensated, failedAt, compensationFailures }`.',
+      '',
+      'Reverse order is a requirement, not a stylistic preference. Later steps may depend on earlier',
+      'results — the shipment was created against the stock the first step reserved — and releasing stock',
+      'before cancelling the shipment opens a window where a shipment points at stock somebody else has',
+      'already bought.',
+      '',
+      'Two gates: compensation must be strictly reversed, and no completed step may be left uncompensated.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('全部成功时不执行任何补偿', 'Nothing is compensated when every step succeeds'),
+    t('失败时已完成的步骤全部被补偿', 'Every completed step is compensated on failure'),
+    t('补偿按逆序执行', 'Compensations run in reverse order'),
+    t('失败的那一步自己不补偿', 'The failing step is not compensated'),
+    t('补偿失败不影响其余补偿', 'A failing compensation does not stop the others'),
+  ],
+  pitfalls: [
+    t(
+      '补偿按正序执行。看起来只是顺序问题，实际上会制造出前面步骤已撤销、后面步骤还挂着的中间态——「物流单指向已经还回库存池的货」。补偿的依赖关系和正向执行完全相反，必须逆序。',
+      'Compensating in forward order. It looks like a mere ordering detail and it manufactures an intermediate state where earlier steps are undone while later ones still stand — a shipment pointing at stock already returned to the pool. Compensation dependencies are the exact reverse of the forward ones, so it must run backwards.'
+    ),
+    t(
+      '把失败的那一步也补偿一遍。它的 invoke 抛错了，可能什么都没做，也可能做了一半。对一个没做成的操作执行反向操作，轻则报错（找不到要撤销的记录），重则撤销掉别人的东西（比如按订单号退款，退掉了上一次成功的那笔）。补偿只针对确认成功的步骤。',
+      'Compensating the failing step as well. Its `invoke` threw, having done nothing or something partial. Inverting an operation that never completed either errors — there is no record to undo — or undoes something else entirely, such as refunding by order id and reversing the previous successful charge. Compensate only confirmed successes.'
+    ),
+    t(
+      '某个补偿抛错就中断整个补偿流程。剩下的步骤永远不会被撤销，系统停在一个谁也说不清的中间态。补偿必须尽最大努力全部执行完，失败的单独记录下来交给人工或者重试队列——这也是为什么返回值里要有 `compensationFailures`。',
+      'Aborting the whole compensation when one of them throws. The remaining steps are never undone and the system settles into a state nobody can describe. Compensation must be best-effort and run to the end, recording failures separately for a human or a retry queue — which is why `compensationFailures` is in the return value.'
+    ),
+    t(
+      '假设补偿一定成功，因此不做幂等。补偿本身也会失败重试，而「退款」重试两次就是退了两笔钱。Saga 的每一步和每一个补偿都必须是幂等的，这一关没有强制，但真实系统里它是前置条件，不是优化。',
+      'Assuming compensations always succeed and therefore need not be idempotent. Compensations fail and get retried too, and a refund retried twice is two refunds. Every step and every compensation in a saga must be idempotent — this stage does not enforce it, and in a real system it is a precondition rather than an optimisation.'
+    ),
+  ],
+  hints: [
+    t(
+      '正向循环里把成功的步骤 push 进一个数组，失败时 `for (let i = done.length - 1; i >= 0; i--)` 就是逆序补偿。',
+      'Push each successful step into an array in the forward loop; `for (let i = done.length - 1; i >= 0; i--)` is then the reverse compensation.'
+    ),
+    t(
+      '每个补偿单独 try/catch，把错误收进 `compensationFailures`，循环继续。',
+      'Wrap each compensation in its own try/catch, collect the error into `compensationFailures`, and keep looping.'
+    ),
+  ],
+  extension: t(
+    [
+      'Saga 这个词来自 1987 年 Garcia-Molina 和 Salem 的论文，原本是为了解决',
+      '「长事务把数据库锁太久」的问题：把一个长事务拆成若干个短事务，',
+      '每个都立即提交，用补偿来处理失败。三十多年后它成了微服务的标配。',
+      '',
+      'Saga 有两种编排方式。**编排式**（orchestration，这一关的做法）有一个中心协调者',
+      '按顺序调用每一步，流程清晰、易于调试，代价是协调者成了一个必须高可用的组件，',
+      '而且它知道所有服务的细节。**协同式**（choreography）没有中心，',
+      '每个服务监听上一步的事件、做完发出自己的事件，耦合更松，',
+      '代价是流程散落在各处——出问题时没人说得清「现在走到哪一步了」。',
+      '',
+      'Saga 最重要的性质是它**不提供隔离性**。ACID 里的 A、C、D 都能靠补偿近似，',
+      'I 不行：saga 执行到一半时，中间状态对外是可见的。',
+      '别人可能读到「库存已扣但订单还没创建」的瞬间。',
+      '常见的缓解手段是**语义锁**（给记录打一个 pending 标记，让其他人知道这里正在进行中）',
+      '和**交换律更新**（把「设置为 X」改成「增加 delta」，让顺序不再重要）。',
+      '',
+      '还有一个实践上的难点：**补偿不总是存在**。发出去的邮件撤不回来，',
+      '调用第三方支付扣的款可能要 T+1 才能退。真实设计里的常见做法是',
+      '把不可补偿的步骤**放到最后**——先做所有可撤销的，最后才做那些无法回头的。',
+    ].join('\n'),
+    [
+      'The word saga comes from a 1987 paper by Garcia-Molina and Salem, originally about long transactions',
+      'holding database locks too long: split one long transaction into several short ones that each commit',
+      'immediately, and handle failure with compensation. Thirty years later it is standard in',
+      'microservices.',
+      '',
+      'Sagas are coordinated two ways. Orchestration, what this stage builds, has a central coordinator',
+      'calling each step in order: the flow is explicit and debuggable, at the cost of a component that',
+      'must be highly available and knows the details of every service. Choreography has no centre — each',
+      "service listens for the previous step's event and emits its own — which couples services more",
+      'loosely and scatters the flow, so when something goes wrong nobody can say which step it is on.',
+      '',
+      'The most important property of a saga is that it provides no isolation. A, C and D from ACID can be',
+      'approximated with compensation; I cannot. Mid-saga intermediate state is visible externally, and',
+      'someone may read the instant where stock is reserved and the order does not yet exist. The usual',
+      'mitigations are semantic locks — a pending flag telling others something is in progress — and',
+      'commutative updates, replacing "set to X" with "add delta" so ordering stops mattering.',
+      '',
+      'One more practical difficulty: compensations do not always exist. A sent email cannot be recalled,',
+      'and a third-party payment may only be refundable the next day. The common design response is to put',
+      'the uncompensatable steps last — do everything reversible first, and only then the things you cannot',
+      'take back.',
+    ].join('\n')
+  ),
+  focus: ['correctness', 'resilience', 'encapsulation'],
+  lab: {},
+  starterFiles: [
+    file(
+      'src/saga.ts',
+      code`
+        export interface SagaStep {
+          name: string;
+          invoke(context: Record<string, unknown>): Promise<void>;
+          compensate(context: Record<string, unknown>): Promise<void>;
+        }
+
+        export interface SagaResult {
+          ok: boolean;
+          /** 成功执行的步骤，按执行顺序 */
+          completed: string[];
+          /** 被补偿的步骤，按补偿执行的顺序 */
+          compensated: string[];
+          /** 失败发生在哪一步 */
+          failedAt: string | null;
+          /** 补偿本身失败的步骤 */
+          compensationFailures: string[];
+        }
+
+        export function runSaga(
+          steps: SagaStep[],
+          context: Record<string, unknown>
+        ): Promise<SagaResult> {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-8.spec.ts',
+      code`
+        import { runSaga } from '../src/saga';
+        import { count } from '@lab/metrics';
+
+        function step(name: string, log: string[], options: { failInvoke?: boolean; failCompensate?: boolean } = {}) {
+          return {
+            name,
+            async invoke() {
+              if (options.failInvoke) throw new Error(name + ' failed');
+              log.push('do:' + name);
+            },
+            async compensate() {
+              if (options.failCompensate) throw new Error(name + ' compensation failed');
+              log.push('undo:' + name);
+            },
+          };
+        }
+
+        describe('阶段8 · Saga 与补偿', () => {
+          it('全部成功时不补偿任何一步', async () => {
+            const log: string[] = [];
+            const result = await runSaga(
+              [step('stock', log), step('payment', log), step('shipment', log)],
+              {}
+            );
+
+            expect(result.ok).toBe(true);
+            expect(result.completed).toEqual(['stock', 'payment', 'shipment']);
+            expect(result.compensated).toEqual([]);
+            expect(log).toEqual(['do:stock', 'do:payment', 'do:shipment']);
+          });
+
+          it('第一步就失败时无事可补偿', async () => {
+            const log: string[] = [];
+            const result = await runSaga([step('stock', log, { failInvoke: true }), step('payment', log)], {});
+
+            expect(result.ok).toBe(false);
+            expect(result.failedAt).toBe('stock');
+            expect(result.completed).toEqual([]);
+            expect(result.compensated).toEqual([]);
+            expect(log).toEqual([]);
+          });
+
+          it('中途失败时按逆序补偿 [gate:reverse]', async () => {
+            const log: string[] = [];
+            const result = await runSaga(
+              [
+                step('stock', log),
+                step('payment', log),
+                step('shipment', log, { failInvoke: true }),
+                step('notify', log),
+              ],
+              {}
+            );
+
+            expect(result.ok).toBe(false);
+            expect(result.failedAt).toBe('shipment');
+            expect(result.completed).toEqual(['stock', 'payment']);
+            // 逆序：先撤 payment 再撤 stock
+            expect(result.compensated).toEqual(['payment', 'stock']);
+
+            let orderErrors = 0;
+            const undoIndex = log.indexOf('undo:payment');
+            const stockUndoIndex = log.indexOf('undo:stock');
+            if (undoIndex === -1 || stockUndoIndex === -1 || undoIndex > stockUndoIndex) orderErrors += 1;
+            count('compensationOrderErrors', orderErrors);
+            expect(orderErrors).toBe(0);
+          });
+
+          it('失败的那一步自己不被补偿', async () => {
+            const log: string[] = [];
+            await runSaga([step('stock', log), step('payment', log, { failInvoke: true })], {});
+            // payment 的 invoke 抛了错，可能什么都没做，撤销它可能撤掉别的东西
+            expect(log).not.toContain('undo:payment');
+            expect(log).toContain('undo:stock');
+          });
+
+          it('失败之后没有未补偿的已完成步骤 [gate:complete]', async () => {
+            const log: string[] = [];
+            const result = await runSaga(
+              [
+                step('a', log),
+                step('b', log),
+                step('c', log),
+                step('d', log, { failInvoke: true }),
+              ],
+              {}
+            );
+
+            const uncompensated = result.completed.filter(
+              (name) => result.compensated.indexOf(name) === -1
+            );
+            count('uncompensated', uncompensated.length);
+
+            expect(result.completed).toEqual(['a', 'b', 'c']);
+            expect(uncompensated).toEqual([]);
+          });
+
+          it('补偿失败时继续补偿剩下的', async () => {
+            const log: string[] = [];
+            const result = await runSaga(
+              [
+                step('stock', log),
+                step('payment', log, { failCompensate: true }),
+                step('shipment', log, { failInvoke: true }),
+              ],
+              {}
+            );
+
+            // payment 的补偿失败了，但 stock 的补偿必须照常执行
+            expect(result.compensationFailures).toEqual(['payment']);
+            expect(log).toContain('undo:stock');
+          });
+
+          it('补偿失败被记录在 compensationFailures 里', async () => {
+            const log: string[] = [];
+            const result = await runSaga(
+              [
+                step('a', log, { failCompensate: true }),
+                step('b', log, { failCompensate: true }),
+                step('c', log, { failInvoke: true }),
+              ],
+              {}
+            );
+            expect(result.compensationFailures.sort()).toEqual(['a', 'b']);
+          });
+
+          it('context 在各步之间传递', async () => {
+            const context: Record<string, unknown> = {};
+            await runSaga(
+              [
+                {
+                  name: 'reserve',
+                  async invoke(ctx) {
+                    ctx.reservationId = 'r-1';
+                  },
+                  async compensate() {
+                    return undefined;
+                  },
+                },
+                {
+                  name: 'ship',
+                  async invoke(ctx) {
+                    ctx.shipmentFor = ctx.reservationId;
+                  },
+                  async compensate() {
+                    return undefined;
+                  },
+                },
+              ],
+              context
+            );
+            expect(context.shipmentFor).toBe('r-1');
+          });
+
+          it('补偿也能读到 context', async () => {
+            const context: Record<string, unknown> = {};
+            let seen: unknown = null;
+            await runSaga(
+              [
+                {
+                  name: 'reserve',
+                  async invoke(ctx) {
+                    ctx.reservationId = 'r-1';
+                  },
+                  async compensate(ctx) {
+                    seen = ctx.reservationId;
+                  },
+                },
+                {
+                  name: 'boom',
+                  async invoke() {
+                    throw new Error('nope');
+                  },
+                  async compensate() {
+                    return undefined;
+                  },
+                },
+              ],
+              context
+            );
+            expect(seen).toBe('r-1');
+          });
+
+          it('空步骤列表直接成功', async () => {
+            const result = await runSaga([], {});
+            expect(result.ok).toBe(true);
+            expect(result.completed).toEqual([]);
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'counters.compensationOrderErrors',
+      op: 'eq',
+      value: 0,
+      zh: '补偿严格按逆序执行',
+      en: 'Compensations run in strictly reverse order',
+      dimension: 'correctness',
+      scope: 'gate:reverse',
+    }),
+    gate({
+      metric: 'counters.uncompensated',
+      op: 'eq',
+      value: 0,
+      zh: '失败之后没有未补偿的已完成步骤',
+      en: 'No completed step is left uncompensated after a failure',
+      dimension: 'resilience',
+      scope: 'gate:complete',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/saga.ts',
+      code`
+        export interface SagaStep {
+          name: string;
+          invoke(context: Record<string, unknown>): Promise<void>;
+          compensate(context: Record<string, unknown>): Promise<void>;
+        }
+
+        export interface SagaResult {
+          ok: boolean;
+          completed: string[];
+          compensated: string[];
+          failedAt: string | null;
+          compensationFailures: string[];
+        }
+
+        export async function runSaga(
+          steps: SagaStep[],
+          context: Record<string, unknown>
+        ): Promise<SagaResult> {
+          const done: SagaStep[] = [];
+          const completed: string[] = [];
+          const compensated: string[] = [];
+          const compensationFailures: string[] = [];
+          let failedAt: string | null = null;
+
+          for (const step of steps) {
+            try {
+              await step.invoke(context);
+              done.push(step);
+              completed.push(step.name);
+            } catch (error) {
+              // 这一步没做成，它自己没什么可撤销的。
+              // 强行补偿它，轻则找不到记录，重则撤销掉别人的东西
+              failedAt = step.name;
+              break;
+            }
+          }
+
+          if (failedAt === null) {
+            return { ok: true, completed, compensated, failedAt: null, compensationFailures };
+          }
+
+          // 逆序：后面的步骤依赖前面的结果，正序补偿会制造出
+          // 「物流单指向已经还回库存池的货」这种中间态
+          for (let index = done.length - 1; index >= 0; index -= 1) {
+            const step = done[index];
+            try {
+              await step.compensate(context);
+              compensated.push(step.name);
+            } catch (error) {
+              // 尽最大努力补偿完：中断的话剩下的步骤永远不会被撤销，
+              // 系统停在一个谁也说不清的状态
+              compensationFailures.push(step.name);
+            }
+          }
+
+          return { ok: false, completed, compensated, failedAt, compensationFailures };
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**`done` 数组是补偿的唯一依据。** 它只包含 `invoke` 真正返回了的步骤——',
+      '抛错的那一步在 `push` 之前就 `break` 了，永远不会进这个数组。',
+      '这一行顺序（先 await 再 push）决定了「失败的步骤不被补偿」这条语义。',
+      '',
+      '**补偿循环里每一步单独 try/catch。** 把整个循环包一层 try 会让第一个失败的补偿',
+      '终止后续所有补偿。补偿是尽最大努力的（best-effort）操作，',
+      '失败的那些进 `compensationFailures`，交给人工或者重试队列——',
+      '但绝不能因为一个失败就放弃其余的。',
+      '',
+      '**`compensated` 记录的是补偿执行的顺序，不是原始顺序。** 所以它是逆序的。',
+      '这让调用方能直接从返回值里看出补偿是不是按正确顺序走的，',
+      '而不需要额外的日志——门槛量的就是这个数组。',
+      '',
+      '**这个实现不保证幂等。** `invoke` 和 `compensate` 的幂等性是**步骤自己的责任**，',
+      'saga 协调者管不了。真实系统里这是前置条件：补偿也会失败重试，',
+      '一个不幂等的「退款」补偿重试两次就是退了两笔钱。',
+    ].join('\n'),
+    [
+      'The `done` array is the only basis for compensation. It contains exactly the steps whose `invoke`',
+      'actually returned — the throwing one breaks before its `push` and never enters. That ordering,',
+      'await before push, is what gives "the failing step is not compensated" its meaning.',
+      '',
+      'Each compensation gets its own try/catch. Wrapping the loop instead lets the first failing',
+      'compensation abort all the rest. Compensation is best-effort: failures go into',
+      '`compensationFailures` for a human or a retry queue, and one failure must never abandon the others.',
+      '',
+      '`compensated` records the order compensations ran in, not the original order, so it reads backwards.',
+      'That lets a caller verify the ordering straight from the return value without extra logging — and',
+      'it is what the gate measures.',
+      '',
+      'This implementation does not provide idempotency. That is each step\'s own responsibility and',
+      'outside the coordinator\'s reach. In a real system it is a precondition: compensations fail and get',
+      'retried, and a non-idempotent refund compensation retried twice refunds twice.',
+    ].join('\n')
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+
+const stage9 = {
+  id: 'event-sourcing',
+  title: t('第 9 关 · 事件溯源与快照', 'Stage 9 · Event sourcing and snapshots'),
+  goal: t(
+    [
+      '前八关一直把事件当作**通知**：状态存在数据库里，事件只是告诉别人「发生了什么」。',
+      '事件溯源把这件事反过来：**事件就是唯一的真相**，状态是把事件从头折叠一遍算出来的。',
+      '',
+      '```',
+      '当前状态 = events.reduce(apply, 初始状态)',
+      '```',
+      '',
+      '好处很实在：任何历史时刻的状态都能重建，审计天然完整，',
+      '而且「为什么这个订单是这个金额」永远有据可查。',
+      '代价是两个新问题，这一关都要解决。',
+      '',
+      '**问题一：并发写。** 两个人同时改同一个订单，各自基于版本 5 计算，',
+      '各自追加了一个事件——后写的那个把前一个的前提悄悄作废了。',
+      '解法是**乐观并发**：追加时带上「我以为的版本」，对不上就拒绝。',
+      '',
+      '**问题二：重放太慢。** 一个订单积累了一万个事件，每次读都从头折叠一万次。',
+      '解法是**快照**：定期把折叠结果存下来，之后只需要重放快照之后的部分。',
+      '',
+      '在 `src/eventstore.ts` 实现 `createEventStore()`：',
+      '',
+      '- `append(streamId, events, expectedVersion)`：版本不匹配抛 `ConcurrencyError`；',
+      '- `read(streamId, fromVersion)`：读取指定版本之后的事件；',
+      '- `saveSnapshot` / `latestSnapshot`；',
+      '- `rebuild(streamId, apply, initial)`：**从最近的快照开始**重放，而不是从头。',
+      '',
+      '门槛：并发冲突必须被拦住；1000 个事件、快照在 990 时，重建只许读 10 个事件。',
+    ].join('\n'),
+    [
+      'Eight stages have treated events as notifications: state lives in a database and events tell others',
+      'what happened. Event sourcing inverts that — events are the only truth, and state is computed by',
+      'folding them from the beginning.',
+      '',
+      '```',
+      'state = events.reduce(apply, initial)',
+      '```',
+      '',
+      'The benefits are concrete: state at any historical moment can be reconstructed, auditing is complete',
+      'by construction, and "why is this order this amount" always has an answer. The cost is two new',
+      'problems, both of which this stage solves.',
+      '',
+      'First, concurrent writes. Two people edit one order, both computing from version 5 and both',
+      "appending an event — and the later write quietly invalidates the earlier one's premise. The answer",
+      'is optimistic concurrency: append with the version you believed, and be refused if it has moved.',
+      '',
+      'Second, replay cost. An order with ten thousand events refolds all ten thousand on every read. The',
+      'answer is snapshots: periodically store the folded result and replay only what came after.',
+      '',
+      'Implement `createEventStore()` in `src/eventstore.ts`:',
+      '',
+      '- `append(streamId, events, expectedVersion)` throws `ConcurrencyError` on a version mismatch;',
+      '- `read(streamId, fromVersion)` returns events after a given version;',
+      '- `saveSnapshot` and `latestSnapshot`;',
+      '- `rebuild(streamId, apply, initial)` replays from the latest snapshot rather than from the start.',
+      '',
+      'Gates: a concurrent conflict must be refused, and rebuilding a 1000-event stream snapshotted at 990',
+      'may read only ten events.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('状态由事件折叠得出', 'State is folded from events'),
+    t('版本不匹配的追加被拒绝', 'An append with a stale version is refused'),
+    t('read 能从指定版本之后开始', 'read can start after a given version'),
+    t('rebuild 从最近的快照开始', 'rebuild starts from the latest snapshot'),
+    t('快照不改变重建出来的状态', 'Snapshots do not change the rebuilt state'),
+  ],
+  pitfalls: [
+    t(
+      '`append` 不检查版本，直接往后追加。两个并发写都会成功，而它们各自是基于同一个旧状态算出来的——比如两个人同时把订单从「待支付」改成「已支付」和「已取消」，最后事件流里两个都在。乐观并发的检查是事件溯源里唯一的写冲突防线。',
+      'Appending without checking the version. Both concurrent writes succeed while each was computed from the same old state — two people moving an order from pending to paid and to cancelled, with both events ending up in the stream. The optimistic check is the only write-conflict defence event sourcing has.'
+    ),
+    t(
+      '`rebuild` 忽略快照，永远从版本 0 开始折叠。功能完全正确，性能随事件数线性劣化——一个跑了两年的订单聚合可能有几万个事件，每次读都重放一遍。快照的存在就是为了让读取成本与历史长度脱钩。',
+      'Ignoring snapshots in `rebuild` and always folding from version zero. Functionally perfect, and read cost degrades linearly with history — an aggregate two years old may hold tens of thousands of events replayed on every read. Snapshots exist precisely to decouple read cost from history length.'
+    ),
+    t(
+      '快照存的是状态对象的引用而不是副本。之后 `apply` 在这个对象上原地修改，快照跟着被改掉了——重建出来的「历史状态」其实是当前状态。这类 bug 在读多写少的场景下可能几个月都不暴露，一旦暴露就是「审计数据对不上」。',
+      'Storing a reference to the state object in the snapshot rather than a copy. Later `apply` calls mutate that object in place and the snapshot changes with it, so the "historical state" rebuilt from it is actually the current one. In read-heavy workloads this can hide for months and surfaces as an audit that does not reconcile.'
+    ),
+    t(
+      '把版本号理解成「事件的数量」并在 append 时用 `events.length` 当新版本。一次 append 写入多个事件时，版本会跳跃，而调用方拿到的 expectedVersion 语义变得含糊。约定应该明确：版本 = 这个流里事件的总数，append 之后新版本 = 旧版本 + 本次事件数。',
+      'Treating the version as an event count and using `events.length` as the new version on append. Writing several events at once makes the version jump and the meaning of `expectedVersion` ambiguous for callers. Fix the convention: version is the total number of events in the stream, and after an append the new version is the old one plus the number written.'
+    ),
+  ],
+  hints: [
+    t(
+      '每个 stream 存一个数组就够了，版本就是 `array.length`。`read(id, from)` 是 `array.slice(from)`。',
+      'One array per stream suffices, with the version being `array.length`. `read(id, from)` is `array.slice(from)`.'
+    ),
+    t(
+      '`rebuild` 先取快照：有就从 `snapshot.state` 和 `snapshot.version` 开始，没有就从 initial 和 0 开始，然后 `read(id, 起始版本)` 折叠剩下的。',
+      'In `rebuild`, fetch the snapshot first: start from its state and version if present, otherwise from `initial` and zero, then fold whatever `read(id, startVersion)` returns.'
+    ),
+  ],
+  extension: t(
+    [
+      '事件溯源最常见的误解是「它是一种存储方式」。它其实是一种**建模决策**：',
+      '你认为系统的本质是「当前状态」还是「发生过的事情」。',
+      '账本、审计、版本控制天然适合事件溯源；一个用户资料表就不适合——',
+      '没人关心昵称改过几次，为此付出重建成本毫无意义。',
+      '',
+      '快照策略本身有讲究。**每 N 个事件存一次**最简单，但对冷门聚合是浪费；',
+      '**按重建耗时**（重放超过 X 毫秒就存一个）更贴合实际收益。',
+      '还有一个坑：快照的格式也会演进，而旧快照没法自动升级——',
+      '所以很多实现干脆把快照当作**可丢弃的缓存**，格式变了就全部删掉重建，',
+      '反正事件流还在。这个心态很重要：快照永远不是真相。',
+      '',
+      '乐观并发之外还有一个更细的粒度问题：**冲突不总是真冲突**。',
+      '两个人一个改收货地址、一个加了备注，版本冲突了但业务上并不矛盾。',
+      '成熟系统会做**语义合并**：检查两次修改是否触及同一组字段，',
+      '不冲突就自动重放到新版本上。这和 Git 的 rebase 是同一个思路。',
+      '',
+      '最后，事件溯源和 CQRS 几乎总是一起出现，但它们是两件事。',
+      'CQRS 说的是「读和写用不同的模型」，事件溯源说的是「写模型存事件」。',
+      '可以只用 CQRS 不用事件溯源，反过来也行——只是事件溯源的读性能问题',
+      '几乎必然把你推向 CQRS，这就是下一关的内容。',
+    ].join('\n'),
+    [
+      'The commonest misunderstanding about event sourcing is that it is a storage technique. It is a',
+      'modelling decision: whether you consider the essence of the system to be its current state or the',
+      'things that happened. Ledgers, audits and version control fit naturally; a user profile table does',
+      'not — nobody cares how many times a nickname changed, and paying reconstruction costs for it is',
+      'pointless.',
+      '',
+      'Snapshot policy deserves thought. Every N events is simplest and wasteful for cold aggregates; by',
+      'rebuild time — snapshot once replay exceeds X milliseconds — tracks the actual benefit better. One',
+      'trap: snapshot formats evolve too, and old snapshots cannot be upgraded automatically, so many',
+      'implementations treat snapshots as a disposable cache, deleting them all when the format changes',
+      'since the event stream is still there. That mindset matters: a snapshot is never the truth.',
+      '',
+      'Beyond optimistic concurrency there is a finer question: not every conflict is a real conflict. One',
+      'person edits the delivery address while another adds a note — the versions collide and the business',
+      'meanings do not. Mature systems do semantic merging, checking whether the two edits touch the same',
+      "fields and replaying automatically onto the new version when they do not. Same idea as Git's rebase.",
+      '',
+      'Finally, event sourcing and CQRS almost always appear together and are two different things. CQRS',
+      'says reads and writes use different models; event sourcing says the write model stores events. You',
+      'can have either without the other — and the read-performance problem of event sourcing pushes you',
+      'towards CQRS almost inevitably, which is the next stage.',
+    ].join('\n')
+  ),
+  focus: ['correctness', 'latency', 'encapsulation'],
+  lab: {},
+  starterFiles: [
+    file(
+      'src/eventstore.ts',
+      code`
+        import type { OrderEvent } from './contract';
+
+        export class ConcurrencyError extends Error {
+          streamId: string;
+          expected: number;
+          actual: number;
+
+          constructor(streamId: string, expected: number, actual: number) {
+            super('stream ' + streamId + ' is at version ' + actual + ', not ' + expected);
+            this.name = 'ConcurrencyError';
+            this.streamId = streamId;
+            this.expected = expected;
+            this.actual = actual;
+          }
+        }
+
+        export interface Snapshot {
+          version: number;
+          state: unknown;
+        }
+
+        export interface EventStore {
+          /** expectedVersion 与当前版本不符时抛 ConcurrencyError */
+          append(streamId: string, events: OrderEvent[], expectedVersion: number): void;
+          /** 返回版本 fromVersion 之后的事件，不传则全部 */
+          read(streamId: string, fromVersion?: number): OrderEvent[];
+          /** 流里事件的总数 */
+          version(streamId: string): number;
+          saveSnapshot(streamId: string, version: number, state: unknown): void;
+          latestSnapshot(streamId: string): Snapshot | null;
+          /** 从最近的快照开始重放，返回折叠结果 */
+          rebuild(
+            streamId: string,
+            apply: (state: unknown, event: OrderEvent) => unknown,
+            initial: unknown
+          ): unknown;
+        }
+
+        export function createEventStore(): EventStore {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-9.spec.ts',
+      code`
+        import { createEventStore, ConcurrencyError } from '../src/eventstore';
+        import { count } from '@lab/metrics';
+
+        function amountEvent(id: string, delta: number) {
+          return { id, type: 'amount.changed', payload: { delta } };
+        }
+
+        const applyAmount = (state: any, event: any) => ({
+          total: (state.total || 0) + Number(event.payload.delta),
+        });
+
+        describe('阶段9 · 事件溯源', () => {
+          it('空流的版本是 0', () => {
+            expect(createEventStore().version('order-1')).toBe(0);
+          });
+
+          it('追加之后版本等于事件总数', () => {
+            const store = createEventStore();
+            store.append('order-1', [amountEvent('e1', 10), amountEvent('e2', 5)], 0);
+            expect(store.version('order-1')).toBe(2);
+
+            store.append('order-1', [amountEvent('e3', 1)], 2);
+            expect(store.version('order-1')).toBe(3);
+          });
+
+          it('read 返回全部事件', () => {
+            const store = createEventStore();
+            store.append('order-1', [amountEvent('e1', 10), amountEvent('e2', 5)], 0);
+            expect(store.read('order-1').map((e) => e.id)).toEqual(['e1', 'e2']);
+          });
+
+          it('read 可以从指定版本之后开始', () => {
+            const store = createEventStore();
+            store.append('order-1', [amountEvent('e1', 1), amountEvent('e2', 2), amountEvent('e3', 3)], 0);
+            expect(store.read('order-1', 2).map((e) => e.id)).toEqual(['e3']);
+          });
+
+          it('状态由事件折叠得出', () => {
+            const store = createEventStore();
+            store.append('order-1', [amountEvent('e1', 10), amountEvent('e2', -3)], 0);
+            expect(store.rebuild('order-1', applyAmount, { total: 0 })).toEqual({ total: 7 });
+          });
+
+          it('版本不匹配的追加被拒绝 [gate:concurrency]', () => {
+            const store = createEventStore();
+            store.append('order-1', [amountEvent('e1', 10)], 0);
+
+            // 两个并发写者都以为自己在版本 1 上
+            store.append('order-1', [amountEvent('e2', 5)], 1);
+
+            let conflicts = 0;
+            try {
+              store.append('order-1', [amountEvent('e3', 7)], 1);
+            } catch (caught) {
+              if (caught instanceof ConcurrencyError) conflicts += 1;
+            }
+
+            count('lostUpdates', conflicts === 1 ? 0 : 1);
+            expect(conflicts).toBe(1);
+            // 冲突的事件不该被写进去
+            expect(store.version('order-1')).toBe(2);
+          });
+
+          it('ConcurrencyError 带上期望和实际版本', () => {
+            const store = createEventStore();
+            store.append('order-1', [amountEvent('e1', 1)], 0);
+            let error: any = null;
+            try {
+              store.append('order-1', [amountEvent('e2', 1)], 0);
+            } catch (caught) {
+              error = caught;
+            }
+            expect(error.expected).toBe(0);
+            expect(error.actual).toBe(1);
+          });
+
+          it('不同的流互不影响', () => {
+            const store = createEventStore();
+            store.append('order-1', [amountEvent('e1', 10)], 0);
+            store.append('order-2', [amountEvent('e2', 20)], 0);
+            expect(store.version('order-1')).toBe(1);
+            expect(store.rebuild('order-2', applyAmount, { total: 0 })).toEqual({ total: 20 });
+          });
+
+          it('快照不改变重建出来的状态', () => {
+            const store = createEventStore();
+            store.append('order-1', [amountEvent('e1', 10), amountEvent('e2', 5)], 0);
+            const withoutSnapshot = store.rebuild('order-1', applyAmount, { total: 0 });
+
+            store.saveSnapshot('order-1', 1, { total: 10 });
+            const withSnapshot = store.rebuild('order-1', applyAmount, { total: 0 });
+
+            expect(withSnapshot).toEqual(withoutSnapshot);
+          });
+
+          it('快照存的是副本，后续 apply 改不到它', () => {
+            const store = createEventStore();
+            const state = { total: 10 };
+            store.saveSnapshot('order-1', 1, state);
+            state.total = 999;
+
+            expect(store.latestSnapshot('order-1')!.state).toEqual({ total: 10 });
+          });
+
+          it('没有快照时 latestSnapshot 返回 null', () => {
+            expect(createEventStore().latestSnapshot('order-1')).toBeNull();
+          });
+
+          it('重建从最近的快照开始，不从头 [gate:snapshot]', () => {
+            const store = createEventStore();
+            const events: any[] = [];
+            for (let index = 0; index < 1000; index += 1) events.push(amountEvent('e' + index, 1));
+            store.append('order-1', events, 0);
+            store.saveSnapshot('order-1', 990, { total: 990 });
+
+            let replayed = 0;
+            const counting = (state: any, event: any) => {
+              replayed += 1;
+              return applyAmount(state, event);
+            };
+
+            const rebuilt = store.rebuild('order-1', counting, { total: 0 });
+            count('eventsReplayed', replayed);
+
+            expect(rebuilt).toEqual({ total: 1000 });
+            // 从头折叠的实现在这里是 1000 次
+            expect(replayed).toBeLessThanOrEqual(12);
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'counters.lostUpdates',
+      op: 'eq',
+      value: 0,
+      zh: '并发写冲突被拦住，不产生丢失更新',
+      en: 'A concurrent write conflict is refused, so no update is lost',
+      dimension: 'correctness',
+      scope: 'gate:concurrency',
+    }),
+    gate({
+      metric: 'counters.eventsReplayed',
+      op: 'lte',
+      value: 12,
+      unit: 'events',
+      zh: '有快照时重建只重放快照之后的事件',
+      en: 'With a snapshot, rebuilding replays only what came after it',
+      dimension: 'latency',
+      scope: 'gate:snapshot',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/eventstore.ts',
+      code`
+        import type { OrderEvent } from './contract';
+
+        export class ConcurrencyError extends Error {
+          streamId: string;
+          expected: number;
+          actual: number;
+
+          constructor(streamId: string, expected: number, actual: number) {
+            super('stream ' + streamId + ' is at version ' + actual + ', not ' + expected);
+            this.name = 'ConcurrencyError';
+            this.streamId = streamId;
+            this.expected = expected;
+            this.actual = actual;
+          }
+        }
+
+        export interface Snapshot {
+          version: number;
+          state: unknown;
+        }
+
+        export interface EventStore {
+          append(streamId: string, events: OrderEvent[], expectedVersion: number): void;
+          read(streamId: string, fromVersion?: number): OrderEvent[];
+          version(streamId: string): number;
+          saveSnapshot(streamId: string, version: number, state: unknown): void;
+          latestSnapshot(streamId: string): Snapshot | null;
+          rebuild(
+            streamId: string,
+            apply: (state: unknown, event: OrderEvent) => unknown,
+            initial: unknown
+          ): unknown;
+        }
+
+        export function createEventStore(): EventStore {
+          const streams = new Map<string, OrderEvent[]>();
+          const snapshots = new Map<string, Snapshot>();
+
+          function streamOf(streamId: string): OrderEvent[] {
+            const existing = streams.get(streamId);
+            if (existing) return existing;
+            const created: OrderEvent[] = [];
+            streams.set(streamId, created);
+            return created;
+          }
+
+          return {
+            append(streamId: string, events: OrderEvent[], expectedVersion: number): void {
+              const stream = streamOf(streamId);
+              // 事件溯源里唯一的写冲突防线。少了它，两个基于同一旧状态的
+              // 并发写都会成功，事件流里会同时存在互相矛盾的两条
+              if (stream.length !== expectedVersion) {
+                throw new ConcurrencyError(streamId, expectedVersion, stream.length);
+              }
+              for (const event of events) stream.push(event);
+            },
+
+            read(streamId: string, fromVersion?: number): OrderEvent[] {
+              return streamOf(streamId).slice(fromVersion ?? 0);
+            },
+
+            version(streamId: string): number {
+              return streamOf(streamId).length;
+            },
+
+            saveSnapshot(streamId: string, version: number, state: unknown): void {
+              // 存副本：存引用的话，后续 apply 原地改动会把快照一起改掉，
+              // 于是「历史状态」变成了当前状态
+              snapshots.set(streamId, { version, state: JSON.parse(JSON.stringify(state)) });
+            },
+
+            latestSnapshot(streamId: string): Snapshot | null {
+              const snapshot = snapshots.get(streamId);
+              if (!snapshot) return null;
+              return { version: snapshot.version, state: JSON.parse(JSON.stringify(snapshot.state)) };
+            },
+
+            rebuild(
+              streamId: string,
+              apply: (state: unknown, event: OrderEvent) => unknown,
+              initial: unknown
+            ): unknown {
+              const snapshot = snapshots.get(streamId);
+              // 快照存在就从它开始：忽略快照的实现功能完全正确，
+              // 只是读取成本会随历史长度线性增长
+              let state = snapshot ? JSON.parse(JSON.stringify(snapshot.state)) : initial;
+              const from = snapshot ? snapshot.version : 0;
+
+              for (const event of streamOf(streamId).slice(from)) {
+                state = apply(state, event);
+              }
+              return state;
+            },
+          };
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**版本就是 `stream.length`，没有单独的计数器。** 两处状态就有两处会不一致的可能——',
+      '追加了事件但忘了加版本号，或者反过来。让版本成为事件数组的一个**推导属性**，',
+      '这类 bug 在结构上就不可能发生。',
+      '',
+      '**`append` 里的检查在 push 之前。** 冲突时一个事件都不该被写进去。',
+      '边写边检查（比如逐个 push 再比较）会在冲突时留下部分写入，',
+      '而事件流是只增不改的，写进去的错误事件没法删掉。',
+      '',
+      '**快照存进去和读出来都做深拷贝。** 存的时候拷贝，防止调用方后续修改原对象；',
+      '读的时候拷贝，防止调用方修改返回值污染存储。',
+      '这里用 `JSON.parse(JSON.stringify(...))` 是因为状态是纯数据；',
+      '真实实现里快照通常本来就要序列化落盘，深拷贝是顺带的。',
+      '',
+      '**`rebuild` 里 `from` 的语义是「已经折叠到第几个事件」。** 快照记的是版本号，',
+      '而版本号等于事件数，所以 `slice(from)` 正好跳过已经算进快照的那些。',
+      '这个等价关系成立的前提就是上面那条「版本 = 事件数」的约定——',
+      '如果版本是另外维护的，这里就要多一次转换，也就多一处可能算错的地方。',
+    ].join('\n'),
+    [
+      'The version is `stream.length` with no separate counter. Two pieces of state means two chances to',
+      'disagree — an event appended without bumping the version, or the reverse. Making the version a',
+      'derived property of the array makes that class of bug structurally impossible.',
+      '',
+      'The check in `append` happens before any push. On conflict not a single event should be written.',
+      'Checking while writing — pushing one at a time and comparing — leaves a partial write on conflict,',
+      'and since an event stream is append-only, wrongly written events cannot be removed.',
+      '',
+      'Snapshots are deep-copied both in and out: on save so a caller mutating the original cannot change',
+      'the stored snapshot, on read so a caller mutating the result cannot corrupt storage.',
+      '`JSON.parse(JSON.stringify(...))` suffices because the state is plain data; in a real implementation',
+      'snapshots are serialised for persistence anyway and the copy comes free.',
+      '',
+      "In `rebuild`, `from` means \"how many events are already folded in\". A snapshot records a version,",
+      'and a version equals an event count, so `slice(from)` skips exactly what the snapshot already',
+      'includes. That equivalence rests on the "version equals event count" convention above — a separately',
+      'maintained version would need a conversion here, and one more place to get the arithmetic wrong.',
+    ].join('\n')
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+
+const stage10 = {
+  id: 'projection',
+  title: t('第 10 关 · 读模型投影与最终一致', 'Stage 10 · Projections and eventual consistency'),
+  goal: t(
+    [
+      '上一关把事件当成了真相，但真相不好查。',
+      '「列出所有待发货的订单」在事件溯源里意味着重放所有订单的全部事件——',
+      '这个查询在生产上根本跑不动。',
+      '',
+      '解法是 **CQRS**：写用事件流，读用另外一份专门为查询优化的**读模型**，',
+      '由事件流投影（project）出来。读模型可以是一张扁平表、一个索引、一个缓存——',
+      '任何查得快的形状。它是**派生数据**，随时可以扔掉重建。',
+      '',
+      '在 `src/projection.ts` 实现 `createProjection(reduce)`：',
+      '',
+      '- `catchUp(events)`：从 `checkpoint()` 之后开始追，返回本次处理了几个；',
+      '- `checkpoint()`：已经追到第几个位置；',
+      '- `state()`：当前读模型；',
+      '- `reset()`：清空，用于全量重建。',
+      '',
+      '两条性质必须同时成立：',
+      '',
+      '1. **可续**：投影器崩溃重启后，从 checkpoint 接着追，不重头来过；',
+      '2. **幂等**：同一批事件被追两次，状态必须和追一次一样。',
+      '',
+      '第二条是重点。投影器随时可能在「应用了事件但还没保存 checkpoint」时崩溃，',
+      '重启后那个事件会被重放一次。如果 `reduce` 是「累加」，重放就会多加一次——',
+      '而这个错误无声无息，只有对账时才会发现（下一关的内容）。',
+      '',
+      '门槛量的正是这两条：重复追赶不许改变状态；从 checkpoint 续追不许重复处理。',
+    ].join('\n'),
+    [
+      'The previous stage made events the truth, and truth is awkward to query. "List every order awaiting',
+      'shipment" under event sourcing means replaying every event of every order — a query that simply',
+      'cannot run in production.',
+      '',
+      'The answer is CQRS: write through the event stream, read from a separate read model shaped for',
+      'queries and projected from that stream. A read model can be a flat table, an index, a cache —',
+      'whatever is fast to query. It is derived data and can be thrown away and rebuilt at any time.',
+      '',
+      'Implement `createProjection(reduce)` in `src/projection.ts`:',
+      '',
+      '- `catchUp(events)` resumes after `checkpoint()` and returns how many it processed;',
+      '- `checkpoint()` reports the position reached;',
+      '- `state()` returns the current read model;',
+      '- `reset()` clears it for a full rebuild.',
+      '',
+      'Two properties must hold together:',
+      '',
+      '1. resumable — after a crash and restart, catching up continues from the checkpoint rather than',
+      '   starting over;',
+      '2. idempotent — catching up over the same events twice must leave the state as if it happened once.',
+      '',
+      'The second is the important one. A projector can crash between applying an event and saving the',
+      'checkpoint, so that event is replayed on restart. If `reduce` accumulates, the replay adds it twice',
+      '— silently, and only reconciliation finds it, which is the next stage.',
+      '',
+      'The gates measure exactly those two: a repeated catch-up must not change the state, and resuming',
+      'from a checkpoint must not reprocess.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('catchUp 只处理 checkpoint 之后的事件', 'catchUp processes only events after the checkpoint'),
+    t('重复追赶同一批事件不改变状态', 'Catching up twice over the same events changes nothing'),
+    t('checkpoint 随处理进度前进', 'The checkpoint advances with progress'),
+    t('reset 之后可以全量重建', 'After reset, a full rebuild is possible'),
+    t('reduce 不修改传入的状态', 'reduce does not mutate the state it is given'),
+  ],
+  pitfalls: [
+    t(
+      '每次 catchUp 都从头处理全部事件。状态是对的（如果 reduce 恰好幂等），但成本随历史线性增长——一个跑了半年的投影器每次追赶都要重放几百万个事件。checkpoint 存在的全部意义就是让「追赶」的代价只和新事件数量有关。',
+      'Reprocessing the whole stream on every catch-up. The state is right, if `reduce` happens to be idempotent, and the cost grows linearly with history — a projector running for six months replays millions of events on every pass. The entire purpose of a checkpoint is making catch-up cost proportional to new events only.'
+    ),
+    t(
+      '先保存 checkpoint 再应用事件。中间崩溃会让那个事件**永远丢失**——checkpoint 已经越过它了，重启后不会再处理。顺序必须是「先应用、后保存 checkpoint」，这样最坏情况是重复应用，而重复可以靠幂等消化。这和第 6 关 outbox 的「先发送后标记」是同一条原则。',
+      'Saving the checkpoint before applying the event. A crash in between loses that event permanently, since the checkpoint has moved past it and the restart never revisits it. The order must be apply then checkpoint, so the worst case is a duplicate application which idempotency absorbs. Same principle as publish-then-mark in the outbox stage.'
+    ),
+    t(
+      '认为「读模型是派生的」就等于「读模型可以随便错」。派生数据出错的后果一点不比源数据小——用户看到的是读模型。区别只在于**修复方式**：源数据错了要人工订正，读模型错了可以 reset 之后重建。所以 `reset` 不是可选功能，它是读模型的修复手段。',
+      'Assuming that because a read model is derived, being wrong is acceptable. Wrong derived data is no less damaging than wrong source data — the read model is what users see. What differs is the repair: wrong source data needs manual correction, a wrong read model can be reset and rebuilt. So `reset` is not optional, it is the repair mechanism.'
+    ),
+    t(
+      '在 reduce 里原地修改状态对象。投影器可能同时服务多个查询，或者持有历史状态用于对比；原地修改会让「上一次的状态」跟着变。更隐蔽的是：一旦 reduce 有副作用，「重放同一批事件」就不再幂等了——而幂等正是这一关的核心要求。',
+      'Mutating the state object inside `reduce`. A projector may serve several queries at once or hold a previous state for comparison, and in-place mutation changes that too. More subtly, once `reduce` has side effects, replaying the same events stops being idempotent — and idempotency is this stage\'s central requirement.'
+    ),
+  ],
+  hints: [
+    t(
+      'checkpoint 就是一个整数：已经处理到 events 数组的第几个位置。`catchUp` 是 `events.slice(checkpoint)`，处理完把 checkpoint 设成 `events.length`。',
+      'The checkpoint is one integer: how far into the event array you have gone. `catchUp` is `events.slice(checkpoint)`, and afterwards the checkpoint becomes `events.length`.'
+    ),
+    t(
+      '幂等靠的就是 checkpoint 本身：第二次 catchUp 时 `slice(checkpoint)` 是空数组，什么都不会重复应用。',
+      'Idempotency comes from the checkpoint itself: on a second catch-up, `slice(checkpoint)` is empty and nothing is reapplied.'
+    ),
+  ],
+  extension: t(
+    [
+      '读模型的「最终一致」有一个非常具体的用户可见后果：**读己之写**（read-your-writes）。',
+      '用户提交订单后立刻刷新列表，投影器可能还没追上，于是他看不到自己刚下的单——',
+      '在他看来这就是「下单失败了」，然后再下一次。',
+      '',
+      '常见的缓解手段有三种。**写后读主**：提交之后短时间内直接查事件流而不是读模型；',
+      '**版本等待**：写操作返回一个版本号，读的时候带上它，读模型没追上就等一会儿；',
+      '**乐观 UI**：前端先自己把结果画出来，不等后端确认。',
+      '三种都不是「解决」，只是把窗口藏起来——CQRS 的最终一致性是架构的固有属性。',
+      '',
+      '投影器的运维也有讲究。一个读模型的 schema 变了（加了个字段），',
+      '标准做法不是写迁移脚本，而是**新建一个投影器从头重放**，追上之后切换流量。',
+      '这是事件溯源最实用的好处之一：读模型的「迁移」就是重建，',
+      '而重建是一个纯粹的、可反复执行的、失败了重来就行的操作。',
+      '',
+      '还有一个规模上的问题：**重放需要多久**。一个积累了十亿事件的系统，',
+      '从头重建一个投影器可能要几天。真实系统因此会保留读模型的定期快照，',
+      '或者让投影器支持并行重放（按聚合 id 分片，各自独立重放）——',
+      '而后者能成立，正是因为第 3 关的分区保证：不同订单之间没有顺序依赖。',
+    ].join('\n'),
+    [
+      'Eventual consistency in a read model has one very concrete user-visible consequence: read-your-writes.',
+      'A user submits an order and refreshes the list immediately, the projector has not caught up, and they',
+      'do not see the order they just placed — which reads to them as a failed submission, so they submit again.',
+      '',
+      'There are three common mitigations. Read from the primary after a write, querying the event stream',
+      'directly for a short window. Version waiting, where the write returns a version the read carries and',
+      'waits for the read model to reach. Optimistic UI, where the frontend renders the result without',
+      'waiting for confirmation. None of them solves it; they hide the window. Eventual consistency is',
+      'inherent to CQRS.',
+      '',
+      'Operating projectors has its own idiom. When a read model\'s schema changes — a new field — the',
+      'standard move is not a migration script but a new projector replaying from the beginning, with',
+      'traffic switched over once it catches up. This is one of the most practical benefits of event',
+      'sourcing: migrating a read model is rebuilding it, and a rebuild is a pure, repeatable operation you',
+      'can simply run again after a failure.',
+      '',
+      'There is a scale problem too: how long a replay takes. A system with a billion events may need days',
+      'to rebuild a projector from scratch. Real systems therefore keep periodic snapshots of read models,',
+      'or make projectors replay in parallel, sharded by aggregate id. That last option works precisely',
+      'because of the partitioning guarantee from stage 3: different orders have no ordering dependency.',
+    ].join('\n')
+  ),
+  focus: ['correctness', 'resilience', 'latency'],
+  lab: {},
+  starterFiles: [
+    file(
+      'src/projection.ts',
+      code`
+        import type { OrderEvent } from './contract';
+
+        export type Reducer = (
+          state: Record<string, unknown>,
+          event: OrderEvent
+        ) => Record<string, unknown>;
+
+        export interface Projection {
+          /** 从 checkpoint 之后开始追赶，返回本次处理了几个事件 */
+          catchUp(events: OrderEvent[]): number;
+          /** 已经处理到事件流的第几个位置 */
+          checkpoint(): number;
+          state(): Record<string, unknown>;
+          /** 清空读模型和 checkpoint，用于全量重建 */
+          reset(): void;
+        }
+
+        export function createProjection(reduce: Reducer): Projection {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-10.spec.ts',
+      code`
+        import { createProjection } from '../src/projection';
+        import { count } from '@lab/metrics';
+
+        function placed(id: string, orderId: string, amount: number) {
+          return { id, type: 'order.placed', payload: { orderId, amount } };
+        }
+
+        /** 累加型 reducer：不幂等的实现在重放时会多加一次 */
+        const sumByOrder = (state: any, event: any) => {
+          const orderId = String(event.payload.orderId);
+          return { ...state, [orderId]: (Number(state[orderId]) || 0) + Number(event.payload.amount) };
+        };
+
+        function stream(count: number) {
+          const events: any[] = [];
+          for (let index = 0; index < count; index += 1) {
+            events.push(placed('e' + index, 'order-' + (index % 3), 10));
+          }
+          return events;
+        }
+
+        describe('阶段10 · 读模型投影', () => {
+          it('初始 checkpoint 是 0，状态为空', () => {
+            const projection = createProjection(sumByOrder);
+            expect(projection.checkpoint()).toBe(0);
+            expect(projection.state()).toEqual({});
+          });
+
+          it('catchUp 处理全部事件并推进 checkpoint', () => {
+            const projection = createProjection(sumByOrder);
+            expect(projection.catchUp(stream(6))).toBe(6);
+            expect(projection.checkpoint()).toBe(6);
+            expect(projection.state()).toEqual({ 'order-0': 20, 'order-1': 20, 'order-2': 20 });
+          });
+
+          it('重复追赶同一批事件不改变状态 [gate:idempotent]', () => {
+            const projection = createProjection(sumByOrder);
+            const events = stream(6);
+
+            projection.catchUp(events);
+            const afterFirst = projection.state();
+
+            const second = projection.catchUp(events);
+            const afterSecond = projection.state();
+
+            count('doubleApplied', second);
+            expect(second).toBe(0);
+            expect(afterSecond).toEqual(afterFirst);
+          });
+
+          it('追加新事件之后只处理新的那些 [gate:resume]', () => {
+            const projection = createProjection(sumByOrder);
+            const events = stream(6);
+            projection.catchUp(events);
+
+            events.push(placed('e6', 'order-0', 5));
+            events.push(placed('e7', 'order-1', 5));
+
+            const processed = projection.catchUp(events);
+            count('reprocessed', processed - 2);
+
+            // 从头重放的实现在这里会处理 8 个
+            expect(processed).toBe(2);
+            expect(projection.checkpoint()).toBe(8);
+            expect(projection.state()).toEqual({ 'order-0': 25, 'order-1': 25, 'order-2': 20 });
+          });
+
+          it('分批追赶和一次追赶结果相同', () => {
+            const events = stream(9);
+
+            const incremental = createProjection(sumByOrder);
+            incremental.catchUp(events.slice(0, 3));
+            incremental.catchUp(events.slice(0, 6));
+            incremental.catchUp(events);
+
+            const atOnce = createProjection(sumByOrder);
+            atOnce.catchUp(events);
+
+            expect(incremental.state()).toEqual(atOnce.state());
+          });
+
+          it('reset 之后可以全量重建', () => {
+            const projection = createProjection(sumByOrder);
+            const events = stream(6);
+            projection.catchUp(events);
+            const before = projection.state();
+
+            projection.reset();
+            expect(projection.checkpoint()).toBe(0);
+            expect(projection.state()).toEqual({});
+
+            projection.catchUp(events);
+            expect(projection.state()).toEqual(before);
+          });
+
+          it('空事件流不会出错', () => {
+            const projection = createProjection(sumByOrder);
+            expect(projection.catchUp([])).toBe(0);
+            expect(projection.state()).toEqual({});
+          });
+
+          it('state 返回副本，外部改不坏读模型', () => {
+            const projection = createProjection(sumByOrder);
+            projection.catchUp(stream(3));
+
+            const snapshot: any = projection.state();
+            snapshot['order-0'] = 9999;
+
+            expect((projection.state() as any)['order-0']).toBe(10);
+          });
+
+          it('reduce 拿到的状态没有被上一次调用改坏', () => {
+            const seen: any[] = [];
+            const projection = createProjection((state, event) => {
+              seen.push(state);
+              return sumByOrder(state, event);
+            });
+            projection.catchUp(stream(3));
+
+            // 第一次 reduce 拿到的是空状态，如果被原地改过就不是了
+            expect(seen[0]).toEqual({});
+          });
+
+          it('checkpoint 前进之后旧事件不会再被处理', () => {
+            const applied: string[] = [];
+            const projection = createProjection((state, event) => {
+              applied.push(event.id);
+              return sumByOrder(state, event);
+            });
+
+            const events = stream(4);
+            projection.catchUp(events);
+            projection.catchUp(events);
+            projection.catchUp(events);
+
+            expect(applied).toEqual(['e0', 'e1', 'e2', 'e3']);
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'counters.doubleApplied',
+      op: 'eq',
+      value: 0,
+      zh: '重复追赶不会重复应用事件',
+      en: 'A repeated catch-up reapplies nothing',
+      dimension: 'correctness',
+      scope: 'gate:idempotent',
+    }),
+    gate({
+      metric: 'counters.reprocessed',
+      op: 'lte',
+      value: 0,
+      zh: '续追只处理新事件，不从头重放',
+      en: 'Resuming processes only new events instead of replaying',
+      dimension: 'latency',
+      scope: 'gate:resume',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/projection.ts',
+      code`
+        import type { OrderEvent } from './contract';
+
+        export type Reducer = (
+          state: Record<string, unknown>,
+          event: OrderEvent
+        ) => Record<string, unknown>;
+
+        export interface Projection {
+          catchUp(events: OrderEvent[]): number;
+          checkpoint(): number;
+          state(): Record<string, unknown>;
+          reset(): void;
+        }
+
+        export function createProjection(reduce: Reducer): Projection {
+          let current: Record<string, unknown> = {};
+          let position = 0;
+
+          return {
+            catchUp(events: OrderEvent[]): number {
+              // 幂等就来自这一行：第二次追赶时 slice 是空的，什么都不会重复应用
+              const pending = events.slice(position);
+
+              for (const event of pending) {
+                // 先应用、后推进 checkpoint。反过来的话，中间崩溃会让
+                // 这个事件永远丢失——checkpoint 已经越过它了
+                current = reduce(current, event);
+                position += 1;
+              }
+
+              return pending.length;
+            },
+
+            checkpoint(): number {
+              return position;
+            },
+
+            state(): Record<string, unknown> {
+              // 交出副本：读模型是给很多地方查的，返回内部对象
+              // 意味着任何一个调用方都能改坏它
+              return { ...current };
+            },
+
+            reset(): void {
+              // 读模型是派生数据，出错了的修复手段就是清空重建，
+              // 所以这不是可选功能
+              current = {};
+              position = 0;
+            },
+          };
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**`events.slice(position)` 一行同时给出了「可续」和「幂等」。** 可续是因为它跳过了',
+      '已经处理的部分，幂等是因为第二次调用时这个 slice 是空的。',
+      '两个看起来独立的要求，其实来自同一个 checkpoint。',
+      '',
+      '**`position += 1` 在 `reduce` 之后。** 顺序反过来会让「应用了但没记录」变成',
+      '「记录了但没应用」——前者导致重复（可以靠幂等消化），后者导致丢失（无法补救）。',
+      '这和第 6 关 outbox 的「先发送后标记」是同一条原则：',
+      '在两种失败之间选可以被下游修复的那一种。',
+      '',
+      '**`current = reduce(current, event)` 而不是 `reduce(current, event)`。** ',
+      'reducer 必须返回新状态而不是原地改。这不只是风格：一旦 reduce 有副作用，',
+      '「重放同一批事件得到同样结果」这条性质就不成立了，而整个 CQRS 的重建能力',
+      '都建立在这条性质上。',
+      '',
+      '**`state()` 返回浅拷贝。** 对这一关的扁平读模型够用。',
+      '真实的读模型是嵌套结构时，浅拷贝挡不住深层修改——',
+      '那时候要么深拷贝（贵），要么让读模型不可变（更好，但需要不可变数据结构）。',
+    ].join('\n'),
+    [
+      '`events.slice(position)` delivers both resumability and idempotency in one line. Resumable because',
+      'it skips what was processed, idempotent because on a second call that slice is empty. Two apparently',
+      'independent requirements coming from a single checkpoint.',
+      '',
+      '`position += 1` comes after `reduce`. Reversing them turns "applied but not recorded" into',
+      '"recorded but not applied" — the first causes a duplicate that idempotency absorbs, the second',
+      'causes a loss that nothing repairs. Same principle as publish-then-mark in the outbox stage: given',
+      'two failure modes, take the one something downstream can fix.',
+      '',
+      '`current = reduce(current, event)` rather than calling `reduce` for its effect. The reducer must',
+      'return a new state instead of mutating. That is not merely style: once `reduce` has side effects,',
+      '"replaying the same events yields the same result" stops holding, and the entire rebuild capability',
+      'of CQRS rests on that property.',
+      '',
+      '`state()` returns a shallow copy, which suffices for the flat read model here. Real read models are',
+      'nested, and a shallow copy does not stop deep mutation — at which point you either deep-copy, which',
+      'is expensive, or make the read model immutable, which is better but needs immutable data structures.',
+    ].join('\n')
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+
+const stage11 = {
+  id: 'reconciliation',
+  title: t('第 11 关 · 端到端对账', 'Stage 11 · End-to-end reconciliation'),
+  goal: t(
+    [
+      '前十关每一关都在努力做对：顺序、幂等、事务、补偿、投影。',
+      '这一关承认一件事：**它们加起来仍然会错**。',
+      '',
+      '一个消费者在 rebalance 的窗口里重复处理了一次；',
+      '一个补偿因为下游超时没执行成功；一个投影器在崩溃后少追了一个事件。',
+      '每一处的概率都很低，乘上千万级的量之后，每天都会有几笔对不上。',
+      '',
+      '所以真实系统里必须有一道**独立于业务链路**的检查：把事件流折叠出的',
+      '「应该是什么」和读模型里的「实际是什么」摆在一起比，把差异找出来。',
+      '这就是对账。它不假设任何一层是对的。',
+      '',
+      '在 `src/reconcile.ts` 实现 `reconcile(expected, actual, options)`：',
+      '',
+      '- 返回一个差异列表，每条是 `{ key, kind, expected, actual }`；',
+      '- `kind` 有三种：`missing`（读模型里少了）、`extra`（读模型里多了）、',
+      '  `mismatch`（都有但值不同）；',
+      '- `tolerance`：数值差异在这个范围内不算 mismatch（浮点累加的正常误差）；',
+      '- 结果按 key 排序，让每次对账的输出可比对。',
+      '',
+      '门槛：三种差异一个都不许漏，也一个都不许误报。',
+      '对账工具自己报错会让人失去对它的信任，而一个没人信的对账等于没有。',
+    ].join('\n'),
+    [
+      'Ten stages have worked at getting things right: ordering, idempotency, transactions, compensation,',
+      'projections. This one accepts that together they will still be wrong sometimes.',
+      '',
+      'A consumer reprocesses once inside a rebalance window; a compensation fails on a downstream timeout;',
+      'a projector misses one event after a crash. Each is individually unlikely, and multiplied by tens of',
+      'millions of operations, a handful disagree every day.',
+      '',
+      'So a real system needs a check independent of the business path: fold the event stream into what',
+      'things should be, put it beside what the read model says they are, and find the differences. That is',
+      'reconciliation, and it assumes no layer is correct.',
+      '',
+      'Implement `reconcile(expected, actual, options)` in `src/reconcile.ts`:',
+      '',
+      '- return a list of differences, each `{ key, kind, expected, actual }`;',
+      '- `kind` is one of `missing` (absent from the read model), `extra` (present but should not be), or',
+      '  `mismatch` (present in both with different values);',
+      '- `tolerance`: numeric differences within it are not a mismatch, covering ordinary float drift;',
+      '- results are sorted by key so successive runs are comparable.',
+      '',
+      'The gate: not one of the three kinds may be missed, and not one may be a false positive. A',
+      'reconciliation tool that reports errors of its own loses trust, and a reconciliation nobody trusts',
+      'is no reconciliation at all.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('完全一致时返回空列表', 'An exact match returns an empty list'),
+    t('三种差异都能被识别', 'All three kinds of difference are detected'),
+    t('容差内的数值差异不算 mismatch', 'Numeric drift within tolerance is not a mismatch'),
+    t('结果按 key 排序，可稳定比对', 'Results are sorted by key and stable across runs'),
+    t('不会把 0 或空字符串误判成缺失', 'Zero and empty string are not mistaken for missing'),
+  ],
+  pitfalls: [
+    t(
+      '用 `if (!actual[key])` 判断读模型里有没有这个 key。金额是 0、状态是空字符串、标志是 false 的记录会全部被误报成 missing——而这些恰恰是最常见的合法值。判断存在性要用 `Object.prototype.hasOwnProperty.call(actual, key)`，不能靠真值。',
+      "Testing presence with `if (!actual[key])`. Every record whose amount is 0, status is an empty string or flag is false is reported as missing — and those are among the most common legitimate values. Presence must be tested with `Object.prototype.hasOwnProperty.call(actual, key)`, never truthiness."
+    ),
+    t(
+      '只遍历 expected 的键。读模型里多出来的记录（`extra`）就永远发现不了——而这类差异往往是最严重的：它意味着有一条没有事件依据的数据凭空出现了，可能是重复消费，也可能是别的 bug 写进来的脏数据。两边的键都要遍历。',
+      'Iterating only the keys of `expected`. Records that exist only in the read model — the `extra` kind — are never found, and those are often the most serious: data with no event to justify it, from a duplicate consumption or from some other bug writing directly. Both key sets must be walked.'
+    ),
+    t(
+      '数值比较用 `===`。事件流折叠出来的金额和读模型里累加出来的金额，即使逻辑完全一致，浮点运算的顺序不同也会产生末位差异。对账工具每天报一堆 0.0000001 的差异，很快就没人看了。容差不是妥协，是让工具的输出保持可信。',
+      'Comparing numbers with `===`. An amount folded from the event stream and one accumulated in the read model differ in the last digits when the operations happen in a different order, even with identical logic. A tool reporting a pile of 0.0000001 differences every day soon goes unread. Tolerance is not a compromise, it is what keeps the output credible.'
+    ),
+    t(
+      '发现差异就自动修复读模型。听起来很贴心，实际上非常危险：对账工具无法判断差异的**原因**——可能读模型错了，也可能事件流本身有问题（比如重复事件）。自动按事件流覆盖读模型，会把一个「读模型正确、事件流有脏数据」的情况改成两边都错。对账只负责发现，修复是另一个决定。',
+      'Automatically repairing the read model when a difference is found. It sounds helpful and is dangerous: the tool cannot determine the cause — the read model may be wrong, or the event stream itself may be (a duplicated event, say). Overwriting the read model from the stream turns "read model right, stream dirty" into both being wrong. Reconciliation detects; repair is a separate decision.'
+    ),
+  ],
+  hints: [
+    t(
+      '把两边的 key 合成一个集合遍历：`new Set([...Object.keys(expected), ...Object.keys(actual)])`，然后按「谁有谁没有」分三种情况。',
+      'Walk the union of both key sets — `new Set([...Object.keys(expected), ...Object.keys(actual)])` — and branch on which side has each key.'
+    ),
+    t(
+      '容差只对两边都是数字的情况生效，其他类型用 `===` 或者深比较。',
+      'Tolerance applies only when both sides are numbers; other types compare with `===` or a deep comparison.'
+    ),
+  ],
+  extension: t(
+    [
+      '对账在金融系统里是强制的，而且通常是**多方对账**：',
+      '自己的账、支付渠道的账、银行的账，三份数据两两比对。',
+      '任何一处不一致都会触发人工介入——因为在钱的领域，',
+      '「自动修复」这四个字本身就是风险。',
+      '',
+      '对账的时机也有讲究。**实时对账**能最快发现问题，但事件流和读模型之间',
+      '本来就有最终一致的延迟窗口，实时比对会产生大量「其实只是还没追上」的假差异。',
+      '所以生产上的常见做法是**延迟对账**：只比对 5 分钟以前的数据，',
+      '用时间换掉那些会自己消失的差异。',
+      '',
+      '发现差异之后怎么办，是一个比检测本身更难的问题。三种典型策略：',
+      '**告警**（人来判断，适合金额类）、**自动重建**（reset 投影器重放，',
+      '适合确定是读模型问题的场景）、**记录并继续**（适合已知的、可容忍的偏差）。',
+      '选哪一种取决于「差异的原因是否可以自动判定」——而大多数时候不可以。',
+      '',
+      '还有一个容易被忽略的角度：**对账工具自己也会错**。',
+      '它读的是同一份数据、跑在同样的代码库上，一个共享的 bug 会让它',
+      '和被检查的系统犯同样的错误，然后报告「一切正常」。',
+      '所以严肃的对账往往用**不同的实现路径**——不同的语言、不同的团队、',
+      '甚至直接从原始日志重算，刻意不复用生产代码。',
+    ].join('\n'),
+    [
+      'Reconciliation is mandatory in financial systems, and usually multi-party: your own ledger, the',
+      "payment provider's, the bank's, compared pairwise. Any disagreement triggers human involvement,",
+      'because where money is concerned the phrase "automatic repair" is itself a risk.',
+      '',
+      'Timing matters. Real-time reconciliation finds problems fastest, and the event stream and read model',
+      'have an eventual-consistency window by design, so comparing immediately produces a flood of false',
+      'differences that are merely not-caught-up-yet. The common production answer is delayed',
+      'reconciliation: compare only data older than five minutes, trading time for the disappearance of',
+      'differences that resolve themselves.',
+      '',
+      'What to do about a difference is harder than detecting it. Three typical strategies: alert and let a',
+      'human judge, which suits anything involving money; rebuild automatically by resetting the projector',
+      'and replaying, when the read model is definitively at fault; or record and continue, for known',
+      'tolerable drift. Which one applies depends on whether the cause can be determined automatically —',
+      'and usually it cannot.',
+      '',
+      'One angle is easy to overlook: the reconciliation tool can be wrong too. It reads the same data and',
+      'runs on the same codebase, so a shared bug makes it repeat the same mistake as the system it checks',
+      'and then report that everything is fine. Serious reconciliation therefore takes a different',
+      'implementation path — a different language, a different team, or recomputation straight from raw',
+      'logs — deliberately not reusing production code.',
+    ].join('\n')
+  ),
+  focus: ['correctness', 'resilience', 'elegance'],
+  lab: {},
+  starterFiles: [
+    file(
+      'src/reconcile.ts',
+      code`
+        export type DiscrepancyKind = 'missing' | 'extra' | 'mismatch';
+
+        export interface Discrepancy {
+          key: string;
+          kind: DiscrepancyKind;
+          expected?: unknown;
+          actual?: unknown;
+        }
+
+        export interface ReconcileOptions {
+          /** 两边都是数字时，差异不超过它就不算 mismatch */
+          tolerance?: number;
+        }
+
+        /**
+         * expected 来自事件流折叠，actual 来自读模型。
+         * 返回按 key 排序的差异列表；完全一致时返回空数组。
+         */
+        export function reconcile(
+          expected: Record<string, unknown>,
+          actual: Record<string, unknown>,
+          options?: ReconcileOptions
+        ): Discrepancy[] {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-11.spec.ts',
+      code`
+        import { reconcile } from '../src/reconcile';
+        import { count } from '@lab/metrics';
+
+        describe('阶段11 · 端到端对账', () => {
+          it('完全一致时返回空列表', () => {
+            expect(reconcile({ a: 1, b: 2 }, { a: 1, b: 2 })).toEqual([]);
+          });
+
+          it('两边都空时返回空列表', () => {
+            expect(reconcile({}, {})).toEqual([]);
+          });
+
+          it('读模型里少了一条是 missing', () => {
+            expect(reconcile({ a: 1, b: 2 }, { a: 1 })).toEqual([
+              { key: 'b', kind: 'missing', expected: 2, actual: undefined },
+            ]);
+          });
+
+          it('读模型里多了一条是 extra', () => {
+            expect(reconcile({ a: 1 }, { a: 1, ghost: 9 })).toEqual([
+              { key: 'ghost', kind: 'extra', expected: undefined, actual: 9 },
+            ]);
+          });
+
+          it('值不同是 mismatch', () => {
+            expect(reconcile({ a: 10 }, { a: 12 })).toEqual([
+              { key: 'a', kind: 'mismatch', expected: 10, actual: 12 },
+            ]);
+          });
+
+          it('0 不会被误判成缺失', () => {
+            // if (!actual[key]) 的实现会把这里报成 missing
+            expect(reconcile({ a: 0 }, { a: 0 })).toEqual([]);
+          });
+
+          it('空字符串和 false 也不会被误判', () => {
+            expect(reconcile({ a: '', b: false }, { a: '', b: false })).toEqual([]);
+          });
+
+          it('容差内的数值差异不算 mismatch', () => {
+            expect(reconcile({ a: 10 }, { a: 10.0000001 }, { tolerance: 0.001 })).toEqual([]);
+            expect(reconcile({ a: 10 }, { a: 10.5 }, { tolerance: 0.001 })).toHaveLength(1);
+          });
+
+          it('不传容差时数值必须精确相等', () => {
+            expect(reconcile({ a: 10 }, { a: 10.0000001 })).toHaveLength(1);
+          });
+
+          it('容差只对数字生效', () => {
+            expect(reconcile({ a: 'x' }, { a: 'y' }, { tolerance: 100 })).toEqual([
+              { key: 'a', kind: 'mismatch', expected: 'x', actual: 'y' },
+            ]);
+          });
+
+          it('结果按 key 排序', () => {
+            const found = reconcile({ z: 1, a: 1, m: 1 }, { z: 2, a: 2, m: 2 });
+            expect(found.map((entry) => entry.key)).toEqual(['a', 'm', 'z']);
+          });
+
+          it('三种差异一个不漏、一个不错 [gate:reconcile]', () => {
+            const expected = { keep: 1, drift: 100, gone: 7, zero: 0, blank: '' };
+            const actual = { keep: 1, drift: 130, zero: 0, blank: '', ghost: 42 };
+
+            const found = reconcile(expected, actual, { tolerance: 0.01 });
+            const byKind = found.reduce((acc: any, entry) => {
+              acc[entry.kind] = (acc[entry.kind] || 0) + 1;
+              return acc;
+            }, {});
+
+            // 应该恰好是：gone -> missing，drift -> mismatch，ghost -> extra
+            const correct =
+              found.length === 3 &&
+              byKind.missing === 1 &&
+              byKind.mismatch === 1 &&
+              byKind.extra === 1;
+            count('reconcileErrors', correct ? 0 : 1);
+
+            expect(found.map((entry) => entry.key)).toEqual(['drift', 'ghost', 'gone']);
+            expect(byKind).toEqual({ missing: 1, mismatch: 1, extra: 1 });
+          });
+
+          it('大量一致数据里只挑出那一条差异', () => {
+            const expected: Record<string, unknown> = {};
+            const actual: Record<string, unknown> = {};
+            for (let index = 0; index < 500; index += 1) {
+              expected['order-' + index] = index;
+              actual['order-' + index] = index;
+            }
+            actual['order-250'] = 999;
+
+            const found = reconcile(expected, actual);
+            expect(found).toHaveLength(1);
+            expect(found[0]).toEqual({
+              key: 'order-250',
+              kind: 'mismatch',
+              expected: 250,
+              actual: 999,
+            });
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'counters.reconcileErrors',
+      op: 'eq',
+      value: 0,
+      zh: '三种差异不漏报也不误报',
+      en: 'All three kinds are found with no false positives',
+      dimension: 'correctness',
+      scope: 'gate:reconcile',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/reconcile.ts',
+      code`
+        export type DiscrepancyKind = 'missing' | 'extra' | 'mismatch';
+
+        export interface Discrepancy {
+          key: string;
+          kind: DiscrepancyKind;
+          expected?: unknown;
+          actual?: unknown;
+        }
+
+        export interface ReconcileOptions {
+          tolerance?: number;
+        }
+
+        function has(source: Record<string, unknown>, key: string): boolean {
+          // 不能写成 if (source[key])：金额 0、状态空串、标志 false
+          // 都是完全合法的值，用真值判断会把它们全报成缺失
+          return Object.prototype.hasOwnProperty.call(source, key);
+        }
+
+        function equal(left: unknown, right: unknown, tolerance: number): boolean {
+          if (typeof left === 'number' && typeof right === 'number') {
+            // 事件流折叠和读模型累加的运算顺序不同，浮点末位必然有差异。
+            // 用 === 的话对账每天报一堆 0.0000001，很快就没人看了
+            return Math.abs(left - right) <= tolerance;
+          }
+          return left === right;
+        }
+
+        export function reconcile(
+          expected: Record<string, unknown>,
+          actual: Record<string, unknown>,
+          options?: ReconcileOptions
+        ): Discrepancy[] {
+          const tolerance = options?.tolerance ?? 0;
+          // 两边的键都要遍历：只走 expected 的话，读模型里凭空多出来的
+          // 记录永远发现不了，而那恰恰是最严重的一类差异
+          const keys = new Set<string>([...Object.keys(expected), ...Object.keys(actual)]);
+
+          const found: Discrepancy[] = [];
+          for (const key of Array.from(keys)) {
+            const inExpected = has(expected, key);
+            const inActual = has(actual, key);
+
+            if (inExpected && !inActual) {
+              found.push({ key, kind: 'missing', expected: expected[key], actual: undefined });
+            } else if (!inExpected && inActual) {
+              found.push({ key, kind: 'extra', expected: undefined, actual: actual[key] });
+            } else if (!equal(expected[key], actual[key], tolerance)) {
+              found.push({ key, kind: 'mismatch', expected: expected[key], actual: actual[key] });
+            }
+          }
+
+          // 排序让每次对账的输出可以直接 diff，看出「今天新增了哪些差异」
+          return found.sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**`has` 这个三行的函数是整关最重要的地方。** 把它写成 `Boolean(source[key])`，',
+      '所有金额为 0、状态为空串、标志为 false 的记录都会被报成 missing——',
+      '而一个天天误报的对账工具，三天之后就没人看了。',
+      '「存在」和「有值」是两件事，在对账这种场景下必须分清。',
+      '',
+      '**遍历的是两边键的并集。** 只走 `expected` 是最自然的写法，',
+      '也会让 `extra` 这一类永远发现不了。而 extra 往往是最严重的：',
+      '读模型里有一条没有事件依据的数据，意味着要么重复消费了，',
+      '要么有别的东西绕过事件流直接写了进来。',
+      '',
+      '**容差只对「两边都是数字」生效。** 用 `Math.abs` 去比较字符串会得到 NaN，',
+      '而 `NaN <= tolerance` 永远是 false——看起来能用，实际上把所有字符串',
+      '差异都判成了不相等，恰好和期望一致，于是这个 bug 永远不会暴露。',
+      '显式判断类型比依赖巧合安全。',
+      '',
+      '**这个函数只报告，不修复。** 它没有任何写操作。对账工具无法判断差异的',
+      '原因——可能是读模型错了，也可能是事件流本身有脏数据。',
+      '自动按事件流覆盖读模型，会把「一边错」变成「两边都错」。',
+    ].join('\n'),
+    [
+      'The three-line `has` function is the most important thing in this stage. Written as',
+      '`Boolean(source[key])`, every record with an amount of 0, an empty status or a false flag is',
+      'reported missing — and a tool that produces false alarms daily goes unread within three days.',
+      'Existence and truthiness are different things, and reconciliation is where that distinction matters.',
+      '',
+      'The iteration walks the union of both key sets. Walking only `expected` is the natural thing to',
+      'write and makes the `extra` kind undiscoverable — and `extra` is often the most serious, meaning the',
+      'read model holds a record with no event to justify it, from a duplicate consumption or from',
+      'something writing directly and bypassing the stream.',
+      '',
+      'Tolerance applies only when both sides are numbers. Using `Math.abs` on strings yields NaN, and',
+      '`NaN <= tolerance` is always false — which appears to work, since it declares all string differences',
+      'unequal exactly as intended, so the bug never surfaces. Checking the type explicitly is safer than',
+      'relying on that coincidence.',
+      '',
+      'The function reports and never repairs; it performs no writes at all. A reconciliation tool cannot',
+      'determine the cause of a difference — the read model may be wrong, or the event stream may hold bad',
+      'data — and overwriting the read model from the stream converts "one side is wrong" into "both are".',
+    ].join('\n')
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+
 module.exports = {
   id: 'order-event-pipeline',
   title: t('事件驱动的订单流水线', 'Event-driven order pipeline'),
   summary: t(
-    '用事件总线解耦下单副作用，用洋葱中间件组织横切关注点，再用幂等与死信队列扛住 at-least-once 投递。',
-    'Decouple checkout side effects with an event bus, organise cross-cutting concerns with onion middleware, then survive at-least-once delivery with idempotency and a DLQ.'
+    '十一关做完一条事件驱动的订单链路：模式演进、分区有序、消费者组、outbox、幂等、Saga、事件溯源、读模型投影与端到端对账。',
+    'Eleven stages of an event-driven order pipeline: schema evolution, partitioned ordering, consumer groups, the outbox, idempotency, sagas, event sourcing, projections and reconciliation.'
   ),
   difficulty: 'Medium',
   domain: 'architecture',
   tags: ['event-driven', 'middleware', 'idempotency', 'api-design'],
-  estimatedMinutes: 90,
+  estimatedMinutes: 420,
   language: 'typescript',
   weights: {
     correctness: 3,
@@ -1362,13 +5165,21 @@ module.exports = {
       '',
       '## 目标',
       '',
-      '三关重构出一套事件驱动的处理骨架：',
+      '十一关重构出一套事件驱动的处理骨架：',
       '',
       '| 关卡 | 解决的问题 |',
       '| --- | --- |',
-      '| 1 事件总线 | 副作用与主流程解耦，互不依赖的下游并行执行 |',
-      '| 2 洋葱中间件 | 横切关注点变成可组合的层，而不是复制粘贴 |',
-      '| 3 幂等与死信 | 重复投递不产生重复副作用，毒消息不阻塞队列 |',
+      '| 1 模式演进 | 事件结构变了，旧事件还读得懂 |',
+      '| 2 事件总线 | 副作用与主流程解耦，互不依赖的下游并行执行 |',
+      '| 3 分区与顺序 | 同一订单严格有序，不同订单完全并行 |',
+      '| 4 洋葱中间件 | 横切关注点变成可组合的层，而不是复制粘贴 |',
+      '| 5 消费者组 | 分区唯一归属，再平衡尽量少移动 |',
+      '| 6 事务性 outbox | 业务写入和事件发出不再是两件事 |',
+      '| 7 幂等与死信 | 重复投递不产生重复副作用，毒消息不阻塞队列 |',
+      '| 8 Saga | 跨服务失败时逆序补偿，不留中间态 |',
+      '| 9 事件溯源 | 事件成为真相，快照让重放代价可控 |',
+      '| 10 读模型投影 | 查询走派生模型，可续、可重放、可重建 |',
+      '| 11 端到端对账 | 承认上面十关加起来仍然会错，并把错找出来 |',
       '',
       '## 硬性约束',
       '',
@@ -1420,13 +5231,21 @@ module.exports = {
       '',
       '## Goal',
       '',
-      'Refactor into an event-driven skeleton across three stages:',
+      'Refactor into an event-driven skeleton across eleven stages:',
       '',
       '| Stage | Problem solved |',
       '| --- | --- |',
-      '| 1 Event bus | Side effects decoupled from the main flow, independent consumers run in parallel |',
-      '| 2 Onion middleware | Cross-cutting concerns become composable layers instead of copy-paste |',
-      '| 3 Idempotency and DLQ | Duplicate delivery causes one side effect; poison messages do not block the queue |',
+      '| 1 Schema evolution | The shape changed and old events are still readable |',
+      '| 2 Event bus | Side effects decoupled from the main flow, independent consumers run in parallel |',
+      '| 3 Partitioning | One order strictly ordered, different orders fully parallel |',
+      '| 4 Onion middleware | Cross-cutting concerns become composable layers instead of copy-paste |',
+      '| 5 Consumer groups | Exactly one owner per partition, minimal movement on rebalance |',
+      '| 6 Transactional outbox | Writing data and emitting an event stop being two things |',
+      '| 7 Idempotency and DLQ | Duplicate delivery causes one side effect; poison messages do not block the queue |',
+      '| 8 Sagas | Cross-service failure compensates in reverse, leaving no partial state |',
+      '| 9 Event sourcing | Events become the truth, snapshots keep replay affordable |',
+      '| 10 Projections | Queries read a derived model that resumes, replays and rebuilds |',
+      '| 11 Reconciliation | Accept that all ten above still get it wrong, and find where |',
       '',
       '## Hard constraints',
       '',
@@ -1481,5 +5300,5 @@ module.exports = {
     ].join('\n')
   ),
   files: [contract],
-  stages: [stage1, stage2, stage3],
+  stages: [stage1, stage2, stage3, stage4, stage5, stage6, stage7, stage8, stage9, stage10, stage11],
 };
