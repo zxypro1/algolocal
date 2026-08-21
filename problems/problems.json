@@ -1762,31 +1762,31 @@
     "tests": [
       {
         "input": "[1,3,5,7,9], 5",
-        "output": 2
+        "output": "2"
       },
       {
         "input": "[1,2,3,4,5], 6",
-        "output": -1
+        "output": "-1"
       },
       {
         "input": "[1,2,3,4,5], 1",
-        "output": 0
+        "output": "0"
       },
       {
         "input": "[2,4,6,8,10], 8",
-        "output": 3
+        "output": "3"
       },
       {
         "input": "[1], 1",
-        "output": 0
+        "output": "0"
       },
       {
         "input": "[1], 2",
-        "output": -1
+        "output": "-1"
       },
       {
         "input": "[5,5,5,5,5], 5",
-        "output": 0
+        "output": "0"
       }
     ]
   },
@@ -1835,7 +1835,8 @@
           "zh": "贪婪算法"
         },
         "content": {
-          "en": "\n## Algorithm Overview\nThe algorithm works by iterating through the array and deleting elements in a greedy manner, always choosing the element that would cause the most disorder if deleted.\n\n## Time Complexity Analysis\nThe time complexity of this algorithm is O(n), where n is the length of the array.\n\n## Implementation\nHere is an example implementation in JavaScript:\n```js\nfunction minDeletions(nums) {\n  let deletions = 0;\n  for (let i = 1; i < nums.length; i++) {\n    if (nums[i] <= nums[i - 1]) {\n      deletions++;\n    }\n  }\n  return deletions;\n}\nmodule.exports = minDeletions;\n```\n\n## Step-by-Step Explanation\n1. Initialize a variable `deletions` to count the number of deletions required.\n2. Iterate through the array, starting from the second element (index 1).\n3. For each pair of adjacent elements, check if the current element is less than or equal to the previous one. If it is, increment the `deletions` count.\n4. Return the total number of deletions required.\n\n## Examples\nExample 1:\nInput: [1, 2, 3, 4]\nOutput: 3 (delete elements at indices 0, 1, and 2)\n\nExample 2:\nInput: [5, 6, 7, 8]\nOutput: 0 (no deletions required)"
+          "en": "\n## Algorithm Overview\nThe algorithm works by iterating through the array and deleting elements in a greedy manner, always choosing the element that would cause the most disorder if deleted.\n\n## Time Complexity Analysis\nThe time complexity of this algorithm is O(n), where n is the length of the array.\n\n## Implementation\nHere is an example implementation in JavaScript:\n```js\nfunction minDeletions(nums) {\n  let deletions = 0;\n  for (let i = 1; i < nums.length; i++) {\n    if (nums[i] <= nums[i - 1]) {\n      deletions++;\n    }\n  }\n  return deletions;\n}\nmodule.exports = minDeletions;\n```\n\n## Step-by-Step Explanation\n1. Initialize a variable `deletions` to count the number of deletions required.\n2. Iterate through the array, starting from the second element (index 1).\n3. For each pair of adjacent elements, check if the current element is less than or equal to the previous one. If it is, increment the `deletions` count.\n4. Return the total number of deletions required.\n\n## Examples\nExample 1:\nInput: [1, 2, 3, 4]\nOutput: 3 (delete elements at indices 0, 1, and 2)\n\nExample 2:\nInput: [5, 6, 7, 8]\nOutput: 0 (no deletions required)",
+          "zh": "\n## 算法概述\n这个算法遍历数组，以贪心的方式删除元素：每次都选择删掉之后最能破坏顺序的那一个。\n\n## 时间复杂度分析\n时间复杂度是 O(n)，n 是数组长度。\n\n## 实现\n下面是一份 JavaScript 实现：\n```js\nfunction minDeletions(nums) {\n  let deletions = 0;\n  for (let i = 1; i < nums.length; i++) {\n    if (nums[i] <= nums[i - 1]) {\n      deletions++;\n    }\n  }\n  return deletions;\n}\nmodule.exports = minDeletions;\n```\n\n## 逐步说明\n1. 用变量 `deletions` 记录需要删除的个数。\n2. 从第二个元素（下标 1）开始遍历数组。\n3. 对每一对相邻元素，检查当前元素是否小于等于前一个。是的话就把 `deletions` 加一。\n4. 返回需要删除的总数。\n\n## 示例\n示例 1：\n输入：[1, 2, 3, 4]\n输出：3（删除下标 0、1、2 上的元素）\n\n示例 2：\n输入：[5, 6, 7, 8]\n输出：0（无需删除）\n"
         }
       }
     ],
@@ -1851,6 +1852,85 @@
       {
         "input": "[1, 3, 2, 4]",
         "output": "2"
+      }
+    ]
+  },
+  {
+    "id": "minimum-spanning-tree-with-odd-degree-constraint",
+    "title": {
+      "en": "Minimum Spanning Tree with Odd Degree Constraint",
+      "zh": "带奇度约束的最小生成树"
+    },
+    "difficulty": "Hard",
+    "tags": [
+      "graph",
+      "minimum-spanning-tree",
+      "dynamic-programming",
+      "combinatorics"
+    ],
+    "description": {
+      "en": "Given an undirected weighted graph with n nodes and m edges, find the minimum spanning tree (MST) where exactly k nodes have odd degree in the resulting tree. The graph is connected and has at least n-1 edges. Return the total weight of such MST if it exists, otherwise return -1.\n\nConstraints:\n- 1 <= n <= 20\n- n-1 <= m <= 190\n- 0 <= k <= n\n- Edge weights are positive integers up to 1000\n- The graph may contain multiple edges between the same nodes",
+      "zh": "给定一个具有n个节点和m条边的无向加权图，找到一个最小生成树（MST），其中恰好有k个节点在结果树中具有奇度数。图是连通的且至少有n-1条边。如果存在这样的MST，则返回其总权重，否则返回-1。\n\n约束条件：\n- 1 <= n <= 20\n- n-1 <= m <= 190\n- 0 <= k <= n\n- 边权重是最大为1000的正整数\n- 图中可能包含相同节点之间的多条边"
+    },
+    "examples": [
+      {
+        "input": "n = 4, edges = [[0,1,1],[0,2,2],[0,3,3],[1,2,4],[1,3,5],[2,3,6]], k = 2",
+        "output": "6"
+      },
+      {
+        "input": "n = 3, edges = [[0,1,1],[0,2,1],[1,2,1]], k = 0",
+        "output": "2"
+      }
+    ],
+    "template": {
+      "js": "function minSpanningTreeWithOddDegree(n, edges, k) {\n  // write your code here\n}\nmodule.exports = minSpanningTreeWithOddDegree;",
+      "python": "def min_spanning_tree_with_odd_degree(n, edges, k):\n    # write your code here\n    pass",
+      "java": "import java.util.*;\n\npublic class Solution {\n    public int minSpanningTreeWithOddDegree(int n, int[][] edges, int k) {\n        // write your code here\n        return -1;\n    }\n}",
+      "cpp": "#include <vector>\n#include <algorithm>\n#include <climits>\nusing namespace std;\n\nclass Solution {\npublic:\n    int minSpanningTreeWithOddDegree(int n, vector<vector<int>>& edges, int k) {\n        // write your code here\n        return -1;\n    }\n};",
+      "c": "#include <stdio.h>\n#include <stdlib.h>\n#include <limits.h>\n\nint minSpanningTreeWithOddDegree(int n, int** edges, int edgesSize, int* edgesColSize, int k) {\n    // write your code here\n    return -1;\n}"
+    },
+    "solutions": [
+      {
+        "title": {
+          "en": "Dynamic Programming with Bitmask and Minimum Spanning Tree",
+          "zh": "位掩码动态规划与最小生成树"
+        },
+        "content": {
+          "en": "## Algorithm Overview\nThis problem combines minimum spanning tree (MST) with degree constraints. We use a dynamic programming approach where dp[mask][odd_count] represents the minimum weight to connect nodes in the mask with exactly odd_count odd-degree nodes.\n\n## Complexity Analysis\n- Time Complexity: O(3^n * n^2) due to subset enumeration\n- Space Complexity: O(2^n * n) for the DP table\n\n## Implementation\n```javascript\nfunction minSpanningTreeWithOddDegree(n, edges, k) {\n    const INF = Number.MAX_SAFE_INTEGER;\n    const dp = Array(1 << n).fill().map(() => \n        Array(n + 1).fill(INF));\n    \n    // Initialize DP table\n    for (let i = 0; i < n; i++) {\n        dp[1 << i][0] = 0;\n    }\n    \n    // Precompute minimum edges between node subsets\n    const minEdge = Array(1 << n).fill(INF);\n    for (const [u, v, w] of edges) {\n        const mask = (1 << u) | (1 << v);\n        minEdge[mask] = Math.min(minEdge[mask], w);\n    }\n    \n    // Dynamic programming\n    for (let mask = 1; mask < (1 << n); mask++) {\n        for (let odd = 0; odd <= n; odd++) {\n            if (dp[mask][odd] === INF) continue;\n            \n            // Try to extend the current component\n            for (let i = 0; i < n; i++) {\n                if (mask & (1 << i)) continue;\n                \n                let minWeight = INF;\n                for (let j = 0; j < n; j++) {\n                    if (mask & (1 << j)) {\n                        const edgeMask = (1 << i) | (1 << j);\n                        minWeight = Math.min(minWeight, minEdge[edgeMask]);\n                    }\n                }\n                \n                if (minWeight !== INF) {\n                    const newMask = mask | (1 << i);\n                    const newOdd = odd + 1;\n                    dp[newMask][newOdd] = Math.min(dp[newMask][newOdd], \n                        dp[mask][odd] + minWeight);\n                }\n            }\n        }\n    }\n    \n    const result = dp[(1 << n) - 1][k];\n    return result === INF ? -1 : result;\n}\n```\n\n## Step-by-Step Explanation\n1. Initialize DP table with INF values\n2. Set base case: single nodes have 0 odd degrees\n3. Precompute minimum edges between all node pairs\n4. For each subset mask and odd count, try to extend the component\n5. Update DP table with minimum weights\n6. Return result for complete graph with exactly k odd degrees",
+          "zh": "## 算法概述\n这个问题结合了最小生成树（MST）和度数约束。我们使用动态规划方法，其中dp[mask][odd_count]表示连接mask中的节点且恰好有odd_count个奇度数节点的最小权重。\n\n## 复杂度分析\n- 时间复杂度：O(3^n * n^2)，由于子集枚举\n- 空间复杂度：O(2^n * n)，用于DP表\n\n## 实现\n```javascript\nfunction minSpanningTreeWithOddDegree(n, edges, k) {\n    const INF = Number.MAX_SAFE_INTEGER;\n    const dp = Array(1 << n).fill().map(() => \n        Array(n + 1).fill(INF));\n    \n    // 初始化DP表\n    for (let i = 0; i < n; i++) {\n        dp[1 << i][0] = 0;\n    }\n    \n    // 预计算节点子集之间的最小边\n    const minEdge = Array(1 << n).fill(INF);\n    for (const [u, v, w] of edges) {\n        const mask = (1 << u) | (1 << v);\n        minEdge[mask] = Math.min(minEdge[mask], w);\n    }\n    \n    // 动态规划\n    for (let mask = 1; mask < (1 << n); mask++) {\n        for (let odd = 0; odd <= n; odd++) {\n            if (dp[mask][odd] === INF) continue;\n            \n            // 尝试扩展当前组件\n            for (let i = 0; i < n; i++) {\n                if (mask & (1 << i)) continue;\n                \n                let minWeight = INF;\n                for (let j = 0; j < n; j++) {\n                    if (mask & (1 << j)) {\n                        const edgeMask = (1 << i) | (1 << j);\n                        minWeight = Math.min(minWeight, minEdge[edgeMask]);\n                    }\n                }\n                \n                if (minWeight !== INF) {\n                    const newMask = mask | (1 << i);\n                    const newOdd = odd + 1;\n                    dp[newMask][newOdd] = Math.min(dp[newMask][newOdd], \n                        dp[mask][odd] + minWeight);\n                }\n            }\n        }\n    }\n    \n    const result = dp[(1 << n) - 1][k];\n    return result === INF ? -1 : result;\n}\n```\n\n## 逐步解释\n1. 用INF值初始化DP表\n2. 设置基础情况：单个节点有0个奇度数\n3. 预计算所有节点对之间的最小边\n4. 对于每个子集掩码和奇度数计数，尝试扩展组件\n5. 用最小权重更新DP表\n6. 返回完整图且恰好有k个奇度数的结果"
+        }
+      },
+      {
+        "title": {
+          "en": "Optimized Approach with Prim's Algorithm and Degree Tracking",
+          "zh": "使用Prim算法和度数跟踪的优化方法"
+        },
+        "content": {
+          "en": "## Algorithm Overview\nThis optimized approach uses Prim's algorithm with state tracking of odd degrees. We maintain a priority queue that stores (weight, mask, odd_count) states and expand the MST while tracking degree constraints.\n\n## Complexity Analysis\n- Time Complexity: O(2^n * n^2 * log(2^n * n))\n- Space Complexity: O(2^n * n)\n\n## Implementation\n```javascript\nfunction minSpanningTreeWithOddDegree(n, edges, k) {\n    const INF = Number.MAX_SAFE_INTEGER;\n    const graph = Array(n).fill().map(() => Array(n).fill(INF));\n    \n    // Build adjacency matrix\n    for (const [u, v, w] of edges) {\n        graph[u][v] = Math.min(graph[u][v], w);\n        graph[v][u] = Math.min(graph[v][u], w);\n    }\n    \n    // DP table: dp[mask][odd] = min weight\n    const dp = Array(1 << n).fill().map(() => \n        Array(n + 1).fill(INF));\n    const heap = [];\n    \n    // Initialize with all single nodes\n    for (let i = 0; i < n; i++) {\n        dp[1 << i][0] = 0;\n        heap.push([0, 1 << i, 0]);\n    }\n    \n    while (heap.length) {\n        heap.sort((a, b) => a[0] - b[0]);\n        const [weight, mask, odd] = heap.shift();\n        \n        if (weight > dp[mask][odd]) continue;\n        \n        // Try to add edges from current component\n        for (let i = 0; i < n; i++) {\n            if (mask & (1 << i)) continue;\n            \n            let minEdge = INF;\n            for (let j = 0; j < n; j++) {\n                if (mask & (1 << j)) {\n                    minEdge = Math.min(minEdge, graph[i][j]);\n                }\n            }\n            \n            if (minEdge !== INF) {\n                const newMask = mask | (1 << i);\n                const newOdd = odd + 1;\n                const newWeight = weight + minEdge;\n                \n                if (newWeight < dp[newMask][newOdd]) {\n                    dp[newMask][newOdd] = newWeight;\n                    heap.push([newWeight, newMask, newOdd]);\n                }\n            }\n        }\n    }\n    \n    return dp[(1 << n) - 1][k] === INF ? -1 : dp[(1 << n) - 1][k];\n}\n```\n\n## Step-by-Step Explanation\n1. Build adjacency matrix from edges\n2. Initialize DP table and priority queue\n3. Use Dijkstra-like algorithm to expand MST components\n4. For each state, try to add adjacent nodes with minimum edges\n5. Update DP table and push new states to the queue\n6. Return the minimum weight for complete graph with k odd degrees",
+          "zh": "## 算法概述\n这种优化方法使用Prim算法并跟踪奇度数状态。我们维护一个优先队列，存储（权重，掩码，奇度数计数）状态，并在扩展MST时跟踪度数约束。\n\n## 复杂度分析\n- 时间复杂度：O(2^n * n^2 * log(2^n * n))\n- 空间复杂度：O(2^n * n)\n\n## 实现\n```javascript\nfunction minSpanningTreeWithOddDegree(n, edges, k) {\n    const INF = Number.MAX_SAFE_INTEGER;\n    const graph = Array(n).fill().map(() => Array(n).fill(INF));\n    \n    // 构建邻接矩阵\n    for (const [u, v, w] of edges) {\n        graph[u][v] = Math.min(graph[u][v], w);\n        graph[v][u] = Math.min(graph[v][u], w);\n    }\n    \n    // DP表：dp[mask][odd] = 最小权重\n    const dp = Array(1 << n).fill().map(() => \n        Array(n + 1).fill(INF));\n    const heap = [];\n    \n    // 用所有单个节点初始化\n    for (let i = 0; i < n; i++) {\n        dp[1 << i][0] = 0;\n        heap.push([0, 1 << i, 0]);\n    }\n    \n    while (heap.length) {\n        heap.sort((a, b) => a[0] - b[0]);\n        const [weight, mask, odd] = heap.shift();\n        \n        if (weight > dp[mask][odd]) continue;\n        \n        // 尝试从当前组件添加边\n        for (let i = 0; i < n; i++) {\n            if (mask & (1 << i)) continue;\n            \n            let minEdge = INF;\n            for (let j = 0; j < n; j++) {\n                if (mask & (1 << j)) {\n                    minEdge = Math.min(minEdge, graph[i][j]);\n                }\n            }\n            \n            if (minEdge !== INF) {\n                const newMask = mask | (1 << i);\n                const newOdd = odd + 1;\n                const newWeight = weight + minEdge;\n                \n                if (newWeight < dp[newMask][newOdd]) {\n                    dp[newMask][newOdd] = newWeight;\n                    heap.push([newWeight, newMask, newOdd]);\n                }\n            }\n        }\n    }\n    \n    return dp[(1 << n) - 1][k] === INF ? -1 : dp[(1 << n) - 1][k];\n}\n```\n\n## 逐步解释\n1. 从边构建邻接矩阵\n2. 初始化DP表和优先队列\n3. 使用类似Dijkstra的算法扩展MST组件\n4. 对于每个状态，尝试用最小边添加相邻节点\n5. 更新DP表并将新状态推入队列\n6. 返回完整图且恰好有k个奇度数的最小权重"
+        }
+      }
+    ],
+    "tests": [
+      {
+        "input": "[4, [[0,1,1],[0,2,2],[0,3,3],[1,2,4],[1,3,5],[2,3,6]], 2]",
+        "output": "6"
+      },
+      {
+        "input": "[3, [[0,1,1],[0,2,1],[1,2,1]], 0]",
+        "output": "2"
+      },
+      {
+        "input": "[2, [[0,1,5]], 2]",
+        "output": "5"
+      },
+      {
+        "input": "[4, [[0,1,1],[1,2,1],[2,3,1],[3,0,1],[0,2,5],[1,3,5]], 4]",
+        "output": "4"
+      },
+      {
+        "input": "[3, [[0,1,1],[0,2,2],[1,2,3]], 1]",
+        "output": "-1"
       }
     ]
   }
