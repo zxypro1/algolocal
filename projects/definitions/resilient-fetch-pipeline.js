@@ -656,9 +656,455 @@ const stage2 = {
 /* 阶段 3：重试与退避                                                   */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+
 const stage3 = {
+  id: 'timeout-deadline',
+  title: t('第 3 关 · 超时与预算传播', 'Stage 3 · Timeouts and deadline propagation'),
+  goal: t(
+    [
+      '上一关的并发池有个致命假设：每个请求最终都会返回。真实世界里不会。',
+      '一个卡住的连接会一直占着并发槽，池子里 5 个槽被 5 个僵死请求占满之后，',
+      '整条管线就停在那里了——不报错，不超时，只是永远不动。',
+      '',
+      '在 `src/deadline.ts` 实现 `fetchWithDeadline(urls, options)`：',
+      '',
+      '- `timeoutMs`：单个请求的超时。超了产出 `{ ok: false, error: \'timeout\' }`，**不要抛**；',
+      '- 超时之后**立刻释放并发槽**，让下一个 URL 开始，不要等那个僵死请求；',
+      '- `totalBudgetMs`：整批的总预算。用完之后剩下的 URL 直接标成失败，',
+      '  **一个请求都不许发出去**；',
+      '- `signal`：外部取消，行为和预算用完一样。',
+      '',
+      '两件事要分清楚：**超时是每个请求的，预算是整批的**。',
+      '一个 10 个 URL 的批次，每个超时 200ms，不代表整批最多 200ms；',
+      '也不代表整批最多 2000ms——并发会把它压缩。预算是独立的一道闸。',
+      '',
+      '「立刻释放槽位」这句话是这一关的全部难点。`Promise.race` 让你**不再等待**那个请求，',
+      '但那个请求本身还在跑。你要保证的是：race 一结束，槽位就还回池子里，',
+      '而不是等到那个被放弃的 promise 终于 settle。',
+    ].join('\n'),
+    [
+      'The pool from the last stage assumes every request eventually returns. In the real world they do',
+      'not. One stuck connection holds its slot forever, and once five stuck requests hold all five slots',
+      'the pipeline simply stops — no error, no timeout, just permanently still.',
+      '',
+      'Implement `fetchWithDeadline(urls, options)` in `src/deadline.ts`:',
+      '',
+      "- `timeoutMs`: per-request timeout. On expiry produce `{ ok: false, error: 'timeout' }`, do not throw;",
+      '- release the concurrency slot immediately on timeout so the next URL starts, rather than waiting',
+      '  for the abandoned request;',
+      '- `totalBudgetMs`: a budget for the whole batch. Once spent, remaining URLs fail without a single',
+      '  request being issued;',
+      '- `signal`: external cancellation, behaving like an exhausted budget.',
+      '',
+      'Keep two things separate: the timeout is per request, the budget is for the batch. Ten URLs with a',
+      '200ms timeout each does not mean the batch takes 200ms, nor that it takes 2000ms — concurrency',
+      'compresses it. The budget is an independent gate.',
+      '',
+      '"Release the slot immediately" is the whole difficulty here. `Promise.race` stops you waiting on the',
+      'request, but the request itself is still running. What you must guarantee is that the slot returns',
+      'to the pool the moment the race settles, not when the abandoned promise eventually does.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('超时产出失败结果而不是抛异常', 'A timeout produces a failed result, not an exception'),
+    t('超时后并发槽立刻释放', 'The slot is released the instant the timeout fires'),
+    t('预算用完后剩下的 URL 不发请求', 'Once the budget is spent, no further requests are issued'),
+    t('外部取消和预算用完行为一致', 'External cancellation behaves like an exhausted budget'),
+    t('快请求不会被慢请求拖慢', 'Fast requests are not delayed by slow ones'),
+  ],
+  pitfalls: [
+    t(
+      '用 `Promise.race([request, timeout])` 之后，在 `finally` 里等 `request` 结束才释放槽位。race 赢了、结果也返回了，但槽位还被那个僵死请求占着——超时于是只改善了「调用方等多久」，完全没改善「管线还能不能往前走」。释放槽位要跟着 race 的结果走，不是跟着请求走。',
+      'Racing the request against a timeout and then releasing the slot in a `finally` that awaits the request. The race is won and the result returned, but the slot is still held by the stuck request, so the timeout improved how long the caller waits and did nothing for whether the pipeline can move. Slot release must follow the race, not the request.'
+    ),
+    t(
+      '被放弃的请求最终 settle 时又去写一次结果数组。那一格早就填上 timeout 了，晚到的成功响应会把它覆盖掉——于是一个明明超时的请求出现在结果里，而且顺序还是乱的。放弃之后要有一个「已结算」标记，晚到的响应直接丢弃。',
+      'Writing to the result array again when the abandoned request finally settles. That slot already holds the timeout, and the late success overwrites it — so a request that definitely timed out appears as a success, out of order. Mark the entry settled on abandonment and drop late arrivals.'
+    ),
+    t(
+      '预算检查只在启动新请求**之前**做一次。10 个 URL、并发 5 时，前 5 个同时启动，预算在它们跑到一半时用完——但检查已经过了，剩下 5 个还是会被发出去。预算要在每次「从队列取下一个」时重新检查。',
+      'Checking the budget once before starting. With ten URLs and a concurrency of five, the first five start together and the budget runs out midway — but the check already passed, so the remaining five go out anyway. Re-check the budget every time you pull the next item off the queue.'
+    ),
+    t(
+      '把总预算实现成「给每个请求的超时取 min(timeoutMs, 剩余预算)」。听起来更精细，实际上会让最后几个请求带着 1ms 的超时发出去，必然失败——白白消耗了服务端资源。预算用完就该**不发**，而不是发一个注定超时的请求。',
+      'Implementing the budget as `min(timeoutMs, remaining)` per request. It sounds more precise, and it means the last few requests go out with a 1ms timeout and are guaranteed to fail — burning server resources for nothing. An exhausted budget means not sending, not sending something doomed.'
+    ),
+  ],
+  hints: [
+    t(
+      '超时用 `Promise.race([task(), sleep(timeoutMs).then(() => TIMEOUT)])`，让超时分支返回一个哨兵值而不是抛错，这样 race 之后用一次判断就能区分两条路。',
+      'Race with `Promise.race([task(), sleep(timeoutMs).then(() => TIMEOUT)])`, having the timeout branch return a sentinel rather than throw, so one check after the race distinguishes the two paths.'
+    ),
+    t(
+      '预算用 `const deadline = now() + totalBudgetMs` 记成一个绝对时刻，取下一个 URL 前判断 `now() >= deadline`。比维护「剩余多少」简单，也不会因为并发而算错。',
+      'Store the budget as an absolute instant, `const deadline = now() + totalBudgetMs`, and check `now() >= deadline` before pulling the next URL. Simpler than tracking remaining time, and immune to concurrency skew.'
+    ),
+  ],
+  extension: t(
+    [
+      '这一关做的是**超时**，真实系统里更常用的概念是**截止时间**（deadline）。',
+      '区别在于可传播：调用方说「我最多等 300ms」，这个 300ms 要一路传下去，',
+      '让每一层都知道自己还剩多少时间。gRPC 的 deadline 就是这么工作的——',
+      '它是请求元数据的一部分，跨进程传递。',
+      '',
+      '超时不传播会导致一类很典型的浪费：网关等了 300ms 就放弃返回给用户，',
+      '但下游服务对此一无所知，还在老老实实算那个已经没人要的结果，',
+      '一直占着数据库连接。这在故障时会雪上加霜——上游都在重试，',
+      '下游还在处理一堆早已被放弃的请求。',
+      '',
+      '另一个方向是**超时值怎么定**。写死一个数字很脆：定小了正常请求被误杀，',
+      '定大了故障时反应迟钝。成熟系统用的是自适应超时，比如按最近的 p99 延迟',
+      '动态调整，或者干脆用 Netflix 的做法：超时 = f(并发度)，负载高时反而放宽，',
+      '避免超时本身变成雪崩的放大器。',
+    ].join('\n'),
+    [
+      'This stage implements timeouts; the more useful concept in real systems is a deadline. The',
+      'difference is propagation: the caller says "I will wait at most 300ms" and that 300ms travels down',
+      'so every layer knows how much time is left. gRPC deadlines work exactly this way, carried as request',
+      'metadata across processes.',
+      '',
+      'Not propagating produces a characteristic waste: the gateway gives up after 300ms and answers the',
+      'user, while the downstream service knows nothing about it and keeps computing a result nobody wants,',
+      'holding a database connection throughout. Under failure this compounds — everything upstream is',
+      'retrying while everything downstream is busy with requests that were abandoned long ago.',
+      '',
+      'The other question is where the timeout value comes from. A hard-coded number is brittle: too small',
+      'and healthy requests are killed, too large and failures take forever to surface. Mature systems',
+      'adapt, tracking recent p99 latency, or take the Netflix approach of making the timeout a function of',
+      'concurrency so it loosens under load rather than becoming an amplifier of the collapse.',
+    ].join('\n')
+  ),
+  focus: ['correctness', 'latency', 'resilience'],
+  lab: {
+    defaultLatencyMs: 100,
+    endpoints: {
+      '/api/hang': { latencyMs: 5000 },
+    },
+  },
+  starterFiles: [
+    cancelSupport,
+    file(
+      'src/deadline.ts',
+      code`
+        import type { CancelToken, PageResult } from './contract';
+
+        export interface DeadlineOptions {
+          /** 并发上限 */
+          concurrency?: number;
+          /** 单个请求的超时 */
+          timeoutMs: number;
+          /** 整批的总预算，用完之后剩下的 URL 不再发请求 */
+          totalBudgetMs?: number;
+          signal?: CancelToken;
+        }
+
+        export function fetchWithDeadline(
+          urls: string[],
+          options: DeadlineOptions
+        ): Promise<PageResult[]> {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-3.spec.ts',
+      code`
+        import { fetchWithDeadline } from '../src/deadline';
+        import { createCancelSource } from '../src/support/cancel';
+        import { now } from '@lab/env';
+        import { getMetrics } from '@lab/net';
+
+        describe('阶段3 · 超时与预算', () => {
+          it('正常请求不受影响', async () => {
+            const results = await fetchWithDeadline(['/api/a', '/api/b'], {
+              concurrency: 2,
+              timeoutMs: 500,
+            });
+            expect(results).toHaveLength(2);
+            expect(results.every((result) => result.ok)).toBe(true);
+            expect(results[0].url).toBe('/api/a');
+          });
+
+          it('超时产出失败结果而不是抛异常', async () => {
+            const results = await fetchWithDeadline(['/api/hang'], {
+              concurrency: 1,
+              timeoutMs: 200,
+            });
+            expect(results).toHaveLength(1);
+            expect(results[0].ok).toBe(false);
+            expect(results[0].error).toBe('timeout');
+            expect(results[0].data).toBeNull();
+          });
+
+          it('结果顺序与输入一致', async () => {
+            const results = await fetchWithDeadline(['/api/hang', '/api/b', '/api/hang'], {
+              concurrency: 3,
+              timeoutMs: 200,
+            });
+            expect(results.map((result) => result.url)).toEqual(['/api/hang', '/api/b', '/api/hang']);
+            expect(results.map((result) => result.ok)).toEqual([false, true, false]);
+          });
+
+          it('被放弃的请求晚到之后不会覆盖已有结果', async () => {
+            const results = await fetchWithDeadline(['/api/hang'], {
+              concurrency: 1,
+              timeoutMs: 200,
+            });
+            // 那个请求会在 5000ms 时才真正返回；再等一会儿结果不能变
+            await new Promise((resolve) => setTimeout(resolve, 6000));
+            expect(results[0].ok).toBe(false);
+            expect(results[0].error).toBe('timeout');
+          });
+
+          it('超时立刻释放并发槽 [gate:slot]', async () => {
+            const startedAt = now();
+            const urls = ['/api/hang', '/api/hang', '/api/hang', '/api/a', '/api/b', '/api/c'];
+            const results = await fetchWithDeadline(urls, { concurrency: 2, timeoutMs: 200 });
+
+            expect(results.filter((result) => result.ok)).toHaveLength(3);
+            // 三个僵死请求各占 200ms、三个正常请求各 100ms，两个槽 -> 450ms 左右。
+            // 等僵死请求真正返回才放槽的实现要 5000ms 以上
+            expect(now() - startedAt).toBeLessThanOrEqual(600);
+          });
+
+          it('总预算用完之后剩下的 URL 不发请求 [gate:budget]', async () => {
+            const urls: string[] = [];
+            for (let index = 0; index < 10; index += 1) urls.push('/api/page-' + index);
+
+            const results = await fetchWithDeadline(urls, {
+              concurrency: 1,
+              timeoutMs: 500,
+              totalBudgetMs: 250,
+            });
+
+            expect(results).toHaveLength(10);
+            const succeeded = results.filter((result) => result.ok).length;
+            expect(succeeded).toBeGreaterThanOrEqual(2);
+            expect(succeeded).toBeLessThanOrEqual(4);
+            // 关键：没跑到的 URL 一个请求都没发出去
+            expect(getMetrics().requests.total).toBe(succeeded);
+          });
+
+          it('预算用完的 URL 标成失败而不是被丢掉', async () => {
+            const urls: string[] = [];
+            for (let index = 0; index < 8; index += 1) urls.push('/api/page-' + index);
+
+            const results = await fetchWithDeadline(urls, {
+              concurrency: 1,
+              timeoutMs: 500,
+              totalBudgetMs: 150,
+            });
+
+            expect(results).toHaveLength(8);
+            const failed = results.filter((result) => !result.ok);
+            expect(failed.length).toBeGreaterThan(0);
+            expect(failed[failed.length - 1].error).toBeTruthy();
+          });
+
+          it('外部取消会停下后续请求', async () => {
+            const source = createCancelSource();
+            const urls: string[] = [];
+            for (let index = 0; index < 10; index += 1) urls.push('/api/page-' + index);
+
+            setTimeout(() => source.cancel(), 250);
+            const results = await fetchWithDeadline(urls, {
+              concurrency: 1,
+              timeoutMs: 500,
+              signal: source.token,
+            });
+
+            expect(results).toHaveLength(10);
+            expect(getMetrics().requests.total).toBeLessThan(10);
+          });
+
+          it('取消发生在开始之前则一个都不发', async () => {
+            const source = createCancelSource();
+            source.cancel();
+
+            const results = await fetchWithDeadline(['/api/a', '/api/b'], {
+              concurrency: 2,
+              timeoutMs: 500,
+              signal: source.token,
+            });
+
+            expect(results).toHaveLength(2);
+            expect(results.every((result) => !result.ok)).toBe(true);
+            expect(getMetrics().requests.total).toBe(0);
+          });
+
+          it('预算充足时不影响正常完成', async () => {
+            const results = await fetchWithDeadline(['/api/a', '/api/b', '/api/c'], {
+              concurrency: 3,
+              timeoutMs: 500,
+              totalBudgetMs: 5000,
+            });
+            expect(results.every((result) => result.ok)).toBe(true);
+          });
+
+          it('空输入返回空数组', async () => {
+            expect(await fetchWithDeadline([], { concurrency: 2, timeoutMs: 100 })).toEqual([]);
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'virtualElapsedMs',
+      op: 'lte',
+      value: 600,
+      unit: 'ms',
+      zh: '僵死请求超时后立刻让出并发槽',
+      en: 'A stuck request yields its slot the moment it times out',
+      dimension: 'latency',
+      scope: 'gate:slot',
+    }),
+    gate({
+      metric: 'requests.total',
+      op: 'lte',
+      value: 4,
+      zh: '预算用完之后不再发出任何请求',
+      en: 'No request is issued once the budget is spent',
+      dimension: 'resilience',
+      scope: 'gate:budget',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/deadline.ts',
+      code`
+        import type { CancelToken, PageResult } from './contract';
+        import { now, sleep } from '@lab/env';
+        import { request } from '@lab/net';
+
+        export interface DeadlineOptions {
+          concurrency?: number;
+          timeoutMs: number;
+          totalBudgetMs?: number;
+          signal?: CancelToken;
+        }
+
+        /** 超时分支返回哨兵而不是抛错，race 之后一次判断就能分开两条路 */
+        const TIMED_OUT = Symbol('timed-out');
+
+        export async function fetchWithDeadline(
+          urls: string[],
+          options: DeadlineOptions
+        ): Promise<PageResult[]> {
+          const results: PageResult[] = new Array(urls.length);
+          if (urls.length === 0) return results;
+
+          // 预算记成一个绝对时刻：比维护「还剩多少」简单，并发下也不会算错
+          const deadline =
+            options.totalBudgetMs === undefined ? Infinity : now() + options.totalBudgetMs;
+
+          const size = Math.max(1, Math.min(options.concurrency ?? 1, urls.length));
+          let cursor = 0;
+
+          function outOfTime(): boolean {
+            return now() >= deadline || Boolean(options.signal?.cancelled);
+          }
+
+          async function runOne(index: number): Promise<void> {
+            const url = urls[index];
+
+            const outcome = await Promise.race([
+              request(url).then((response) => response.data),
+              sleep(options.timeoutMs).then(() => TIMED_OUT),
+            ]);
+
+            // race 一结束就返回，槽位跟着这个函数的返回释放。
+            // 在这里 await 那个被放弃的请求，等于超时白做
+            if (outcome === TIMED_OUT) {
+              results[index] = { url, ok: false, data: null, error: 'timeout' };
+              return;
+            }
+            results[index] = { url, ok: true, data: outcome };
+          }
+
+          async function worker(): Promise<void> {
+            for (;;) {
+              // 每取一个都要重新判断：并发启动的那批可能在中途把预算耗光
+              if (cursor >= urls.length) return;
+              const index = cursor;
+              cursor += 1;
+
+              if (outOfTime()) {
+                results[index] = {
+                  url: urls[index],
+                  ok: false,
+                  data: null,
+                  error: options.signal?.cancelled ? 'cancelled' : 'budget exhausted',
+                };
+                continue;
+              }
+
+              try {
+                await runOne(index);
+              } catch (error) {
+                results[index] = {
+                  url: urls[index],
+                  ok: false,
+                  data: null,
+                  error: error instanceof Error ? error.message : String(error),
+                };
+              }
+            }
+          }
+
+          const runners: Array<Promise<void>> = [];
+          for (let slot = 0; slot < size; slot += 1) runners.push(worker());
+          await Promise.all(runners);
+
+          return results;
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**槽位跟着 race 走，不跟着请求走。** `runOne` 在 race 结束时就 return 了，',
+      '那个被放弃的请求还挂在事件循环上，但 worker 已经去取下一个 URL 了。',
+      '这一行行为差别，在门槛上是 450ms 和 5000ms 的差别。',
+      '',
+      '**没有「已结算」标记也不会被晚到的响应覆盖。** 因为被放弃的那个 promise',
+      '根本没人再去 `.then` 它——`Promise.race` 的输家会被静默丢弃。',
+      '如果实现里在 race 之外还保留了对它的引用并写回结果，就需要一个标记；',
+      '不保留引用是更简单的做法。',
+      '',
+      '**预算用绝对时刻而不是剩余时长。** 并发场景下「剩余多少」需要在每次启动和',
+      '结束时更新，很容易漏。`now() >= deadline` 是无状态的，随便什么时候问都对。',
+      '',
+      '**预算耗尽的 URL 仍然占一个结果位。** 返回一个比输入短的数组会让调用方',
+      '没法把结果和输入对应起来——它只知道「少了几个」，不知道是哪几个。',
+    ].join('\n'),
+    [
+      'The slot follows the race, not the request. `runOne` returns the moment the race settles; the',
+      'abandoned request is still pending on the event loop while the worker has already pulled the next',
+      'URL. That one behavioural difference is 450ms versus 5000ms on the gate.',
+      '',
+      'No "settled" flag is needed to keep late responses out, because nothing ever `.then`s the abandoned',
+      'promise again — the loser of a `Promise.race` is silently dropped. An implementation that keeps a',
+      'reference and writes back would need the flag; not keeping one is simpler.',
+      '',
+      'The budget is an absolute instant rather than a remaining duration. Under concurrency, "how much is',
+      'left" must be updated on every start and finish and is easy to get wrong. `now() >= deadline` is',
+      'stateless and correct whenever it is asked.',
+      '',
+      'URLs skipped for budget still occupy a result slot. Returning a shorter array than the input leaves',
+      'the caller unable to line results up with what they asked for — they know some are missing, not which.',
+    ].join('\n')
+  ),
+};
+
+const stage4 = {
   id: 'retry-backoff',
-  title: t('第 3 关 · 重试与指数退避', 'Stage 3 · Retry with exponential backoff'),
+  title: t('第 4 关 · 重试与指数退避', 'Stage 4 · Retry with exponential backoff'),
   goal: t(
     [
       '真实的下游会抖动。`/api/pages/flaky` 前两次一定失败，第三次才成功。',
@@ -815,14 +1261,14 @@ const stage3 = {
   ],
   specs: [
     spec(
-      'specs/stage-3.spec.ts',
+      'specs/stage-4.spec.ts',
       code`
         import { withRetry } from '../src/retry';
         import { fetchPage } from '../src/fetcher';
         import { getMetrics } from '@lab/net';
         import { now } from '@lab/env';
 
-        describe('阶段3 · 重试与退避', () => {
+        describe('阶段4 · 重试与退避', () => {
           it('失败两次后第三次成功 [gate:retry]', async () => {
             const result = await fetchPage('/api/pages/flaky', { retries: 3, baseDelayMs: 50 });
             expect(result.ok).toBe(true);
@@ -1044,9 +1490,806 @@ const stage3 = {
 /* 阶段 4：缓存与单飞                                                   */
 /* ------------------------------------------------------------------ */
 
-const stage4 = {
+/* ------------------------------------------------------------------ */
+
+const stage5 = {
+  id: 'failure-policy',
+  title: t('第 5 关 · 错误分类与限流响应', 'Stage 5 · Classifying failures and honouring throttling'),
+  goal: t(
+    [
+      '上一关的重试对所有错误一视同仁。这是个很贵的假设：',
+      '404 重试三次仍然是 404，只是白白多打了三次；',
+      '429 说的是「你太快了」，指数退避那点时间根本不够，重试反而让限流更严重。',
+      '',
+      '在 `src/policy.ts` 实现两个东西：',
+      '',
+      '- `classify(error)`：把失败分成三类',
+      '  - `permanent`（4xx，除了 429）：**一次都不许重试**，直接失败；',
+      '  - `throttled`（429）：等一个**固定的、较长的**时间再试，不用指数退避；',
+      '  - `retryable`（5xx 和网络错误）：指数退避重试。',
+      '- `fetchWithPolicy(url, options)`：按分类执行对应策略。',
+      '',
+      '这一关的门槛只量两件事：',
+      '',
+      '1. 打一个 404，**总请求数必须正好是 1**。多一次都是在给一个已知会失败的接口加压；',
+      '2. 撞上 429 时，总耗时必须体现出你真的按 `throttleDelayMs` 退了——',
+      '   用 50ms 的指数退避去应付限流，等于没退。',
+      '',
+      '「什么错误该重试」这个判断，比「怎么重试」重要得多。',
+      '重试策略写得再精妙，用在不该重试的错误上都是纯粹的放大器。',
+    ].join('\n'),
+    [
+      'The retry from the last stage treats every failure alike. That is an expensive assumption: a 404',
+      'retried three times is still a 404, just three extra requests; and a 429 means "you are going too',
+      'fast", where exponential backoff of a few tens of milliseconds is nowhere near enough and retrying',
+      'makes the throttling worse.',
+      '',
+      'Implement two things in `src/policy.ts`:',
+      '',
+      '- `classify(error)`, sorting failures into three kinds:',
+      '  - `permanent` (4xx other than 429): never retried, fail immediately;',
+      '  - `throttled` (429): wait a fixed, longer delay before retrying, not exponential backoff;',
+      '  - `retryable` (5xx and network errors): exponential backoff.',
+      '- `fetchWithPolicy(url, options)`, applying the policy for each kind.',
+      '',
+      "This stage's gates measure exactly two things:",
+      '',
+      '1. hitting a 404 must produce exactly one request. Any more is load added to an endpoint already',
+      '   known to fail;',
+      '2. on a 429 the elapsed time must show you actually backed off by `throttleDelayMs` — answering',
+      '   throttling with 50ms of exponential backoff is not backing off.',
+      '',
+      'Deciding which failures deserve a retry matters far more than how the retry is performed. However',
+      'elegant the strategy, applied to the wrong failure it is a pure amplifier.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('4xx 不重试，一次就失败', '4xx fails on the first attempt with no retry'),
+    t('429 用固定的长退避，不用指数退避', '429 uses a fixed long delay, not exponential backoff'),
+    t('5xx 仍然指数退避重试', '5xx still retries with exponential backoff'),
+    t('分类函数本身可以单独测试', 'The classifier is independently testable'),
+    t('重试用尽后返回失败结果而不是抛异常', 'Exhausted retries return a failed result, not an exception'),
+  ],
+  pitfalls: [
+    t(
+      '把 429 归到 retryable 里。它确实该重试，但用指数退避的初始值（几十毫秒）去应付限流，等于立刻又打过去一次——服务端的限流窗口通常是秒级的。结果是重试全部撞在限流上，把重试预算白白烧完，最后仍然失败。',
+      'Filing 429 under retryable. It should be retried, but the initial exponential delay of tens of milliseconds means hitting the server again immediately, while its throttling window is usually seconds. Every retry lands on the throttle, burning the whole budget and failing anyway.'
+    ),
+    t(
+      '按「有没有 status」而不是按 status 的值分类。网络层错误（连接被拒、DNS 失败）没有 status，应该算 retryable；但如果实现写成「没有 status 就当 permanent」，一次网络抖动就会被判成永久失败，而它恰恰是最该重试的那一类。',
+      'Classifying by whether a status exists rather than by its value. Network-layer errors — connection refused, DNS failure — carry no status and are the most retryable kind of all; an implementation that treats "no status" as permanent turns a transient blip into a permanent failure.'
+    ),
+    t(
+      '把 408（请求超时）和 425（Too Early）也归进 permanent。它们虽然是 4xx，但语义上都是「再试一次可能就好了」。按区间一刀切很省事，代价是把两类本该重试的错误挡在门外——真实的重试策略都是按状态码逐个列白名单的。',
+      'Sweeping 408 (Request Timeout) and 425 (Too Early) into permanent. They are 4xx, but both mean "trying again may well work". Slicing by range is convenient and shuts out two genuinely retryable failures — real retry policies enumerate status codes explicitly.'
+    ),
+    t(
+      '重试用尽之后把最后那个错误抛出去。上一关的契约是「失败也要产出一条 PageResult」，抛出去会让整批请求里的一个失败炸掉整个 `Promise.all`。分类做得再对，边界契约破了一样不能用。',
+      'Throwing the last error once retries are exhausted. The contract from the earlier stages is that a failure still produces a `PageResult`; throwing lets one failure inside a batch take down the whole `Promise.all`. However right the classification, breaking the boundary contract makes it unusable.'
+    ),
+  ],
+  hints: [
+    t(
+      '`LabHttpError` 上有 `status`。分类函数先判断 `error instanceof LabHttpError`，拿到 status 之后再按 429 / 4xx / 其他分三路；不是 LabHttpError 的一律当 retryable。',
+      '`LabHttpError` carries a `status`. Check `error instanceof LabHttpError` first, then branch on 429 / other 4xx / everything else; anything that is not a `LabHttpError` counts as retryable.'
+    ),
+    t(
+      '三条策略共用一个循环，区别只在「这一轮要不要继续」和「等多久」。把这两个决定抽成两行，循环本身就不会变成三个分支的大杂烩。',
+      'One loop serves all three policies; only "should there be another attempt" and "how long to wait" differ. Reduce those to two lines and the loop never becomes a tangle of three branches.'
+    ),
+  ],
+  extension: t(
+    [
+      '真实的 429 响应通常带一个 `Retry-After` 头，值是秒数或者一个绝对时刻。',
+      '按它退避比任何本地策略都准——服务端知道自己的限流窗口什么时候重置，客户端不知道。',
+      '这一关的 lab 不提供响应头，所以用固定的 `throttleDelayMs` 代替，',
+      '但真实实现里「有 Retry-After 就听它的」应该是第一条规则。',
+      '',
+      '错误分类还有一个常被忽略的维度：**幂等性**。',
+      '一个 GET 超时了可以放心重试，一个 POST 超时了不行——你不知道服务端到底有没有处理。',
+      'HTTP 的方法语义（GET/PUT/DELETE 幂等，POST 不幂等）正是为此存在的，',
+      '而真正的解法是让写操作带幂等键，把「不确定有没有生效」变成「重试也只生效一次」。',
+      '',
+      '再往上一层是**重试预算**（retry budget）。就算每次重试都判断对了，',
+      '当下游整体故障时，所有客户端同时重试仍然会把流量放大好几倍，',
+      '让本来能自愈的抖动变成雪崩。gRPC 和 Envoy 的做法是给重试设一个',
+      '「不超过总请求量 10%」的配额，超了就直接失败——宁可多失败一点，也不参与踩踏。',
+    ].join('\n'),
+    [
+      'A real 429 usually carries a `Retry-After` header holding either a number of seconds or an absolute',
+      'time. Honouring it beats any local policy: the server knows when its throttling window resets and',
+      "the client does not. This stage's lab has no response headers, so a fixed `throttleDelayMs` stands",
+      'in — but in a real implementation "obey Retry-After when present" should be the first rule.',
+      '',
+      'Classification has another commonly ignored dimension: idempotency. A timed-out GET can be retried',
+      'safely; a timed-out POST cannot, because you do not know whether the server processed it. HTTP',
+      'method semantics (GET, PUT and DELETE idempotent, POST not) exist for exactly this, and the real',
+      'fix is idempotency keys on writes, turning "did it take effect?" into "retrying still takes effect',
+      'once".',
+      '',
+      'One layer above sits the retry budget. Even with every individual decision correct, a broad',
+      'downstream failure has every client retrying at once and multiplies traffic several times over,',
+      'turning a self-healing blip into a stampede. gRPC and Envoy cap retries at a quota — no more than',
+      'about 10% of total requests — and fail outright beyond it, preferring a few more failures to joining',
+      'the pile-on.',
+    ].join('\n')
+  ),
+  focus: ['correctness', 'resilience', 'latency'],
+  lab: {
+    defaultLatencyMs: 100,
+    endpoints: {
+      '/api/throttled': { failFirstN: 2, status: 429 },
+      '/api/missing': { failFirstN: 99, status: 404 },
+      '/api/gone': { failFirstN: 99, status: 410 },
+      '/api/flaky': { failFirstN: 2, status: 500 },
+      '/api/broken': { failFirstN: 99, status: 503 },
+    },
+  },
+  starterFiles: [
+    file(
+      'src/policy.ts',
+      code`
+        import type { PageResult } from './contract';
+
+        export type FailureKind = 'permanent' | 'throttled' | 'retryable';
+
+        export interface PolicyOptions {
+          /** 最多重试几次（不含第一次） */
+          retries: number;
+          /** retryable 的指数退避基数 */
+          baseDelayMs: number;
+          /** throttled 的固定退避，通常远大于 baseDelayMs */
+          throttleDelayMs: number;
+        }
+
+        export function classify(error: unknown): FailureKind {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+
+        export function fetchWithPolicy(url: string, options: PolicyOptions): Promise<PageResult> {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-5.spec.ts',
+      code`
+        import { classify, fetchWithPolicy } from '../src/policy';
+        import { LabHttpError, getMetrics } from '@lab/net';
+        import { now } from '@lab/env';
+
+        const OPTIONS = { retries: 3, baseDelayMs: 50, throttleDelayMs: 400 };
+
+        describe('阶段5 · 错误分类', () => {
+          it('404 是永久失败', () => {
+            expect(classify(new LabHttpError('nope', 404, '/api/missing'))).toBe('permanent');
+          });
+
+          it('410 也是永久失败', () => {
+            expect(classify(new LabHttpError('gone', 410, '/api/gone'))).toBe('permanent');
+          });
+
+          it('429 是被限流', () => {
+            expect(classify(new LabHttpError('slow down', 429, '/api/throttled'))).toBe('throttled');
+          });
+
+          it('5xx 可以重试', () => {
+            expect(classify(new LabHttpError('boom', 500, '/api/flaky'))).toBe('retryable');
+            expect(classify(new LabHttpError('unavailable', 503, '/api/broken'))).toBe('retryable');
+          });
+
+          it('没有 status 的错误当作可重试', () => {
+            // 连接被拒、DNS 失败都属于这一类，恰恰是最该重试的
+            expect(classify(new Error('connection refused'))).toBe('retryable');
+          });
+        });
+
+        describe('阶段5 · 按分类执行', () => {
+          it('正常请求直接成功', async () => {
+            const result = await fetchWithPolicy('/api/ok', OPTIONS);
+            expect(result.ok).toBe(true);
+            expect(result.url).toBe('/api/ok');
+          });
+
+          it('5xx 重试之后成功', async () => {
+            const result = await fetchWithPolicy('/api/flaky', OPTIONS);
+            expect(result.ok).toBe(true);
+            // 前两次失败，第三次成功
+            expect(getMetrics().requests.total).toBe(3);
+          });
+
+          it('一直 5xx 时重试用尽，返回失败结果而不是抛异常', async () => {
+            const result = await fetchWithPolicy('/api/broken', OPTIONS);
+            expect(result.ok).toBe(false);
+            expect(result.data).toBeNull();
+            expect(result.error).toBeTruthy();
+            expect(getMetrics().requests.total).toBe(OPTIONS.retries + 1);
+          });
+
+          it('429 最终会成功', async () => {
+            const result = await fetchWithPolicy('/api/throttled', OPTIONS);
+            expect(result.ok).toBe(true);
+            expect(getMetrics().requests.total).toBe(3);
+          });
+
+          it('4xx 一次都不重试 [gate:permanent]', async () => {
+            const result = await fetchWithPolicy('/api/missing', OPTIONS);
+            expect(result.ok).toBe(false);
+            // 重试一个 404 只是在给已知会失败的接口加压
+            expect(getMetrics().requests.total).toBe(1);
+          });
+
+          it('410 同样不重试', async () => {
+            await fetchWithPolicy('/api/gone', OPTIONS);
+            expect(getMetrics().requests.total).toBe(1);
+          });
+
+          it('被限流时真的按 throttleDelayMs 退避 [gate:throttle]', async () => {
+            const startedAt = now();
+            const result = await fetchWithPolicy('/api/throttled', OPTIONS);
+            const elapsed = now() - startedAt;
+
+            expect(result.ok).toBe(true);
+            // 三次请求 300ms + 两次限流退避 800ms。
+            // 用 50ms 指数退避应付限流的实现在这里只有 450ms 左右
+            expect(elapsed).toBeGreaterThanOrEqual(900);
+          });
+
+          it('5xx 用的是指数退避，不是限流的长退避', async () => {
+            const startedAt = now();
+            await fetchWithPolicy('/api/flaky', OPTIONS);
+            const elapsed = now() - startedAt;
+
+            // 300ms 请求 + 50 + 100 退避 = 450ms 上下，明显短于限流那条路
+            expect(elapsed).toBeLessThan(700);
+          });
+
+          it('retries 为 0 时任何失败都只发一次', async () => {
+            await fetchWithPolicy('/api/flaky', { retries: 0, baseDelayMs: 50, throttleDelayMs: 400 });
+            expect(getMetrics().requests.total).toBe(1);
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'requests.total',
+      op: 'eq',
+      value: 1,
+      zh: '永久失败一次都不重试',
+      en: 'A permanent failure is never retried',
+      dimension: 'resilience',
+      scope: 'gate:permanent',
+    }),
+    gate({
+      metric: 'virtualElapsedMs',
+      op: 'gte',
+      value: 900,
+      unit: 'ms',
+      zh: '被限流时真的退避了，而不是立刻重打',
+      en: 'Throttling is answered with a real backoff, not an immediate retry',
+      dimension: 'resilience',
+      scope: 'gate:throttle',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/policy.ts',
+      code`
+        import type { PageResult } from './contract';
+        import { sleep } from '@lab/env';
+        import { LabHttpError, request } from '@lab/net';
+
+        export type FailureKind = 'permanent' | 'throttled' | 'retryable';
+
+        export interface PolicyOptions {
+          retries: number;
+          baseDelayMs: number;
+          throttleDelayMs: number;
+        }
+
+        /** 4xx 里这几个的语义是「再试一次可能就好了」，不能跟着区间一刀切 */
+        const RETRYABLE_4XX = [408, 425];
+
+        export function classify(error: unknown): FailureKind {
+          // 没有 status 的是网络层错误（连接被拒、DNS 失败），
+          // 它恰恰是最该重试的一类，不能因为「拿不到 status」就判永久失败
+          if (!(error instanceof LabHttpError)) return 'retryable';
+
+          const status = error.status;
+          if (status === 429) return 'throttled';
+          if (status >= 400 && status < 500 && RETRYABLE_4XX.indexOf(status) === -1) {
+            return 'permanent';
+          }
+          return 'retryable';
+        }
+
+        export async function fetchWithPolicy(url: string, options: PolicyOptions): Promise<PageResult> {
+          let lastError: unknown = null;
+
+          for (let attempt = 0; attempt <= options.retries; attempt += 1) {
+            try {
+              const response = await request(url);
+              return { url, ok: true, data: response.data };
+            } catch (error) {
+              lastError = error;
+              const kind = classify(error);
+
+              // 一条循环服务三种策略，区别只是这两个决定
+              if (kind === 'permanent') break;
+              if (attempt === options.retries) break;
+
+              const delay =
+                kind === 'throttled'
+                  ? // 限流窗口是秒级的，指数退避的初始值根本等不到窗口重置
+                    options.throttleDelayMs
+                  : options.baseDelayMs * Math.pow(2, attempt);
+              await sleep(delay);
+            }
+          }
+
+          // 契约是「失败也要产出 PageResult」：抛出去会让批量调用里的
+          // 一个失败炸掉整个 Promise.all
+          return {
+            url,
+            ok: false,
+            data: null,
+            error: lastError instanceof Error ? lastError.message : String(lastError),
+          };
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**分类函数的默认分支是 `retryable`，不是 `permanent`。** 这个方向选反了会很难查：',
+      '一个不认识的错误类型（网络层异常、序列化失败）被判成永久失败之后，',
+      '表现是「偶发的、不重试的、没有堆栈的失败」，而它本来只要重试一次就好了。',
+      '不确定的时候倾向重试，是这类策略的通用默认值。',
+      '',
+      '**`RETRYABLE_4XX` 这个白名单存在的意义。** 按 `status >= 400 && status < 500` 一刀切最省事，',
+      '但 408（请求超时）和 425（Too Early）落在这个区间里，语义却是「再来一次」。',
+      '真实的重试策略都是逐个状态码列白名单的，区间判断只是它的粗糙近似。',
+      '',
+      '**三种策略共用一个循环。** 差异被压缩成两行：`if (kind === \'permanent\') break;`',
+      '和那个三元表达式选延迟。写成三个 if 分支各带一份循环，逻辑一样，',
+      '但「重试次数怎么算」这件事就散落在三处，改一处忘两处。',
+      '',
+      '**限流的退避是固定值而不是指数。** 指数退避解决的是「大家同时重试造成碰撞」，',
+      '而限流解决的是「你超过了服务端的速率窗口」。后者的正确等待时长由服务端决定，',
+      '和你重试了几次没关系——所以它不该随 attempt 增长。',
+    ].join('\n'),
+    [
+      "The classifier's default branch is `retryable`, not `permanent`. Getting that direction wrong is",
+      'hard to diagnose: an unrecognised error — a network-layer exception, a deserialisation failure —',
+      'judged permanent presents as an intermittent, un-retried, stackless failure that one retry would',
+      'have fixed. Leaning towards retrying when unsure is the usual default for policies like this.',
+      '',
+      'Why the `RETRYABLE_4XX` allowlist exists. Slicing on `status >= 400 && status < 500` is convenient,',
+      'but 408 (Request Timeout) and 425 (Too Early) sit in that range and mean "try again". Real retry',
+      'policies enumerate status codes; the range check is only a coarse approximation of one.',
+      '',
+      'All three policies share one loop. The difference compresses to two lines: the `permanent` break and',
+      'the ternary choosing the delay. Three separate branches each with their own loop compute the same',
+      'thing while scattering "how attempts are counted" across three places, so a change to one forgets',
+      'the other two.',
+      '',
+      'The throttled backoff is fixed, not exponential. Exponential backoff solves collisions between',
+      'clients retrying together; throttling means you exceeded a server-side rate window. The right wait',
+      'is decided by the server and has nothing to do with how many times you have tried, so it should not',
+      'grow with the attempt number.',
+    ].join('\n')
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+
+const stage6 = {
+  id: 'hedging',
+  title: t('第 6 关 · 对冲请求与尾延迟', 'Stage 6 · Hedged requests and tail latency'),
+  goal: t(
+    [
+      '重试解决的是**失败**，对冲解决的是**慢**。',
+      '一个服务 p50 是 30ms、p99 是 900ms 时，问题往往不是它整体慢，',
+      '而是某台机器恰好在 GC、某个连接恰好排在长队后面。',
+      '这种慢没有错误可以捕获——请求最终会成功，只是太晚了。',
+      '',
+      '对冲的思路很简单：**等一小会儿，如果还没回来，就再向另一个副本发一次，谁先回用谁**。',
+      '',
+      '在 `src/hedge.ts` 实现 `hedgedFetch(replicas, options)`：',
+      '',
+      '- 先发 `replicas[0]`；',
+      '- 等 `hedgeAfterMs` 还没结果，就并发发出 `replicas[1]`，以此类推；',
+      '- 最多同时在飞 `maxAttempts` 个；',
+      '- 谁先**成功**就返回谁，其余的放弃；',
+      '- 全都失败才返回失败。',
+      '',
+      '这一关的两个门槛是一对，必须同时满足：',
+      '',
+      '1. 慢副本 900ms、快副本 120ms、`hedgeAfterMs` 200 时，总耗时要在 400ms 以内——',
+      '   证明对冲真的发生了；',
+      '2. 主副本 150ms 就返回（快过 `hedgeAfterMs`）时，**总请求数必须是 1**——',
+      '   证明你没有一上来就把所有副本全打一遍。',
+      '',
+      '第二条才是难点。对冲的代价是额外的请求，一个「先全发出去再取最快的」的实现',
+      '延迟同样漂亮，但把下游流量翻了好几倍——那不是对冲，那是散弹枪。',
+    ].join('\n'),
+    [
+      'Retries address failure; hedging addresses slowness. When a service has a p50 of 30ms and a p99 of',
+      '900ms, the problem is usually not that it is slow overall but that one machine happens to be in GC',
+      'or one connection happens to sit behind a long queue. There is no error to catch — the request will',
+      'succeed, just far too late.',
+      '',
+      'The idea is simple: wait a little, and if nothing came back, send another request to a different',
+      'replica and take whichever answers first.',
+      '',
+      'Implement `hedgedFetch(replicas, options)` in `src/hedge.ts`:',
+      '',
+      '- send `replicas[0]` first;',
+      '- if nothing has settled after `hedgeAfterMs`, send `replicas[1]` alongside it, and so on;',
+      '- at most `maxAttempts` in flight at once;',
+      '- return the first success and abandon the rest;',
+      '- fail only when all of them fail.',
+      '',
+      'The two gates are a pair and must both hold:',
+      '',
+      '1. with a 900ms primary, a 120ms replica and `hedgeAfterMs` of 200, the whole thing finishes within',
+      '   400ms — proving the hedge actually fired;',
+      '2. when the primary answers in 150ms (faster than `hedgeAfterMs`), the total request count must be',
+      '   exactly 1 — proving you did not fire every replica up front.',
+      '',
+      'The second is the hard one. Hedging costs extra requests, and an implementation that fires',
+      'everything and takes the fastest has equally pretty latency while multiplying downstream traffic.',
+      'That is not hedging, that is a shotgun.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('主副本够快时只发一个请求', 'A fast primary means exactly one request'),
+    t('主副本慢时按 hedgeAfterMs 追发副本', 'A slow primary triggers a hedge after hedgeAfterMs'),
+    t('谁先成功返回谁', 'The first success wins'),
+    t('在飞数量不超过 maxAttempts', 'No more than maxAttempts are in flight'),
+    t('全部失败才返回失败', 'Failure is returned only when every replica fails'),
+  ],
+  pitfalls: [
+    t(
+      '一次性把所有副本都发出去，然后 `Promise.race`。延迟指标很好看，下游流量翻了 N 倍。对冲的定义就是「先等一会儿」——去掉这个等待，它就退化成了主动散弹。真实系统里这种实现会在下游本来就慢的时候把它彻底压垮。',
+      'Firing every replica at once and racing them. The latency numbers look great and downstream traffic is multiplied N-fold. Waiting first is the definition of hedging; remove the wait and it degenerates into a deliberate shotgun, which flattens a downstream that was merely slow.'
+    ),
+    t(
+      '追发副本之前不检查「是不是已经有结果了」。定时器在 200ms 时触发，而主副本 150ms 就回来了——但定时器不知道，照样发出去。表现是「明明很快返回了，请求数却是 2」，在主副本正常的时候持续产生一倍的无效流量。',
+      'Not checking whether a result already arrived before firing the hedge. The timer fires at 200ms while the primary returned at 150ms — the timer does not know, and sends anyway. The symptom is a fast response with a request count of two, doubling traffic continuously whenever the primary is healthy.'
+    ),
+    t(
+      '用 `Promise.race` 取第一个 settle 的结果。race 不区分成功和失败：如果第一个副本 50ms 就返回 500，race 立刻以失败告终，而那个 120ms 会成功的副本根本没机会。要的是「第一个**成功**」，不是「第一个结束」。',
+      'Using `Promise.race` for the first settled result. A race does not distinguish success from failure: if the first replica returns a 500 in 50ms the race ends in failure and the replica that would have succeeded at 120ms never gets a chance. You want the first success, not the first completion.'
+    ),
+    t(
+      '成功返回之后不停止后续的追发定时器。函数已经把结果交给调用方了，但 400ms、600ms 时的定时器仍然会醒来并发出请求——调用方看到的延迟是对的，下游看到的是一串没人要的请求。放弃要放弃干净。',
+      'Returning a success without cancelling the pending hedge timers. The caller has its result, and the timers at 400ms and 600ms still wake up and issue requests. The caller sees the right latency while downstream sees a trail of requests nobody wants. Abandoning must be complete.'
+    ),
+  ],
+  hints: [
+    t(
+      '维护一个 `settled` 标志。追发定时器醒来时先看这个标志，已经有结果就直接返回，什么都不做。这比真的去 clearTimeout 更简单，效果一样。',
+      'Keep a `settled` flag. When a hedge timer wakes, check it first and do nothing if a result already exists. Simpler than actually clearing timers, with the same effect.'
+    ),
+    t(
+      '「第一个成功」可以这样实现：给每个副本的 promise 挂上 `.then(成功就 resolve 外层)`，同时用一个计数器记录失败数，失败数等于已发出数且不会再发时才 reject。',
+      'Implement "first success" by attaching `.then(resolve the outer promise on success)` to each replica, while a counter tracks failures and rejects only when the failure count equals the number issued and no more will be sent.'
+    ),
+  ],
+  extension: t(
+    [
+      '对冲是 Google 那篇《The Tail at Scale》（Dean & Barroso, 2013）里的核心手法之一。',
+      '论文里的数据很有说服力：在一个 100 台机器的服务上，就算单机 p99 只有 10ms，',
+      '一个需要访问全部 100 台的请求，其 p99 会被放大到接近 140ms——',
+      '因为「至少有一台慢」这件事几乎必然发生。',
+      '',
+      '论文给的对冲变体叫 **tied request**：两个副本都收到请求，但它们互相知道对方的存在，',
+      '谁先开始处理就通知对方取消。这比单纯的对冲省一半的无效工作，代价是副本之间要通信。',
+      '',
+      '`hedgeAfterMs` 定成多少是个真问题。定成 p50 会让一半的请求都触发对冲，流量翻倍；',
+      '通常取 p95 或 p99——只有真正落在长尾里的那 1% 会付出额外一次请求的代价，',
+      '而收益是把 p99 拉到接近 p50。这是一个非常划算的交换，前提是这个分位数要**动态测量**，',
+      '写死一个数字在负载变化时会立刻失效。',
+      '',
+      '还有一个前提容易被忽略：对冲只在请求**幂等**时安全。对一个 POST 做对冲，',
+      '等于故意制造重复提交。gRPC 的 hedging 配置里因此明确要求声明哪些方法可以对冲。',
+    ].join('\n'),
+    [
+      'Hedging is one of the central techniques in Google\'s "The Tail at Scale" (Dean and Barroso, 2013).',
+      'The paper\'s numbers are persuasive: on a hundred-machine service where each machine has a p99 of',
+      'just 10ms, a request that must touch all hundred sees its p99 stretch towards 140ms, because "at',
+      'least one is slow" is almost certain to happen.',
+      '',
+      'The variant the paper describes is the tied request: both replicas receive the work and know about',
+      'each other, so whichever starts first tells the other to drop it. That halves the wasted work',
+      'compared to plain hedging, at the cost of replicas needing to communicate.',
+      '',
+      'Choosing `hedgeAfterMs` is a genuine problem. Setting it at p50 hedges half of all requests and',
+      'doubles traffic; the usual choice is p95 or p99, so only the 1% genuinely in the tail pays for an',
+      'extra request while p99 is pulled down towards p50. That is an excellent trade, provided the',
+      'percentile is measured continuously — a hard-coded number stops being right the moment load shifts.',
+      '',
+      'One precondition is easy to overlook: hedging is only safe for idempotent requests. Hedging a POST',
+      "is deliberately manufacturing a duplicate submission, which is why gRPC's hedging configuration",
+      'requires declaring which methods may be hedged.',
+    ].join('\n')
+  ),
+  focus: ['latency', 'resilience', 'concurrency'],
+  lab: {
+    defaultLatencyMs: 100,
+    endpoints: {
+      '/api/slow-primary': { latencyMs: 900 },
+      '/api/fast-replica': { latencyMs: 120 },
+      '/api/second-replica': { latencyMs: 150 },
+      '/api/quick-primary': { latencyMs: 150 },
+      '/api/broken-primary': { failFirstN: 99, status: 500, latencyMs: 50 },
+    },
+  },
+  starterFiles: [
+    file(
+      'src/hedge.ts',
+      code`
+        import type { PageResult } from './contract';
+
+        export interface HedgeOptions {
+          /** 等这么久还没结果就追发下一个副本 */
+          hedgeAfterMs: number;
+          /** 最多同时在飞多少个，默认等于副本数 */
+          maxAttempts?: number;
+        }
+
+        /** 依次向副本发起请求，返回第一个成功的结果 */
+        export function hedgedFetch(replicas: string[], options: HedgeOptions): Promise<PageResult> {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-6.spec.ts',
+      code`
+        import { hedgedFetch } from '../src/hedge';
+        import { now, sleep } from '@lab/env';
+        import { getMetrics } from '@lab/net';
+
+        describe('阶段6 · 对冲请求', () => {
+          it('单个副本时就是普通请求', async () => {
+            const result = await hedgedFetch(['/api/quick-primary'], { hedgeAfterMs: 200 });
+            expect(result.ok).toBe(true);
+            expect(getMetrics().requests.total).toBe(1);
+          });
+
+          it('主副本够快时不追发 [gate:cheap]', async () => {
+            const result = await hedgedFetch(
+              ['/api/quick-primary', '/api/fast-replica', '/api/second-replica'],
+              { hedgeAfterMs: 200 }
+            );
+
+            expect(result.ok).toBe(true);
+            expect(result.url).toBe('/api/quick-primary');
+            // 150ms 就回来了，200ms 的追发定时器醒来时必须发现「已经有结果了」
+            expect(getMetrics().requests.total).toBe(1);
+          });
+
+          it('主副本慢时追发副本并用它的结果 [gate:tail]', async () => {
+            const startedAt = now();
+            const result = await hedgedFetch(['/api/slow-primary', '/api/fast-replica'], {
+              hedgeAfterMs: 200,
+            });
+            const elapsed = now() - startedAt;
+
+            expect(result.ok).toBe(true);
+            expect(result.url).toBe('/api/fast-replica');
+            // 200ms 等待 + 120ms 副本 = 320ms，而不是主副本的 900ms
+            expect(elapsed).toBeLessThanOrEqual(400);
+          });
+
+          it('追发之后总共只发了两个请求', async () => {
+            await hedgedFetch(['/api/slow-primary', '/api/fast-replica'], { hedgeAfterMs: 200 });
+            expect(getMetrics().requests.total).toBe(2);
+          });
+
+          it('成功之后不再追发后续副本', async () => {
+            await hedgedFetch(
+              ['/api/slow-primary', '/api/fast-replica', '/api/second-replica'],
+              { hedgeAfterMs: 200 }
+            );
+            const afterResolve = getMetrics().requests.total;
+
+            // 再等很久，那些还没到时间的追发定时器不能醒来发请求
+            await sleep(2000);
+            expect(getMetrics().requests.total).toBe(afterResolve);
+            expect(afterResolve).toBe(2);
+          });
+
+          it('maxAttempts 限制在飞数量', async () => {
+            await hedgedFetch(
+              ['/api/slow-primary', '/api/slow-primary', '/api/slow-primary', '/api/fast-replica'],
+              { hedgeAfterMs: 100, maxAttempts: 2 }
+            );
+            expect(getMetrics().requests.total).toBeLessThanOrEqual(2);
+          });
+
+          it('第一个副本失败时不会提前收工', async () => {
+            const result = await hedgedFetch(['/api/broken-primary', '/api/fast-replica'], {
+              hedgeAfterMs: 100,
+            });
+            // Promise.race 取「第一个 settle」的实现会在 50ms 时以失败结束
+            expect(result.ok).toBe(true);
+            expect(result.url).toBe('/api/fast-replica');
+          });
+
+          it('全部失败才返回失败', async () => {
+            const result = await hedgedFetch(['/api/broken-primary', '/api/broken-primary'], {
+              hedgeAfterMs: 100,
+            });
+            expect(result.ok).toBe(false);
+            expect(result.data).toBeNull();
+            expect(result.error).toBeTruthy();
+          });
+
+          it('返回的 url 是真正胜出的那个副本', async () => {
+            const result = await hedgedFetch(['/api/slow-primary', '/api/fast-replica'], {
+              hedgeAfterMs: 200,
+            });
+            expect(result.url).toBe('/api/fast-replica');
+          });
+
+          it('副本列表为空时返回失败而不是挂住', async () => {
+            const result = await hedgedFetch([], { hedgeAfterMs: 100 });
+            expect(result.ok).toBe(false);
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'virtualElapsedMs',
+      op: 'lte',
+      value: 400,
+      unit: 'ms',
+      zh: '慢副本被对冲掉，尾延迟压到副本的速度',
+      en: 'The slow replica is hedged away, tail latency drops to the fast one',
+      dimension: 'latency',
+      scope: 'gate:tail',
+    }),
+    gate({
+      metric: 'requests.total',
+      op: 'eq',
+      value: 1,
+      zh: '主副本够快时不产生额外流量',
+      en: 'A fast primary generates no extra traffic',
+      dimension: 'resilience',
+      scope: 'gate:cheap',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/hedge.ts',
+      code`
+        import type { PageResult } from './contract';
+        import { sleep } from '@lab/env';
+        import { request } from '@lab/net';
+
+        export interface HedgeOptions {
+          hedgeAfterMs: number;
+          maxAttempts?: number;
+        }
+
+        export function hedgedFetch(replicas: string[], options: HedgeOptions): Promise<PageResult> {
+          const limit = Math.min(options.maxAttempts ?? replicas.length, replicas.length);
+
+          if (limit === 0) {
+            return Promise.resolve({
+              url: '',
+              ok: false,
+              data: null,
+              error: 'no replicas to try',
+            });
+          }
+
+          return new Promise<PageResult>((resolve) => {
+            let settled = false;
+            let launched = 0;
+            let failures = 0;
+            let lastError = 'all replicas failed';
+
+            function finish(result: PageResult): void {
+              if (settled) return;
+              settled = true;
+              resolve(result);
+            }
+
+            function launch(index: number): void {
+              // 定时器醒来时先看这个：主副本可能已经在它之前返回了。
+              // 少了这一句，健康状态下也会持续产生一倍的无效流量
+              if (settled || index >= limit) return;
+              launched += 1;
+              const url = replicas[index];
+
+              request(url).then(
+                (response) => finish({ url, ok: true, data: response.data }),
+                (error) => {
+                  failures += 1;
+                  lastError = error instanceof Error ? error.message : String(error);
+                  // 只有「已经发出的全失败了，而且不会再发」才算彻底失败。
+                  // 用 Promise.race 的实现会在第一个失败时就收工
+                  if (failures === launched && launched >= limit) {
+                    finish({ url, ok: false, data: null, error: lastError });
+                  } else if (failures === launched) {
+                    // 手上没有在飞的请求了，立刻追发下一个，不必等满 hedgeAfterMs
+                    launch(launched);
+                  }
+                }
+              );
+
+              if (index + 1 < limit) {
+                sleep(options.hedgeAfterMs).then(() => launch(index + 1));
+              }
+            }
+
+            launch(0);
+          });
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**`settled` 标志同时解决两个问题。** 它既保证 `resolve` 只生效一次，',
+      '又让所有还没醒来的追发定时器变成空操作。真的去 `clearTimeout` 也可以，',
+      '但要维护一个定时器数组，而且 `sleep()` 返回的是 promise 不是 id——',
+      '用标志位是更贴合这个 API 的写法。',
+      '',
+      '**「第一个成功」不是 `Promise.race`。** race 在第一个 settle 时结束，不管成败。',
+      '这里用的是显式的 `then(成功 -> finish, 失败 -> 计数)`：成功立刻收工，',
+      '失败只是记一笔，等到「发出去的全失败了且没有下一个」才算真的失败。',
+      '',
+      '**失败时会提前追发。** `failures === launched` 意味着手上一个在飞的请求都没有了，',
+      '这时候再等满 `hedgeAfterMs` 是纯浪费——等待的意义是「给主副本一个机会」，',
+      '主副本已经明确失败了，机会就没有必要留。',
+      '',
+      '**追发是链式的而不是一次排好的。** 每次 `launch` 只安排下一个的定时器，',
+      '而不是一开始就 `for` 循环排 N 个。这样每一环都会重新检查 `settled`，',
+      '中途成功之后整条链自然断掉。',
+    ].join('\n'),
+    [
+      'The `settled` flag solves two problems at once: it makes `resolve` effective only once, and it turns',
+      'every hedge timer that has not fired yet into a no-op. Actually clearing timers would work too, but',
+      'that means keeping an array of them, and `sleep()` returns a promise rather than an id — a flag fits',
+      'this API better.',
+      '',
+      '"First success" is not `Promise.race`. A race ends at the first settlement regardless of outcome.',
+      'This uses an explicit `then(success -> finish, failure -> count)`: a success finishes immediately, a',
+      'failure only records itself, and real failure requires everything launched to have failed with',
+      'nothing left to send.',
+      '',
+      'A failure launches the next hedge early. `failures === launched` means nothing is in flight, and',
+      'waiting out the rest of `hedgeAfterMs` then is pure waste — the wait exists to give the primary a',
+      'chance, and a primary that has definitively failed needs no more chances.',
+      '',
+      'Hedges are chained rather than scheduled up front. Each `launch` schedules only the next timer',
+      'instead of looping over all N at the start, so every link re-checks `settled` and the whole chain',
+      'breaks by itself once something succeeds.',
+    ].join('\n')
+  ),
+};
+
+const stage7 = {
   id: 'cache-single-flight',
-  title: t('第 4 关 · 缓存与并发去重', 'Stage 4 · Caching and single-flight'),
+  title: t('第 7 关 · 缓存与并发去重', 'Stage 7 · Caching and single-flight'),
   goal: t(
     [
       '同一批任务里经常出现重复地址；更糟的是，同一个地址的多个请求会同时打到下游。',
@@ -1188,14 +2431,14 @@ const stage4 = {
   ],
   specs: [
     spec(
-      'specs/stage-4.spec.ts',
+      'specs/stage-7.spec.ts',
       code`
         import { createCache, createSingleFlight } from '../src/cache';
         import { fetchPage, fetchAll } from '../src/fetcher';
         import { getMetrics } from '@lab/net';
         import { sleep } from '@lab/env';
 
-        describe('阶段4 · 缓存与并发去重', () => {
+        describe('阶段7 · 缓存与并发去重', () => {
           it('LRU 按最近使用淘汰', () => {
             const cache = createCache<number>({ maxSize: 2 });
             cache.set('a', 1);
@@ -1474,9 +2717,1352 @@ const stage4 = {
 /* 阶段 5：收敛成可运维的组件                                           */
 /* ------------------------------------------------------------------ */
 
-const stage5 = {
+/* ------------------------------------------------------------------ */
+
+const stage8 = {
+  id: 'priority-scheduling',
+  title: t('第 8 关 · 优先级调度与饥饿', 'Stage 8 · Priority scheduling and starvation'),
+  goal: t(
+    [
+      '到这里，池子里所有请求一律平等。真实系统里不是：',
+      '用户正在等的那个搜索请求，和后台的缓存预热任务，不该排同一个队。',
+      '',
+      '在 `src/scheduler.ts` 实现 `createScheduler(options)`：',
+      '',
+      '- `submit({ url, priority })`：priority 越大越优先，返回该请求的结果；',
+      '- 同优先级按提交顺序（FIFO）；',
+      '- `pending()`：还在排队的数量。',
+      '',
+      '光有优先级就够了吗？不够。高优先级请求源源不断的时候，',
+      '低优先级的那个会**永远排在队尾**——这就是饥饿。',
+      '一个只按优先级排序的调度器，在压力下等于把低优先级任务丢掉了，',
+      '而且丢得悄无声息：它们既没失败也没超时，只是永远不开始。',
+      '',
+      '解法是**老化**（aging）：等待越久，有效优先级越高。',
+      '',
+      '```',
+      '有效优先级 = priority + floor(已等待时长 / agingMs) × agingBoost',
+      '```',
+      '',
+      '这一关的门槛量的正是饥饿：并发 1、每个请求 100ms，先提交一个低优先级、',
+      '再提交十个高优先级，那个低优先级任务必须在 600ms 内完成。',
+      '不做老化的实现要 1100ms——它排在所有高优先级后面。',
+    ].join('\n'),
+    [
+      'So far every request in the pool is equal. In a real system they are not: the search a user is',
+      'waiting on and a background cache-warming job do not belong in the same queue.',
+      '',
+      'Implement `createScheduler(options)` in `src/scheduler.ts`:',
+      '',
+      '- `submit({ url, priority })`: higher priority goes first, resolving to that request\'s result;',
+      '- equal priorities run in submission order (FIFO);',
+      '- `pending()`: how many are still queued.',
+      '',
+      'Is priority alone enough? No. With high-priority work arriving continuously, the low-priority task',
+      'sits at the back of the queue forever — that is starvation. A scheduler that only sorts by priority',
+      'effectively discards low-priority work under load, and does so silently: those tasks neither fail',
+      'nor time out, they simply never begin.',
+      '',
+      'The fix is aging: the longer something waits, the higher its effective priority.',
+      '',
+      '```',
+      'effective = priority + floor(waited / agingMs) × agingBoost',
+      '```',
+      '',
+      "This stage's gate measures starvation directly: concurrency 1, 100ms per request, submit one",
+      'low-priority task followed by ten high-priority ones, and the low-priority task must finish within',
+      '600ms. Without aging it takes 1100ms, sitting behind every high-priority task.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('高优先级插到队列前面', 'Higher priority moves to the front of the queue'),
+    t('同优先级保持提交顺序', 'Equal priorities keep submission order'),
+    t('等待足够久的低优先级会被提上来', 'A long-waiting low-priority task gets promoted'),
+    t('正在执行的请求不会被抢占', 'A running request is never preempted'),
+    t('pending() 反映真实排队数', 'pending() reflects the real queue depth'),
+  ],
+  pitfalls: [
+    t(
+      '只按 priority 排序，不做老化。压测时看不出问题——高优先级任务总能及时完成，指标很漂亮。但低优先级任务的完成时间会随高优先级的到达速率无限增长，最后表现为「后台任务好像从来没跑过」，而监控上任何一条曲线都是正常的。',
+      'Sorting by priority alone with no aging. Load tests look fine, since high-priority work always completes promptly and the dashboards are green. Meanwhile low-priority completion time grows without bound as high-priority arrival rate rises, presenting as "the background jobs never seem to run" while every metric looks normal.'
+    ),
+    t(
+      '在每次入队时计算一次有效优先级，然后就固定下来。老化的意义是「随时间变化」，算一次等于没算——任务入队那一刻等待时长是 0，有效优先级永远等于原始优先级。有效优先级必须在**每次挑选**时重新计算。',
+      'Computing the effective priority once at enqueue time and freezing it. Aging means changing over time, so computing it once achieves nothing: at enqueue the wait is zero and the effective priority equals the original forever. It must be recomputed at every selection.'
+    ),
+    t(
+      '为了实现优先级去抢占正在执行的请求。请求已经发出去了，中止它并不会让服务端少做功，只会让这次工作白费，而且高优先级任务还得从头开始等一次网络往返。调度只发生在「挑下一个」的时刻，已经在飞的不动。',
+      'Preempting a running request to honour priority. The request is already out; aborting it does not save the server any work, wastes what was done, and the high-priority task still has to wait a full round trip from scratch. Scheduling happens when picking the next task, never to something already in flight.'
+    ),
+    t(
+      '用 `array.sort()` 维护队列，并且假设它是稳定的。V8 的 sort 现在确实稳定，但依赖这一点会让「同优先级 FIFO」这条语义变成对运行时实现的赌注。想要 FIFO 就显式记一个递增的入队序号，把它作为第二排序键。',
+      'Maintaining the queue with `array.sort()` and assuming stability. V8\'s sort is stable today, but relying on that turns "FIFO within a priority" into a bet on a runtime detail. Record a monotonically increasing sequence number at enqueue and use it as the tiebreaker.'
+    ),
+  ],
+  hints: [
+    t(
+      '挑下一个任务时遍历整个队列算一遍有效优先级，取最大的。队列不长的时候这比维护一个堆简单得多，而且老化本来就要求每次重算。',
+      'Pick the next task by walking the queue, computing effective priority for each and taking the maximum. At these queue lengths that beats maintaining a heap, and aging requires recomputation anyway.'
+    ),
+    t(
+      '每个入队任务记下 `enqueuedAt` 和一个递增的 `seq`。有效优先级用 `enqueuedAt` 算，同分时比 `seq`。',
+      'Store `enqueuedAt` and an incrementing `seq` on each queued task. Effective priority comes from `enqueuedAt`, ties break on `seq`.'
+    ),
+  ],
+  extension: t(
+    [
+      '老化是操作系统调度器的老办法了。Linux 的 CFS 用的是另一套思路——',
+      '不排优先级，而是记录每个任务「已经用掉多少 CPU 时间」（vruntime），',
+      '总是挑用得最少的那个。优先级（nice 值）只影响 vruntime 增长的**速率**，',
+      '于是低优先级任务跑得慢，但永远不会完全跑不到。',
+      '这比显式老化更优雅：饥饿在模型层面就不可能发生，不需要额外的补丁。',
+      '',
+      '真实的请求调度还要考虑**公平性的维度**。按优先级是一维的，',
+      '而线上更常见的需求是「每个租户都要拿到一份」——一个租户提交一万个请求，',
+      '不该把其他租户挤没。这类需求用的是加权公平队列（WFQ）或者',
+      'deficit round robin：每个租户一个子队列，轮流从各队列取，按权重分配配额。',
+      '',
+      '还有一个和这一关直接相关的坑：**优先级反转**。',
+      '低优先级任务持有了高优先级任务需要的资源（一把锁、一个连接），',
+      '于是高优先级被低优先级阻塞。1997 年火星探路者号的著名故障就是这个。',
+      '解法是优先级继承：持有资源的任务临时继承等待者里最高的优先级。',
+    ].join('\n'),
+    [
+      'Aging is an old operating-system technique. Linux CFS takes a different route: rather than ranking',
+      'priorities it tracks how much CPU time each task has consumed (vruntime) and always picks the one',
+      'that has used least. Priority — the nice value — only changes the rate at which vruntime grows, so',
+      'low-priority tasks run slowly but never stop running entirely. That is more elegant than explicit',
+      'aging: starvation becomes impossible in the model rather than patched afterwards.',
+      '',
+      'Real request scheduling also has a fairness dimension. Priority is one-dimensional, while the common',
+      'production requirement is that every tenant gets a share — one tenant submitting ten thousand',
+      'requests must not squeeze the others out. That calls for weighted fair queueing or deficit round',
+      'robin: a sub-queue per tenant, served in turn with quotas by weight.',
+      '',
+      'One more trap connects directly to this stage: priority inversion. A low-priority task holds a',
+      'resource — a lock, a connection — that a high-priority task needs, so the high-priority task is',
+      "blocked by the low-priority one. The Mars Pathfinder failure of 1997 was exactly this. The fix is",
+      'priority inheritance: the holder temporarily inherits the highest priority among its waiters.',
+    ].join('\n')
+  ),
+  focus: ['concurrency', 'correctness', 'resilience'],
+  lab: { defaultLatencyMs: 100 },
+  starterFiles: [
+    file(
+      'src/scheduler.ts',
+      code`
+        import type { PageResult } from './contract';
+
+        export interface ScheduledTask {
+          url: string;
+          /** 越大越优先 */
+          priority: number;
+        }
+
+        export interface SchedulerOptions {
+          concurrency: number;
+          /** 每等待这么久，有效优先级提升一档；不传表示不做老化 */
+          agingMs?: number;
+          /** 每一档提升多少，默认 10 */
+          agingBoost?: number;
+        }
+
+        export interface Scheduler {
+          submit(task: ScheduledTask): Promise<PageResult>;
+          /** 还在排队（尚未开始）的数量 */
+          pending(): number;
+        }
+
+        export function createScheduler(options: SchedulerOptions): Scheduler {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-8.spec.ts',
+      code`
+        import { createScheduler } from '../src/scheduler';
+        import { now, sleep } from '@lab/env';
+        import { count } from '@lab/metrics';
+
+        describe('阶段8 · 优先级调度', () => {
+          it('单个任务直接执行', async () => {
+            const scheduler = createScheduler({ concurrency: 1 });
+            const result = await scheduler.submit({ url: '/api/a', priority: 0 });
+            expect(result.ok).toBe(true);
+            expect(result.url).toBe('/api/a');
+          });
+
+          it('高优先级先跑', async () => {
+            const scheduler = createScheduler({ concurrency: 1 });
+            const order: string[] = [];
+
+            const blocker = scheduler.submit({ url: '/api/blocker', priority: 0 });
+            await sleep(1);
+            const low = scheduler.submit({ url: '/api/low', priority: 1 }).then(() => order.push('low'));
+            const high = scheduler.submit({ url: '/api/high', priority: 9 }).then(() => order.push('high'));
+
+            await Promise.all([blocker, low, high]);
+            expect(order).toEqual(['high', 'low']);
+          });
+
+          it('同优先级按提交顺序', async () => {
+            const scheduler = createScheduler({ concurrency: 1 });
+            const order: string[] = [];
+
+            const blocker = scheduler.submit({ url: '/api/blocker', priority: 5 });
+            await sleep(1);
+            const first = scheduler.submit({ url: '/api/first', priority: 5 }).then(() => order.push('first'));
+            const second = scheduler.submit({ url: '/api/second', priority: 5 }).then(() => order.push('second'));
+
+            await Promise.all([blocker, first, second]);
+            expect(order).toEqual(['first', 'second']);
+          });
+
+          it('pending 反映排队数', async () => {
+            const scheduler = createScheduler({ concurrency: 1 });
+            const running = scheduler.submit({ url: '/api/a', priority: 0 });
+            await sleep(1);
+            const queued = [
+              scheduler.submit({ url: '/api/b', priority: 0 }),
+              scheduler.submit({ url: '/api/c', priority: 0 }),
+            ];
+
+            expect(scheduler.pending()).toBe(2);
+            await Promise.all([running, ...queued]);
+            expect(scheduler.pending()).toBe(0);
+          });
+
+          it('并发上限被遵守', async () => {
+            const scheduler = createScheduler({ concurrency: 2 });
+            const tasks: Array<Promise<unknown>> = [];
+            for (let index = 0; index < 6; index += 1) {
+              tasks.push(scheduler.submit({ url: '/api/page-' + index, priority: 0 }));
+            }
+            const startedAt = now();
+            await Promise.all(tasks);
+            // 6 个 100ms 的请求、两个槽 = 300ms
+            expect(now() - startedAt).toBe(300);
+          });
+
+          it('正在执行的请求不会被高优先级抢占', async () => {
+            const scheduler = createScheduler({ concurrency: 1 });
+            const order: string[] = [];
+
+            const running = scheduler
+              .submit({ url: '/api/running', priority: 0 })
+              .then(() => order.push('running'));
+            await sleep(1);
+            const urgent = scheduler
+              .submit({ url: '/api/urgent', priority: 99 })
+              .then(() => order.push('urgent'));
+
+            await Promise.all([running, urgent]);
+            // 已经在飞的那个先完成，高优先级只能排下一个
+            expect(order).toEqual(['running', 'urgent']);
+          });
+
+          it('不配 agingMs 时纯按优先级', async () => {
+            const scheduler = createScheduler({ concurrency: 1 });
+            const order: string[] = [];
+
+            const blocker = scheduler.submit({ url: '/api/blocker', priority: 5 });
+            await sleep(1);
+            const low = scheduler.submit({ url: '/api/low', priority: 0 }).then(() => order.push('low'));
+            const highs: Array<Promise<unknown>> = [];
+            for (let index = 0; index < 3; index += 1) {
+              highs.push(
+                scheduler.submit({ url: '/api/high-' + index, priority: 5 }).then(() => order.push('high'))
+              );
+            }
+
+            await Promise.all([blocker, low, ...highs]);
+            expect(order[order.length - 1]).toBe('low');
+          });
+
+          it('老化让久等的低优先级被提上来 [gate:aging]', async () => {
+            const scheduler = createScheduler({ concurrency: 1, agingMs: 300, agingBoost: 10 });
+            let lowFinishedAt = -1;
+
+            const startedAt = now();
+            const low = scheduler.submit({ url: '/api/low', priority: 0 }).then(() => {
+              lowFinishedAt = now() - startedAt;
+            });
+
+            const highs: Array<Promise<unknown>> = [];
+            for (let index = 0; index < 10; index += 1) {
+              highs.push(scheduler.submit({ url: '/api/high-' + index, priority: 10 }));
+            }
+
+            await Promise.all([low, ...highs]);
+            count('lowPriorityWaitMs', lowFinishedAt);
+
+            // 不做老化的实现要排在 10 个高优先级之后，1100ms
+            expect(lowFinishedAt).toBeLessThanOrEqual(600);
+          });
+
+          it('老化不会把低优先级提到比刚来的高优先级还前面', async () => {
+            const scheduler = createScheduler({ concurrency: 1, agingMs: 10000, agingBoost: 10 });
+            const order: string[] = [];
+
+            const blocker = scheduler.submit({ url: '/api/blocker', priority: 0 });
+            await sleep(1);
+            const low = scheduler.submit({ url: '/api/low', priority: 0 }).then(() => order.push('low'));
+            const high = scheduler.submit({ url: '/api/high', priority: 5 }).then(() => order.push('high'));
+
+            await Promise.all([blocker, low, high]);
+            // agingMs 很大，还没到提升的时候
+            expect(order).toEqual(['high', 'low']);
+          });
+
+          it('失败的请求也会把槽位还回去', async () => {
+            const scheduler = createScheduler({ concurrency: 1 });
+            const results = await Promise.all([
+              scheduler.submit({ url: '/api/a', priority: 0 }),
+              scheduler.submit({ url: '/api/b', priority: 0 }),
+            ]);
+            expect(results).toHaveLength(2);
+            expect(scheduler.pending()).toBe(0);
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'counters.lowPriorityWaitMs',
+      op: 'lte',
+      value: 600,
+      unit: 'ms',
+      zh: '低优先级任务不会被高优先级饿死',
+      en: 'A low-priority task is not starved by high-priority traffic',
+      dimension: 'concurrency',
+      scope: 'gate:aging',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/scheduler.ts',
+      code`
+        import type { PageResult } from './contract';
+        import { now } from '@lab/env';
+        import { request } from '@lab/net';
+
+        export interface ScheduledTask {
+          url: string;
+          priority: number;
+        }
+
+        export interface SchedulerOptions {
+          concurrency: number;
+          agingMs?: number;
+          agingBoost?: number;
+        }
+
+        export interface Scheduler {
+          submit(task: ScheduledTask): Promise<PageResult>;
+          pending(): number;
+        }
+
+        interface QueuedTask extends ScheduledTask {
+          enqueuedAt: number;
+          /** 显式的入队序号：不去赌 Array.sort 的稳定性 */
+          seq: number;
+          settle(result: PageResult): void;
+        }
+
+        export function createScheduler(options: SchedulerOptions): Scheduler {
+          const limit = Math.max(1, options.concurrency);
+          const agingBoost = options.agingBoost ?? 10;
+          const queue: QueuedTask[] = [];
+          let running = 0;
+          let nextSeq = 0;
+
+          /** 每次挑选都要重算：算一次然后固定下来，等于没有老化 */
+          function effectivePriority(task: QueuedTask): number {
+            if (!options.agingMs) return task.priority;
+            const waited = now() - task.enqueuedAt;
+            return task.priority + Math.floor(waited / options.agingMs) * agingBoost;
+          }
+
+          function takeNext(): QueuedTask | null {
+            if (queue.length === 0) return null;
+
+            let bestIndex = 0;
+            let bestPriority = effectivePriority(queue[0]);
+            for (let index = 1; index < queue.length; index += 1) {
+              const candidate = effectivePriority(queue[index]);
+              // 同分时比 seq，保证同优先级 FIFO
+              if (candidate > bestPriority || (candidate === bestPriority && queue[index].seq < queue[bestIndex].seq)) {
+                bestIndex = index;
+                bestPriority = candidate;
+              }
+            }
+            return queue.splice(bestIndex, 1)[0];
+          }
+
+          function pump(): void {
+            while (running < limit) {
+              const task = takeNext();
+              if (!task) return;
+
+              running += 1;
+              request(task.url).then(
+                (response) => {
+                  running -= 1;
+                  task.settle({ url: task.url, ok: true, data: response.data });
+                  pump();
+                },
+                (error) => {
+                  // 失败也要还槽位，否则一次错误就永久缩小并发度
+                  running -= 1;
+                  task.settle({
+                    url: task.url,
+                    ok: false,
+                    data: null,
+                    error: error instanceof Error ? error.message : String(error),
+                  });
+                  pump();
+                }
+              );
+            }
+          }
+
+          return {
+            submit(task: ScheduledTask): Promise<PageResult> {
+              return new Promise<PageResult>((resolve) => {
+                const seq = nextSeq;
+                nextSeq += 1;
+                queue.push({ ...task, enqueuedAt: now(), seq, settle: resolve });
+                pump();
+              });
+            },
+
+            pending(): number {
+              return queue.length;
+            },
+          };
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**`effectivePriority` 在 `takeNext` 里调用，不在 `submit` 里。** 这是老化能不能生效的分水岭：',
+      '入队那一刻等待时长必然是 0，算出来的有效优先级永远等于原始优先级。',
+      '老化的语义是「随时间变化」，所以它必须是一个**每次挑选时求值**的函数，而不是一个存下来的字段。',
+      '',
+      '**`seq` 而不是依赖 sort 的稳定性。** 这里根本没有用 sort——一次线性扫描找最大值，',
+      '同分时显式比较 `seq`。即使换成堆或者别的结构，「同优先级 FIFO」这条语义也不会随之改变。',
+      '',
+      '**失败分支里也有 `running -= 1` 和 `pump()`。** 少了这两行，一个失败的请求会永久占走一个槽位，',
+      '连续几次失败之后并发度悄悄变成 0，整个调度器停住——而且不报任何错。',
+      '这类「资源没还」的 bug 在成功路径的测试里永远看不出来。',
+      '',
+      '**`pump` 用 `while` 而不是 `if`。** 一次归还槽位可能要启动多个任务（比如并发度是 5、',
+      '刚才有 3 个同时结束）。写成 `if` 只会启动一个，剩下的要等下一次归还才被想起来，',
+      '表现为「并发度在压力下莫名其妙地降下来」。',
+    ].join('\n'),
+    [
+      '`effectivePriority` is called from `takeNext`, not from `submit`. That is what decides whether aging',
+      'works at all: at enqueue the wait is necessarily zero, so the computed value equals the original',
+      'priority forever. Aging means changing over time, so it has to be a function evaluated at each',
+      'selection rather than a stored field.',
+      '',
+      '`seq` instead of relying on sort stability. There is no sort here at all — one linear scan for the',
+      'maximum, breaking ties on `seq` explicitly. Swap in a heap or any other structure and "FIFO within a',
+      'priority" still holds.',
+      '',
+      'The failure branch also has `running -= 1` and `pump()`. Without those two lines a failed request',
+      'holds its slot permanently, a few failures in a row silently reduce concurrency to zero, and the',
+      'scheduler stops — reporting nothing. Resource-leak bugs of this shape are invisible to any test that',
+      'only exercises the success path.',
+      '',
+      '`pump` loops with `while` rather than `if`. One returned slot can start several tasks — concurrency',
+      'five with three finishing at once — and an `if` starts only one, leaving the rest until the next',
+      'return. The symptom is concurrency mysteriously sagging under load.',
+    ].join('\n')
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+
+const stage9 = {
+  id: 'backpressure',
+  title: t('第 9 关 · 背压与队列上限', 'Stage 9 · Backpressure and bounded queues'),
+  goal: t(
+    [
+      '上一关的调度器有一个没说出口的假设：队列可以无限长。',
+      '入队速度超过处理速度时，这个假设会以两种方式报复你：',
+      '',
+      '1. **内存**：队列一直涨，最后 OOM；',
+      '2. **延迟**：排在第 10000 位的请求，等它开始时调用方早就超时走了——',
+      '   你在花真实的资源去处理一个没人要的结果。',
+      '',
+      '第二条比第一条更常见，也更隐蔽。它的表现是「系统没崩，但所有请求都超时」。',
+      '',
+      '在 `src/bounded.ts` 实现 `createBoundedQueue(options)`：',
+      '',
+      '- `submit(url)`：队列没满就排队，满了**立刻** reject 一个 `QueueFullError`；',
+      '- `depth()`：当前排队数；`highWaterMark()`：历史最高排队数；',
+      '- `rejected()`：被拒绝的总数。',
+      '',
+      '「立刻拒绝」这四个字是重点。让调用方等一会儿再告诉它「队列满了」，',
+      '等于把背压又变成了延迟——调用方拿不到快速失败，也就没法降级或者换一条路。',
+      '',
+      '门槛量两件事：历史最高排队数不许超过 `maxQueueDepth`；',
+      '被拒绝的那些请求，从 submit 到 reject 的耗时必须是 0。',
+    ].join('\n'),
+    [
+      "The scheduler from the last stage carries an unspoken assumption: that the queue can grow without",
+      'bound. When arrivals outpace service, that assumption takes revenge in two ways:',
+      '',
+      '1. memory — the queue grows until the process dies;',
+      '2. latency — by the time the ten-thousandth request starts, its caller timed out long ago, and you',
+      '   are spending real resources computing a result nobody wants.',
+      '',
+      'The second is more common and better hidden. It presents as "nothing crashed, but everything times out".',
+      '',
+      'Implement `createBoundedQueue(options)` in `src/bounded.ts`:',
+      '',
+      '- `submit(url)`: queue it if there is room, otherwise reject immediately with `QueueFullError`;',
+      '- `depth()` for the current queue length, `highWaterMark()` for the maximum ever reached;',
+      '- `rejected()` for the total refused.',
+      '',
+      'The word "immediately" carries the weight. Making the caller wait before telling it the queue is',
+      'full turns backpressure back into latency — no fast failure means no chance to degrade or reroute.',
+      '',
+      'The gates measure two things: the high-water mark never exceeds `maxQueueDepth`, and the time from',
+      'submit to rejection is zero.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('队列未满时正常排队执行', 'Work queues normally while there is room'),
+    t('队列满时立刻拒绝，不等待', 'A full queue rejects immediately without waiting'),
+    t('拒绝抛的是 QueueFullError', 'Rejection throws a QueueFullError'),
+    t('排队数从不超过上限', 'Queue depth never exceeds the limit'),
+    t('有槽位空出来时恢复接收', 'Accepting resumes once a slot frees up'),
+  ],
+  pitfalls: [
+    t(
+      '队列满时不拒绝，而是让 submit 挂起，等有位置了再入队。这看起来更友好，实际上把背压变成了延迟：调用方拿不到任何信号，只是变慢，于是它自己的队列开始堆积——压力被原样传给了上游，而不是被挡住。背压的本质是**说不**，不是慢慢来。',
+      'Suspending `submit` when the queue is full and enqueuing once space appears. It looks friendlier and turns backpressure into latency: the caller gets no signal, just slowness, so its own queue starts filling and the pressure is passed upstream unchanged rather than stopped. Backpressure means saying no, not going slower.'
+    ),
+    t(
+      '把上限算在「排队数 + 正在执行数」上。正在执行的请求并不占队列内存，也不会让延迟无限增长——它们马上就会结束。把它们算进上限会让实际可排队量比配置的少，并发度越高少得越多，配置的含义变得依赖并发度。',
+      'Counting running requests against the limit. Running work occupies no queue memory and does not grow latency without bound — it is about to finish. Including it makes the real queue capacity smaller than configured, by an amount that depends on concurrency, so the setting stops meaning what it says.'
+    ),
+    t(
+      '拒绝时返回一个失败的 PageResult 而不是 reject。调用方于是要检查 `result.ok` 才知道被拒了，而这和「请求发出去但失败了」是完全不同的两件事——前者应该重试或降级，后者可能要退避。用异常把它们区分开。',
+      'Returning a failed `PageResult` instead of rejecting. The caller must then inspect `result.ok`, conflating two very different outcomes: refused before sending (retry or degrade) versus sent and failed (perhaps back off). An exception keeps them distinct.'
+    ),
+    t(
+      '记 highWaterMark 时只在入队时更新。出队时不更新是对的，但如果在「入队并立刻被取走」的路径上漏了更新，压测出来的峰值会比真实值低——一个专门用来发现容量问题的指标，反而在容量出问题时最不准。',
+      'Updating the high-water mark only on enqueue. Not updating on dequeue is right, but missing the path where an item is enqueued and immediately taken makes the reported peak lower than reality — a metric whose entire purpose is to reveal capacity problems becomes least accurate exactly when capacity is a problem.'
+    ),
+  ],
+  hints: [
+    t(
+      '`submit` 里先判断 `queue.length >= maxQueueDepth`，是就 `return Promise.reject(new QueueFullError(url))`。同步返回一个已 reject 的 promise，耗时天然是 0。',
+      'In `submit`, check `queue.length >= maxQueueDepth` first and `return Promise.reject(new QueueFullError(url))`. A synchronously rejected promise takes zero time by construction.'
+    ),
+    t(
+      'highWaterMark 在每次 push 之后立刻 `Math.max` 一下，这样无论后面是不是马上被取走，峰值都记下来了。',
+      'Update the high-water mark with a `Math.max` right after every push, so the peak is recorded whether or not the item is taken immediately afterwards.'
+    ),
+  ],
+  extension: t(
+    [
+      '「满了就拒绝」是最简单的背压策略，学名叫 **tail drop**。',
+      '它有个已知问题：所有客户端会在同一时刻开始被拒，同时退避，然后同时重来——',
+      '这就是网络里的**全局同步**（global synchronisation）现象。',
+      '路由器解决它的办法是 RED（Random Early Detection）：队列还没满的时候就开始',
+      '按概率随机丢弃，队列越长概率越高。随机性把客户端的重试时刻打散了。',
+      '',
+      '另一个维度是**丢哪一个**。tail drop 丢最新来的，但最新来的往往是最有价值的',
+      '（调用方还在等它）；队头那个已经等了很久，很可能调用方早就超时了。',
+      '所以有些系统用 head drop 或者 **LIFO 队列**——反直觉，但在过载时',
+      '「优先服务刚到的请求」能让成功率显著更高，因为老请求本来也救不回来了。',
+      'Facebook 的 Wangle 和 Envoy 都提供了这个选项。',
+      '',
+      '再往上是**自适应容量**：上限不写死，而是根据观察到的延迟自动调整。',
+      'Netflix 的 concurrency-limits 库用的是 TCP 拥塞控制那套算法（AIMD、Gradient），',
+      '把「队列该多长」变成一个持续测量的量，而不是一个上线前拍脑袋定的常数。',
+    ].join('\n'),
+    [
+      'Rejecting when full is the simplest backpressure policy, known as tail drop. It has a known flaw:',
+      'every client starts getting refused at the same instant, backs off together and returns together —',
+      'the global synchronisation effect from networking. Routers answer it with RED (Random Early',
+      'Detection), dropping probabilistically before the queue is full with probability rising as it grows.',
+      'The randomness spreads client retries apart.',
+      '',
+      'The other dimension is which item to drop. Tail drop discards the newest arrival, yet the newest is',
+      'often the most valuable — its caller is still waiting — while the item at the head has waited so long',
+      'its caller has probably given up. So some systems use head drop or an outright LIFO queue.',
+      'Counterintuitive, but under overload "serve the freshest request first" measurably raises success',
+      'rate, because the old ones were unsalvageable anyway. Facebook\'s Wangle and Envoy both offer it.',
+      '',
+      'Above that sits adaptive capacity: rather than a fixed limit, adjust from observed latency.',
+      "Netflix's concurrency-limits library borrows TCP congestion control (AIMD, Gradient), turning \"how",
+      'long should the queue be" into a continuously measured quantity instead of a constant guessed before',
+      'launch.',
+    ].join('\n')
+  ),
+  focus: ['resilience', 'concurrency', 'latency'],
+  lab: { defaultLatencyMs: 100 },
+  starterFiles: [
+    file(
+      'src/bounded.ts',
+      code`
+        import type { PageResult } from './contract';
+
+        export class QueueFullError extends Error {
+          url: string;
+
+          constructor(url: string) {
+            super('queue is full, rejected ' + url);
+            this.name = 'QueueFullError';
+            this.url = url;
+          }
+        }
+
+        export interface BoundedOptions {
+          concurrency: number;
+          /** 最多允许多少个在排队（不含正在执行的） */
+          maxQueueDepth: number;
+        }
+
+        export interface BoundedQueue {
+          /** 队列满时立刻 reject 一个 QueueFullError */
+          submit(url: string): Promise<PageResult>;
+          depth(): number;
+          highWaterMark(): number;
+          rejected(): number;
+        }
+
+        export function createBoundedQueue(options: BoundedOptions): BoundedQueue {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-9.spec.ts',
+      code`
+        import { createBoundedQueue, QueueFullError } from '../src/bounded';
+        import { now, sleep } from '@lab/env';
+        import { count } from '@lab/metrics';
+
+        describe('阶段9 · 背压与队列上限', () => {
+          it('未满时正常执行', async () => {
+            const queue = createBoundedQueue({ concurrency: 2, maxQueueDepth: 4 });
+            const results = await Promise.all([
+              queue.submit('/api/a'),
+              queue.submit('/api/b'),
+            ]);
+            expect(results.every((result) => result.ok)).toBe(true);
+            expect(queue.rejected()).toBe(0);
+          });
+
+          it('满了立刻拒绝', async () => {
+            const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 2 });
+            const accepted: Array<Promise<unknown>> = [];
+            // 1 个在跑 + 2 个排队 = 满
+            accepted.push(queue.submit('/api/running'));
+            await sleep(1);
+            accepted.push(queue.submit('/api/queued-1'));
+            accepted.push(queue.submit('/api/queued-2'));
+
+            let error: unknown = null;
+            try {
+              await queue.submit('/api/overflow');
+            } catch (caught) {
+              error = caught;
+            }
+
+            expect(error).toBeInstanceOf(QueueFullError);
+            expect(queue.rejected()).toBe(1);
+            await Promise.all(accepted);
+          });
+
+          it('拒绝是立刻发生的，不让调用方等 [gate:fast-reject]', async () => {
+            const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 1 });
+            const accepted = [queue.submit('/api/running')];
+            await sleep(1);
+            accepted.push(queue.submit('/api/queued'));
+
+            const before = now();
+            let rejectedAt = -1;
+            try {
+              await queue.submit('/api/overflow');
+            } catch (caught) {
+              rejectedAt = now() - before;
+            }
+            count('rejectLatencyMs', rejectedAt);
+
+            // 等有位置了再拒绝的实现在这里要等 100ms 以上
+            expect(rejectedAt).toBe(0);
+            await Promise.all(accepted);
+          });
+
+          it('排队数从不超过上限 [gate:depth]', async () => {
+            const queue = createBoundedQueue({ concurrency: 2, maxQueueDepth: 3 });
+            const inFlight: Array<Promise<unknown>> = [];
+
+            for (let index = 0; index < 20; index += 1) {
+              inFlight.push(
+                queue.submit('/api/page-' + index).catch(() => null)
+              );
+            }
+            await Promise.all(inFlight);
+            count('peakDepth', queue.highWaterMark());
+
+            expect(queue.highWaterMark()).toBeLessThanOrEqual(3);
+            expect(queue.rejected()).toBeGreaterThan(0);
+          });
+
+          it('有位置空出来之后恢复接收', async () => {
+            const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 1 });
+            const first = queue.submit('/api/first');
+            await sleep(1);
+            const second = queue.submit('/api/second');
+
+            let rejected = false;
+            try {
+              await queue.submit('/api/third');
+            } catch (caught) {
+              rejected = true;
+            }
+            expect(rejected).toBe(true);
+
+            await Promise.all([first, second]);
+            // 都跑完了，队列空了
+            expect(queue.depth()).toBe(0);
+            const later = await queue.submit('/api/later');
+            expect(later.ok).toBe(true);
+          });
+
+          it('正在执行的请求不占队列名额', async () => {
+            const queue = createBoundedQueue({ concurrency: 3, maxQueueDepth: 2 });
+            const running: Array<Promise<unknown>> = [];
+            for (let index = 0; index < 3; index += 1) running.push(queue.submit('/api/run-' + index));
+            await sleep(1);
+
+            // 3 个在跑，队列还是空的，应该还能收 2 个
+            expect(queue.depth()).toBe(0);
+            running.push(queue.submit('/api/q1'));
+            running.push(queue.submit('/api/q2'));
+            expect(queue.depth()).toBe(2);
+
+            await Promise.all(running);
+          });
+
+          it('depth 在执行开始后回落', async () => {
+            const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 3 });
+            const tasks = [queue.submit('/api/a')];
+            await sleep(1);
+            tasks.push(queue.submit('/api/b'));
+            expect(queue.depth()).toBe(1);
+
+            await Promise.all(tasks);
+            expect(queue.depth()).toBe(0);
+          });
+
+          it('highWaterMark 记住峰值，不随回落而下降', async () => {
+            const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 5 });
+            const tasks = [queue.submit('/api/a')];
+            await sleep(1);
+            tasks.push(queue.submit('/api/b'), queue.submit('/api/c'));
+            const peak = queue.highWaterMark();
+            expect(peak).toBeGreaterThanOrEqual(2);
+
+            await Promise.all(tasks);
+            expect(queue.depth()).toBe(0);
+            expect(queue.highWaterMark()).toBe(peak);
+          });
+
+          it('拒绝的是新来的，已排队的照常执行', async () => {
+            const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 1 });
+            const running = queue.submit('/api/running');
+            await sleep(1);
+            const queued = queue.submit('/api/queued');
+
+            await queue.submit('/api/overflow').catch(() => null);
+
+            const results = await Promise.all([running, queued]);
+            expect(results.every((result) => result.ok)).toBe(true);
+          });
+
+          it('maxQueueDepth 为 0 时只接受正在执行的', async () => {
+            const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 0 });
+            const running = queue.submit('/api/running');
+            await sleep(1);
+
+            let rejected = false;
+            try {
+              await queue.submit('/api/any');
+            } catch (caught) {
+              rejected = true;
+            }
+            expect(rejected).toBe(true);
+            await running;
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'counters.peakDepth',
+      op: 'lte',
+      value: 3,
+      zh: '排队数从不越过配置的上限',
+      en: 'Queue depth never crosses the configured limit',
+      dimension: 'resilience',
+      scope: 'gate:depth',
+    }),
+    gate({
+      metric: 'counters.rejectLatencyMs',
+      op: 'eq',
+      value: 0,
+      unit: 'ms',
+      zh: '拒绝是立刻返回的，不是等出来的',
+      en: 'Rejection returns immediately rather than after a wait',
+      dimension: 'latency',
+      scope: 'gate:fast-reject',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/bounded.ts',
+      code`
+        import type { PageResult } from './contract';
+        import { request } from '@lab/net';
+
+        export class QueueFullError extends Error {
+          url: string;
+
+          constructor(url: string) {
+            super('queue is full, rejected ' + url);
+            this.name = 'QueueFullError';
+            this.url = url;
+          }
+        }
+
+        export interface BoundedOptions {
+          concurrency: number;
+          maxQueueDepth: number;
+        }
+
+        export interface BoundedQueue {
+          submit(url: string): Promise<PageResult>;
+          depth(): number;
+          highWaterMark(): number;
+          rejected(): number;
+        }
+
+        interface Waiting {
+          url: string;
+          settle(result: PageResult): void;
+        }
+
+        export function createBoundedQueue(options: BoundedOptions): BoundedQueue {
+          const limit = Math.max(1, options.concurrency);
+          const queue: Waiting[] = [];
+          let running = 0;
+          let peak = 0;
+          let refused = 0;
+
+          function pump(): void {
+            while (running < limit && queue.length > 0) {
+              const task = queue.shift() as Waiting;
+              running += 1;
+              request(task.url).then(
+                (response) => {
+                  running -= 1;
+                  task.settle({ url: task.url, ok: true, data: response.data });
+                  pump();
+                },
+                (error) => {
+                  running -= 1;
+                  task.settle({
+                    url: task.url,
+                    ok: false,
+                    data: null,
+                    error: error instanceof Error ? error.message : String(error),
+                  });
+                  pump();
+                }
+              );
+            }
+          }
+
+          return {
+            submit(url: string): Promise<PageResult> {
+              // 上限只算排队的：正在执行的马上就结束，既不占队列内存
+              // 也不会让延迟无限增长，把它们算进来会让配置值的含义随并发度漂移
+              if (queue.length >= options.maxQueueDepth && running >= limit) {
+                refused += 1;
+                // 同步返回一个已 reject 的 promise：耗时天然是 0。
+                // 等有位置了再拒绝，等于把背压变回了延迟
+                return Promise.reject(new QueueFullError(url));
+              }
+
+              return new Promise<PageResult>((resolve) => {
+                queue.push({ url, settle: resolve });
+                // push 之后立刻记峰值：pump 可能马上就把它取走，
+                // 漏了这一次更新，压测出来的峰值会比真实值低
+                peak = Math.max(peak, queue.length);
+                pump();
+              });
+            },
+
+            depth(): number {
+              return queue.length;
+            },
+
+            highWaterMark(): number {
+              return peak;
+            },
+
+            rejected(): number {
+              return refused;
+            },
+          };
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**`Promise.reject(...)` 是同步返回的。** 这一行让「立刻拒绝」这个语义免费成立：',
+      '调用方 `await` 它的时候会在下一个微任务里拿到异常，虚拟时钟一格都不走。',
+      '写成 `async submit()` 里 `throw` 效果一样；写成「先 await 点什么再抛」就毁了。',
+      '',
+      '**判断条件是 `queue.length >= maxQueueDepth && running >= limit`。** 两个条件都要：',
+      '只看队列长度的话，`maxQueueDepth: 0` 会把所有请求都拒掉，包括本可以直接开跑的那个；',
+      '只看 running 的话，队列会无限长。前者管「有没有空槽」，后者管「等的人多不多」。',
+      '',
+      '**峰值在 push 之后立刻记。** `pump()` 可能在同一个同步块里就把它取走，',
+      '这时 `queue.length` 已经回落了。把 `Math.max` 放在 pump 之后，',
+      '这种「入队即执行」的路径就永远不会被计入峰值——而这恰恰是低压力下的常态，',
+      '于是这个指标在正常时永远是 0，在过载时才突然跳起来，失去了预警的作用。',
+      '',
+      '**拒绝用异常而不是失败结果。** 「因为队列满了没发出去」和「发出去了但失败」',
+      '对调用方是两种完全不同的处置：前者该降级或者换条路，后者该考虑重试。',
+      '塞进同一个 `PageResult` 里，调用方就只能靠字符串匹配 error 来区分。',
+    ].join('\n'),
+    [
+      '`Promise.reject(...)` returns synchronously, which makes "reject immediately" true for free: the',
+      "caller's `await` sees the error on the next microtask and the virtual clock does not advance a tick.",
+      'A `throw` inside an `async submit()` is equivalent; awaiting anything before throwing ruins it.',
+      '',
+      'The condition is `queue.length >= maxQueueDepth && running >= limit`, and both halves are needed.',
+      'Checking only the queue makes `maxQueueDepth: 0` refuse everything including work that could start',
+      'right now; checking only `running` lets the queue grow without bound. One asks whether a slot is',
+      'free, the other how many are already waiting.',
+      '',
+      'The peak is recorded immediately after the push. `pump()` may take the item within the same',
+      'synchronous block, by which point `queue.length` has already fallen. Putting the `Math.max` after',
+      'pump means the enqueue-and-run-immediately path never counts — and that path is the norm under light',
+      'load, so the metric reads zero when things are fine and only jumps under overload, losing exactly',
+      'the early warning it exists to give.',
+      '',
+      'Rejection is an exception, not a failed result. "Never sent because the queue was full" and "sent',
+      'and failed" call for different handling — degrade or reroute versus consider retrying. Folding both',
+      'into one `PageResult` leaves the caller matching on error strings to tell them apart.',
+    ].join('\n')
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+
+const stage10 = {
+  id: 'pagination',
+  title: t('第 10 关 · 游标分页遍历', 'Stage 10 · Cursor pagination'),
+  goal: t(
+    [
+      '前面所有关卡处理的都是「一批已知的 URL」。真实的抓取任务往往不是这样：',
+      '你只知道第一页的地址，下一页的地址藏在这一页的响应里。',
+      '',
+      '在 `src/paginate.ts` 实现 `fetchAllPages(startUrl, options)`：',
+      '',
+      '- 每一页的响应形如 `{ items: [...], next: string | null }`；',
+      '- 顺着 `next` 一直走，把所有 `items` 拼起来；',
+      '- `next` 为 `null` 表示走完了；',
+      '- `maxPages`：最多翻多少页，到了就停下并标记 `truncated: true`；',
+      '- **游标成环时必须停下来**：服务端出 bug 返回一个指向自己的 `next`，',
+      '  没有防护的实现会一直翻下去，直到内存耗尽。',
+      '',
+      '这一关有一个前面九关都没有的特点：**它天生是串行的**。',
+      '你必须拿到第 N 页才知道第 N+1 页在哪，所以并发池在这里一点忙都帮不上。',
+      '十页各 100ms 就是 1000ms，没有任何办法压缩——除非服务端提供别的分页方式。',
+      '',
+      '门槛量两件事：翻 N 页正好发 N 个请求（不能重复抓）；',
+      '撞上环形游标时，请求数不许超过 `maxPages`。',
+    ].join('\n'),
+    [
+      'Every stage so far worked on a known batch of URLs. Real crawling is rarely like that: you know the',
+      "first page's address, and the next one is hidden inside the response.",
+      '',
+      'Implement `fetchAllPages(startUrl, options)` in `src/paginate.ts`:',
+      '',
+      '- each page responds with `{ items: [...], next: string | null }`;',
+      '- follow `next`, concatenating every `items`;',
+      '- `next` being `null` means the end;',
+      '- `maxPages` caps how far you go, stopping with `truncated: true`;',
+      '- a cursor loop must terminate: a buggy server returning a `next` that points at itself will make',
+      '  an unguarded implementation crawl until it runs out of memory.',
+      '',
+      'This stage has a property none of the previous nine had: it is inherently serial. You cannot know',
+      'where page N+1 is until page N arrives, so the concurrency pool is of no help whatsoever. Ten pages',
+      'at 100ms each is 1000ms and nothing can compress it — short of the server offering another way to',
+      'paginate.',
+      '',
+      'The gates measure two things: walking N pages issues exactly N requests, and a cursor loop never',
+      'exceeds `maxPages` requests.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('顺着 next 走到底并拼接 items', 'Follow next to the end, concatenating items'),
+    t('next 为 null 时停止', 'Stop when next is null'),
+    t('maxPages 生效并标记 truncated', 'maxPages applies and marks the result truncated'),
+    t('环形游标不会让程序转不出来', 'A cursor loop does not spin forever'),
+    t('翻 N 页就发 N 个请求', 'Walking N pages issues exactly N requests'),
+  ],
+  pitfalls: [
+    t(
+      '只靠 `maxPages` 防环。它确实能保证程序停下来，但停下来的时候你会得到一个「翻了 100 页、items 里全是重复的同一批」的结果，而且 `truncated` 是 true，调用方以为还有更多。用一个 `Set` 记住访问过的 URL，撞上重复立刻停并明确报告——这是两种不同的结束原因。',
+      'Relying on `maxPages` alone to break loops. It does stop the program, and it stops with a result containing a hundred pages of the same repeated items and `truncated` set to true, so the caller believes there is more. Track visited URLs in a `Set`, stop on a repeat and report it distinctly — these are two different reasons for stopping.'
+    ),
+    t(
+      '把 `next` 当成相对路径直接拼在 startUrl 后面。有些 API 返回的是完整 URL，有些返回的是游标字符串，有些返回相对路径——拼错了会得到一个不存在的地址，而症状是「第二页 404」，很容易被误判成服务端的问题。这一关的约定是 `next` 就是下一页的完整地址，照用即可。',
+      'Treating `next` as a relative path and concatenating it onto the start URL. Some APIs return a full URL, some a cursor token, some a relative path; guessing wrong yields a nonexistent address and presents as "page two 404s", easily misdiagnosed as a server problem. The contract here is that `next` is the complete address of the next page.'
+    ),
+    t(
+      '每翻一页都把已收集的 items 复制一遍（`items = [...items, ...page.items]`）。一百页的时候这是 O(n²) 次复制。改成 `items.push(...page.items)` 就是线性的。这类问题在十页的测试里完全看不出来。',
+      'Copying the accumulated items on every page (`items = [...items, ...page.items]`). At a hundred pages that is O(n²) copying, where `items.push(...page.items)` is linear. A ten-page test shows nothing.'
+    ),
+    t(
+      '认为分页可以并发加速，于是猜测下一页的地址（比如把 `?page=1` 改成 `?page=2`）提前发出去。这在偏移分页上碰巧能用，在游标分页上必然出错——游标是不透明的，猜不出来。而且就算是偏移分页，并发翻页遇到数据变动会漏行或重复。',
+      'Assuming pagination can be parallelised by guessing the next address, incrementing `?page=1` to `?page=2` and issuing it early. That happens to work with offset pagination and cannot work with cursors, which are opaque by design. And even with offsets, paging concurrently while the data changes skips or duplicates rows.'
+    ),
+  ],
+  hints: [
+    t(
+      '循环条件是「还有 next 且没到 maxPages 且这个 URL 没访问过」。三个条件对应三种结束原因，分别记下来，调用方才知道为什么停。',
+      'The loop condition is "there is a next, the page cap is not reached, and this URL has not been seen". Three conditions, three reasons for stopping — record which one fired so the caller knows why.'
+    ),
+    t(
+      '响应体就是 `response.data`，直接当作 `{ items, next }` 用。防御性地处理一下 `items` 不是数组的情况，服务端返回畸形数据时不要整个崩掉。',
+      'The body is `response.data`, usable directly as `{ items, next }`. Guard against `items` not being an array so malformed server data does not take the whole crawl down.'
+    ),
+  ],
+  extension: t(
+    [
+      '游标分页（cursor / keyset pagination）和偏移分页（`LIMIT 20 OFFSET 1000`）',
+      '是两种完全不同的东西，而且前者在几乎所有维度上都更好。',
+      '',
+      '偏移分页的问题在数据库层：`OFFSET 1000` 要求数据库**扫描并丢弃**前 1000 行，',
+      '翻到第 500 页时每次查询都要扫 10000 行。更糟的是它不稳定——',
+      '你在翻第 2 页的时候有人插入了一行，第 3 页就会重复或者漏掉一条记录。',
+      '游标分页记的是「上次读到哪个键」，用 `WHERE id > last_id LIMIT 20`，',
+      '走索引、代价恒定、而且对并发插入免疫。',
+      '',
+      '代价是游标分页**不能跳页**——没有「第 47 页」这个概念，只能一页页往下走。',
+      '这也是为什么社交产品（无限滚动）都用游标，而后台管理系统（要显示页码）还在用偏移。',
+      '',
+      '至于「分页天生串行」这个限制，真实系统的绕法是让服务端提供**并行分片**：',
+      '一次返回 N 个互不重叠的起始游标，客户端可以并发地各走各的。',
+      'DynamoDB 的 Parallel Scan、Kafka 的 partition、S3 ListObjects 的分段',
+      '都是这个思路——把「串行的遍历」变成「并行的多条串行遍历」。',
+    ].join('\n'),
+    [
+      'Cursor (keyset) pagination and offset pagination (`LIMIT 20 OFFSET 1000`) are entirely different',
+      'things, and the former is better on nearly every axis.',
+      '',
+      "Offset's problem is at the database: `OFFSET 1000` requires scanning and discarding a thousand rows,",
+      'so page 500 scans ten thousand rows per query. Worse, it is unstable — someone inserting a row while',
+      'you are on page 2 makes page 3 repeat or skip a record. Cursor pagination remembers the last key seen',
+      'and issues `WHERE id > last_id LIMIT 20`: index-backed, constant cost, immune to concurrent inserts.',
+      '',
+      'The price is that cursors cannot jump — there is no "page 47", only one page after another. Which is',
+      'why infinite-scroll products use cursors while admin consoles that display page numbers still use',
+      'offsets.',
+      '',
+      'As for pagination being inherently serial, real systems escape it by having the server offer',
+      'parallel shards: return N non-overlapping starting cursors so clients can walk each concurrently.',
+      "DynamoDB's Parallel Scan, Kafka partitions and segmented S3 ListObjects are all this idea — turning",
+      'one serial traversal into several parallel serial traversals.',
+    ].join('\n')
+  ),
+  focus: ['correctness', 'resilience', 'latency'],
+  lab: {
+    defaultLatencyMs: 100,
+    endpoints: {
+      '/api/list/1': { payload: { items: ['a', 'b'], next: '/api/list/2' } },
+      '/api/list/2': { payload: { items: ['c', 'd'], next: '/api/list/3' } },
+      '/api/list/3': { payload: { items: ['e'], next: null } },
+      '/api/single': { payload: { items: ['solo'], next: null } },
+      '/api/empty': { payload: { items: [], next: null } },
+      '/api/loop/1': { payload: { items: ['x'], next: '/api/loop/1' } },
+      '/api/malformed': { payload: { next: null } },
+    },
+  },
+  starterFiles: [
+    file(
+      'src/paginate.ts',
+      code`
+        export interface PaginateOptions {
+          /** 最多翻多少页 */
+          maxPages: number;
+        }
+
+        export interface PaginateResult {
+          items: unknown[];
+          /** 实际请求了多少页 */
+          pages: number;
+          /** 因为 maxPages 而提前停下 */
+          truncated: boolean;
+          /** 因为游标成环而提前停下 */
+          looped: boolean;
+        }
+
+        export function fetchAllPages(startUrl: string, options: PaginateOptions): Promise<PaginateResult> {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-10.spec.ts',
+      code`
+        import { fetchAllPages } from '../src/paginate';
+        import { now } from '@lab/env';
+        import { getMetrics } from '@lab/net';
+
+        describe('阶段10 · 游标分页', () => {
+          it('走到底并拼接所有 items [gate:pages]', async () => {
+            const result = await fetchAllPages('/api/list/1', { maxPages: 10 });
+
+            expect(result.items).toEqual(['a', 'b', 'c', 'd', 'e']);
+            expect(result.pages).toBe(3);
+            expect(result.truncated).toBe(false);
+            expect(result.looped).toBe(false);
+            // 三页正好三个请求，没有重复抓
+            expect(getMetrics().requests.total).toBe(3);
+          });
+
+          it('只有一页时也正常', async () => {
+            const result = await fetchAllPages('/api/single', { maxPages: 10 });
+            expect(result.items).toEqual(['solo']);
+            expect(result.pages).toBe(1);
+          });
+
+          it('空列表不会炸', async () => {
+            const result = await fetchAllPages('/api/empty', { maxPages: 10 });
+            expect(result.items).toEqual([]);
+            expect(result.pages).toBe(1);
+          });
+
+          it('maxPages 生效并标记 truncated', async () => {
+            const result = await fetchAllPages('/api/list/1', { maxPages: 2 });
+            expect(result.items).toEqual(['a', 'b', 'c', 'd']);
+            expect(result.pages).toBe(2);
+            expect(result.truncated).toBe(true);
+            expect(result.looped).toBe(false);
+          });
+
+          it('maxPages 为 1 时只取第一页', async () => {
+            const result = await fetchAllPages('/api/list/1', { maxPages: 1 });
+            expect(result.items).toEqual(['a', 'b']);
+            expect(result.pages).toBe(1);
+            expect(result.truncated).toBe(true);
+          });
+
+          it('环形游标会停下并标记 looped [gate:loop]', async () => {
+            const result = await fetchAllPages('/api/loop/1', { maxPages: 50 });
+
+            expect(result.looped).toBe(true);
+            // 只靠 maxPages 兜底的实现会抓 50 次
+            expect(result.pages).toBe(1);
+            expect(getMetrics().requests.total).toBe(1);
+          });
+
+          it('环形停止和 maxPages 停止是两种不同的原因', async () => {
+            const looped = await fetchAllPages('/api/loop/1', { maxPages: 50 });
+            const truncated = await fetchAllPages('/api/list/1', { maxPages: 2 });
+
+            expect(looped.looped).toBe(true);
+            expect(looped.truncated).toBe(false);
+            expect(truncated.truncated).toBe(true);
+            expect(truncated.looped).toBe(false);
+          });
+
+          it('items 缺失的畸形响应不会让整次遍历崩掉', async () => {
+            const result = await fetchAllPages('/api/malformed', { maxPages: 5 });
+            expect(result.items).toEqual([]);
+            expect(result.pages).toBe(1);
+          });
+
+          it('分页是串行的，耗时等于页数乘以单页延迟', async () => {
+            const startedAt = now();
+            await fetchAllPages('/api/list/1', { maxPages: 10 });
+            // 三页各 100ms：拿不到第 N 页就不知道第 N+1 页在哪，压不下去
+            expect(now() - startedAt).toBe(300);
+          });
+
+          it('maxPages 为 0 时一个请求都不发', async () => {
+            const result = await fetchAllPages('/api/list/1', { maxPages: 0 });
+            expect(result.pages).toBe(0);
+            expect(result.items).toEqual([]);
+            expect(getMetrics().requests.total).toBe(0);
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'requests.total',
+      op: 'eq',
+      value: 3,
+      zh: '翻三页正好发三个请求',
+      en: 'Three pages cost exactly three requests',
+      dimension: 'correctness',
+      scope: 'gate:pages',
+    }),
+    gate({
+      metric: 'requests.total',
+      op: 'lte',
+      value: 1,
+      zh: '游标成环时立刻停止，不靠页数上限兜底',
+      en: 'A cursor loop stops at once instead of running to the page cap',
+      dimension: 'resilience',
+      scope: 'gate:loop',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/paginate.ts',
+      code`
+        import { request } from '@lab/net';
+
+        export interface PaginateOptions {
+          maxPages: number;
+        }
+
+        export interface PaginateResult {
+          items: unknown[];
+          pages: number;
+          truncated: boolean;
+          looped: boolean;
+        }
+
+        interface PageEnvelope {
+          items?: unknown[];
+          next?: string | null;
+        }
+
+        export async function fetchAllPages(
+          startUrl: string,
+          options: PaginateOptions
+        ): Promise<PaginateResult> {
+          const items: unknown[] = [];
+          const visited = new Set<string>();
+
+          let cursor: string | null = startUrl;
+          let pages = 0;
+          let looped = false;
+
+          while (cursor !== null && pages < options.maxPages) {
+            // 环检测独立于 maxPages：只靠页数兜底的话，
+            // 调用方拿到的是「一百页重复数据 + truncated: true」，
+            // 会以为后面还有更多
+            if (visited.has(cursor)) {
+              looped = true;
+              break;
+            }
+            visited.add(cursor);
+
+            const response = await request(cursor);
+            pages += 1;
+
+            const page = (response.data || {}) as PageEnvelope;
+            // 服务端返回畸形数据时不要让整次遍历崩掉
+            if (Array.isArray(page.items)) {
+              // push 而不是重新构造数组：后者在页数多时是 O(n²) 次复制
+              for (const item of page.items) items.push(item);
+            }
+
+            cursor = typeof page.next === 'string' ? page.next : null;
+          }
+
+          return {
+            items,
+            pages,
+            // 还有下一页却停下来了，才算被截断
+            truncated: cursor !== null && !looped,
+            looped,
+          };
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**`truncated` 的判断是 `cursor !== null && !looped`。** 三种结束方式要能被调用方区分：',
+      '正常走完（cursor 为 null）、撞上页数上限（还有 cursor）、游标成环（looped）。',
+      '把后两种混成一个 `truncated: true`，调用方就没法决定「要不要接着抓」——',
+      '前者接着抓是对的，后者接着抓只会再撞一次环。',
+      '',
+      '**`visited` 用 Set 而不是只比较「和上一个 URL 是否相同」。** 环不一定是自环，',
+      '服务端可能返回 A → B → A 这样的两步环，只比上一个是发现不了的。',
+      'Set 的代价是 O(页数) 的内存，而这本来就已经被 `maxPages` 限住了。',
+      '',
+      '**循环条件里 `pages < options.maxPages` 在前，请求在后。** 这样 `maxPages: 0`',
+      '会一个请求都不发，而不是「先发一个再发现超了」。边界值传 0 通常意味着',
+      '调用方想要「什么都别做」，把这个意图落实比抛参数异常更有用。',
+      '',
+      '**这一关没有并发。** 前面九关都在想办法把并发度提上去，这一关的正确答案是',
+      '一个朴素的 `while` 加 `await`。识别出「这件事天生不能并行」和知道怎么并行同样重要——',
+      '硬要在这里加并发的实现只会引入猜测游标之类的错误。',
+    ].join('\n'),
+    [
+      'The `truncated` test is `cursor !== null && !looped`. The caller has to distinguish three endings:',
+      'a natural finish (cursor null), hitting the page cap (a cursor remains), and a loop. Collapsing the',
+      'last two into one `truncated: true` leaves the caller unable to decide whether to continue — in the',
+      'first case continuing is right, in the second it just hits the loop again.',
+      '',
+      '`visited` is a Set rather than a comparison against the previous URL. A loop need not be a self-loop:',
+      'a server can return A → B → A, which comparing only the previous one never detects. The Set costs',
+      'memory proportional to page count, which `maxPages` already bounds.',
+      '',
+      'In the loop condition `pages < options.maxPages` comes before the request, so `maxPages: 0` issues',
+      'nothing rather than sending one and then noticing. Passing zero usually means the caller wants',
+      'nothing done, and honouring that intent is more useful than throwing an argument error.',
+      '',
+      'There is no concurrency in this stage. Nine stages spent effort raising parallelism and the right',
+      'answer here is a plain `while` with an `await`. Recognising that something cannot be parallelised',
+      'matters as much as knowing how to parallelise — forcing concurrency in here only introduces',
+      'cursor-guessing bugs.',
+    ].join('\n')
+  ),
+};
+
+const stage11 = {
   id: 'pipeline',
-  title: t('第 5 关 · 收敛为可运维的组件', 'Stage 5 · Ship an operable component'),
+  title: t('第 11 关 · 收敛为可运维的组件', 'Stage 11 · Ship an operable component'),
   goal: t(
     [
       '最后一关不加新功能，而是把前四关的能力收进一个有边界的组件。',
@@ -1627,7 +4213,7 @@ const stage5 = {
   ],
   specs: [
     spec(
-      'specs/stage-5.spec.ts',
+      'specs/stage-11.spec.ts',
       code`
         import { createPipeline } from '../src/pipeline';
         import { createCancelSource } from '../src/support/cancel';
@@ -1637,7 +4223,7 @@ const stage5 = {
 
         const urls = Array.from({ length: 12 }, (_, index) => '/api/pages/' + index);
 
-        describe('阶段5 · 收敛为组件', () => {
+        describe('阶段11 · 收敛为组件', () => {
           it('组合能力：并发 + 重试 + 缓存 [gate:pipeline]', async () => {
             const pipeline = createPipeline({ concurrency: 4, retries: 2, baseDelayMs: 20, ttlMs: 1000 });
             const results = await pipeline.run(urls.concat(['/api/pages/flaky', '/api/pages/0']));
@@ -1869,17 +4455,567 @@ const stage5 = {
   ),
 };
 
+/* ------------------------------------------------------------------ */
+
+const stage12 = {
+  id: 'observability',
+  title: t('第 12 关 · 指标与慢请求归因', 'Stage 12 · Metrics and attributing slowness'),
+  goal: t(
+    [
+      '前十一关把管线做对了。这一关回答另一个问题：**它现在到底在干什么？**',
+      '',
+      '线上出问题时，「平均延迟 120ms」这句话几乎没有任何用处——',
+      '它可能是所有请求都 120ms，也可能是 99% 的请求 20ms、1% 的请求 10 秒。',
+      '你要的是分位数，以及「慢的是哪一个」。',
+      '',
+      '在 `src/telemetry.ts` 实现两样东西：',
+      '',
+      '**`createHistogram(boundaries)`** —— 分桶直方图：',
+      '',
+      '- `observe(value)` / `count()` / `sum()`；',
+      '- `quantile(q)`：在命中的那个桶里线性插值；',
+      '- `size()`：内部占用的统计槽数量。',
+      '',
+      '**`createTracer()`** —— 计时与归因：',
+      '',
+      '- `span(name)` 返回一个 `{ end() }`，记录这段耗时；',
+      '- `spans()` / `slowest()`。',
+      '',
+      '这一关的门槛只有一条，但它是这一关存在的理由：',
+      '**观测 10000 次之后，`size()` 不许超过桶数。**',
+      '',
+      '把每个样本都存下来再排序取分位数，是最直观的实现，也是最危险的：',
+      '内存随观测数线性增长，一个高 QPS 的接口能在几分钟内把进程撑爆。',
+      '监控组件把被监控的系统搞垮，是运维事故里相当经典的一类。',
+    ].join('\n'),
+    [
+      'Eleven stages made the pipeline correct. This one answers a different question: what is it actually',
+      'doing right now?',
+      '',
+      'When something breaks in production, "average latency 120ms" is nearly useless — it could mean every',
+      'request takes 120ms, or that 99% take 20ms and 1% take ten seconds. What you need is percentiles,',
+      'and which one was slow.',
+      '',
+      'Implement two things in `src/telemetry.ts`:',
+      '',
+      '`createHistogram(boundaries)`, a bucketed histogram:',
+      '',
+      '- `observe(value)`, `count()`, `sum()`;',
+      '- `quantile(q)`, interpolating linearly inside the bucket it lands in;',
+      '- `size()`, how many internal slots it occupies.',
+      '',
+      '`createTracer()`, for timing and attribution:',
+      '',
+      '- `span(name)` returns `{ end() }` recording that duration;',
+      '- `spans()` and `slowest()`.',
+      '',
+      'There is one gate, and it is the reason this stage exists: after ten thousand observations, `size()`',
+      'must not exceed the bucket count.',
+      '',
+      'Storing every sample and sorting to find a percentile is the most obvious implementation and the',
+      'most dangerous: memory grows linearly with observations, and a high-QPS endpoint can exhaust the',
+      'process in minutes. Monitoring that takes down the system it monitors is a classic incident.',
+    ].join('\n')
+  ),
+  checklist: [
+    t('count / sum 正确', 'count and sum are correct'),
+    t('quantile 在桶内线性插值', 'quantile interpolates within its bucket'),
+    t('内存不随观测数增长', 'Memory does not grow with the number of observations'),
+    t('span 记录的是虚拟时钟的真实耗时', 'A span records real elapsed time on the virtual clock'),
+    t('slowest 指出耗时最长的那一段', 'slowest names the longest segment'),
+  ],
+  pitfalls: [
+    t(
+      '把所有样本存进数组，`quantile` 时排序取下标。数学上最准，工程上不能用：内存和观测数成正比，排序还是 O(n log n)。一个每秒一万请求的服务跑十分钟，这个数组里就有六百万个数字——监控组件本身成了最大的内存消费者。',
+      'Storing every sample in an array and sorting on `quantile`. Mathematically exact and operationally unusable: memory is proportional to observations and each query is O(n log n). Ten minutes at ten thousand requests per second leaves six million numbers in that array, making the monitoring the largest memory consumer in the process.'
+    ),
+    t(
+      '用「保留最近 N 个样本」的环形缓冲代替全量存储。内存确实有界了，但分位数变成了「最近 N 个请求的分位数」——流量一大，N 个样本可能只覆盖最近几百毫秒，算出来的 p99 会剧烈抖动。分桶直方图的计数是**累积**的，不会有这个问题。',
+      'Replacing full storage with a ring buffer of the last N samples. Memory is bounded and the percentile becomes "the percentile of the last N requests" — under high traffic those N may span only a few hundred milliseconds, and the computed p99 oscillates wildly. Bucketed counts are cumulative and do not have this problem.'
+    ),
+    t(
+      '`quantile` 直接返回命中桶的上边界。这是最粗糙的近似：所有落在 [100, 500) 里的值，p50 和 p99 都会返回 500。桶内线性插值虽然假设了桶内均匀分布（这个假设并不总成立），但至少能区分桶内的不同位置。Prometheus 的 `histogram_quantile` 用的就是这个插值。',
+      'Returning the upper bound of the matching bucket from `quantile`. That is the crudest approximation: every value in [100, 500) yields 500 for both p50 and p99. Linear interpolation inside the bucket assumes uniformity within it — not always true — but at least distinguishes positions within a bucket. It is what Prometheus histogram_quantile does.'
+    ),
+    t(
+      '`span(name).end()` 用 `Date.now()` 计时。在这个环境里 `Date` 被虚拟时钟接管了，所以能跑；但真实代码里用挂钟计时会被 NTP 校时、闰秒、甚至用户改系统时间影响，出现负的耗时。计时应该用单调时钟（`performance.now()`），它只保证「一直往前走」，不保证对应任何真实时刻。',
+      'Timing with `Date.now()`. It works here because `Date` is driven by the virtual clock, but in real code wall-clock timing is disturbed by NTP steps, leap seconds and users changing the system time, producing negative durations. Timing wants a monotonic clock, which only promises to move forward and corresponds to no real instant.'
+    ),
+  ],
+  hints: [
+    t(
+      '桶用「上边界数组 + 计数数组」表示，最后再加一个 +Inf 桶装超出所有边界的值。`observe` 就是找到第一个 `value <= boundary` 的下标然后计数加一。',
+      'Represent buckets as an array of upper bounds plus an array of counts, with one extra +Inf bucket for values beyond every boundary. `observe` finds the first index where `value <= boundary` and increments.'
+    ),
+    t(
+      'quantile 先算目标位次 `q * count`，然后从低到高累加计数，找到跨过这个位次的桶，在这个桶的 [下边界, 上边界] 之间按剩余比例插值。',
+      'For quantile, compute the target rank `q * count`, accumulate counts from the lowest bucket until the rank is crossed, then interpolate between that bucket lower and upper bound by the leftover fraction.'
+    ),
+  ],
+  extension: t(
+    [
+      '分桶直方图的代价是**桶边界要提前定**。定得不好，全部样本落进同一个桶，',
+      '分位数就退化成了「桶宽」级别的粗糙估计。这也是 Prometheus 用得最痛的地方——',
+      '换桶边界需要改代码重新发布，而且历史数据没法重新分桶。',
+      '',
+      '解法之一是 **HDR Histogram**：桶宽随值指数增长（小值密、大值疏），',
+      '用固定的相对精度（比如「误差不超过 1%」）覆盖从 1 微秒到 1 小时的全量程，',
+      '内存仍然是常数级。另一条路是 **t-digest** 和 **DDSketch**：',
+      '前者在分布两端保留更高精度（正好是分位数最需要精度的地方），',
+      '后者保证相对误差有上界，而且**可合并**——多台机器的直方图能直接相加，',
+      '这在分布式系统里是刚需（你要的是全集群的 p99，不是每台机器 p99 的平均）。',
+      '',
+      '顺带一提：**p99 的平均值没有任何意义**。十台机器各自的 p99 取平均，',
+      '既不是集群的 p99，也不是任何一个可解释的量。要算集群 p99，',
+      '必须把原始分布合并之后再算分位数——这就是可合并性为什么重要。',
+      '',
+      '至于 span，这一关做的是最简单的平铺记录。真实的分布式追踪（OpenTelemetry）',
+      '还要处理父子关系、跨进程传播（trace context 通过 HTTP 头传递）、',
+      '以及采样——全量记录 span 的成本通常比业务本身还高，',
+      '所以线上一般只采 1% 左右，代价是低频的慢请求可能永远采不到。',
+    ].join('\n'),
+    [
+      'Bucketed histograms cost you having to choose boundaries in advance. Choose badly and every sample',
+      'lands in one bucket, degrading percentiles to bucket-width guesses. This is the sorest spot in',
+      'Prometheus: changing boundaries means a code change and a redeploy, and historical data cannot be',
+      're-bucketed.',
+      '',
+      'One answer is the HDR Histogram, where bucket width grows exponentially — dense at small values,',
+      'sparse at large ones — covering microseconds to hours at fixed relative precision in constant',
+      'memory. Another is t-digest and DDSketch: the former keeps higher precision at the distribution',
+      'tails, exactly where percentiles need it, while the latter bounds relative error and is mergeable,',
+      'so histograms from many machines add together. That is essential in distributed systems, where you',
+      'want the cluster p99 rather than the average of per-machine p99s.',
+      '',
+      'Which is worth stating plainly: averaging p99s is meaningless. The mean of ten machines p99 values',
+      'is neither the cluster p99 nor any interpretable quantity. Computing a cluster p99 requires merging',
+      'the raw distributions first — which is why mergeability matters.',
+      '',
+      'As for spans, this stage records a flat list. Real distributed tracing (OpenTelemetry) adds',
+      'parent-child structure, cross-process propagation via trace context in HTTP headers, and sampling —',
+      'recording every span usually costs more than the work being traced, so production typically samples',
+      'around 1%, at the price of possibly never capturing a rare slow request.',
+    ].join('\n')
+  ),
+  focus: ['encapsulation', 'elegance', 'latency'],
+  lab: {
+    defaultLatencyMs: 100,
+    endpoints: {
+      '/api/quick': { latencyMs: 40 },
+      '/api/slow': { latencyMs: 700 },
+    },
+  },
+  starterFiles: [
+    file(
+      'src/telemetry.ts',
+      code`
+        export interface Histogram {
+          observe(value: number): void;
+          count(): number;
+          sum(): number;
+          /** q 在 0~1 之间，桶内线性插值 */
+          quantile(q: number): number;
+          /** 内部占用的统计槽数量，必须与观测次数无关 */
+          size(): number;
+        }
+
+        /** boundaries 是升序的桶上边界，超出最后一个边界的值进 +Inf 桶 */
+        export function createHistogram(boundaries: number[]): Histogram {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+
+        export interface SpanRecord {
+          name: string;
+          durationMs: number;
+        }
+
+        export interface Tracer {
+          span(name: string): { end(): void };
+          spans(): SpanRecord[];
+          /** 耗时最长的那一段，没有记录时返回 null */
+          slowest(): SpanRecord | null;
+        }
+
+        export function createTracer(): Tracer {
+          // TODO: 在这里实现
+          throw new Error('not implemented');
+        }
+      `,
+      { openByDefault: true }
+    ),
+  ],
+  specs: [
+    spec(
+      'specs/stage-12.spec.ts',
+      code`
+        import { createHistogram, createTracer } from '../src/telemetry';
+        import { now, sleep } from '@lab/env';
+        import { request } from '@lab/net';
+        import { count } from '@lab/metrics';
+
+        const BOUNDARIES = [10, 50, 100, 500, 1000];
+
+        describe('阶段12 · 直方图', () => {
+          it('count 和 sum', () => {
+            const histogram = createHistogram(BOUNDARIES);
+            histogram.observe(5);
+            histogram.observe(15);
+            histogram.observe(25);
+
+            expect(histogram.count()).toBe(3);
+            expect(histogram.sum()).toBe(45);
+          });
+
+          it('空直方图的 count 是 0', () => {
+            const histogram = createHistogram(BOUNDARIES);
+            expect(histogram.count()).toBe(0);
+            expect(histogram.sum()).toBe(0);
+          });
+
+          it('分位数落在正确的桶里', () => {
+            const histogram = createHistogram(BOUNDARIES);
+            for (let index = 0; index < 90; index += 1) histogram.observe(5);
+            for (let index = 0; index < 10; index += 1) histogram.observe(800);
+
+            expect(histogram.quantile(0.5)).toBeLessThanOrEqual(10);
+            expect(histogram.quantile(0.95)).toBeGreaterThan(500);
+            expect(histogram.quantile(0.95)).toBeLessThanOrEqual(1000);
+          });
+
+          it('桶内做插值，而不是直接返回桶上边界', () => {
+            const histogram = createHistogram([100, 200]);
+            for (let index = 0; index < 100; index += 1) histogram.observe(150);
+
+            const low = histogram.quantile(0.1);
+            const high = histogram.quantile(0.9);
+            expect(high).toBeGreaterThan(low);
+            expect(low).toBeGreaterThanOrEqual(100);
+            expect(high).toBeLessThanOrEqual(200);
+          });
+
+          it('所有值相同时分位数就是那个值附近', () => {
+            const histogram = createHistogram(BOUNDARIES);
+            for (let index = 0; index < 50; index += 1) histogram.observe(30);
+            const median = histogram.quantile(0.5);
+            expect(median).toBeGreaterThan(10);
+            expect(median).toBeLessThanOrEqual(50);
+          });
+
+          it('超出所有边界的值进 +Inf 桶', () => {
+            const histogram = createHistogram([10, 50]);
+            histogram.observe(9999);
+            expect(histogram.count()).toBe(1);
+            expect(histogram.sum()).toBe(9999);
+            expect(histogram.quantile(0.99)).toBeGreaterThanOrEqual(50);
+          });
+
+          it('q 为 0 和 1 的边界值', () => {
+            const histogram = createHistogram(BOUNDARIES);
+            for (let index = 0; index < 10; index += 1) histogram.observe(30);
+            expect(histogram.quantile(0)).toBeGreaterThanOrEqual(0);
+            expect(histogram.quantile(1)).toBeLessThanOrEqual(1000);
+          });
+
+          it('内存不随观测数增长 [gate:bounded-memory]', () => {
+            const histogram = createHistogram(BOUNDARIES);
+            const before = histogram.size();
+
+            for (let index = 0; index < 10000; index += 1) {
+              histogram.observe(index % 1200);
+            }
+
+            count('histogramSlots', histogram.size());
+            expect(histogram.count()).toBe(10000);
+            expect(histogram.size()).toBe(before);
+            expect(histogram.size()).toBeLessThanOrEqual(BOUNDARIES.length + 1);
+          });
+        });
+
+        describe('阶段12 · 计时与归因', () => {
+          it('span 记录真实耗时', async () => {
+            const tracer = createTracer();
+            const span = tracer.span('sleep-120');
+            await sleep(120);
+            span.end();
+
+            expect(tracer.spans()).toHaveLength(1);
+            expect(tracer.spans()[0].name).toBe('sleep-120');
+            expect(tracer.spans()[0].durationMs).toBe(120);
+          });
+
+          it('多个 span 各自计时', async () => {
+            const tracer = createTracer();
+            const first = tracer.span('a');
+            await sleep(50);
+            first.end();
+
+            const second = tracer.span('b');
+            await sleep(200);
+            second.end();
+
+            expect(tracer.spans().map((span) => span.durationMs)).toEqual([50, 200]);
+          });
+
+          it('并行的 span 不会互相污染', async () => {
+            const tracer = createTracer();
+            await Promise.all([
+              (async () => {
+                const span = tracer.span('short');
+                await sleep(30);
+                span.end();
+              })(),
+              (async () => {
+                const span = tracer.span('long');
+                await sleep(300);
+                span.end();
+              })(),
+            ]);
+
+            const byName = tracer.spans().reduce((acc, span) => {
+              acc[span.name] = span.durationMs;
+              return acc;
+            }, {} as Record<string, number>);
+            expect(byName.short).toBe(30);
+            expect(byName.long).toBe(300);
+          });
+
+          it('slowest 指出最慢的那一段', async () => {
+            const tracer = createTracer();
+            const plan: Array<[string, number]> = [['fast', 20], ['slower', 90], ['slowest', 240]];
+            for (const entry of plan) {
+              const span = tracer.span(entry[0]);
+              await sleep(entry[1]);
+              span.end();
+            }
+
+            expect(tracer.slowest()).toEqual({ name: 'slowest', durationMs: 240 });
+          });
+
+          it('没有记录时 slowest 返回 null', () => {
+            expect(createTracer().slowest()).toBeNull();
+          });
+
+          it('把真实请求归因到最慢的那个 URL', async () => {
+            const tracer = createTracer();
+            const histogram = createHistogram(BOUNDARIES);
+
+            for (const url of ['/api/quick', '/api/slow', '/api/quick']) {
+              const span = tracer.span(url);
+              const startedAt = now();
+              await request(url);
+              span.end();
+              histogram.observe(now() - startedAt);
+            }
+
+            expect(tracer.slowest()!.name).toBe('/api/slow');
+            expect(histogram.count()).toBe(3);
+            expect(histogram.quantile(0.99)).toBeGreaterThan(500);
+          });
+
+          it('未结束的 span 不出现在结果里', async () => {
+            const tracer = createTracer();
+            tracer.span('never-ended');
+            const done = tracer.span('done');
+            await sleep(10);
+            done.end();
+
+            expect(tracer.spans()).toHaveLength(1);
+            expect(tracer.spans()[0].name).toBe('done');
+          });
+        });
+      `
+    ),
+  ],
+  gates: [
+    gate({
+      metric: 'counters.histogramSlots',
+      op: 'lte',
+      value: 6,
+      unit: 'slots',
+      zh: '一万次观测之后内存占用不变',
+      en: 'Memory is unchanged after ten thousand observations',
+      dimension: 'encapsulation',
+      scope: 'gate:bounded-memory',
+    }),
+  ],
+  referenceFiles: [
+    file(
+      'src/telemetry.ts',
+      code`
+        import { now } from '@lab/env';
+
+        export interface Histogram {
+          observe(value: number): void;
+          count(): number;
+          sum(): number;
+          quantile(q: number): number;
+          size(): number;
+        }
+
+        export function createHistogram(boundaries: number[]): Histogram {
+          const bounds = boundaries.slice().sort((left, right) => left - right);
+          // 桶数固定：观测多少次都只是往这几个计数器上加，
+          // 内存与观测数无关。存全量样本才是那个会把进程撑爆的实现
+          const counts: number[] = [];
+          for (let index = 0; index <= bounds.length; index += 1) counts.push(0);
+          let total = 0;
+          let totalSum = 0;
+
+          function bucketFor(value: number): number {
+            for (let index = 0; index < bounds.length; index += 1) {
+              if (value <= bounds[index]) return index;
+            }
+            // 超出所有边界的进 +Inf 桶
+            return bounds.length;
+          }
+
+          return {
+            observe(value: number): void {
+              counts[bucketFor(value)] += 1;
+              total += 1;
+              totalSum += value;
+            },
+
+            count(): number {
+              return total;
+            },
+
+            sum(): number {
+              return totalSum;
+            },
+
+            quantile(q: number): number {
+              if (total === 0) return 0;
+              const last = bounds.length > 0 ? bounds[bounds.length - 1] : 0;
+
+              const target = q * total;
+              let cumulative = 0;
+
+              for (let index = 0; index < counts.length; index += 1) {
+                const next = cumulative + counts[index];
+                if (next < target) {
+                  cumulative = next;
+                  continue;
+                }
+                if (counts[index] === 0) return last;
+                // +Inf 桶没有上边界，插不了值，只能退回最后一个有限边界
+                if (index === bounds.length) return last;
+
+                const lower = index === 0 ? 0 : bounds[index - 1];
+                const upper = bounds[index];
+                // 桶内线性插值：直接返回 upper 的话，
+                // 同一个桶里的 p10 和 p90 会是同一个数
+                const withinBucket = (target - cumulative) / counts[index];
+                return lower + (upper - lower) * Math.min(1, Math.max(0, withinBucket));
+              }
+
+              return last;
+            },
+
+            size(): number {
+              return counts.length;
+            },
+          };
+        }
+
+        export interface SpanRecord {
+          name: string;
+          durationMs: number;
+        }
+
+        export interface Tracer {
+          span(name: string): { end(): void };
+          spans(): SpanRecord[];
+          slowest(): SpanRecord | null;
+        }
+
+        export function createTracer(): Tracer {
+          const records: SpanRecord[] = [];
+
+          return {
+            span(name: string) {
+              // 起止时刻都存在这个闭包里，并行的 span 各有各的一份，不会互相覆盖
+              const startedAt = now();
+              let ended = false;
+              return {
+                end(): void {
+                  // 结束两次不该记两条
+                  if (ended) return;
+                  ended = true;
+                  records.push({ name, durationMs: now() - startedAt });
+                },
+              };
+            },
+
+            spans(): SpanRecord[] {
+              return records.slice();
+            },
+
+            slowest(): SpanRecord | null {
+              if (records.length === 0) return null;
+              return records.reduce((best, current) =>
+                current.durationMs > best.durationMs ? current : best
+              );
+            },
+          };
+        }
+      `
+    ),
+  ],
+  referenceNotes: t(
+    [
+      '**`counts` 的长度在构造时就定死了。** 这一行就是这一关的全部：',
+      '`observe` 永远只是往固定数量的计数器里加一，无论调用一万次还是一亿次，',
+      '`size()` 返回同一个数。存全量样本的实现在功能上完全正确、精度还更高，',
+      '但它把「监控」变成了「内存泄漏」。',
+      '',
+      '**桶内插值的那三行。** `withinBucket` 是「目标位次落在这个桶的哪个比例位置」，',
+      '按这个比例在 `[lower, upper]` 之间取值。少了它，`quantile(0.1)` 和 `quantile(0.9)`',
+      '只要落在同一个桶就会返回同一个数——而线上大部分请求本来就挤在同一个桶里，',
+      '于是分位数图变成一条直线。',
+      '',
+      '**+Inf 桶不能插值。** 它没有上边界，数学上无从插起。Prometheus 的做法是',
+      '返回最后一个有限边界，并在文档里明确说「如果 p99 落在 +Inf 桶里，',
+      '说明你的桶边界定得太小了」。这是一个提示，不是一个答案。',
+      '',
+      '**`ended` 标志。** 一个 span 被 `end()` 两次不该产生两条记录——',
+      '这在有 try/finally 又有正常返回路径的代码里非常容易发生，',
+      '而重复记录会让 count 虚高、分位数偏移，且很难被发现。',
+    ].join('\n'),
+    [
+      'The length of `counts` is fixed at construction, and that single line is the whole stage. `observe`',
+      'only ever increments one of a fixed number of counters, so `size()` returns the same number after ten',
+      'thousand calls or a hundred million. Storing every sample is functionally correct and more precise,',
+      'and it turns monitoring into a memory leak.',
+      '',
+      'The three lines of intra-bucket interpolation. `withinBucket` is where the target rank falls inside',
+      'the bucket as a fraction, applied between `lower` and `upper`. Without it, `quantile(0.1)` and',
+      '`quantile(0.9)` return the same number whenever they land in one bucket — and in production most',
+      'requests do land in one bucket, flattening the percentile chart into a line.',
+      '',
+      'The +Inf bucket cannot be interpolated: it has no upper bound, so there is nothing to interpolate',
+      'between. Prometheus returns the last finite boundary and says plainly in its documentation that a',
+      'p99 landing in +Inf means your boundaries are too small. That is a hint, not an answer.',
+      '',
+      'The `ended` flag. Calling `end()` twice must not record two spans — very easy to do in code with',
+      'both a try/finally and a normal return path — and duplicate records inflate the count and shift the',
+      'percentiles in a way that is hard to notice.',
+    ].join('\n')
+  ),
+};
+
 module.exports = {
   id: 'resilient-fetch-pipeline',
   title: t('高可用抓取管线', 'Resilient fetch pipeline'),
   summary: t(
-    '从一个串行 for 循环出发，逐关加上并发池、指数退避、缓存单飞与取消，最终收敛成一个可运维的组件。',
-    'Start from a sequential for-loop and grow it into an operable component: bounded concurrency, backoff, caching, single-flight and cancellation.'
+    '从一个串行 for 循环出发，十二关加上并发池、超时预算、错误分类、对冲、缓存单飞、优先级、背压、分页与可观测性。',
+    'Start from a sequential for-loop and spend twelve stages on a pool, deadlines, failure classification, hedging, single-flight caching, priorities, backpressure, pagination and telemetry.'
   ),
   difficulty: 'Medium',
   domain: 'concurrency',
   tags: ['concurrency', 'resilience', 'caching', 'api-design'],
-  estimatedMinutes: 120,
+  estimatedMinutes: 420,
   language: 'typescript',
   weights: {
     correctness: 3,
@@ -1940,15 +5076,22 @@ module.exports = {
       '',
       '## 目标',
       '',
-      '分 5 关把它改造成一个真正能上线的抓取管线：',
+      '分 12 关把它改造成一个真正能上线的抓取管线：',
       '',
       '| 关卡 | 引入的能力 | 主要指标 |',
       '| --- | --- | --- |',
       '| 1 | 错误边界：失败是数据，不是异常 | 不重复请求 |',
       '| 2 | 有上限的并发 | 峰值并发 ≤ 4，12 个请求 ≤ 300ms |',
-      '| 3 | 指数退避重试 | 确实重试，且退避不过度 |',
-      '| 4 | 缓存 + 并发去重 | 热点地址只回源一次 |',
-      '| 5 | 收敛成可运维组件 | 并发受控、可取消、有埋点 |',
+      '| 3 | 超时与总预算 | 僵死请求立刻让出槽位；预算用完不再发请求 |',
+      '| 4 | 指数退避重试 | 确实重试，且退避不过度 |',
+      '| 5 | 错误分类与限流 | 4xx 零重试；429 真的退避 |',
+      '| 6 | 对冲请求 | 尾延迟压到副本速度，主副本快时零额外流量 |',
+      '| 7 | 缓存 + 并发去重 | 热点地址只回源一次 |',
+      '| 8 | 优先级调度与老化 | 低优先级不被饿死 |',
+      '| 9 | 背压与队列上限 | 排队数有界；拒绝立刻返回 |',
+      '| 10 | 游标分页 | 翻 N 页发 N 个请求；成环立刻停 |',
+      '| 11 | 收敛成可运维组件 | 并发受控、可取消、有埋点 |',
+      '| 12 | 指标与归因 | 一万次观测内存不增长 |',
       '',
       '## 硬性约束',
       '',
@@ -1961,7 +5104,7 @@ module.exports = {
       '',
       '- 不做持久化：进程重启后缓存丢失是可以接受的；',
       '- 不做分布式协调：这是一个单进程组件；',
-      '- 不做优先级调度：所有地址同等重要（这是第 2 关「延伸」里的话题）。',
+      '- 不做分布式协调：优先级、背压、限流都只在这一个进程里生效。',
       '',
       '## 术语',
       '',
@@ -2014,9 +5157,16 @@ module.exports = {
       '| --- | --- | --- |',
       '| 1 | Error boundary: failure is data, not an exception | No duplicate calls |',
       '| 2 | Bounded concurrency | Peak ≤ 4, 12 requests ≤ 300ms |',
-      '| 3 | Retry with exponential backoff | Retries happen, backoff is not wasteful |',
-      '| 4 | Caching + request coalescing | Hot key hits origin once |',
-      '| 5 | An operable component | Bounded, cancellable, instrumented |',
+      '| 3 | Timeouts and a batch budget | A stuck request yields its slot; nothing is sent past the budget |',
+      '| 4 | Retry with exponential backoff | Retries happen, backoff is not wasteful |',
+      '| 5 | Failure classification | Zero retries on 4xx; a real backoff on 429 |',
+      '| 6 | Hedged requests | Tail latency drops to the replica, a fast primary costs nothing extra |',
+      '| 7 | Caching + request coalescing | Hot key hits origin once |',
+      '| 8 | Priority scheduling and aging | Low priority is never starved |',
+      '| 9 | Backpressure | Queue depth is bounded; rejection is instant |',
+      '| 10 | Cursor pagination | N pages cost N requests; a loop stops at once |',
+      '| 11 | An operable component | Bounded, cancellable, instrumented |',
+      '| 12 | Metrics and attribution | Ten thousand observations, unchanged memory |',
       '',
       '## Hard constraints',
       '',
@@ -2087,5 +5237,5 @@ module.exports = {
     ].join('\n')
   ),
   files: [contract],
-  stages: [stage1, stage2, stage3, stage4, stage5],
+  stages: [stage1, stage2, stage3, stage4, stage5, stage6, stage7, stage8, stage9, stage10, stage11, stage12],
 };
