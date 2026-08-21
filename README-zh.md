@@ -40,11 +40,16 @@
 | Linux（Debian、Ubuntu） | `AlgoLocal-*-Linux.deb` |
 | Linux（Fedora、RHEL） | `AlgoLocal-*-Linux.rpm` |
 
-macOS 若提示应用已损坏，清除隔离属性即可：
+#### 在 macOS 上打开
 
-```bash
-xattr -cr "/Applications/AlgoLocal.app"
-```
+安装包使用 ad-hoc 签名，没有 Apple Developer ID 证书，所以 macOS 无法验证开发者，第一次打开会被拦下。放行方式：
+
+1. 把 **AlgoLocal** 拖进「应用程序」并双击，系统提示无法确认它不含恶意软件，点「完成」。
+2. 打开 **系统设置 → 隐私与安全性**，下拉到「安全性」，点 AlgoLocal 旁边的 **仍要打开**，用触控 ID 或密码确认。
+
+只需要做一次。macOS Sequoia（15）及以上已经移除了「右键 → 打开」的绕过方式，`xattr -rd com.apple.quarantine` 也既不必要也不管用。
+
+要彻底去掉这个警告需要付费的 Apple Developer ID 证书并做公证。[从源码运行](#从源码运行)则不会遇到。
 
 ### 从源码运行
 

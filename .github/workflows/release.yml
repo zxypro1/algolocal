@@ -115,6 +115,43 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      # v0.5.0 曾经把一个签名损坏的包发出去：electron-builder 跳过签名后，
+      # 包里只剩 Electron 二进制自带的 linker ad-hoc 签名，而它已经描述不了被改写过的
+      # bundle。macOS 15+ 对这种情况的判定是 "revoked"，直接当成恶意软件丢进废纸篓。
+      # 这一步保证签名坏掉时构建失败，而不是发布出去。
+      - name: Verify macOS code signature
+        run: |
+          APP=$(find dist -maxdepth 2 -name "AlgoLocal.app" -type d | head -1)
+          if [ -z "$APP" ]; then
+            echo "::error::No AlgoLocal.app found under dist/"
+            exit 1
+          fi
+          echo "Verifying $APP"
+          codesign -dv --verbose=2 "$APP" 2>&1 | grep -E "Identifier=|flags=|Authority=" || true
+
+          if ! codesign --verify --deep --strict --verbose=2 "$APP"; then
+            echo "::error::Code signature is invalid — refusing to publish."
+            exit 1
+          fi
+
+          # 签名标识必须是我们自己的 appId。如果这里还是 "Electron"，
+          # 说明 bundle 根本没被重新签过，正是 v0.5.0 的故障形态。
+          IDENT=$(codesign -dv "$APP" 2>&1 | sed -n 's/^Identifier=//p')
+          if [ "$IDENT" != "com.algolocal.app" ]; then
+            echo "::error::Unexpected signing identifier '$IDENT' (expected com.algolocal.app)."
+            exit 1
+          fi
+
+          # spctl 的判定：没有 Developer ID 时 "rejected" 是预期结果（用户可以在
+          # 系统设置里放行）；"revoked" 则是硬拦截，必须拦下。
+          VERDICT=$(spctl -a -vvv -t exec "$APP" 2>&1 || true)
+          echo "$VERDICT"
+          if echo "$VERDICT" | grep -q "revoked"; then
+            echo "::error::Gatekeeper reports this build as revoked — it would be quarantined as malware."
+            exit 1
+          fi
+          echo "✓ Signature verified (identifier=$IDENT)"
+
       # 清理钥匙串
       - name: Cleanup Keychain
         if: always()
@@ -270,17 +307,23 @@ jobs:
             | **Linux** | Debian/Ubuntu | `AlgoLocal-*-Linux.deb` |
             | **Linux** | Fedora/RHEL | `AlgoLocal-*-Linux.rpm` |
             
-            ### macOS Installation Note
+            ### Opening the app on macOS
             
-            If you see **"damaged"** or **"cannot verify developer"** message when opening the app, run this command in Terminal:
+            These builds are signed ad-hoc, not with an Apple Developer ID, so macOS will
+            warn that it cannot verify the developer. Opening it takes two steps:
             
-            ```bash
-            # For app installed from DMG
-            sudo xattr -rd com.apple.quarantine /Applications/AlgoLocal.app
+            1. Drag **AlgoLocal** to your Applications folder and double-click it. macOS will
+               refuse and say it cannot verify the app is free of malware. Click **Done**.
+            2. Open **System Settings → Privacy & Security**, scroll to the Security section,
+               and click **Open Anyway** next to AlgoLocal. Confirm with Touch ID or your password.
             
-            # Or for app extracted from ZIP (adjust path accordingly)
-            sudo xattr -rd com.apple.quarantine ~/Downloads/AlgoLocal.app
-            ```
+            You only need to do this once.
+            
+            **Note for macOS Sequoia (15) and later:** the old Control-click → Open shortcut no
+            longer bypasses Gatekeeper. System Settings is the only route.
+            
+            The `xattr -rd com.apple.quarantine` command that older release notes recommended is
+            no longer needed, and on its own it will not help.
             
             ### Changelog
             
@@ -292,11 +335,19 @@ jobs:
             
             100% 离线刷算法，AI 全程辅助：生成题目、获取提示、讨论解法，支持 JavaScript、TypeScript、Python 代码运行——无需联网或配置环境。
             
-            **macOS 安装提示**：如果打开应用时提示"已损坏"或"无法验证开发者"，请在终端运行：
+            **macOS 打开方式**：这些安装包使用 ad-hoc 签名，没有 Apple Developer ID 证书，
+            所以 macOS 会提示无法验证开发者。分两步打开：
             
-            ```bash
-            sudo xattr -rd com.apple.quarantine /Applications/AlgoLocal.app
-            ```
+            1. 把 **AlgoLocal** 拖进「应用程序」文件夹并双击，系统会拒绝并提示无法确认它不含
+               恶意软件，点「完成」。
+            2. 打开 **系统设置 → 隐私与安全性**，下拉到「安全性」一栏，点 AlgoLocal 旁边的
+               **仍要打开**，用触控 ID 或密码确认。
+            
+            这一步只需要做一次。
+            
+            **macOS Sequoia（15）及以上注意**：过去「右键 → 打开」的绕过方式已经被移除，
+            只能走系统设置这条路。旧版发布说明里的 `xattr -rd com.apple.quarantine` 已经不需要，
+            单独执行它也解决不了问题。
           files: release-assets/*
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}

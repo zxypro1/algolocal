@@ -40,11 +40,21 @@ No runtime dependencies are required. [Download the latest release](https://gith
 | Linux (Debian, Ubuntu) | `AlgoLocal-*-Linux.deb` |
 | Linux (Fedora, RHEL) | `AlgoLocal-*-Linux.rpm` |
 
-If macOS reports that the application is damaged, clear the quarantine attribute:
+#### Opening the app on macOS
 
-```bash
-xattr -cr "/Applications/AlgoLocal.app"
-```
+These builds are signed ad-hoc rather than with an Apple Developer ID, so macOS cannot verify
+the developer and will refuse the first launch. To allow it:
+
+1. Move **AlgoLocal** to Applications and double-click it. macOS says it cannot verify the app
+   is free of malware — click **Done**.
+2. Open **System Settings → Privacy & Security**, scroll to Security, and click **Open Anyway**
+   next to AlgoLocal. Confirm with Touch ID or your password.
+
+This is only needed once. On macOS Sequoia (15) and later the old Control-click → Open shortcut
+no longer works, and `xattr -rd com.apple.quarantine` is neither needed nor sufficient.
+
+Removing this warning entirely requires a paid Apple Developer ID certificate and notarization.
+Building [from source](#from-source) avoids it.
 
 ### From source
 

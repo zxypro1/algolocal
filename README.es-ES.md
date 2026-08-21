@@ -40,11 +40,21 @@ No requiere dependencias. [Descargar la última versión](https://github.com/zxy
 | Linux (Debian, Ubuntu) | `AlgoLocal-*-Linux.deb` |
 | Linux (Fedora, RHEL) | `AlgoLocal-*-Linux.rpm` |
 
-Si macOS indica que la aplicación está dañada, quita el atributo de cuarentena:
+#### Abrir la aplicación en macOS
 
-```bash
-xattr -cr "/Applications/AlgoLocal.app"
-```
+Estas compilaciones llevan una firma ad-hoc, no un Apple Developer ID, así que macOS no puede
+verificar al desarrollador y bloqueará el primer inicio. Para permitirlo:
+
+1. Mueve **AlgoLocal** a Aplicaciones y haz doble clic. macOS dirá que no puede verificar que
+   esté libre de malware — pulsa **Listo**.
+2. Abre **Ajustes del Sistema → Privacidad y seguridad**, baja hasta Seguridad y pulsa
+   **Abrir de todos modos** junto a AlgoLocal. Confirma con Touch ID o tu contraseña.
+
+Solo hace falta una vez. En macOS Sequoia (15) y posteriores el atajo Control-clic → Abrir ya no
+funciona, y `xattr -rd com.apple.quarantine` ni es necesario ni basta.
+
+Eliminar el aviso por completo requiere un certificado Apple Developer ID de pago y notarización.
+Compilar [desde el código fuente](#desde-el-código-fuente) lo evita.
 
 ### Desde el código fuente
 

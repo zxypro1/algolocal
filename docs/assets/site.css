@@ -429,6 +429,10 @@ h2 { font-size: clamp(2.35rem, 4.2vw, 4rem); font-weight: 700; line-height: 1.07
 .platform-actions .platform-primary { color: var(--cyan); border-color: var(--cyan-deep); }
 .platform-actions .platform-orange { color: var(--orange); border-color: var(--orange); }
 .all-releases { margin-top: 28px; }
+.platform-note { margin-top: 30px; padding: 18px 20px; border: 1px solid var(--line-dark); border-radius: 9px; color: #9fb0c4; font-size: .88rem; line-height: 1.65; }
+.platform-note b { color: #dce6ee; font-weight: 600; }
+.platform-note ol { margin: 9px 0 0; padding-left: 18px; }
+.platform-note li { margin-top: 4px; }
 .closing { position: relative; min-height: 280px; padding: 85px 6% 50px 30%; display: flex; align-items: center; }
 .closing h2 { font-size: clamp(2.7rem, 5vw, 5rem); color: var(--white); }
 .closing i { position: absolute; left: 7%; top: 0; width: 18%; height: 78%; border-left: 5px solid var(--cyan); border-bottom: 5px solid var(--orange); border-radius: 0 0 0 25px; }

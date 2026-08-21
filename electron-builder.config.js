@@ -2,6 +2,20 @@
  * Electron Builder Configuration
  * 支持 Windows、macOS 和 Linux 的跨平台构建
  */
+// 有没有真正的 Developer ID 证书。release.yml 在没有配置证书时会把
+// CSC_IDENTITY_AUTO_DISCOVERY 设成 'false'，那条路径下 electron-builder 会完全跳过签名，
+// 改由 build/afterPack.js 补一个 ad-hoc 签名（见该文件里的说明）。
+const hasSigningCertificate = process.env.CSC_IDENTITY_AUTO_DISCOVERY !== 'false';
+
+// 公证要求「Developer ID 签名 + 强化运行时」，缺一不可。
+// 只有凭据齐全时才打开，否则 electron-builder 会拿一个 ad-hoc 包去公证，必然失败。
+const canNotarize = Boolean(
+  hasSigningCertificate &&
+  process.env.APPLE_ID &&
+  process.env.APPLE_APP_SPECIFIC_PASSWORD &&
+  process.env.APPLE_TEAM_ID
+);
+
 module.exports = {
   // 应用标识
   appId: 'com.algolocal.app',
@@ -15,6 +29,10 @@ module.exports = {
     output: 'dist',
     buildResources: 'build'
   },
+
+  // macOS 产物在这里补 ad-hoc 签名。必须是 afterPack 而不是 afterSign——
+  // electron-builder 在跳过签名时同样会跳过 afterSign。
+  afterPack: 'build/afterPack.js',
   
   // 打包文件
   files: [
@@ -159,9 +177,7 @@ module.exports = {
       }
     ],
     darkModeSupport: true,
-    notarize: process.env.APPLE_ID && process.env.APPLE_APP_SPECIFIC_PASSWORD ? {
-      teamId: process.env.APPLE_TEAM_ID
-    } : false
+    notarize: canNotarize ? { teamId: process.env.APPLE_TEAM_ID } : false
   },
   
   // DMG 配置
