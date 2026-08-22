@@ -411,7 +411,14 @@ sys.stderr = _stderr_backup
         jsOutput.stdout || '',
         jsOutput.stderr || ''
       );
-      collector.entries.push(...entries);
+      // 走收集器自己的入口，才会受同一个条数上限约束
+      for (const entry of entries) {
+        if (collector.entries.length >= CONSOLE_LIMITS.maxEntries) {
+          collector.truncated = true;
+          break;
+        }
+        collector.entries.push(entry);
+      }
       if (truncated) collector.truncated = true;
     }
 
@@ -813,7 +820,9 @@ export function useWasmExecutor() {
           const createExecuteFn = () => {
             // 每次都需要重新解析参数，因为某些语言（如链表问题）会修改参数
             const freshArgs = parseTestInput(test.input);
-            const runCollector = captureThisRun ? collector : undefined;
+            // 后续几次基准运行同样注入替身 console（保证四次运行行为一致），
+            // 只是把输出丢进一个一次性收集器，不进入结果。
+            const runCollector = captureThisRun ? collector : createConsoleCollector('user');
             captureThisRun = false;
 
             if (language === 'javascript') {

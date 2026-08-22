@@ -22,8 +22,11 @@ export interface ConsoleLogEntry {
 }
 
 export interface ConsoleCollector {
-  /** 注入给用户代码的替身 console */
-  console: Record<ConsoleLevel, (...args: unknown[]) => void>;
+  /**
+   * 注入给用户代码的替身 console。
+   * 除了被捕获的几个级别，其余 console 方法原样透传给真实 console。
+   */
+  console: Record<ConsoleLevel, (...args: unknown[]) => void> & Record<string, unknown>;
   entries: ConsoleLogEntry[];
   /** 是否因为超过条数上限而丢弃了后续输出 */
   truncated: boolean;
@@ -32,9 +35,43 @@ export interface ConsoleCollector {
 
 const LEVELS: ConsoleLevel[] = ['log', 'info', 'warn', 'error', 'debug'];
 
+/**
+ * 替身 console 必须是「完整的」console。
+ * 用户代码里出现 console.table / console.time / console.group 是很正常的事，
+ * 如果替身上没有这些方法，调用就会抛 TypeError，整条用例直接失败 ——
+ * 本来只是想看个日志，结果把题做挂了。
+ * 所以先把真实 console 的所有方法搬过来（绑定回真实 console 以免 this 丢失），
+ * 再覆盖掉我们要捕获的那几个级别。
+ */
+function baseConsole(): Record<string, unknown> {
+  const base: Record<string, unknown> = {};
+  const real = typeof console !== 'undefined' ? (console as unknown as Record<string, unknown>) : {};
+
+  const names = new Set<string>([
+    ...Object.keys(real),
+    // 兜底：某些环境下这些方法在原型上，Object.keys 取不到
+    'table', 'dir', 'dirxml', 'trace', 'group', 'groupCollapsed', 'groupEnd',
+    'time', 'timeEnd', 'timeLog', 'count', 'countReset', 'assert', 'clear', 'profile', 'profileEnd',
+  ]);
+
+  for (const name of names) {
+    const value = real[name];
+    if (typeof value === 'function') {
+      base[name] = (value as (...args: unknown[]) => unknown).bind(real);
+    }
+  }
+
+  // 真的什么都没有时（比如某些 worker 环境），至少给个空实现，别让用户代码抛异常
+  for (const name of names) {
+    if (typeof base[name] !== 'function') base[name] = () => undefined;
+  }
+
+  return base;
+}
+
 export function createConsoleCollector(source: 'user' | 'system' = 'user'): ConsoleCollector {
   const collector: ConsoleCollector = {
-    console: {} as ConsoleCollector['console'],
+    console: baseConsole() as ConsoleCollector['console'],
     entries: [],
     truncated: false,
     reset() {
@@ -83,8 +120,18 @@ export function entriesFromPythonOutput(stdout: string, stderr: string): {
   // 末尾的换行是 print 自带的，不该多出一条空日志
   const lines = (text: string) => text.replace(/\n$/, '').split('\n');
 
-  if (stdout) lines(stdout).forEach((line) => push(line, 'log'));
-  if (stderr) lines(stderr).forEach((line) => push(line, 'error'));
+  // stderr 通常是报错信息，比 stdout 更值得看。
+  // 先给它留出一半配额，否则一个话痨解法的 stdout 会把 stderr 整个挤掉。
+  const stderrLines = stderr ? lines(stderr) : [];
+  const stdoutLines = stdout ? lines(stdout) : [];
+  const stderrBudget = Math.min(stderrLines.length, Math.ceil(CONSOLE_LIMITS.maxEntries / 2));
+  const stdoutBudget = CONSOLE_LIMITS.maxEntries - stderrBudget;
+
+  stdoutLines.slice(0, stdoutBudget).forEach((line) => push(line, 'log'));
+  if (stdoutLines.length > stdoutBudget) truncated = true;
+
+  stderrLines.forEach((line) => push(line, 'error'));
+  if (stderrLines.length > stderrBudget) truncated = true;
 
   return { entries, truncated };
 }

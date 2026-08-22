@@ -101,9 +101,17 @@ function formatValue(value: unknown, depth: number, seen: Set<object>): string {
     // 普通对象（含 class 实例）
     const keys = Object.keys(obj);
     const shownKeys = keys.slice(0, CONSOLE_LIMITS.maxObjectKeys);
-    const parts = shownKeys.map(
-      (key) => `${quoteKey(key)}: ${formatValue((obj as Record<string, unknown>)[key], depth + 1, seen)}`
-    );
+    // 单个属性可能是会抛异常的 getter。只让这一个属性降级，
+    // 其余部分照常显示 —— 整个对象退化成 [object Object] 就白做了。
+    const parts = shownKeys.map((key) => {
+      let rendered: string;
+      try {
+        rendered = formatValue((obj as Record<string, unknown>)[key], depth + 1, seen);
+      } catch (error) {
+        rendered = `[threw: ${error instanceof Error ? error.message : String(error)}]`;
+      }
+      return `${quoteKey(key)}: ${rendered}`;
+    });
     if (keys.length > shownKeys.length) {
       parts.push(`… ${keys.length - shownKeys.length} more`);
     }
@@ -120,7 +128,17 @@ function formatValue(value: unknown, depth: number, seen: Set<object>): string {
 
 /** 格式化单个值。字符串保持原样（不加引号），与浏览器 console 的行为一致。 */
 export function formatConsoleValue(value: unknown): string {
-  return formatValue(value, 0, new Set());
+  // 取值本身就可能抛：throwing getter、Proxy 的 ownKeys 陷阱等等。
+  // 格式化一条日志绝不该把用户代码打断，所以兜底成一个占位符。
+  try {
+    return formatValue(value, 0, new Set());
+  } catch {
+    try {
+      return String(value);
+    } catch {
+      return '[unserializable]';
+    }
+  }
 }
 
 /** 格式化 console.* 的一组参数，用空格连接。 */
