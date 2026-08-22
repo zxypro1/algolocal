@@ -9,6 +9,7 @@
  * 所有请求都跑在虚拟时钟上，因此「串行 10 次 200ms 请求 = 2000ms，
  * 并发 5 路 = 400ms」这样的差异可以被精确、可复现地度量出来。
  */
+import { CONSOLE_LIMITS, formatConsoleArgs } from '../consoleFormat';
 import { VirtualClock } from './clock';
 import type {
   ConsoleEntry,
@@ -53,6 +54,7 @@ interface UrlState {
 export class Lab {
   clock = new VirtualClock();
   console: ConsoleEntry[] = [];
+  consoleTruncated = false;
 
   private config: LabNetworkConfig = {};
   private rng = createRng(1);
@@ -79,6 +81,7 @@ export class Lab {
     this.clock = new VirtualClock();
     this.rng = createRng(this.config.seed ?? 1);
     this.console = [];
+    this.consoleTruncated = false;
     this.inFlight = 0;
     this.maxConcurrency = 0;
     this.timeline = [];
@@ -245,19 +248,15 @@ export class Lab {
     this.counters[name] = (this.counters[name] || 0) + delta;
   }
 
-  log(level: ConsoleEntry['level'], args: unknown[]): void {
-    if (this.console.length >= 500) return;
-    const text = args
-      .map((arg) => {
-        if (typeof arg === 'string') return arg;
-        try {
-          return JSON.stringify(arg);
-        } catch {
-          return String(arg);
-        }
-      })
-      .join(' ');
-    this.console.push({ level, text, at: this.clock.now() });
+  log(level: ConsoleEntry['level'], args: unknown[], source: 'user' | 'system' = 'user'): void {
+    // 超上限就丢弃：死循环里打日志会瞬间把内存和 UI 拖垮。
+    if (this.console.length >= CONSOLE_LIMITS.maxEntries) {
+      this.consoleTruncated = true;
+      return;
+    }
+    // 统一用共享的格式化器：原来的 JSON.stringify 遇到循环引用会抛，
+    // 然后 fallback 到 String(arg) 变成 [object Object]。
+    this.console.push({ level, text: formatConsoleArgs(args), at: this.clock.now(), source });
   }
 }
 
@@ -330,10 +329,10 @@ export function createLabGlobals(lab: Lab): Record<string, unknown> {
     performance: { now: () => lab.clock.now() },
     console: {
       log: (...args: unknown[]) => lab.log('log', args),
-      info: (...args: unknown[]) => lab.log('log', args),
+      info: (...args: unknown[]) => lab.log('info', args),
       warn: (...args: unknown[]) => lab.log('warn', args),
       error: (...args: unknown[]) => lab.log('error', args),
-      debug: (...args: unknown[]) => lab.log('log', args),
+      debug: (...args: unknown[]) => lab.log('debug', args),
     },
   };
 }

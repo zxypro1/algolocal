@@ -21,6 +21,7 @@ import {
   YAxis,
 } from 'recharts';
 import { useI18n, useTranslation } from '../../contexts/I18nContext';
+import ConsoleOutput from '../ConsoleOutput';
 import type {
   DimensionKey,
   LocalizedText,
@@ -161,6 +162,17 @@ export function RunReportPanel({ report }: { report: StageRunReport | null }) {
                     </Stack>
                   </Group>
                 )}
+              </Box>
+            )}
+
+            {testCase.console && testCase.console.length > 0 && (
+              <Box mt={6}>
+                <ConsoleOutput
+                  entries={testCase.console}
+                  truncated={testCase.consoleTruncated}
+                  defaultOpen={!testCase.passed}
+                  maxHeight={160}
+                />
               </Box>
             )}
           </Card>

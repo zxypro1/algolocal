@@ -14,16 +14,20 @@ const ts = require('typescript');
 
 const root = path.join(__dirname, '..');
 const libDir = path.join(root, 'src', 'lib', 'engineering');
+const sharedLibDir = path.join(root, 'src', 'lib');
 const buildDir = path.join(os.tmpdir(), 'algolocal-engineering-verify');
+// 运行时库在临时目录里保持和 src/lib 一样的层级，
+// lab.ts 里的 `../consoleFormat` 这类跨目录引用才能照常解析。
+const engineeringOutDir = path.join(buildDir, 'engineering');
+/** engineering 之外、运行时需要的共享模块 */
+const SHARED_MODULES = ['consoleFormat.ts'];
 
 /** 用 transpileModule 把运行时库转成 CommonJS，避免依赖完整的 tsc 编译流程 */
-function buildRuntime() {
-  fs.rmSync(buildDir, { recursive: true, force: true });
-  fs.mkdirSync(buildDir, { recursive: true });
-
-  for (const name of fs.readdirSync(libDir)) {
+function transpileTo(sourceDir, outDir, names) {
+  fs.mkdirSync(outDir, { recursive: true });
+  for (const name of names) {
     if (!name.endsWith('.ts')) continue;
-    const source = fs.readFileSync(path.join(libDir, name), 'utf8');
+    const source = fs.readFileSync(path.join(sourceDir, name), 'utf8');
     const output = ts.transpileModule(source, {
       fileName: name,
       compilerOptions: {
@@ -32,8 +36,16 @@ function buildRuntime() {
         esModuleInterop: true,
       },
     }).outputText;
-    fs.writeFileSync(path.join(buildDir, name.replace(/\.ts$/, '.js')), output, 'utf8');
+    fs.writeFileSync(path.join(outDir, name.replace(/\.ts$/, '.js')), output, 'utf8');
   }
+}
+
+function buildRuntime() {
+  fs.rmSync(buildDir, { recursive: true, force: true });
+  fs.mkdirSync(buildDir, { recursive: true });
+
+  transpileTo(sharedLibDir, buildDir, SHARED_MODULES);
+  transpileTo(libDir, engineeringOutDir, fs.readdirSync(libDir));
 }
 
 function toFileMap(files) {
@@ -81,10 +93,10 @@ function buildStageWorkspace(project, stageIndex, solved = true) {
 
 async function main() {
   buildRuntime();
-  const { runStage } = require(path.join(buildDir, 'runner.js'));
-  const { createTranspiler } = require(path.join(buildDir, 'transpile.js'));
-  const { analyzeWorkspace } = require(path.join(buildDir, 'analysis.js'));
-  const { computeScoreCard } = require(path.join(buildDir, 'scoring.js'));
+  const { runStage } = require(path.join(engineeringOutDir, 'runner.js'));
+  const { createTranspiler } = require(path.join(engineeringOutDir, 'transpile.js'));
+  const { analyzeWorkspace } = require(path.join(engineeringOutDir, 'analysis.js'));
+  const { computeScoreCard } = require(path.join(engineeringOutDir, 'scoring.js'));
   const transpile = createTranspiler(ts);
 
   const projectsPath = path.join(root, 'projects', 'projects.json');
