@@ -1,8 +1,10 @@
-const { app, BrowserWindow, shell, Menu, ipcMain, protocol, net } = require('electron');
+const { app, BrowserWindow, shell, Menu, ipcMain, protocol, net, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { createServer } = require('http');
+// electron 的 net 已经占用了这个名字，Node 的 net 只能另起一个
+const nodeNet = require('node:net');
 
 // Global error handlers
 process.on('uncaughtException', (error) => {
@@ -23,7 +25,9 @@ process.env.APP_ROOT = app.isPackaged
 // In development, use NODE_ENV to determine mode
 const dev = app.isPackaged ? false : (process.env.NODE_ENV !== 'production');
 const hostname = 'localhost';
-const port = 3000;
+// 首选端口。被占用时会自动往后找，实际使用的端口在启动时写回 port。
+const preferredPort = 3000;
+let port = preferredPort;
 
 let mainWindow;
 let server;
@@ -149,6 +153,27 @@ function loadSavedConfig() {
 }
 
 // Start Next.js server
+function isPortFree(candidate) {
+  return new Promise((resolve) => {
+    const probe = nodeNet.createServer();
+    probe.once('error', () => resolve(false));
+    probe.once('listening', () => probe.close(() => resolve(true)));
+    probe.listen(candidate, hostname);
+  });
+}
+
+// 3000 是开发机上最容易被别的项目占掉的端口。占用时不该让应用起不来，
+// 往后找一个空闲端口即可。
+async function findFreePort(preferred, attempts = 20) {
+  for (let candidate = preferred; candidate < preferred + attempts; candidate += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await isPortFree(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error(`No free port available in range ${preferred}-${preferred + attempts - 1}`);
+}
+
 async function startNextServer() {
   try {
     // Load configuration first
@@ -163,7 +188,12 @@ async function startNextServer() {
     
     // Dynamically require next to handle potential issues
     const next = require('next');
-    
+
+    port = await findFreePort(preferredPort);
+    if (port !== preferredPort) {
+      console.log(`> Port ${preferredPort} is in use, falling back to ${port}`);
+    }
+
     nextApp = next({ 
       dev, 
       hostname, 
@@ -197,11 +227,19 @@ async function startNextServer() {
     });
 
     return new Promise((resolve, reject) => {
+      // server.listen() 失败时错误走的是 'error' 事件，回调根本不会被调用。
+      // 只在回调里 resolve/reject 会让这个 Promise 永远悬着，
+      // 于是 await 不返回、createWindow() 永远不执行——表现就是「进程活着但没有窗口」。
+      const onListenError = (error) => reject(error);
+      server.once('error', onListenError);
+
       server.listen(port, hostname, (err) => {
         if (err) {
+          server.removeListener('error', onListenError);
           reject(err);
           return;
         }
+        server.removeListener('error', onListenError);
         console.log(`> Ready on http://${hostname}:${port}`);
         resolve();
       });
@@ -298,6 +336,10 @@ app.whenReady().then(async () => {
     createWindow();
   } catch (error) {
     console.error('Failed to start application:', error);
+    dialog.showErrorBox(
+      'AlgoLocal could not start',
+      `The local server failed to start.\n\n${error && error.message ? error.message : error}`
+    );
     app.quit();
   }
 
