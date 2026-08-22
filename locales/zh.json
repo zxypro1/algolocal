@@ -136,6 +136,8 @@
     "expected": "期望输出",
     "actual": "实际输出",
     "executionTime": "执行时间",
+    "consoleOutput": "控制台输出",
+    "consoleTruncated": "输出已达上限，后续日志被丢弃。",
     "ms": "毫秒",
     "runningTests": "正在运行测试...",
     "runError": "运行错误",

@@ -21,6 +21,7 @@ import {
 import dynamic from 'next/dynamic';
 import { IconPlus, IconFileText, IconBulb, IconFlask } from '@tabler/icons-react';
 import { useTranslation, useI18n } from '../../src/contexts/I18nContext';
+import ConsoleOutput from '../../src/components/ConsoleOutput';
 import { AppHeader, HEADER_HEIGHT } from '../../src/components/AppHeader';
 import { CodeWithCopy } from '../../src/components/CodeWithCopy';
 import MarkdownRenderer from '../../src/components/MarkdownRenderer';
@@ -311,6 +312,12 @@ export default function ProblemPage() {
                       <Text size="xs" c="dimmed">{t('codeRunner.executionTime')}: {testResult.executionTime}ms</Text>
                     </div>
                   )}
+                  <ConsoleOutput
+                    entries={testResult.logs || []}
+                    truncated={testResult.logsTruncated}
+                    defaultOpen={!testResult.passed}
+                    maxHeight={160}
+                  />
                 </Stack>
               </Paper>
             ))}

@@ -244,7 +244,10 @@ export async function runStage(options: RunStageOptions): Promise<StageRunReport
           label: [...testCase.suite, testCase.name].join(' > '),
           metrics: snapshot,
         });
-        consoleEntries.push(...lab.console);
+        // lab 每条用例前会 reset，所以 lab.console 就是这一条用例的输出。
+        // 既挂到用例上（这样日志能对上是哪条用例产生的），也并进整体列表。
+        const caseConsole = [...lab.console];
+        consoleEntries.push(...caseConsole);
 
         cases.push({
           suite: testCase.suite,
@@ -254,6 +257,8 @@ export async function runStage(options: RunStageOptions): Promise<StageRunReport
           error: failure?.message,
           expected: failure?.expected,
           actual: failure?.actual,
+          console: caseConsole,
+          consoleTruncated: lab.consoleTruncated,
         });
       }
     }

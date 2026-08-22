@@ -32,6 +32,7 @@ import Editor from '@monaco-editor/react';
 import { useTranslation, useI18n } from '../contexts/I18nContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { useWasmExecutor } from '../hooks/useWasmExecutor';
+import ConsoleOutput from './ConsoleOutput';
 import {
   DEFAULT_PREFS,
   EditorPrefs,
@@ -549,6 +550,11 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
                       <Text size="xs" c="dimmed">{t('codeRunner.executionTime')}: {testResult.executionTime}ms</Text>
                     </div>
                   )}
+                  <ConsoleOutput
+                    entries={testResult.logs || []}
+                    truncated={testResult.logsTruncated}
+                    defaultOpen={!testResult.passed}
+                  />
                 </Stack>
               </Paper>
             ))}

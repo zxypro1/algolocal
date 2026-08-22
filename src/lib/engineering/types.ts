@@ -190,13 +190,19 @@ export interface SpecCaseResult {
   /** 断言失败时的期望/实际，便于 UI 直接展示 diff */
   expected?: string;
   actual?: string;
+  /** 这条用例执行期间产生的输出。整体聚合在 StageRunReport.console 里。 */
+  console?: ConsoleEntry[];
+  /** 输出条数超过上限被截断 */
+  consoleTruncated?: boolean;
 }
 
 export interface ConsoleEntry {
-  level: 'log' | 'warn' | 'error';
+  level: 'log' | 'info' | 'warn' | 'error' | 'debug';
   text: string;
   /** 虚拟时钟时间 */
   at: number;
+  /** user = 学员代码打的，system = 运行时/测试框架打的 */
+  source: 'user' | 'system';
 }
 
 export interface RequestSample {

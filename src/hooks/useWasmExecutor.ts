@@ -8,6 +8,16 @@
  */
 import { useState, useCallback, useRef } from 'react';
 
+import {
+  CONSOLE_LIMITS,
+  createConsoleCollector,
+  entriesFromPythonOutput,
+  type ConsoleCollector,
+  type ConsoleLogEntry,
+} from '../lib/consoleCapture';
+
+export type { ConsoleLogEntry };
+
 export interface WasmExecutionResult {
   output: string;
   error: string;
@@ -22,6 +32,10 @@ export interface TestResult {
   passed: boolean;
   executionTime: number;
   error: string | null;
+  /** 这条用例执行期间用户代码产生的输出 */
+  logs: ConsoleLogEntry[];
+  /** 输出条数超过上限被截断 */
+  logsTruncated: boolean;
 }
 
 export interface PerformanceStats {
@@ -74,15 +88,15 @@ let globalRuntime: WasmRuntimeState = {
  * 使用 Function 构造函数安全执行 JavaScript 代码
  * 比 iframe 更可靠，适用于用户自己编写的代码
  */
-export function executeCode(code: string): any {
+export function executeCode(code: string, sandboxConsole?: unknown): any {
   try {
-    // 使用 Function 构造函数创建一个新的函数作用域
-    const fn = new Function(code);
-    const result = fn();
+    // 用 Function 构造函数创建一个新的函数作用域。
+    // 把 console 作为形参传进去，用户代码里的 console.* 就会命中我们的收集器，
+    // 而不是浏览器的全局 console —— 既能捕获，又不会污染全局或在并发运行时串台。
+    const fn = new Function('console', code);
+    const result = fn(sandboxConsole ?? console);
     return result;
   } catch (error) {
-    console.error('executeCode error:', error);
-    console.error('Code:', code);
     throw error;
   }
 }
@@ -221,7 +235,8 @@ async function loadPyodide(): Promise<any> {
 export async function executeJavaScript(
   code: string,
   args: any[],
-  isLinkedListProblem: boolean = false
+  isLinkedListProblem: boolean = false,
+  collector?: ConsoleCollector
 ): Promise<{ result: any; error: string | null; executionTime: number }> {
   const startTime = performance.now();
 
@@ -282,9 +297,7 @@ export async function executeJavaScript(
       `}
     `;
 
-    console.log('Executing JS code with args:', args);
-    const result = executeCode(jsCode);
-    console.log('Execution result:', result);
+    const result = executeCode(jsCode, collector?.console);
     const executionTime = performance.now() - startTime;
 
     return {
@@ -308,7 +321,8 @@ export async function executeJavaScript(
 async function executeTypeScript(
   code: string,
   args: any[],
-  isLinkedListProblem: boolean = false
+  isLinkedListProblem: boolean = false,
+  collector?: ConsoleCollector
 ): Promise<{ result: any; error: string | null; executionTime: number }> {
   const startTime = performance.now();
 
@@ -317,7 +331,7 @@ async function executeTypeScript(
     const jsCode = await transpileTypeScript(code);
     
     // 然后使用 JavaScript 执行逻辑
-    return await executeJavaScript(jsCode, args, isLinkedListProblem);
+    return await executeJavaScript(jsCode, args, isLinkedListProblem, collector);
   } catch (error: any) {
     const executionTime = performance.now() - startTime;
     return {
@@ -334,7 +348,8 @@ async function executeTypeScript(
 async function executePython(
   code: string,
   args: any[],
-  functionName: string = 'solution'
+  functionName: string = 'solution',
+  collector?: ConsoleCollector
 ): Promise<{ result: any; error: string | null; executionTime: number }> {
   const startTime = performance.now();
 
@@ -390,6 +405,23 @@ sys.stderr = _stderr_backup
     // 将 Python 对象转换为 JS
     const jsOutput = output.toJs ? output.toJs({ dict_converter: Object.fromEntries }) : output;
     
+    // stdout / stderr 一直都被收集着，只是过去没有被读出来，直接丢了。
+    if (collector) {
+      const { entries, truncated } = entriesFromPythonOutput(
+        jsOutput.stdout || '',
+        jsOutput.stderr || ''
+      );
+      // 走收集器自己的入口，才会受同一个条数上限约束
+      for (const entry of entries) {
+        if (collector.entries.length >= CONSOLE_LIMITS.maxEntries) {
+          collector.truncated = true;
+          break;
+        }
+        collector.entries.push(entry);
+      }
+      if (truncated) collector.truncated = true;
+    }
+
     if (jsOutput.error) {
       return {
         result: null,
@@ -773,6 +805,13 @@ export function useWasmExecutor() {
       );
 
       for (const test of tests) {
+        // 每条用例一个收集器，日志才能和用例对上号。
+        // 放在 try 外面，抛异常时也能把已经打出来的日志带出去 —— 恰恰是最需要看日志的时候。
+        const collector = createConsoleCollector('user');
+        // 基准测试会把同一段代码跑 4 次（1 次预热 + 3 次测量）。
+        // 全部收集的话每条日志会重复四遍，所以只记录第一次运行的输出。
+        let captureThisRun = true;
+
         try {
           const args = parseTestInput(test.input);
           const expected = JSON.parse(test.output);
@@ -781,13 +820,17 @@ export function useWasmExecutor() {
           const createExecuteFn = () => {
             // 每次都需要重新解析参数，因为某些语言（如链表问题）会修改参数
             const freshArgs = parseTestInput(test.input);
-            
+            // 后续几次基准运行同样注入替身 console（保证四次运行行为一致），
+            // 只是把输出丢进一个一次性收集器，不进入结果。
+            const runCollector = captureThisRun ? collector : createConsoleCollector('user');
+            captureThisRun = false;
+
             if (language === 'javascript') {
-              return executeJavaScript(code, freshArgs, isLinkedListProblem);
+              return executeJavaScript(code, freshArgs, isLinkedListProblem, runCollector);
             } else if (language === 'typescript') {
-              return executeTypeScript(code, freshArgs, isLinkedListProblem);
+              return executeTypeScript(code, freshArgs, isLinkedListProblem, runCollector);
             } else if (language === 'python') {
-              return executePython(code, freshArgs, functionName);
+              return executePython(code, freshArgs, functionName, runCollector);
             } else {
               throw new Error(`Unsupported language: ${language}`);
             }
@@ -806,7 +849,9 @@ export function useWasmExecutor() {
               actual: null,
               passed: false,
               executionTime: calculateMedian(benchmarkResult.times),
-              error: benchmarkResult.error
+              error: benchmarkResult.error,
+              logs: collector.entries,
+              logsTruncated: collector.truncated
             });
           } else {
             const passed = deepEqual(benchmarkResult.result, expected);
@@ -821,7 +866,9 @@ export function useWasmExecutor() {
               actual: benchmarkResult.result,
               passed,
               executionTime: Math.round(medianTime * 100) / 100,
-              error: null
+              error: null,
+              logs: collector.entries,
+              logsTruncated: collector.truncated
             });
           }
         } catch (error: any) {
@@ -831,7 +878,9 @@ export function useWasmExecutor() {
             actual: null,
             passed: false,
             executionTime: 0,
-            error: error.message || String(error)
+            error: error.message || String(error),
+            logs: collector.entries,
+            logsTruncated: collector.truncated
           });
         }
       }
