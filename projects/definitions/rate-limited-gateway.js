@@ -8,12 +8,12 @@ const { t, code, file, readonlyFile, spec, gate } = require('./_helpers');
 const contract = readonlyFile(
   'src/contract.ts',
   code`
-    /** 平台提供的契约（只读） */
+    /** Contract provided by the platform (read-only) */
 
     export interface GatewayResult {
       ok: boolean;
       data?: unknown;
-      /** 失败原因：'timeout' | 'circuit-open' | 'upstream' */
+      /** Failure reason: 'timeout' | 'circuit-open' | 'upstream' */
       reason?: string;
       error?: string;
     }
@@ -297,30 +297,30 @@ const stage1 = {
       'src/window.ts',
       code`
         export interface WindowOptions {
-          /** 窗口内最多放行多少个 */
+          /** How many are admitted per window at most */
           limit: number;
           windowMs: number;
         }
 
         export interface Limiter {
-          /** 放行返回 true，被限流返回 false */
+          /** true when admitted, false when rate-limited */
           allow(): boolean;
-          /** 内部保留的状态条数，用来比较三种实现的内存代价 */
+          /** How many state entries are retained, for comparing the memory cost of the three implementations */
           size(): number;
         }
 
         export function createFixedWindow(options: WindowOptions): Limiter {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
 
         export function createSlidingLog(options: WindowOptions): Limiter {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
 
         export function createSlidingCounter(options: WindowOptions): Limiter {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -343,20 +343,20 @@ const stage1 = {
           return allowed;
         }
 
-        describe('阶段1 · 三种窗口的稳态行为', () => {
-          it('固定窗口放行 limit 个', () => {
+        describe('Stage 1 · Steady-state behaviour of the three windows', () => {
+          it('the fixed window admits limit requests', () => {
             expect(admit(createFixedWindow(OPTIONS), 8)).toBe(5);
           });
 
-          it('滑动日志放行 limit 个', () => {
+          it('the sliding log admits limit requests', () => {
             expect(admit(createSlidingLog(OPTIONS), 8)).toBe(5);
           });
 
-          it('滑动计数器放行 limit 个', () => {
+          it('the sliding counter admits limit requests', () => {
             expect(admit(createSlidingCounter(OPTIONS), 8)).toBe(5);
           });
 
-          it('窗口过去之后额度恢复', async () => {
+          it('allowance recovers once the window passes', async () => {
             const limiter = createFixedWindow(OPTIONS);
             expect(admit(limiter, 5)).toBe(5);
             expect(limiter.allow()).toBe(false);
@@ -365,7 +365,7 @@ const stage1 = {
             expect(limiter.allow()).toBe(true);
           });
 
-          it('滑动日志在窗口过去之后也恢复', async () => {
+          it('the sliding log recovers once the window passes too', async () => {
             const limiter = createSlidingLog(OPTIONS);
             expect(admit(limiter, 5)).toBe(5);
             await sleep(1001);
@@ -373,19 +373,19 @@ const stage1 = {
           });
         });
 
-        describe('阶段1 · 边界突刺', () => {
-          it('固定窗口在边界上放两倍流量', async () => {
+        describe('Stage 1 · Boundary bursts', () => {
+          it('the fixed window admits double the traffic at a boundary', async () => {
             const limiter = createFixedWindow(OPTIONS);
             await sleep(900);
             const before = admit(limiter, 5);
             await sleep(100);
             const after = admit(limiter, 5);
 
-            // 200ms 内一共过了 10 个，是限额的两倍
+            // Ten got through within 200ms, twice the limit
             expect(before + after).toBe(10);
           });
 
-          it('滑动日志挡得住边界突刺', async () => {
+          it('the sliding log blocks the boundary burst', async () => {
             const limiter = createSlidingLog(OPTIONS);
             await sleep(900);
             const before = admit(limiter, 5);
@@ -395,7 +395,7 @@ const stage1 = {
             expect(before + after).toBeLessThanOrEqual(5);
           });
 
-          it('滑动计数器挡得住边界突刺 [gate:boundary]', async () => {
+          it('the sliding counter blocks the boundary burst [gate:boundary]', async () => {
             const limiter = createSlidingCounter(OPTIONS);
             await sleep(900);
             const before = admit(limiter, 5);
@@ -406,54 +406,54 @@ const stage1 = {
             expect(before + after).toBeLessThanOrEqual(6);
           });
 
-          it('滑动计数器的加权方向是对的', async () => {
+          it('the sliding counter weights in the right direction', async () => {
             const limiter = createSlidingCounter(OPTIONS);
-            // 把上一个窗口用满
+            // Fill the previous window completely
             expect(admit(limiter, 5)).toBe(5);
 
-            // 刚进入新窗口：上一个窗口几乎全额计入，几乎放不进去
+            // Just into the new window: the previous one counts almost in full, so almost nothing gets in
             await sleep(1010);
             const early = admit(limiter, 10);
 
-            // 新窗口快走完了：上一个窗口基本滑出去了，额度回来了
+            // Near the end of the new window: the previous one has mostly slid out and the allowance is back
             await sleep(940);
             const late = admit(limiter, 10);
 
-            // 权重写反（用 elapsed 而不是 1 - elapsed）时这两个数会颠倒过来
+            // With the weight inverted (using elapsed instead of 1 - elapsed) these two numbers swap
             expect(early).toBeLessThanOrEqual(2);
             expect(late).toBeGreaterThan(early);
           });
         });
 
-        describe('阶段1 · 内存代价', () => {
-          it('滑动日志的内存随请求数增长', () => {
+        describe('Stage 1 · Memory cost', () => {
+          it("the sliding log's memory grows with request count", () => {
             const limiter = createSlidingLog({ limit: 400, windowMs: 1000 });
             admit(limiter, 300);
             expect(limiter.size()).toBeGreaterThanOrEqual(300);
           });
 
-          it('滑动计数器的内存有界 [gate:memory]', () => {
+          it("the sliding counter's memory is bounded [gate:memory]", () => {
             const limiter = createSlidingCounter({ limit: 400, windowMs: 1000 });
             admit(limiter, 300);
 
             count('counterSlots', limiter.size());
-            // 只保留当前窗口和上一个窗口的计数
+            // Only the current and previous window counts are kept
             expect(limiter.size()).toBeLessThanOrEqual(4);
           });
 
-          it('固定窗口的内存也有界', () => {
+          it("the fixed window's memory is bounded too", () => {
             const limiter = createFixedWindow({ limit: 400, windowMs: 1000 });
             admit(limiter, 300);
             expect(limiter.size()).toBeLessThanOrEqual(4);
           });
 
-          it('被拒绝的请求不会让滑动日志无限膨胀', async () => {
+          it('rejected requests do not let the sliding log grow without bound', async () => {
             const limiter = createSlidingLog(OPTIONS);
             admit(limiter, 5);
-            // 持续打，全部被拒
+            // Keep hammering; everything is rejected
             admit(limiter, 200);
             await sleep(1001);
-            // 窗口过去之后，过期的时间戳应该被清掉
+            // Once the window passes, the expired timestamps should have been cleared
             limiter.allow();
             expect(limiter.size()).toBeLessThanOrEqual(OPTIONS.limit + 1);
           });
@@ -504,8 +504,8 @@ const stage1 = {
 
           return {
             allow(): boolean {
-              // 按时间戳算窗口编号，不用定时器：定时器和请求处理是两条
-              // 独立的时间线，而且会让每个实例泄漏一个永不结束的 timer
+              // Derive the window number from the timestamp rather than using a timer: timers and request
+              // handling are two independent timelines, and a timer leaks one never-ending handle per instance
               const current = Math.floor(now() / options.windowMs);
               if (current !== windowId) {
                 windowId = current;
@@ -533,8 +533,8 @@ const stage1 = {
           return {
             allow(): boolean {
               const at = now();
-              // 清理放在最前面，被拒绝的请求也会走到这里。
-              // 只在放行路径上清理的话，持续被限流的客户端会让数组永远堆着
+              // Cleanup goes first so rejected requests reach it too.
+              // Cleaning only on the admit path lets a permanently throttled client pile up the array forever
               prune(at);
               if (stamps.length >= options.limit) return false;
               stamps.push(at);
@@ -556,7 +556,7 @@ const stage1 = {
           function roll(at: number): void {
             const id = Math.floor(at / options.windowMs);
             if (id === windowId) return;
-            // 只跨了一个窗口时上一个窗口还有参考价值，跨得更远就全清零
+            // One window back the previous count still means something; further back, zero everything out
             previous = id === windowId + 1 ? current : 0;
             current = 0;
             windowId = id;
@@ -568,8 +568,8 @@ const stage1 = {
               roll(at);
 
               const elapsed = (at % options.windowMs) / options.windowMs;
-              // 权重是「上一个窗口还有多少没滑出去」，即 1 - 已过去的比例。
-              // 写成 elapsed 会让行为完全颠倒
+              // The weight is how much of the previous window has not slid out yet, i.e. 1 - the elapsed fraction.
+              // Writing elapsed instead inverts the behaviour completely
               const estimated = previous * (1 - elapsed) + current;
               if (estimated >= options.limit) return false;
               current += 1;
@@ -856,9 +856,9 @@ const stage2 = {
       'src/rateLimiter.ts',
       code`
         export interface TokenBucketOptions {
-          /** 桶容量，也就是允许的突发大小 */
+          /** Bucket capacity, which is also the burst size allowed */
           capacity: number;
-          /** 每秒补充的令牌数 */
+          /** Tokens refilled per second */
           refillPerSecond: number;
         }
 
@@ -869,7 +869,7 @@ const stage2 = {
         }
 
         export function createTokenBucket(options: TokenBucketOptions): TokenBucket {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -883,8 +883,8 @@ const stage2 = {
         import { createTokenBucket } from '../src/rateLimiter';
         import { now, sleep } from '@lab/env';
 
-        describe('阶段2 · 令牌桶', () => {
-          it('初始满桶，允许一次突发', () => {
+        describe('Stage 2 · Token bucket', () => {
+          it('starts full and allows one burst', () => {
             const bucket = createTokenBucket({ capacity: 5, refillPerSecond: 10 });
             expect(bucket.available()).toBe(5);
             for (let index = 0; index < 5; index += 1) {
@@ -894,7 +894,7 @@ const stage2 = {
             expect(bucket.available()).toBe(0);
           });
 
-          it('按时间惰性补充', async () => {
+          it('refills lazily based on elapsed time', async () => {
             const bucket = createTokenBucket({ capacity: 5, refillPerSecond: 10 });
             for (let index = 0; index < 5; index += 1) bucket.tryAcquire();
 
@@ -904,14 +904,14 @@ const stage2 = {
             expect(bucket.available()).toBe(3);
           });
 
-          it('补充不会超过 capacity', async () => {
+          it('refilling never exceeds capacity', async () => {
             const bucket = createTokenBucket({ capacity: 5, refillPerSecond: 10 });
             bucket.tryAcquire(5);
             await sleep(10000);
             expect(bucket.available()).toBe(5);
           });
 
-          it('tryAcquire 不等待，acquire 才等待', async () => {
+          it('tryAcquire does not wait, acquire does', async () => {
             const bucket = createTokenBucket({ capacity: 1, refillPerSecond: 10 });
             expect(bucket.tryAcquire()).toBe(true);
             expect(bucket.tryAcquire()).toBe(false);
@@ -921,19 +921,19 @@ const stage2 = {
             expect(now() - startedAt).toBe(100);
           });
 
-          it('突发之后长期速率受控 [gate:rate]', async () => {
+          it('the long-run rate stays controlled after a burst [gate:rate]', async () => {
             const bucket = createTokenBucket({ capacity: 3, refillPerSecond: 10 });
             const startedAt = now();
             for (let index = 0; index < 6; index += 1) {
               await bucket.acquire();
             }
             const elapsed = now() - startedAt;
-            // 3 个突发 + 3 个按 100ms/个 补充
+            // A burst of 3 plus 3 more refilled at 100ms each
             expect(elapsed).toBeGreaterThanOrEqual(300);
             expect(elapsed).toBeLessThanOrEqual(360);
           });
 
-          it('可以一次取多个令牌', () => {
+          it('several tokens can be taken at once', () => {
             const bucket = createTokenBucket({ capacity: 5, refillPerSecond: 10 });
             expect(bucket.tryAcquire(3)).toBe(true);
             expect(bucket.available()).toBe(2);
@@ -941,43 +941,43 @@ const stage2 = {
             expect(bucket.available()).toBe(2);
           });
 
-          it('取多个令牌时要等到全部补够', async () => {
+          it('taking several tokens waits until all of them are refilled', async () => {
             const bucket = createTokenBucket({ capacity: 5, refillPerSecond: 10 });
             bucket.tryAcquire(5);
 
             const startedAt = now();
             await bucket.acquire(3);
-            // 3 个令牌 = 300ms
+            // 3 tokens = 300ms
             expect(now() - startedAt).toBeGreaterThanOrEqual(300);
           });
 
-          it('补充按经过的时间等比例计算，而不是固定加一个', async () => {
+          it('refill is proportional to elapsed time rather than a fixed increment', async () => {
             const bucket = createTokenBucket({ capacity: 10, refillPerSecond: 10 });
             bucket.tryAcquire(10);
 
             await sleep(500);
-            // 500ms * 10/s = 5 个
+            // 500ms * 10/s = 5 tokens
             expect(bucket.available()).toBe(5);
           });
 
-          it('内部保留小数，不会因为反复取整而系统性偏低', async () => {
+          it('the fraction is kept internally so repeated rounding does not bias it low', async () => {
             const bucket = createTokenBucket({ capacity: 10, refillPerSecond: 10 });
             bucket.tryAcquire(10);
 
-            // 分 10 次推进，每次 50ms（半个令牌）
+            // Advance in ten steps of 50ms each (half a token)
             for (let index = 0; index < 10; index += 1) {
               await sleep(50);
               bucket.available();
             }
-            // 累计 500ms 就应该是 5 个，取整丢掉小数的话只会剩 0
+            // 500ms in total should be 5 tokens; rounding the fraction away leaves 0
             expect(bucket.available()).toBe(5);
           });
 
-          it('没有流量时不需要任何定时器就能保持正确', async () => {
+          it('stays correct with no traffic and without any timer', async () => {
             const bucket = createTokenBucket({ capacity: 4, refillPerSecond: 10 });
             bucket.tryAcquire(4);
 
-            // 长时间完全不碰它
+            // Leave it completely untouched for a long time
             await sleep(5000);
             expect(bucket.available()).toBe(4);
           });
@@ -1046,7 +1046,7 @@ const stage2 = {
             async acquire(count = 1) {
               while (!take(count)) {
                 const missing = count - tokens;
-                // 直接睡到「刚好补够」的时刻，不做无谓的轮询
+                // Sleep straight to the moment it is refilled, with no pointless polling
                 await sleep(Math.max(1, Math.ceil((missing / options.refillPerSecond) * 1000)));
               }
             },
@@ -1290,7 +1290,7 @@ const stage3 = {
       'src/quota.ts',
       code`
         export interface QuotaRule {
-          /** 这条规则作用在哪个维度上，比如 'user' / 'ip' / 'route' */
+          /** Which dimension this rule applies to, e.g. 'user' / 'ip' / 'route' */
           dimension: string;
           limit: number;
           windowMs: number;
@@ -1298,18 +1298,18 @@ const stage3 = {
 
         export interface QuotaDecision {
           allowed: boolean;
-          /** 被拒时是哪个维度挡的，放行时为 null */
+          /** Which dimension rejected it, or null when admitted */
           limitedBy: string | null;
         }
 
         export interface QuotaLimiter {
           allow(dimensions: Record<string, string>): QuotaDecision;
-          /** 某个具体主体还剩多少额度 */
+          /** How much allowance a given subject has left */
           remaining(dimension: string, value: string): number;
         }
 
         export function createQuotaLimiter(rules: QuotaRule[]): QuotaLimiter {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -1332,58 +1332,58 @@ const stage3 = {
 
         const REQUEST = { user: 'alice', ip: '1.2.3.4', route: '/search' };
 
-        describe('阶段3 · 多维限流', () => {
-          it('所有维度都有额度时放行', () => {
+        describe('Stage 3 · Multi-dimensional limiting', () => {
+          it('admits when every dimension has allowance left', () => {
             const limiter = createQuotaLimiter(RULES);
             const decision = limiter.allow(REQUEST);
             expect(decision.allowed).toBe(true);
             expect(decision.limitedBy).toBeNull();
           });
 
-          it('最紧的那个维度决定上限', () => {
+          it('the tightest dimension sets the ceiling', () => {
             const limiter = createQuotaLimiter(RULES);
             let allowed = 0;
             for (let index = 0; index < 20; index += 1) {
               if (limiter.allow(REQUEST).allowed) allowed += 1;
             }
-            // ip 限 5，是三条里最紧的
+            // ip is capped at 5, the tightest of the three
             expect(allowed).toBe(5);
           });
 
-          it('limitedBy 指出是哪个维度挡的', () => {
+          it('limitedBy names the dimension that rejected it', () => {
             const limiter = createQuotaLimiter(RULES);
             for (let index = 0; index < 5; index += 1) limiter.allow(REQUEST);
             expect(limiter.allow(REQUEST).limitedBy).toBe('ip');
           });
 
-          it('不同主体的额度互相独立', () => {
+          it('allowances for different subjects are independent', () => {
             const limiter = createQuotaLimiter(RULES);
             for (let index = 0; index < 5; index += 1) {
               limiter.allow({ user: 'alice', ip: '1.1.1.1', route: '/search' });
             }
             expect(limiter.allow({ user: 'alice', ip: '1.1.1.1', route: '/search' }).allowed).toBe(false);
-            // 换一个 IP 就该放行
+            // A different IP should be admitted
             expect(limiter.allow({ user: 'alice', ip: '2.2.2.2', route: '/search' }).allowed).toBe(true);
           });
 
-          it('同一个维度的不同值互不干扰', () => {
+          it('different values within one dimension do not interfere', () => {
             const limiter = createQuotaLimiter([{ dimension: 'user', limit: 2, windowMs: 1000 }]);
             expect(limiter.allow({ user: 'alice' }).allowed).toBe(true);
             expect(limiter.allow({ user: 'alice' }).allowed).toBe(true);
             expect(limiter.allow({ user: 'alice' }).allowed).toBe(false);
-            // bob 不该被 alice 影响
+            // bob should not be affected by alice
             expect(limiter.allow({ user: 'bob' }).allowed).toBe(true);
           });
 
-          it('请求没带某个维度时该规则不生效', () => {
+          it('a rule does not apply when the request lacks that dimension', () => {
             const limiter = createQuotaLimiter([{ dimension: 'user', limit: 1, windowMs: 1000 }]);
-            // 匿名请求没有 user，这条规则对它不适用
+            // An anonymous request has no user, so this rule does not apply to it
             for (let index = 0; index < 10; index += 1) {
               expect(limiter.allow({ ip: '1.1.1.1' }).allowed).toBe(true);
             }
           });
 
-          it('remaining 反映剩余额度', () => {
+          it('remaining reflects the allowance left', () => {
             const limiter = createQuotaLimiter(RULES);
             expect(limiter.remaining('ip', '1.2.3.4')).toBe(5);
             limiter.allow(REQUEST);
@@ -1391,12 +1391,12 @@ const stage3 = {
             expect(limiter.remaining('ip', '1.2.3.4')).toBe(3);
           });
 
-          it('没有规则的维度剩余额度是无穷', () => {
+          it('a dimension with no rule has infinite allowance', () => {
             const limiter = createQuotaLimiter(RULES);
             expect(limiter.remaining('unknown', 'x')).toBe(Infinity);
           });
 
-          it('窗口过去之后额度恢复', async () => {
+          it('allowance recovers once the window passes', async () => {
             const limiter = createQuotaLimiter(RULES);
             for (let index = 0; index < 5; index += 1) limiter.allow(REQUEST);
             expect(limiter.allow(REQUEST).allowed).toBe(false);
@@ -1405,29 +1405,29 @@ const stage3 = {
             expect(limiter.allow(REQUEST).allowed).toBe(true);
           });
 
-          it('被拒绝的请求不消耗其他维度的额度 [gate:two-phase]', () => {
+          it('a rejected request does not consume the other dimensions [gate:two-phase]', () => {
             const limiter = createQuotaLimiter(RULES);
 
-            // 前 5 个把 ip 用满，同时消耗 5 个 user 额度
+            // The first 5 fill ip up, consuming 5 of user at the same time
             for (let index = 0; index < 5; index += 1) limiter.allow(REQUEST);
-            // 后 15 个全被 ip 挡住，不该动 user 的额度
+            // The next 15 are all blocked by ip and must not touch user
             for (let index = 0; index < 15; index += 1) limiter.allow(REQUEST);
 
             const left = limiter.remaining('user', 'alice');
             count('userRemaining', left);
 
-            // 边判断边扣减的实现在这里是 80
+            // An implementation that decrements while checking reports 80 here
             expect(left).toBe(95);
           });
 
-          it('被拒绝的请求也不消耗更靠后的维度', () => {
+          it('a rejected request does not consume later dimensions either', () => {
             const limiter = createQuotaLimiter(RULES);
             for (let index = 0; index < 5; index += 1) limiter.allow(REQUEST);
             for (let index = 0; index < 10; index += 1) limiter.allow(REQUEST);
             expect(limiter.remaining('route', '/search')).toBe(45);
           });
 
-          it('空规则表放行一切', () => {
+          it('an empty rule table admits everything', () => {
             const limiter = createQuotaLimiter([]);
             for (let index = 0; index < 50; index += 1) {
               expect(limiter.allow(REQUEST).allowed).toBe(true);
@@ -1476,7 +1476,7 @@ const stage3 = {
         }
 
         export function createQuotaLimiter(rules: QuotaRule[]): QuotaLimiter {
-          // 键是「维度 + 值」：只用维度当键的话，所有用户会共用一个计数器
+          // The key is dimension plus value: keying on the dimension alone puts every user on one counter
           const counters = new Map<string, Counter>();
 
           function keyOf(dimension: string, value: string): string {
@@ -1493,7 +1493,7 @@ const stage3 = {
             return fresh;
           }
 
-          /** 请求里没带这个维度时，规则对它不适用——不是把 undefined 当成一个值 */
+          /** When the request lacks this dimension the rule does not apply — undefined is not a value */
           function applicable(dimensions: Record<string, string>): QuotaRule[] {
             return rules.filter((rule) => typeof dimensions[rule.dimension] === 'string');
           }
@@ -1502,8 +1502,8 @@ const stage3 = {
             allow(dimensions: Record<string, string>): QuotaDecision {
               const matched = applicable(dimensions);
 
-              // 第一趟只判断，一条不过就直接返回，什么都不扣。
-              // 边判断边扣的话，被后面规则拒掉的请求已经烧掉了前面维度的配额
+              // First pass checks only, and returns on the first failure without decrementing anything.
+              // Decrementing while checking burns the earlier dimensions' quota for a request a later rule rejects
               for (const rule of matched) {
                 const counter = counterFor(rule, dimensions[rule.dimension]);
                 if (counter.used >= rule.limit) {
@@ -1511,7 +1511,7 @@ const stage3 = {
                 }
               }
 
-              // 第二趟统一扣减
+              // Second pass decrements them all together
               for (const rule of matched) {
                 counterFor(rule, dimensions[rule.dimension]).used += 1;
               }
@@ -1576,15 +1576,15 @@ const sharedStore = readonlyFile(
   'src/support/store.ts',
   code`
     /**
-     * 集中式配额存储（只读，平台提供）
+     * Central quota store (read-only, provided by the platform)
      *
-     * 模拟 Redis 之类的共享计数器：所有实例通过它协调。
-     * 它记录被调用了多少次——这一关的门槛量的正是「协调成本」。
+     * Stands in for a shared counter like Redis: every instance coordinates through it.
+     * It records how often it was called — which is exactly the coordination cost this stage gates on.
      */
     export interface SharedStore {
-      /** 从全局配额里取走至多 amount 个，返回实际拿到多少 */
+      /** Take up to amount from the global quota and return how much was actually granted */
       take(key: string, amount: number): number;
-      /** 被调用了多少次，用来衡量协调开销 */
+      /** How many times it was called, as a measure of coordination overhead */
       calls(): number;
       remaining(key: string): number;
     }
@@ -1876,22 +1876,22 @@ const stage4 = {
         import type { SharedStore } from './support/store';
 
         export interface LeaseOptions {
-          /** 全局配额的键，多个实例用同一个 */
+          /** The global quota key, shared by every instance */
           key: string;
-          /** 每次向中心存储批发多少 */
+          /** How much to lease from the central store at a time */
           leaseSize: number;
-          /** 批发失败后隔多久才再问一次，默认 100ms */
+          /** How long to wait before asking again after a failed lease; defaults to 100ms */
           retryAfterMs?: number;
         }
 
         export interface LeasedLimiter {
           allow(): boolean;
-          /** 本地还剩多少批发来的额度 */
+          /** How much leased allowance is left locally */
           localBalance(): number;
         }
 
         export function createLeasedLimiter(store: SharedStore, options: LeaseOptions): LeasedLimiter {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -1909,8 +1909,8 @@ const stage4 = {
 
         const KEY = 'search';
 
-        describe('阶段4 · 租约式分布式限流', () => {
-          it('第一次调用会去批发一批', () => {
+        describe('Stage 4 · Lease-based distributed limiting', () => {
+          it('the first call goes and leases a batch', () => {
             const store = createSharedStore({ limit: 100 });
             const limiter = createLeasedLimiter(store, { key: KEY, leaseSize: 10 });
 
@@ -1919,7 +1919,7 @@ const stage4 = {
             expect(limiter.localBalance()).toBe(9);
           });
 
-          it('本地有余额时不碰 store', () => {
+          it('does not touch the store while local allowance remains', () => {
             const store = createSharedStore({ limit: 100 });
             const limiter = createLeasedLimiter(store, { key: KEY, leaseSize: 10 });
 
@@ -1927,7 +1927,7 @@ const stage4 = {
             expect(store.calls()).toBe(1);
           });
 
-          it('余额用完才批发下一批', () => {
+          it('leases the next batch only once the local balance runs out', () => {
             const store = createSharedStore({ limit: 100 });
             const limiter = createLeasedLimiter(store, { key: KEY, leaseSize: 10 });
 
@@ -1935,7 +1935,7 @@ const stage4 = {
             expect(store.calls()).toBe(2);
           });
 
-          it('全局额度用完之后拒绝', () => {
+          it('rejects once the global quota is exhausted', () => {
             const store = createSharedStore({ limit: 20 });
             const limiter = createLeasedLimiter(store, { key: KEY, leaseSize: 10 });
 
@@ -1944,18 +1944,18 @@ const stage4 = {
             expect(allowed).toBe(20);
           });
 
-          it('store 给不出额度时不会误以为拿到了', () => {
+          it('does not mistake an empty grant from the store for a successful lease', () => {
             const store = createSharedStore({ limit: 5 });
             const limiter = createLeasedLimiter(store, { key: KEY, leaseSize: 10 });
 
-            // 第一次只能批发到 5
+            // Only 5 could be leased the first time
             for (let index = 0; index < 5; index += 1) expect(limiter.allow()).toBe(true);
-            // take 返回 0，必须拒绝
+            // take returned 0, so it must reject
             expect(limiter.allow()).toBe(false);
             expect(limiter.localBalance()).toBe(0);
           });
 
-          it('不同的键互不影响', () => {
+          it('different keys do not affect each other', () => {
             const store = createSharedStore({ limit: 10 });
             const search = createLeasedLimiter(store, { key: 'search', leaseSize: 10 });
             const upload = createLeasedLimiter(store, { key: 'upload', leaseSize: 10 });
@@ -1965,14 +1965,14 @@ const stage4 = {
             expect(upload.allow()).toBe(true);
           });
 
-          it('四个实例合计不超过全局限额 [gate:global]', () => {
+          it('four instances together stay under the global limit [gate:global]', () => {
             const store = createSharedStore({ limit: 100 });
             const instances = [1, 2, 3, 4].map(() =>
               createLeasedLimiter(store, { key: KEY, leaseSize: 10 })
             );
 
             let admitted = 0;
-            // 流量极不均匀：第一个实例拿走大部分
+            // Wildly uneven traffic: the first instance takes most of it
             for (let round = 0; round < 200; round += 1) {
               const instance = round < 150 ? instances[0] : instances[round % 4];
               if (instance.allow()) admitted += 1;
@@ -1982,21 +1982,21 @@ const stage4 = {
             expect(admitted).toBeLessThanOrEqual(100);
           });
 
-          it('流量不均时也能用满全局额度', () => {
+          it('the global quota is fully used even when traffic is uneven', () => {
             const store = createSharedStore({ limit: 100 });
             const instances = [1, 2, 3, 4].map(() =>
               createLeasedLimiter(store, { key: KEY, leaseSize: 10 })
             );
 
             let admitted = 0;
-            // 全部打到一个实例上：按「各限 25」的分法这里只能放 25
+            // Everything hits one instance: a fixed 25-each split would admit only 25 here
             for (let round = 0; round < 200; round += 1) {
               if (instances[0].allow()) admitted += 1;
             }
             expect(admitted).toBe(100);
           });
 
-          it('协调次数远少于请求数 [gate:coordination]', () => {
+          it('coordination happens far less often than requests arrive [gate:coordination]', () => {
             const store = createSharedStore({ limit: 100 });
             const instances = [1, 2, 3, 4].map(() =>
               createLeasedLimiter(store, { key: KEY, leaseSize: 10 })
@@ -2007,25 +2007,25 @@ const stage4 = {
             }
 
             count('storeCalls', store.calls());
-            // 100 个额度、每批 10 个 = 10 次，加上每个实例最后一次徒劳的申请
+            // 100 of quota at 10 per batch = 10 calls, plus one futile final request per instance
             expect(store.calls()).toBeLessThanOrEqual(14);
           });
 
-          it('额度耗尽后不再每个请求都打 store', () => {
+          it('stops hitting the store on every request once the quota is gone', () => {
             const store = createSharedStore({ limit: 10 });
             const limiter = createLeasedLimiter(store, { key: KEY, leaseSize: 10 });
 
             for (let index = 0; index < 10; index += 1) limiter.allow();
             const afterLease = store.calls();
 
-            // 额度已经用完，再打 50 个请求
+            // The quota is already spent; send 50 more requests
             for (let index = 0; index < 50; index += 1) expect(limiter.allow()).toBe(false);
 
-            // 只该多出一次「发现用完了」的调用，而不是 50 次
+            // There should be exactly one extra call that discovers it is exhausted, not 50
             expect(store.calls() - afterLease).toBeLessThanOrEqual(1);
           });
 
-          it('冷却期过去之后会重新尝试批发', async () => {
+          it('tries to lease again once the cooldown has passed', async () => {
             const store = createSharedStore({ limit: 10 });
             const limiter = createLeasedLimiter(store, { key: KEY, leaseSize: 10, retryAfterMs: 50 });
 
@@ -2037,7 +2037,7 @@ const stage4 = {
             expect(store.calls()).toBe(afterExhaustion + 1);
           });
 
-          it('localBalance 反映本地剩余', () => {
+          it('localBalance reflects what is left locally', () => {
             const store = createSharedStore({ limit: 100 });
             const limiter = createLeasedLimiter(store, { key: KEY, leaseSize: 8 });
             expect(limiter.localBalance()).toBe(0);
@@ -2087,8 +2087,8 @@ const stage4 = {
         }
 
         export function createLeasedLimiter(store: SharedStore, options: LeaseOptions): LeasedLimiter {
-          // 本地状态就这两个数字。它们把「每请求一次协调」
-          // 变成了「每 leaseSize 个请求一次协调」
+          // Local state is just these two numbers. They turn one coordination per request
+          // into one coordination per leaseSize requests
           let balance = 0;
           let nextAttemptAt = 0;
           const retryAfterMs = options.retryAfterMs ?? 100;
@@ -2096,13 +2096,13 @@ const stage4 = {
           return {
             allow(): boolean {
               if (balance <= 0) {
-                // 全局额度耗尽之后还每个请求问一次，就是在系统已经过载时
-                // 再给中心存储加一份满负荷流量。冷却期内直接拒绝
+                // Asking once per request after the global quota is gone piles a second full load onto
+                // the central store exactly when the system is already overloaded. Reject outright during the cooldown
                 if (now() < nextAttemptAt) return false;
 
                 const granted = store.take(options.key, options.leaseSize);
-                // take 返回 0 表示全局额度已经用完。
-                // 不检查而默认拿到了 leaseSize，全局限额就彻底失效了
+                // take returning 0 means the global quota is exhausted.
+                // Not checking, and assuming leaseSize was granted, defeats the global limit entirely
                 if (granted <= 0) {
                   nextAttemptAt = now() + retryAfterMs;
                   return false;
@@ -2424,11 +2424,11 @@ const stage5 = {
         export type CircuitState = 'closed' | 'open' | 'half-open';
 
         export interface CircuitBreakerOptions {
-          /** 连续失败多少次后熔断 */
+          /** How many consecutive failures trip the breaker */
           failureThreshold: number;
-          /** 熔断多久之后允许探针 */
+          /** How long the breaker stays open before a probe is allowed */
           resetTimeoutMs: number;
-          /** 半开状态最多放行几个探针，默认 1 */
+          /** How many probes half-open admits at most; defaults to 1 */
           halfOpenMax?: number;
         }
 
@@ -2445,7 +2445,7 @@ const stage5 = {
         }
 
         export function createCircuitBreaker(options: CircuitBreakerOptions): CircuitBreaker {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -2464,8 +2464,8 @@ const stage5 = {
           throw new Error('upstream exploded');
         };
 
-        describe('阶段5 · 熔断器', () => {
-          it('连续失败达到阈值后打开', async () => {
+        describe('Stage 5 · Circuit breaker', () => {
+          it('opens once consecutive failures reach the threshold', async () => {
             const breaker = createCircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 500 });
             expect(breaker.state()).toBe('closed');
 
@@ -2476,7 +2476,7 @@ const stage5 = {
             expect(breaker.state()).toBe('open');
           });
 
-          it('成功会清零失败计数', async () => {
+          it('a success resets the failure count', async () => {
             const breaker = createCircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 500 });
             await expect(async () => breaker.exec(failing)).rejects.toThrow();
             await expect(async () => breaker.exec(failing)).rejects.toThrow();
@@ -2485,14 +2485,14 @@ const stage5 = {
             expect(breaker.state()).toBe('closed');
           });
 
-          it('打开期间不再调用下游 [gate:fastfail]', async () => {
+          it('does not call downstream while open [gate:fastfail]', async () => {
             const breaker = createCircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 1000 });
 
             for (let index = 0; index < 6; index += 1) {
               try {
                 await breaker.exec(() => request('/api/down'));
               } catch (error) {
-                // 前 2 次是真实失败，之后应该是 CircuitOpenError
+                // The first 2 are real failures; after that it should be CircuitOpenError
                 if (index >= 2) expect(error).toBeInstanceOf(CircuitOpenError);
               }
             }
@@ -2500,7 +2500,7 @@ const stage5 = {
             expect(getMetrics().requests.total).toBe(2);
           });
 
-          it('超时后进入半开，探针成功则闭合', async () => {
+          it('goes half-open after the timeout and closes when the probe succeeds', async () => {
             const breaker = createCircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 300 });
             await expect(async () => breaker.exec(failing)).rejects.toThrow();
             await expect(async () => breaker.exec(failing)).rejects.toThrow();
@@ -2514,7 +2514,7 @@ const stage5 = {
             expect(breaker.state()).toBe('closed');
           });
 
-          it('半开探针失败立刻重新打开', async () => {
+          it('a failed half-open probe reopens it immediately', async () => {
             const breaker = createCircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 300 });
             await expect(async () => breaker.exec(failing)).rejects.toThrow();
             await expect(async () => breaker.exec(failing)).rejects.toThrow();
@@ -2526,7 +2526,7 @@ const stage5 = {
             expect(breaker.state()).toBe('open');
           });
 
-          it('探针失败后要重新等满一个 resetTimeout', async () => {
+          it('after a failed probe a full resetTimeout has to elapse again', async () => {
             const breaker = createCircuitBreaker({ failureThreshold: 1, resetTimeoutMs: 300 });
             await expect(async () => breaker.exec(failing)).rejects.toThrow();
 
@@ -2534,7 +2534,7 @@ const stage5 = {
             await expect(async () => breaker.exec(failing)).rejects.toThrow();
             expect(breaker.state()).toBe('open');
 
-            // 还没到下一个窗口
+            // Not yet into the next window
             await sleep(200);
             expect(breaker.state()).toBe('open');
 
@@ -2542,7 +2542,7 @@ const stage5 = {
             expect(breaker.state()).toBe('half-open');
           });
 
-          it('半开时只放行 halfOpenMax 个探针', async () => {
+          it('half-open admits only halfOpenMax probes', async () => {
             const breaker = createCircuitBreaker({
               failureThreshold: 1,
               resetTimeoutMs: 100,
@@ -2559,13 +2559,13 @@ const stage5 = {
               return 'ok';
             };
 
-            // 两个请求同时进来，只有一个能当探针
+            // Two requests arrive together and only one gets to be the probe
             const results = await Promise.allSettled([breaker.exec(slowProbe), breaker.exec(slowProbe)]);
             expect(probes).toBe(1);
             expect(results.filter((item) => item.status === 'rejected')).toHaveLength(1);
           });
 
-          it('成功后计数清零，可以再撑满一个阈值', async () => {
+          it('the count resets on success, so a full threshold can be absorbed again', async () => {
             const breaker = createCircuitBreaker({ failureThreshold: 3, resetTimeoutMs: 500 });
 
             for (let round = 0; round < 3; round += 1) {
@@ -2576,22 +2576,22 @@ const stage5 = {
             }
           });
 
-          it('闭合状态下正常返回下游的结果', async () => {
+          it("returns downstream's result normally while closed", async () => {
             const breaker = createCircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 100 });
             const response = await breaker.exec(() => request('/api/ok'));
             expect(response.status).toBe(200);
             expect(getMetrics().requests.total).toBe(1);
           });
 
-          it('下游恢复后，探针成功会让流量重新放行', async () => {
+          it('once downstream recovers, a successful probe lets traffic through again', async () => {
             const breaker = createCircuitBreaker({ failureThreshold: 2, resetTimeoutMs: 200 });
 
-            // /api/recovering 前两次失败，之后成功
+            // /api/recovering fails twice and then succeeds
             for (let index = 0; index < 2; index += 1) {
               try {
                 await breaker.exec(() => request('/api/recovering'));
               } catch (error) {
-                // 预期内
+                // Expected
               }
             }
             expect(breaker.state()).toBe('open');
@@ -2649,7 +2649,7 @@ const stage5 = {
           let openedAt = 0;
           let probes = 0;
 
-          // 读状态顺便完成 open -> half-open 的时间驱动转换
+          // Reading the state also performs the time-driven open -> half-open transition
           function state(): CircuitState {
             if (current === 'open' && now() - openedAt >= options.resetTimeoutMs) {
               current = 'half-open';
@@ -2983,16 +2983,16 @@ const stage6 = {
 
         export interface BalancerOptions {
           strategy: Strategy;
-          /** 连续失败多少次判定为不健康 */
+          /** How many consecutive failures mark a node unhealthy */
           failureThreshold: number;
-          /** 过多久放它回来试探一次 */
+          /** How long before it is let back in for a probe */
           recoverAfterMs: number;
-          /** consistent-hash 时每个物理节点放多少虚拟节点，默认 64 */
+          /** Virtual nodes per physical node for consistent hashing; defaults to 64 */
           virtualNodes?: number;
         }
 
         export interface Balancer {
-          /** consistent-hash 策略需要传 key；没有健康节点时返回 null */
+          /** The consistent-hash strategy needs a key; returns null when no node is healthy */
           pick(key?: string): Node | null;
           markStart(id: string): void;
           markEnd(id: string, ok: boolean): void;
@@ -3001,7 +3001,7 @@ const stage6 = {
         }
 
         export function createBalancer(nodes: Node[], options: BalancerOptions): Balancer {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -3031,15 +3031,15 @@ const stage6 = {
           return list;
         }
 
-        describe('阶段6 · 选择策略', () => {
-          it('轮询依次选中每个节点', () => {
+        describe('Stage 6 · Selection strategies', () => {
+          it('round robin picks each node in turn', () => {
             const balancer = createBalancer(NODES, { strategy: 'round-robin', ...HEALTH });
             const picked = [0, 1, 2, 3, 4].map(() => balancer.pick()!.id);
             expect(picked.slice(0, 4).sort()).toEqual(['a', 'b', 'c', 'd']);
             expect(picked[4]).toBe(picked[0]);
           });
 
-          it('最少连接选中在飞最少的那个', () => {
+          it('least-connections picks the one with the fewest in flight', () => {
             const balancer = createBalancer(NODES, { strategy: 'least-connections', ...HEALTH });
             balancer.markStart('a');
             balancer.markStart('a');
@@ -3049,7 +3049,7 @@ const stage6 = {
             expect(picked === 'c' || picked === 'd').toBe(true);
           });
 
-          it('请求结束后计数要减回去', () => {
+          it('the count comes back down when a request finishes', () => {
             const balancer = createBalancer(NODES, { strategy: 'least-connections', ...HEALTH });
             balancer.markStart('a');
             expect(balancer.inFlight('a')).toBe(1);
@@ -3057,14 +3057,14 @@ const stage6 = {
             expect(balancer.inFlight('a')).toBe(0);
           });
 
-          it('失败的请求同样要减计数', () => {
+          it('a failed request decrements the count too', () => {
             const balancer = createBalancer(NODES, { strategy: 'least-connections', ...HEALTH });
             balancer.markStart('a');
             balancer.markEnd('a', false);
             expect(balancer.inFlight('a')).toBe(0);
           });
 
-          it('一致性哈希：同一个 key 稳定落到同一个节点', () => {
+          it('consistent hashing: one key lands on the same node every time', () => {
             const balancer = createBalancer(NODES, { strategy: 'consistent-hash', ...HEALTH });
             const first = balancer.pick('user-42')!.id;
             for (let index = 0; index < 20; index += 1) {
@@ -3072,7 +3072,7 @@ const stage6 = {
             }
           });
 
-          it('一致性哈希分布大致均匀', () => {
+          it('consistent hashing distributes roughly evenly', () => {
             const balancer = createBalancer(NODES, { strategy: 'consistent-hash', ...HEALTH });
             const tally: Record<string, number> = {};
             for (const key of keys(1000)) {
@@ -3085,14 +3085,14 @@ const stage6 = {
           });
         });
 
-        describe('阶段6 · 健康管理', () => {
-          it('连续失败达到阈值后被摘掉', () => {
+        describe('Stage 6 · Health management', () => {
+          it('a node is pulled once consecutive failures reach the threshold', () => {
             const balancer = createBalancer(NODES, { strategy: 'round-robin', ...HEALTH });
             for (let index = 0; index < 3; index += 1) balancer.markEnd('a', false);
             expect(balancer.healthy().sort()).toEqual(['b', 'c', 'd']);
           });
 
-          it('中途成功会重置连续失败计数', () => {
+          it('a success in between resets the consecutive failure count', () => {
             const balancer = createBalancer(NODES, { strategy: 'round-robin', ...HEALTH });
             balancer.markEnd('a', false);
             balancer.markEnd('a', false);
@@ -3101,7 +3101,7 @@ const stage6 = {
             expect(balancer.healthy()).toContain('a');
           });
 
-          it('不健康的节点收到零流量 [gate:dead-node]', () => {
+          it('an unhealthy node receives zero traffic [gate:dead-node]', () => {
             const balancer = createBalancer(NODES, { strategy: 'round-robin', ...HEALTH });
             for (let index = 0; index < 3; index += 1) balancer.markEnd('a', false);
 
@@ -3113,7 +3113,7 @@ const stage6 = {
             expect(deadPicks).toBe(0);
           });
 
-          it('一致性哈希也要绕开不健康的节点', () => {
+          it('consistent hashing routes around unhealthy nodes too', () => {
             const balancer = createBalancer(NODES, { strategy: 'consistent-hash', ...HEALTH });
             for (let index = 0; index < 3; index += 1) balancer.markEnd('a', false);
 
@@ -3122,7 +3122,7 @@ const stage6 = {
             }
           });
 
-          it('恢复期过后放回来试探', async () => {
+          it('a node is let back in for a probe after the recovery period', async () => {
             const balancer = createBalancer(NODES, { strategy: 'round-robin', ...HEALTH });
             for (let index = 0; index < 3; index += 1) balancer.markEnd('a', false);
             expect(balancer.healthy()).not.toContain('a');
@@ -3131,7 +3131,7 @@ const stage6 = {
             expect(balancer.healthy()).toContain('a');
           });
 
-          it('全部节点都不健康时返回 null', () => {
+          it('returns null when every node is unhealthy', () => {
             const balancer = createBalancer(NODES, { strategy: 'round-robin', ...HEALTH });
             for (const node of NODES) {
               for (let index = 0; index < 3; index += 1) balancer.markEnd(node.id, false);
@@ -3139,12 +3139,12 @@ const stage6 = {
             expect(balancer.pick()).toBeNull();
           });
 
-          it('摘掉一个节点只重映射它那一份 key [gate:remap]', () => {
+          it('pulling one node remaps only that node\u2019s share of the keys [gate:remap]', () => {
             const before = createBalancer(NODES, { strategy: 'consistent-hash', ...HEALTH });
             const sample = keys(1000);
             const original = sample.map((key) => before.pick(key)!.id);
 
-            // 摘掉 a
+            // Pull a
             for (let index = 0; index < 3; index += 1) before.markEnd('a', false);
             const after = sample.map((key) => before.pick(key)!.id);
 
@@ -3155,7 +3155,7 @@ const stage6 = {
             const percent = Math.round((moved / sample.length) * 100);
             count('remappedPercent', percent);
 
-            // hash % nodeCount 的实现在这里是 75% 左右
+            // A hash % nodeCount implementation lands around 75% here
             expect(percent).toBeLessThanOrEqual(40);
           });
         });
@@ -3218,7 +3218,7 @@ const stage6 = {
           downUntil: number;
         }
 
-        /** FNV-1a：够快、够均匀，不需要密码学强度 */
+        /** FNV-1a: fast enough and even enough, with no need for cryptographic strength */
         function hash(text: string): number {
           let value = 2166136261;
           for (let index = 0; index < text.length; index += 1) {
@@ -3234,7 +3234,7 @@ const stage6 = {
             states.set(node.id, { node, inFlight: 0, consecutiveFailures: 0, downUntil: 0 });
           }
 
-          // 哈希环：每个物理节点放很多虚拟节点，否则四个节点的分布会非常不均
+          // The hash ring: many virtual nodes per physical node, otherwise four nodes spread very unevenly
           const virtualCount = options.virtualNodes ?? 64;
           const ring: Array<{ hash: number; id: string }> = [];
           for (const node of nodes) {
@@ -3245,7 +3245,7 @@ const stage6 = {
           ring.sort((left, right) => left.hash - right.hash);
 
           function isHealthy(state: NodeState): boolean {
-            // 恢复期过了就放回来试探，不需要额外的定时器
+            // Let it back in for a probe once the recovery period passes, with no extra timer needed
             return state.downUntil === 0 || now() >= state.downUntil;
           }
 
@@ -3269,8 +3269,8 @@ const stage6 = {
               if (options.strategy === 'consistent-hash' && typeof key === 'string') {
                 const live = new Set(available.map((state) => state.node.id));
                 const target = hash(key);
-                // 沿着环往前找第一个健康的点，绕回开头。
-                // 用 hash % nodes.length 的话，节点数一变几乎所有 key 都会改落点
+                // Walk forward around the ring to the first healthy point, wrapping to the start.
+                // With hash % nodes.length, changing the node count moves almost every key
                 for (let step = 0; step < ring.length; step += 1) {
                   const point = ring[(binarySearch(ring, target) + step) % ring.length];
                   if (live.has(point.id)) return (states.get(point.id) as NodeState).node;
@@ -3291,8 +3291,8 @@ const stage6 = {
             markEnd(id: string, ok: boolean): void {
               const state = states.get(id);
               if (!state) return;
-              // 失败路径同样要减：只加不减会让最先被选中的节点
-              // 很快「看起来最忙」，之后所有流量都绕开它
+              // The failure path has to decrement too: incrementing without decrementing soon makes
+              // the first node picked look busiest, after which all traffic routes around it
               state.inFlight = Math.max(0, state.inFlight - 1);
 
               if (ok) {
@@ -3319,7 +3319,7 @@ const stage6 = {
           };
         }
 
-        /** 环上找第一个 hash 不小于 target 的点，找不到就绕回 0 */
+        /** Find the first point on the ring whose hash is not below target, wrapping to 0 */
         function binarySearch(ring: Array<{ hash: number; id: string }>, target: number): number {
           let low = 0;
           let high = ring.length - 1;
@@ -3621,9 +3621,9 @@ const stage7 = {
         }
 
         export interface BulkheadOptions {
-          /** 每个池的并发上限 */
+          /** Concurrency ceiling for each pool */
           pools: Record<string, number>;
-          /** 没登记的池用这个上限，默认不限 */
+          /** Ceiling for unregistered pools; unlimited by default */
           defaultLimit?: number;
         }
 
@@ -3634,7 +3634,7 @@ const stage7 = {
         }
 
         export function createBulkhead(options: BulkheadOptions): Bulkhead {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -3651,8 +3651,8 @@ const stage7 = {
 
         const POOLS = { pools: { slow: 2, fast: 4 } };
 
-        describe('阶段7 · 舱壁隔离', () => {
-          it('池没满时正常执行', async () => {
+        describe('Stage 7 · Bulkhead isolation', () => {
+          it('runs normally while the pool has room', async () => {
             const bulkhead = createBulkhead(POOLS);
             const value = await bulkhead.run('fast', async () => {
               await sleep(10);
@@ -3661,7 +3661,7 @@ const stage7 = {
             expect(value).toBe('ok');
           });
 
-          it('池满时立刻抛 BulkheadFullError', async () => {
+          it('throws BulkheadFullError immediately when the pool is full', async () => {
             const bulkhead = createBulkhead(POOLS);
             const held = [
               bulkhead.run('slow', () => sleep(500)),
@@ -3680,7 +3680,7 @@ const stage7 = {
             await Promise.all(held);
           });
 
-          it('拒绝是立刻的，不让调用方等', async () => {
+          it('rejection is immediate and does not make the caller wait', async () => {
             const bulkhead = createBulkhead(POOLS);
             const held = [
               bulkhead.run('slow', () => sleep(500)),
@@ -3692,13 +3692,13 @@ const stage7 = {
             try {
               await bulkhead.run('slow', () => sleep(10));
             } catch (caught) {
-              // 预期之内
+              // Expected
             }
             expect(now() - before).toBe(0);
             await Promise.all(held);
           });
 
-          it('任务结束后释放槽位', async () => {
+          it('releases the slot when the task finishes', async () => {
             const bulkhead = createBulkhead(POOLS);
             await bulkhead.run('slow', () => sleep(10));
             expect(bulkhead.inFlight('slow')).toBe(0);
@@ -3706,7 +3706,7 @@ const stage7 = {
             expect(bulkhead.inFlight('slow')).toBe(0);
           });
 
-          it('任务抛错也要释放槽位', async () => {
+          it('releases the slot when the task throws too', async () => {
             const bulkhead = createBulkhead(POOLS);
             for (let index = 0; index < 5; index += 1) {
               try {
@@ -3714,15 +3714,15 @@ const stage7 = {
                   throw new Error('downstream exploded');
                 });
               } catch (caught) {
-                // 预期之内
+                // Expected
               }
             }
-            // 五次失败之后这个池必须还能用
+            // The pool must still be usable after five failures
             expect(bulkhead.inFlight('slow')).toBe(0);
             expect(await bulkhead.run('slow', async () => 'still works')).toBe('still works');
           });
 
-          it('inFlight 反映在飞数量', async () => {
+          it('inFlight reflects how many are in flight', async () => {
             const bulkhead = createBulkhead(POOLS);
             const held = bulkhead.run('slow', () => sleep(200));
             await sleep(1);
@@ -3731,7 +3731,7 @@ const stage7 = {
             expect(bulkhead.inFlight('slow')).toBe(0);
           });
 
-          it('没登记的池默认不限', async () => {
+          it('an unregistered pool is unlimited by default', async () => {
             const bulkhead = createBulkhead(POOLS);
             const tasks: Array<Promise<unknown>> = [];
             for (let index = 0; index < 20; index += 1) tasks.push(bulkhead.run('other', () => sleep(10)));
@@ -3739,7 +3739,7 @@ const stage7 = {
             expect(bulkhead.rejected('other')).toBe(0);
           });
 
-          it('defaultLimit 对没登记的池生效', async () => {
+          it('defaultLimit applies to unregistered pools', async () => {
             const bulkhead = createBulkhead({ pools: { slow: 2 }, defaultLimit: 1 });
             const held = bulkhead.run('other', () => sleep(200));
             await sleep(1);
@@ -3754,10 +3754,10 @@ const stage7 = {
             await held;
           });
 
-          it('一个池被占满不影响另一个池 [gate:isolation]', async () => {
+          it('one pool filling up does not affect another [gate:isolation]', async () => {
             const bulkhead = createBulkhead(POOLS);
 
-            // 两个永远慢的请求把 slow 池占满
+            // Two permanently slow requests fill the slow pool
             const stuck = [
               bulkhead.run('slow', () => sleep(5000)),
               bulkhead.run('slow', () => sleep(5000)),
@@ -3765,7 +3765,7 @@ const stage7 = {
             await sleep(1);
             expect(bulkhead.inFlight('slow')).toBe(2);
 
-            // fast 池必须完全不受影响
+            // The fast pool must be entirely unaffected
             const startedAt = now();
             const results = await Promise.all([
               bulkhead.run('fast', async () => {
@@ -3781,13 +3781,13 @@ const stage7 = {
             count('fastPoolLatencyMs', elapsed);
 
             expect(results).toEqual([1, 2]);
-            // 共用一个池的实现在这里要等 5000ms
+            // An implementation sharing one pool would wait 5000ms here
             expect(elapsed).toBe(50);
 
             await Promise.all(stuck);
           });
 
-          it('慢池被拒的请求不消耗快池的额度', async () => {
+          it('requests rejected by the slow pool do not consume the fast one', async () => {
             const bulkhead = createBulkhead(POOLS);
             const stuck = [
               bulkhead.run('slow', () => sleep(1000)),
@@ -3799,7 +3799,7 @@ const stage7 = {
               try {
                 await bulkhead.run('slow', () => sleep(10));
               } catch (caught) {
-                // 预期之内
+                // Expected
               }
             }
             expect(bulkhead.inFlight('fast')).toBe(0);
@@ -3866,8 +3866,8 @@ const stage7 = {
             async run<T>(pool: string, task: () => Promise<T>): Promise<T> {
               if (get(running, pool) >= limitOf(pool)) {
                 refused.set(pool, get(refused, pool) + 1);
-                // 直接抛，不排队：排队会把「慢下游最多占我多少资源」
-                // 这个上界变成时间上的无限
+                // Throw rather than queue: queuing turns the bound on how much a slow downstream
+                // can take from you into no bound at all in the time dimension
                 throw new BulkheadFullError(pool);
               }
 
@@ -3875,8 +3875,8 @@ const stage7 = {
               try {
                 return await task();
               } finally {
-                // finally 而不是成功分支：任务抛错时不还槽位的话，
-                // 几次失败就能把这个池的可用并发降到 0
+                // finally rather than the success branch: not returning the slot when a task throws
+                // drives this pool's usable concurrency to 0 after a handful of failures
                 running.set(pool, Math.max(0, get(running, pool) - 1));
               }
             },
@@ -4174,24 +4174,24 @@ const stage8 = {
       'src/retryBudget.ts',
       code`
         export interface RetryBudgetOptions {
-          /** 重试数占正常请求数的上限比例 */
+          /** Ceiling on retries as a fraction of normal requests */
           ratio: number;
-          /** 每个窗口至少允许几次重试，低流量时靠它兜底 */
+          /** Minimum retries allowed per window, as a floor for low traffic */
           minPerWindow?: number;
           windowMs: number;
         }
 
         export interface RetryBudget {
-          /** 记录一次原始请求（不含重试） */
+          /** Record one original request (retries excluded) */
           recordRequest(): void;
           canRetry(): boolean;
           recordRetry(): void;
-          /** 当前窗口里重试占请求的比例 */
+          /** The current window's ratio of retries to requests */
           usedRatio(): number;
         }
 
         export function createRetryBudget(options: RetryBudgetOptions): RetryBudget {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -4208,13 +4208,13 @@ const stage8 = {
 
         const OPTIONS = { ratio: 0.1, minPerWindow: 3, windowMs: 1000 };
 
-        describe('阶段8 · 重试预算', () => {
-          it('低流量时靠 minPerWindow 兜底', () => {
+        describe('Stage 8 · Retry budget', () => {
+          it('minPerWindow provides the floor at low traffic', () => {
             const budget = createRetryBudget(OPTIONS);
             budget.recordRequest();
             budget.recordRequest();
 
-            // 2 × 0.1 向下取整是 0，但 minPerWindow 是 3
+            // 2 × 0.1 floors to 0, but minPerWindow is 3
             let allowed = 0;
             for (let index = 0; index < 10; index += 1) {
               if (budget.canRetry()) {
@@ -4225,7 +4225,7 @@ const stage8 = {
             expect(allowed).toBe(3);
           });
 
-          it('高流量时按比例放开', () => {
+          it('scales proportionally at high traffic', () => {
             const budget = createRetryBudget(OPTIONS);
             for (let index = 0; index < 200; index += 1) budget.recordRequest();
 
@@ -4239,14 +4239,14 @@ const stage8 = {
             expect(allowed).toBe(20);
           });
 
-          it('预算用完之后 canRetry 返回 false', () => {
+          it('canRetry returns false once the budget is spent', () => {
             const budget = createRetryBudget(OPTIONS);
             for (let index = 0; index < 100; index += 1) budget.recordRequest();
             for (let index = 0; index < 10; index += 1) budget.recordRetry();
             expect(budget.canRetry()).toBe(false);
           });
 
-          it('重试不计入分母', () => {
+          it('retries do not count towards the denominator', () => {
             const budget = createRetryBudget({ ratio: 0.5, minPerWindow: 0, windowMs: 1000 });
             for (let index = 0; index < 10; index += 1) budget.recordRequest();
 
@@ -4257,22 +4257,22 @@ const stage8 = {
                 allowed += 1;
               }
             }
-            // 把重试计进分母的实现会一直自我供养，远超 5
+            // An implementation counting retries in the denominator feeds itself and goes well past 5
             expect(allowed).toBe(5);
           });
 
-          it('usedRatio 反映当前占比', () => {
+          it('usedRatio reflects the current share', () => {
             const budget = createRetryBudget(OPTIONS);
             for (let index = 0; index < 100; index += 1) budget.recordRequest();
             for (let index = 0; index < 5; index += 1) budget.recordRetry();
             expect(budget.usedRatio()).toBeCloseTo(0.05, 4);
           });
 
-          it('没有请求时 usedRatio 是 0', () => {
+          it('usedRatio is 0 when there are no requests', () => {
             expect(createRetryBudget(OPTIONS).usedRatio()).toBe(0);
           });
 
-          it('窗口滚动之后预算重置', async () => {
+          it('the budget resets once the window rolls over', async () => {
             const budget = createRetryBudget(OPTIONS);
             for (let index = 0; index < 100; index += 1) budget.recordRequest();
             for (let index = 0; index < 10; index += 1) budget.recordRetry();
@@ -4283,18 +4283,18 @@ const stage8 = {
             expect(budget.canRetry()).toBe(true);
           });
 
-          it('minPerWindow 为 0 时纯按比例', () => {
+          it('a minPerWindow of 0 makes it purely proportional', () => {
             const budget = createRetryBudget({ ratio: 0.1, minPerWindow: 0, windowMs: 1000 });
             budget.recordRequest();
             budget.recordRequest();
             expect(budget.canRetry()).toBe(false);
           });
 
-          it('下游全挂时重试被限制在预算内 [gate:amplification]', () => {
+          it('retries stay inside the budget when downstream is entirely down [gate:amplification]', () => {
             const budget = createRetryBudget(OPTIONS);
             let retries = 0;
 
-            // 100 个请求全部失败，每个都想重试
+            // All 100 requests fail and every one of them wants a retry
             for (let index = 0; index < 100; index += 1) {
               budget.recordRequest();
               if (budget.canRetry()) {
@@ -4304,14 +4304,14 @@ const stage8 = {
             }
 
             count('retriesUsed', retries);
-            // 没有预算的实现在这里是 100，下游收到两倍流量
+            // An implementation without a budget reports 100 here, doubling the traffic downstream sees
             expect(retries).toBeLessThanOrEqual(13);
           });
 
-          it('健康时的偶发失败仍然能重试', () => {
+          it('occasional failures while healthy can still be retried', () => {
             const budget = createRetryBudget(OPTIONS);
             let retries = 0;
-            // 100 个请求，只有 3 个失败
+            // 100 requests, only 3 of which fail
             for (let index = 0; index < 100; index += 1) {
               budget.recordRequest();
               if (index % 33 === 0 && budget.canRetry()) {
@@ -4319,7 +4319,7 @@ const stage8 = {
                 retries += 1;
               }
             }
-            // 预算不该在正常场景下挡住重试
+            // The budget should not block retries in the normal case
             expect(retries).toBe(4);
           });
         });
@@ -4371,16 +4371,16 @@ const stage8 = {
           }
 
           function allowance(): number {
-            // minPerWindow 那一项是给低流量兜底的：2 × 0.1 向下取整是 0，
-            // 而每秒两个请求恰恰是重试最安全的时候
+            // The minPerWindow term is the floor for low traffic: 2 × 0.1 floors to 0,
+            // and two requests a second is precisely when retrying is safest
             return Math.max(minPerWindow, Math.floor(requests * options.ratio));
           }
 
           return {
             recordRequest(): void {
               roll();
-              // 只记原始请求。把重试也算进来，分母会自我供养：
-              // 重试越多，允许的重试越多
+              // Count original requests only. Counting retries too makes the denominator feed itself:
+              // the more you retry, the more retries you are allowed
               requests += 1;
             },
 
@@ -4736,9 +4736,9 @@ const stage9 = {
           }
         }
 
-        /** 给任意异步任务加上超时预算 */
+        /** Put a timeout budget around any async task */
         export async function withTimeout<T>(task: () => Promise<T>, ms: number): Promise<T> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -4763,11 +4763,11 @@ const stage9 = {
         }
 
         /**
-         * 组合限流、熔断与超时。
-         * call 永远 resolve，把失败翻译成 GatewayResult。
+         * Combine rate limiting, the circuit breaker and timeouts.
+         * call always resolves, translating failures into a GatewayResult.
          */
         export function createGateway(options: GatewayOptions): Gateway {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `
@@ -4792,8 +4792,8 @@ const stage9 = {
           });
         }
 
-        describe('阶段9 · 超时预算与组合', () => {
-          it('withTimeout 在预算内正常返回', async () => {
+        describe('Stage 9 · Timeout budgets and composition', () => {
+          it('withTimeout returns normally inside the budget', async () => {
             const value = await withTimeout(async () => {
               await sleep(50);
               return 'fast';
@@ -4801,7 +4801,7 @@ const stage9 = {
             expect(value).toBe('fast');
           });
 
-          it('withTimeout 超时抛 TimeoutError [gate:timeout]', async () => {
+          it('withTimeout throws TimeoutError on expiry [gate:timeout]', async () => {
             const startedAt = now();
             let caught: unknown;
             try {
@@ -4816,7 +4816,7 @@ const stage9 = {
             expect(now() - startedAt).toBe(200);
           });
 
-          it('慢下游被判超时而不是一直等 [gate:budget]', async () => {
+          it('a slow downstream is timed out rather than waited on forever [gate:budget]', async () => {
             const gateway = createDefaultGateway();
             const result = await gateway.call('/api/slow');
             expect(result.ok).toBe(false);
@@ -4824,7 +4824,7 @@ const stage9 = {
             expect(gateway.stats().timedOut).toBe(1);
           });
 
-          it('正常请求返回数据', async () => {
+          it('a normal request returns data', async () => {
             const gateway = createDefaultGateway();
             const result = await gateway.call('/api/ok');
             expect(result.ok).toBe(true);
@@ -4832,7 +4832,7 @@ const stage9 = {
             expect(gateway.stats().ok).toBe(1);
           });
 
-          it('持续失败会熔断并停止打下游 [gate:protect]', async () => {
+          it('sustained failure trips the breaker and stops hitting downstream [gate:protect]', async () => {
             const gateway = createDefaultGateway();
             const reasons: string[] = [];
 
@@ -4847,7 +4847,7 @@ const stage9 = {
             expect(gateway.stats().rejected).toBe(5);
           });
 
-          it('超时同样会累积到熔断', async () => {
+          it('timeouts accumulate towards the breaker too', async () => {
             const gateway = createGateway({
               capacity: 10,
               refillPerSecond: 100,
@@ -4864,7 +4864,7 @@ const stage9 = {
             expect(gateway.stats().timedOut).toBe(2);
           });
 
-          it('预算内完成的任务不受超时影响，也不会被迟到的定时器改写结果', async () => {
+          it('a task finishing inside the budget is unaffected, and a late timer cannot rewrite its result', async () => {
             let settled = 'pending';
             await withTimeout(async () => {
               await sleep(50);
@@ -4875,13 +4875,13 @@ const stage9 = {
 
             expect(settled).toBe('fast');
 
-            // 把时钟推过超时点：结果不能被翻案
-            // （注意：泄漏的定时器本身在这个沙箱里观察不到，见「常见坑」）
+            // Push the clock past the timeout point: the result must not be overturned
+            // (note: a leaked timer is not itself observable in this sandbox — see \u2018Common pitfalls\u2019)
             await sleep(2000);
             expect(settled).toBe('fast');
           });
 
-          it('call 永远不抛异常，失败也返回结构化结果', async () => {
+          it('call never throws and returns a structured result on failure', async () => {
             const gateway = createDefaultGateway();
             const results = await Promise.all([
               gateway.call('/api/ok'),
@@ -4895,10 +4895,10 @@ const stage9 = {
             }
           });
 
-          it('单次抖动不会误伤后续请求', async () => {
+          it('a single blip does not penalise later requests', async () => {
             const gateway = createDefaultGateway();
 
-            // /api/blip 只失败一次，阈值是 3，不该熔断
+            // /api/blip fails once and the threshold is 3, so it should not trip
             const first = await gateway.call('/api/blip');
             expect(first.ok).toBe(false);
             expect(first.reason).toBe('upstream');
@@ -4909,7 +4909,7 @@ const stage9 = {
             expect(gateway.stats().failed).toBe(1);
           });
 
-          it('stats 的四类计数互相独立', async () => {
+          it("stats' four counters are independent", async () => {
             const gateway = createGateway({
               capacity: 10,
               refillPerSecond: 100,
@@ -4918,8 +4918,8 @@ const stage9 = {
               timeoutMs: 200,
             });
 
-            await gateway.call('/api/slow'); // timedOut，同时触发熔断
-            await gateway.call('/api/ok'); // 熔断已开 -> rejected
+            await gateway.call('/api/slow'); // timedOut, and trips the breaker at the same time
+            await gateway.call('/api/ok'); // breaker already open -> rejected
 
             const stats = gateway.stats();
             expect(stats.timedOut).toBe(1);
@@ -4927,7 +4927,7 @@ const stage9 = {
             expect(stats.ok).toBe(0);
           });
 
-          it('两个网关实例互不影响', async () => {
+          it('two gateway instances do not affect each other', async () => {
             const first = createGateway({
               capacity: 10,
               refillPerSecond: 100,
@@ -4950,7 +4950,7 @@ const stage9 = {
             expect(second.stats().rejected).toBe(0);
           });
 
-          it('限流让长期速率受控 [gate:ratelimit]', async () => {
+          it('rate limiting keeps the long-run rate controlled [gate:ratelimit]', async () => {
             const gateway = createGateway({
               capacity: 3,
               refillPerSecond: 10,
@@ -4966,7 +4966,7 @@ const stage9 = {
             const elapsed = now() - startedAt;
 
             expect(results.every((item) => item.ok)).toBe(true);
-            // 3 个立即放行，后 3 个每 100ms 放一个，最后一个再花 100ms 请求
+            // 3 pass immediately, the next 3 one per 100ms, and the last one takes another 100ms to request
             expect(elapsed).toBeGreaterThanOrEqual(400);
             expect(elapsed).toBeLessThanOrEqual(460);
           });
@@ -5066,7 +5066,7 @@ const stage9 = {
 
           return {
             async call(url: string): Promise<GatewayResult> {
-              // 顺序：限流在最外层，被限流的请求不该消耗熔断配额
+              // Order matters: the limiter is outermost, and a throttled request should not consume breaker budget
               await bucket.acquire();
 
               try {
@@ -5346,25 +5346,25 @@ const stage10 = {
         }
 
         export interface DegradeOptions {
-          /** 多久之内算新鲜 */
+          /** How long a value counts as fresh */
           ttlMs: number;
-          /** 下游失败时，多久之内的旧值还能拿来用 */
+          /** How old a value may be and still be served when downstream fails */
           staleWhileErrorMs: number;
-          /** 下游失败之后隔多久才再试一次 */
+          /** How long to wait before trying downstream again after a failure */
           retryAfterMs: number;
-          /** 连旧值都没有时返回什么 */
+          /** What to return when there is not even a stale value */
           fallback(key: string): unknown;
         }
 
         export interface Degrader {
-          /** 任何情况下都不抛异常 */
+          /** Never throws, under any circumstances */
           get(key: string, load: () => Promise<unknown>): Promise<DegradeResult>;
-          /** 这个 key 的缓存写入时刻，没有则为 null */
+          /** When this key was cached, or null if it was not */
           cachedAt(key: string): number | null;
         }
 
         export function createDegrader(options: DegradeOptions): Degrader {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -5397,14 +5397,14 @@ const stage10 = {
           };
         }
 
-        describe('阶段10 · 优雅降级', () => {
-          it('第一次取值走下游并标成 live', async () => {
+        describe('Stage 10 · Graceful degradation', () => {
+          it('the first read goes downstream and is marked live', async () => {
             const degrader = createDegrader(OPTIONS);
             const result = await degrader.get('home', working('fresh'));
             expect(result).toEqual({ value: 'fresh', freshness: 'live' });
           });
 
-          it('缓存新鲜时不再打下游', async () => {
+          it('does not hit downstream while the cache is fresh', async () => {
             const degrader = createDegrader(OPTIONS);
             await degrader.get('home', working('first'));
 
@@ -5418,7 +5418,7 @@ const stage10 = {
             expect(result.freshness).toBe('live');
           });
 
-          it('缓存过期后重新取', async () => {
+          it('fetches again once the cache expires', async () => {
             const degrader = createDegrader(OPTIONS);
             await degrader.get('home', working('first'));
             await sleep(150);
@@ -5427,7 +5427,7 @@ const stage10 = {
             expect(result).toEqual({ value: 'second', freshness: 'live' });
           });
 
-          it('下游失败时返回旧值并标成 stale', async () => {
+          it('returns the old value marked stale when downstream fails', async () => {
             const degrader = createDegrader(OPTIONS);
             await degrader.get('home', working('cached'));
             await sleep(150);
@@ -5436,13 +5436,13 @@ const stage10 = {
             expect(result).toEqual({ value: 'cached', freshness: 'stale' });
           });
 
-          it('没有任何缓存时返回 fallback', async () => {
+          it('returns the fallback when nothing is cached', async () => {
             const degrader = createDegrader(OPTIONS);
             const result = await degrader.get('home', broken());
             expect(result).toEqual({ value: 'fallback:home', freshness: 'fallback' });
           });
 
-          it('旧值太旧了也退回 fallback', async () => {
+          it('falls back to the fallback when even the stale value is too old', async () => {
             const degrader = createDegrader({ ...OPTIONS, staleWhileErrorMs: 200, retryAfterMs: 0 });
             await degrader.get('home', working('ancient'));
             await sleep(500);
@@ -5451,7 +5451,7 @@ const stage10 = {
             expect(result.freshness).toBe('fallback');
           });
 
-          it('stale 和 fallback 是两档，不是一个布尔', async () => {
+          it('stale and fallback are two levels, not one boolean', async () => {
             const degrader = createDegrader(OPTIONS);
             await degrader.get('with-cache', working('cached'));
             await sleep(150);
@@ -5462,7 +5462,7 @@ const stage10 = {
             expect(fallback.freshness).toBe('fallback');
           });
 
-          it('下游恢复之后立刻回到 live', async () => {
+          it('returns to live immediately once downstream recovers', async () => {
             const degrader = createDegrader({ ...OPTIONS, retryAfterMs: 50 });
             await degrader.get('home', working('cached'));
             await sleep(150);
@@ -5473,7 +5473,7 @@ const stage10 = {
             expect(result).toEqual({ value: 'recovered', freshness: 'live' });
           });
 
-          it('cachedAt 反映缓存写入时刻', async () => {
+          it('cachedAt reflects when the value was cached', async () => {
             const degrader = createDegrader(OPTIONS);
             expect(degrader.cachedAt('home')).toBeNull();
             const before = now();
@@ -5481,14 +5481,14 @@ const stage10 = {
             expect(degrader.cachedAt('home')).toBe(before);
           });
 
-          it('不同 key 的降级状态互相独立', async () => {
+          it('degradation state is independent per key', async () => {
             const degrader = createDegrader(OPTIONS);
             await degrader.get('bad', broken());
             const good = await degrader.get('good', working('ok'));
             expect(good.freshness).toBe('live');
           });
 
-          it('下游全挂时二十次调用零异常 [gate:no-throw]', async () => {
+          it('twenty calls throw nothing while downstream is entirely down [gate:no-throw]', async () => {
             const degrader = createDegrader(OPTIONS);
             await degrader.get('home', working('cached'));
             await sleep(150);
@@ -5509,7 +5509,7 @@ const stage10 = {
             expect(usable).toBe(20);
           });
 
-          it('冷却期内不反复打已知故障的下游 [gate:cooldown]', async () => {
+          it('does not repeatedly hit a downstream known to be broken during the cooldown [gate:cooldown]', async () => {
             const degrader = createDegrader(OPTIONS);
             await degrader.get('home', working('cached'));
             await sleep(150);
@@ -5520,7 +5520,7 @@ const stage10 = {
             }
 
             count('downstreamCalls', counter.calls);
-            // 每次都试一遍的实现在这里是 20，而且每次都要等它失败
+            // An implementation that retries every time reports 20 here, waiting for each failure
             expect(counter.calls).toBeLessThanOrEqual(2);
           });
         });
@@ -5583,8 +5583,8 @@ const stage10 = {
 
           function degraded(key: string, at: number): DegradeResult {
             const entry = cache.get(key);
-            // 过期但还在可用窗口内的真实数据，和一个写死的默认值，
-            // 对调用方是完全不同的两种可信度，所以分成两档返回
+            // Real data that has expired but is still inside the usable window, and a hardcoded default,
+            // carry completely different confidence for the caller, so they are returned as two distinct levels
             if (entry && at - entry.storedAt < options.staleWhileErrorMs) {
               return { value: entry.value, freshness: 'stale' };
             }
@@ -5599,22 +5599,22 @@ const stage10 = {
                 return { value: entry.value, freshness: 'live' };
               }
 
-              // 已知故障的冷却期内连 load 都不调用：
-              // 缓存里明明有能用的旧值，没必要在下游最虚弱时继续加压，
-              // 而且每次都等它超时会让降级本身变成延迟来源
+              // During the cooldown for a known failure, load is not even called:
+              // there is a perfectly usable stale value in the cache, so there is no reason to keep
+              // pressing downstream at its weakest, and waiting for each timeout makes degradation itself a source of latency
               const cooldownUntil = nextAttemptAt.get(key) ?? 0;
               if (at < cooldownUntil) return degraded(key, at);
 
               try {
                 const value = await load();
                 cache.set(key, { value, storedAt: now() });
-                // 成功了就立刻解除冷却，别让恢复被冷却期拖着
+                // Clear the cooldown as soon as a call succeeds, so recovery is not held back by it
                 nextAttemptAt.delete(key);
                 return { value, freshness: 'live' };
               } catch (error) {
                 nextAttemptAt.set(key, now() + options.retryAfterMs);
-                // 这一层的硬性契约：异常到此为止。
-                // 抛出去就等于把降级决定推给了每一个调用点
+                // The hard contract of this layer: exceptions stop here.
+                // Letting one out pushes the degradation decision onto every single call site
                 return degraded(key, now());
               }
             },
@@ -5906,16 +5906,16 @@ const stage11 = {
       'src/shadow.ts',
       code`
         export interface ShadowOptions {
-          /** 镜像比例，0~1 */
+          /** Mirroring ratio, 0 to 1 */
           ratio: number;
         }
 
         export interface ShadowStats {
-          /** 主路径执行了多少次 */
+          /** How many times the primary path ran */
           primary: number;
-          /** 镜像了多少次 */
+          /** How many times traffic was mirrored */
           shadowed: number;
-          /** canary 失败了多少次（只统计，不上抛） */
+          /** How many times the canary failed (counted only, never rethrown) */
           canaryFailures: number;
         }
 
@@ -5929,7 +5929,7 @@ const stage11 = {
         }
 
         export function createShadower(options: ShadowOptions): Shadower {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -5953,14 +5953,14 @@ const stage11 = {
           throw new Error('canary is broken');
         };
 
-        describe('阶段11 · 流量镜像', () => {
-          it('返回的永远是主路径的结果', async () => {
+        describe('Stage 11 · Traffic mirroring', () => {
+          it("always returns the primary path's result", async () => {
             const shadower = createShadower({ ratio: 1 });
             const value = await shadower.run('k', ok('primary'), ok('canary'));
             expect(value).toBe('primary');
           });
 
-          it('ratio 为 0 时不镜像', async () => {
+          it('does not mirror when ratio is 0', async () => {
             const shadower = createShadower({ ratio: 0 });
             let canaryRan = false;
             await shadower.run('k', ok('primary'), async () => {
@@ -5972,7 +5972,7 @@ const stage11 = {
             expect(shadower.stats().shadowed).toBe(0);
           });
 
-          it('ratio 为 1 时每次都镜像', async () => {
+          it('mirrors every time when ratio is 1', async () => {
             const shadower = createShadower({ ratio: 1 });
             for (let index = 0; index < 10; index += 1) {
               await shadower.run('key-' + index, ok('primary'), ok('canary'));
@@ -5982,7 +5982,7 @@ const stage11 = {
             expect(shadower.stats().primary).toBe(10);
           });
 
-          it('按比例采样', async () => {
+          it('samples proportionally', async () => {
             const shadower = createShadower({ ratio: 0.3 });
             for (let index = 0; index < 400; index += 1) {
               await shadower.run('user-' + index, ok('primary'), ok('canary'));
@@ -5993,7 +5993,7 @@ const stage11 = {
             expect(shadowed).toBeLessThan(200);
           });
 
-          it('同一个 key 的采样结果稳定', async () => {
+          it('sampling is stable for a given key', async () => {
             const shadower = createShadower({ ratio: 0.5 });
             await shadower.run('stable-key', ok('p'), ok('c'));
             const first = shadower.stats().shadowed;
@@ -6003,12 +6003,12 @@ const stage11 = {
             }
             await sleep(10);
             const after = shadower.stats().shadowed;
-            // 要么每次都镜像（11 次），要么一次都不（0 次）
+            // Either mirrored every time (11) or not at all (0)
             expect(after === 0 || after === 11).toBe(true);
             expect(first === 0 || first === 1).toBe(true);
           });
 
-          it('canary 抛异常不会传给调用方 [gate:no-leak]', async () => {
+          it('a throwing canary never reaches the caller [gate:no-leak]', async () => {
             const shadower = createShadower({ ratio: 1 });
             let leaked = 0;
 
@@ -6027,7 +6027,7 @@ const stage11 = {
             expect(shadower.stats().canaryFailures).toBe(50);
           });
 
-          it('canary 很慢也不拖累主路径 [gate:no-latency]', async () => {
+          it('a very slow canary does not slow the primary path [gate:no-latency]', async () => {
             const shadower = createShadower({ ratio: 1 });
 
             const startedAt = now();
@@ -6036,11 +6036,11 @@ const stage11 = {
 
             count('shadowLatencyMs', elapsed);
             expect(value).toBe('primary');
-            // Promise.all 的实现在这里是 2000ms
+            // A Promise.all implementation takes 2000ms here
             expect(elapsed).toBe(50);
           });
 
-          it('主路径的异常照常抛出', async () => {
+          it('errors from the primary path propagate as usual', async () => {
             const shadower = createShadower({ ratio: 1 });
             let thrown = false;
             try {
@@ -6048,11 +6048,11 @@ const stage11 = {
             } catch (caught) {
               thrown = true;
             }
-            // 吞掉的只能是 canary 的异常，主路径的必须原样传出去
+            // Only the canary's errors may be swallowed; the primary path's must pass through untouched
             expect(thrown).toBe(true);
           });
 
-          it('canary 成功时不计入失败数', async () => {
+          it('a successful canary does not count as a failure', async () => {
             const shadower = createShadower({ ratio: 1 });
             for (let index = 0; index < 5; index += 1) {
               await shadower.run('key-' + index, ok('primary'), ok('canary'));
@@ -6061,7 +6061,7 @@ const stage11 = {
             expect(shadower.stats().canaryFailures).toBe(0);
           });
 
-          it('主路径每次都执行，与采样无关', async () => {
+          it('the primary path runs every time, regardless of sampling', async () => {
             const shadower = createShadower({ ratio: 0.1 });
             for (let index = 0; index < 30; index += 1) {
               expect(await shadower.run('key-' + index, ok('primary'), ok('canary'))).toBe('primary');
@@ -6131,8 +6131,8 @@ const stage11 = {
           function shouldShadow(key: string): boolean {
             if (options.ratio <= 0) return false;
             if (options.ratio >= 1) return true;
-            // 按 key 哈希而不是 Math.random：同一个 key 每次结果一致，
-            // 才谈得上「比较同一个请求在新旧版本上的表现」
+            // Hash on the key rather than Math.random: only a stable result per key makes it meaningful
+            // to compare how the same request behaves on the old and new versions
             return hash(key) % 1000 < options.ratio * 1000;
           }
 
@@ -6146,22 +6146,22 @@ const stage11 = {
 
               if (shouldShadow(key)) {
                 counters.shadowed += 1;
-                // fire-and-forget：发出去就不管。await 它的话，
-                // 主路径的延迟会变成两者的最大值
+                // Fire and forget. Awaiting it would make the primary path's latency
+                // the maximum of the two
                 Promise.resolve()
                   .then(canary)
                   .then(
                     () => undefined,
                     () => {
-                      // 两个回调都要给。只给 then 不给 reject 处理，
-                      // canary 的异常会变成 unhandled rejection，
-                      // 某些配置下直接让进程退出——一个只用来观察的旁路杀掉了生产
+                      // Both callbacks are required. With then but no rejection handler,
+                      // a canary error becomes an unhandled rejection and,
+                      // under some configurations, exits the process outright — an observe-only side path killing production
                       counters.canaryFailures += 1;
                     }
                   );
               }
 
-              // 主路径原样返回，包括它自己的异常
+              // The primary path is returned as-is, including its own errors
               return primary();
             },
 

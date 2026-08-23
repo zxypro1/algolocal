@@ -12,25 +12,25 @@ const { t, code, file, readonlyFile, spec, gate } = require('./_helpers');
 const contract = readonlyFile(
   'src/contract.ts',
   code`
-    /** 平台提供的契约（只读） */
+    /** Contract provided by the platform (read-only) */
 
-    /** 一行数据。定长 schema，省掉「解析 schema」这层与本题无关的工作。 */
+    /** One row of data. A fixed schema, which spares you the schema-parsing work this project is not about. */
     export interface Row {
       id: number;
       name: string;
-      /** 0 或 1 */
+      /** 0 or 1 */
       active: number;
     }
 
-    /** 缓冲池的运行统计，用来证明缓存真的生效了 */
+    /** Buffer pool runtime statistics, used to prove the cache really works */
     export interface PagerStats {
-      /** 命中缓存的次数 */
+      /** How many times the cache was hit */
       hits: number;
-      /** 未命中、必须读盘的次数 */
+      /** How many times it missed and had to read the disk */
       misses: number;
-      /** 因容量不足被淘汰的页数 */
+      /** How many pages were evicted for lack of capacity */
       evictions: number;
-      /** 当前缓存中被改过、尚未写回的页数 */
+      /** How many cached pages have been modified but not yet written back */
       dirty: number;
     }
 
@@ -38,25 +38,25 @@ const contract = readonlyFile(
       readPage(pageId: number): Promise<Uint8Array>;
       writePage(pageId: number, data: Uint8Array): Promise<void>;
       allocatePage(): Promise<number>;
-      /** 把所有脏页写回磁盘并 fsync 一次 */
+      /** Write every dirty page back to disk and fsync once */
       flush(): Promise<void>;
       stats(): PagerStats;
     }
 
-    /** 一条记录在页内的位置 */
+    /** Where one record sits within a page */
     export interface Slot {
       pageId: number;
       slotId: number;
     }
 
-    /** WAL 里的一条日志 */
+    /** One entry in the WAL */
     export interface LogRecord {
-      /** 事务号 */
+      /** Transaction number */
       txId: number;
       type: 'begin' | 'write' | 'commit';
-      /** type 为 write 时才有 */
+      /** Present only when type is write */
       pageId?: number;
-      /** type 为 write 时才有，页的新内容 */
+      /** Present only when type is write; the page\u2019s new content */
       after?: number[];
     }
   `
@@ -66,19 +66,19 @@ const disk = readonlyFile(
   'src/disk.ts',
   code`
     /**
-     * 模拟块设备（只读，平台提供）
+     * Simulated block device (read-only, provided by the platform)
      *
-     * 它刻意做得像真的磁盘，因为这道题的每一关都在和它的特性较劲：
+     * It is deliberately made to behave like a real disk, because every stage of this project wrestles with its properties:
      *
-     * - 读写以「页」为单位，不能读半页；
-     * - 写入先落在操作系统的页缓存里，**只有 fsync 之后才真正持久**；
-     * - crash() 会丢掉所有没 fsync 的写入——崩溃恢复那一关全靠它；
-     * - 每次读、写、fsync 都会计数并推进虚拟时钟，所以「少读一次盘」是能被量出来的。
+     * - reads and writes work in whole pages; half a page cannot be read;
+     * - writes land in the operating system page cache first, and **only fsync makes them durable**;
+     * - crash() drops every write not yet fsynced — the crash recovery stage rests entirely on this;
+     * - every read, write and fsync is counted and advances the virtual clock, so one fewer disk read is measurable.
      */
     import { sleep } from '@lab/env';
     import { count } from '@lab/metrics';
 
-    /** 页大小。真实数据库通常是 4KB/8KB，这里取小值方便手算。 */
+    /** Page size. Real databases usually use 4KB or 8KB; a small value here keeps the arithmetic doable by hand. */
     export const PAGE_SIZE = 128;
 
     const READ_MS = 1;
@@ -109,7 +109,7 @@ const disk = readonlyFile(
         this.pending.set(pageId, data.slice());
       }
 
-      /** 分配一个新页，内容全零 */
+      /** Allocate a new page, zero-filled */
       async allocatePage(): Promise<number> {
         const pageId = this.nextPageId;
         this.nextPageId += 1;
@@ -121,7 +121,7 @@ const disk = readonlyFile(
         return this.nextPageId;
       }
 
-      /** 把页缓存和日志缓存一起刷到「盘上」 */
+      /** Flush the page cache and the log buffer together to \u2018disk\u2019 */
       async fsync(): Promise<void> {
         count('diskFsync');
         await sleep(FSYNC_MS);
@@ -133,26 +133,26 @@ const disk = readonlyFile(
         this.pendingLog = [];
       }
 
-      /** 追加一条 WAL 记录（同样要 fsync 才持久） */
+      /** Append one WAL record (which also needs an fsync to be durable) */
       appendLog(bytes: Uint8Array): void {
         count('diskLogAppends');
         this.pendingLog.push(bytes.slice());
       }
 
-      /** 读取已持久化的日志 */
+      /** Read the log that has been persisted */
       readLog(): Uint8Array[] {
         return this.durableLog.map((record) => record.slice());
       }
 
-      /** 检查点之后清空日志 */
+      /** Clear the log after a checkpoint */
       truncateLog(): void {
         this.durableLog = [];
         this.pendingLog = [];
       }
 
       /**
-       * 模拟掉电：没 fsync 的东西全部消失。
-       * nextPageId 保留，因为真实系统重启后会从元数据里读回它。
+       * Simulated power loss: everything not fsynced disappears.
+       * nextPageId survives, because a real system reads it back from metadata on restart.
        */
       crash(): void {
         this.pending.clear();
@@ -374,12 +374,12 @@ const stage1 = {
         import { Disk } from './disk';
 
         export interface PagerOptions {
-          /** 缓冲池最多缓存多少页 */
+          /** How many pages the buffer pool caches at most */
           capacity: number;
         }
 
         export function createPager(disk: Disk, options: PagerOptions): Pager {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -400,8 +400,8 @@ const stage1 = {
           return page;
         }
 
-        describe('阶段1 · 页与缓冲池', () => {
-          it('读回来的就是写进去的', async () => {
+        describe('Stage 1 · Pages and the buffer pool', () => {
+          it('what is read back is what was written', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 4 });
             const pageId = await pager.allocatePage();
@@ -412,7 +412,7 @@ const stage1 = {
             expect(Array.from(read)).toEqual(Array.from(bytes(7)));
           });
 
-          it('同一页读第二次命中缓存 [gate:cache]', async () => {
+          it('reading the same page a second time hits the cache [gate:cache]', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 4 });
             const pageId = await pager.allocatePage();
@@ -428,7 +428,7 @@ const stage1 = {
             expect(stats.misses).toBeLessThanOrEqual(1);
           });
 
-          it('writePage 不立刻落盘', async () => {
+          it('writePage does not go to disk immediately', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 4 });
             const pageId = await pager.allocatePage();
@@ -441,7 +441,7 @@ const stage1 = {
             expect(pager.stats().dirty).toBe(1);
           });
 
-          it('flush 把脏页写回并且只 fsync 一次', async () => {
+          it('flush writes the dirty pages back with a single fsync', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 8 });
             const ids: number[] = [];
@@ -459,12 +459,12 @@ const stage1 = {
             expect(afterSync - beforeSync).toBe(1);
             expect(pager.stats().dirty).toBe(0);
 
-            // 绕过缓冲池直接问磁盘，确认真的写下去了
+            // Ask the disk directly, bypassing the buffer pool, to confirm it really landed
             const raw = await disk.readPage(ids[2]);
             expect(Array.from(raw)).toEqual(Array.from(bytes(3)));
           });
 
-          it('容量满时淘汰最久未使用的页', async () => {
+          it('the least recently used page is evicted when capacity is full', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 2 });
             const a = await pager.allocatePage();
@@ -474,7 +474,7 @@ const stage1 = {
 
             await pager.readPage(a);
             await pager.readPage(b);
-            // 再碰一下 a，让 b 成为最久未使用的那个
+            // Touch a again so that b becomes the least recently used
             await pager.readPage(a);
             await pager.readPage(c);
 
@@ -485,14 +485,14 @@ const stage1 = {
             expect(pager.stats().hits).toBe(beforeHits + 1);
           });
 
-          it('被淘汰的脏页先写回，数据不丢', async () => {
+          it('an evicted dirty page is written back first and loses no data', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 1 });
             const a = await pager.allocatePage();
             const b = await pager.allocatePage();
 
             await pager.writePage(a, bytes(9));
-            // 容量只有 1，读 b 一定会把 a 挤出去
+            // With a capacity of 1, reading b is guaranteed to push a out
             await pager.readPage(b);
             await pager.flush();
 
@@ -500,7 +500,7 @@ const stage1 = {
             expect(Array.from(raw)).toEqual(Array.from(bytes(9)));
           });
 
-          it('淘汰干净页不产生写盘', async () => {
+          it('evicting a clean page produces no disk write', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 1 });
             const a = await pager.allocatePage();
@@ -515,7 +515,7 @@ const stage1 = {
             expect(after).toBe(before);
           });
 
-          it('缓存不会超过容量', async () => {
+          it('the cache never exceeds its capacity', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 3 });
             const ids: number[] = [];
@@ -531,7 +531,7 @@ const stage1 = {
             expect(pager.stats().evictions).toBeGreaterThanOrEqual(3);
           });
 
-          it('返回的是副本，调用方改不坏缓存', async () => {
+          it('a copy is returned, so callers cannot corrupt the cache', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 4 });
             const pageId = await pager.allocatePage();
@@ -544,7 +544,7 @@ const stage1 = {
             expect(second[0]).toBe(4);
           });
 
-          it('重新读回被淘汰的页拿到的是最后写入的内容', async () => {
+          it('re-reading an evicted page returns the last content written', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 1 });
             const a = await pager.allocatePage();
@@ -590,8 +590,8 @@ const stage1 = {
         export function createPager(disk: Disk, options: PagerOptions): Pager {
           const capacity = Math.max(1, options.capacity);
 
-          // Map 按插入顺序迭代，命中时 delete + set 把这一页挪到最新端，
-          // 于是第一个 key 永远是最久未使用的那一页。
+          // A Map iterates in insertion order, so delete + set on a hit moves that page to the newest end,
+          // which makes the first key always the least recently used page.
           const frames = new Map<number, Frame>();
           const stats: PagerStats = { hits: 0, misses: 0, evictions: 0, dirty: 0 };
 
@@ -615,7 +615,7 @@ const stage1 = {
               const pageId = oldest.value as number;
               const frame = frames.get(pageId) as Frame;
               frames.delete(pageId);
-              // 脏页必须先写回，否则用户写过的数据会随着淘汰一起消失
+              // A dirty page has to be written back first, or data the user wrote disappears along with the eviction
               if (frame.dirty) await disk.writePage(pageId, frame.data);
               stats.evictions += 1;
             }
@@ -640,7 +640,7 @@ const stage1 = {
           return {
             async readPage(pageId: number): Promise<Uint8Array> {
               const frame = await load(pageId);
-              // 交出副本：调用方改坏了返回值也不会污染缓存
+              // Hand out a copy: a caller corrupting the return value does not pollute the cache
               return frame.data.slice();
             },
 
@@ -671,7 +671,7 @@ const stage1 = {
                 await disk.writePage(entry[0], frame.data);
                 frame.dirty = false;
               }
-              // 攒够了一次 fsync：它是这一层最贵的操作
+              // Enough accumulated for one fsync, which is the most expensive operation at this layer
               await disk.fsync();
               stats.dirty = 0;
             },
@@ -982,15 +982,15 @@ const stage2 = {
       code`
         import type { Row } from './contract';
 
-        /** 把一行编码成紧凑字节 */
+        /** Encode one row into compact bytes */
         export function encodeRow(row: Row): Uint8Array {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
 
-        /** 从字节解码回一行 */
+        /** Decode a row back from bytes */
         export function decodeRow(bytes: Uint8Array): Row {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -1000,27 +1000,27 @@ const stage2 = {
       'src/page.ts',
       code`
         export interface SlottedPage {
-          /** 放得下返回 slotId，放不下返回 null */
+          /** Returns a slotId when it fits, null when it does not */
           insert(record: Uint8Array): number | null;
-          /** 不存在或已删除返回 null */
+          /** Returns null when absent or deleted */
           read(slotId: number): Uint8Array | null;
           remove(slotId: number): boolean;
-          /** 包含墓碑在内的 slot 总数 */
+          /** Total slots, tombstones included */
           slotCount(): number;
-          /** 还活着的记录条数 */
+          /** How many records are still live */
           liveCount(): number;
           freeSpace(): number;
-          /** 序列化成正好 PAGE_SIZE 字节的页 */
+          /** Serialise into a page of exactly PAGE_SIZE bytes */
           toBytes(): Uint8Array;
         }
 
         export function createSlottedPage(): SlottedPage {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
 
         export function loadSlottedPage(bytes: Uint8Array): SlottedPage {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -1039,36 +1039,36 @@ const stage2 = {
           return { id, name, active };
         }
 
-        describe('阶段2 · 记录编解码', () => {
-          it('编码后再解码，内容不变', () => {
+        describe('Stage 2 · Record encoding', () => {
+          it('encoding and decoding round-trips unchanged', () => {
             const original = row(42, 'alice', 1);
             const decoded = decodeRow(encodeRow(original));
             expect(decoded).toEqual(original);
           });
 
-          it('空名字也能往返', () => {
+          it('an empty name round-trips too', () => {
             const decoded = decodeRow(encodeRow(row(7, '', 0)));
             expect(decoded).toEqual(row(7, '', 0));
           });
 
-          it('大 id 不溢出', () => {
+          it('a large id does not overflow', () => {
             const decoded = decodeRow(encodeRow(row(4000000000, 'big', 1)));
             expect(decoded.id).toBe(4000000000);
           });
 
-          it('非 ASCII 名字按 UTF-8 字节处理', () => {
+          it('a non-ASCII name is handled as UTF-8 bytes', () => {
             const decoded = decodeRow(encodeRow(row(1, '张三', 1)));
             expect(decoded.name).toBe('张三');
           });
 
-          it('编码是紧凑的，不是定长填充', () => {
+          it('the encoding is compact rather than fixed-width padded', () => {
             const short = encodeRow(row(1, 'a', 1));
             const long = encodeRow(row(1, 'abcdefghij', 1));
             expect(long.length).toBeGreaterThan(short.length);
             expect(short.length).toBeLessThan(20);
           });
 
-          it('名字超过 255 字节时抛错', () => {
+          it('a name longer than 255 bytes throws', () => {
             let threw = false;
             try {
               encodeRow(row(1, 'x'.repeat(300), 1));
@@ -1079,8 +1079,8 @@ const stage2 = {
           });
         });
 
-        describe('阶段2 · slotted page', () => {
-          it('插入后能按 slotId 读回来', () => {
+        describe('Stage 2 · Slotted page', () => {
+          it('an inserted record can be read back by slotId', () => {
             const page = createSlottedPage();
             const slot = page.insert(encodeRow(row(1, 'alice')));
             expect(slot).not.toBeNull();
@@ -1089,7 +1089,7 @@ const stage2 = {
             expect(decodeRow(back as Uint8Array)).toEqual(row(1, 'alice'));
           });
 
-          it('多条记录互不干扰', () => {
+          it('several records do not interfere with each other', () => {
             const page = createSlottedPage();
             const a = page.insert(encodeRow(row(1, 'aa'))) as number;
             const b = page.insert(encodeRow(row(2, 'bbbb'))) as number;
@@ -1101,7 +1101,7 @@ const stage2 = {
             expect(page.liveCount()).toBe(3);
           });
 
-          it('页满时返回 null，已有记录仍然完好', () => {
+          it('a full page returns null and leaves the existing records intact', () => {
             const page = createSlottedPage();
             const accepted: number[] = [];
             let rejected = false;
@@ -1116,7 +1116,7 @@ const stage2 = {
             }
 
             expect(rejected).toBe(true);
-            // 128 字节的页装不下 40 条，但也不该只装得下两三条
+            // A 128-byte page cannot hold 40 records, but it should hold more than two or three
             expect(accepted.length).toBeGreaterThanOrEqual(4);
             for (let index = 0; index < accepted.length; index += 1) {
               const back = page.read(accepted[index]);
@@ -1125,7 +1125,7 @@ const stage2 = {
             }
           });
 
-          it('删除之后读不到，其他记录的 slotId 不变', () => {
+          it('a deleted record is unreadable and other records keep their slotIds', () => {
             const page = createSlottedPage();
             const a = page.insert(encodeRow(row(1, 'aa'))) as number;
             const b = page.insert(encodeRow(row(2, 'bb'))) as number;
@@ -1135,18 +1135,18 @@ const stage2 = {
             expect(page.read(b)).toBeNull();
             expect(page.liveCount()).toBe(2);
 
-            // 关键：a 和 c 的编号没有因为中间那条被删而挪动
+            // The key point: the ids of a and c did not shift because the one in between was deleted
             expect(decodeRow(page.read(a) as Uint8Array)).toEqual(row(1, 'aa'));
             expect(decodeRow(page.read(c) as Uint8Array)).toEqual(row(3, 'cc'));
           });
 
-          it('删除不存在的 slot 返回 false', () => {
+          it('deleting a nonexistent slot returns false', () => {
             const page = createSlottedPage();
             expect(page.remove(99)).toBe(false);
             expect(page.read(99)).toBeNull();
           });
 
-          it('toBytes 正好是一页，且能 load 回等价的页', () => {
+          it('toBytes is exactly one page and loads back into an equivalent page', () => {
             const page = createSlottedPage();
             const a = page.insert(encodeRow(row(11, 'alpha'))) as number;
             const b = page.insert(encodeRow(row(22, 'beta'))) as number;
@@ -1161,7 +1161,7 @@ const stage2 = {
             expect(reloaded.liveCount()).toBe(1);
           });
 
-          it('load 回来的页还能继续插入', () => {
+          it('a page loaded back can still be inserted into', () => {
             const page = createSlottedPage();
             page.insert(encodeRow(row(1, 'a')));
 
@@ -1172,7 +1172,7 @@ const stage2 = {
             expect(reloaded.liveCount()).toBe(2);
           });
 
-          it('空页的空闲空间接近整页，插入后变小', () => {
+          it('an empty page has nearly a full page free, and less after an insert', () => {
             const page = createSlottedPage();
             const empty = page.freeSpace();
             expect(empty).toBeGreaterThan(PAGE_SIZE / 2);
@@ -1181,7 +1181,7 @@ const stage2 = {
             expect(page.freeSpace()).toBeLessThan(empty);
           });
 
-          it('读出来的是副本，改不坏页内数据', () => {
+          it('what is read out is a copy and cannot corrupt the page data', () => {
             const page = createSlottedPage();
             const slot = page.insert(encodeRow(row(5, 'copy'))) as number;
 
@@ -1203,10 +1203,10 @@ const stage2 = {
         import type { Row } from './contract';
 
         /**
-         * 布局：
+         * Layout:
          *   [0..3]  id            uint32 BE
          *   [4]     active        uint8
-         *   [5]     nameLength    uint8   ← 变长字段自带长度
+         *   [5]     nameLength    uint8   <- a variable-length field carries its own length
          *   [6..]   name          UTF-8
          */
         const ID_OFFSET = 0;
@@ -1234,7 +1234,7 @@ const stage2 = {
           if (bytes.length < HEADER_BYTES) {
             throw new Error('record is truncated: ' + bytes.length + ' bytes');
           }
-          // 带上 byteOffset：bytes 可能是某个更大 buffer 上的视图
+          // Include byteOffset: bytes may be a view onto some larger buffer
           const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
           const nameLength = view.getUint8(NAME_LENGTH_OFFSET);
           if (bytes.length < HEADER_BYTES + nameLength) {
@@ -1265,13 +1265,13 @@ const stage2 = {
         }
 
         /**
-         * 页布局：
+         * Page layout:
          *   [0..1]   slotCount   uint16 BE
-         *   [2..3]   freeStart   uint16 BE，记录区的终点
-         *   [4..]    记录数据，从前往后堆
-         *   [..128]  slot 目录，从后往前长，每个 slot 4 字节 (offset uint16, length uint16)
+         *   [2..3]   freeStart   uint16 BE, the end of the record area
+         *   [4..]    record data, piling up from the front
+         *   [..128]  the slot directory, growing from the back, 4 bytes per slot (offset uint16, length uint16)
          *
-         * 记录和目录相向生长，中间就是空闲空间。length 为 0 表示墓碑。
+         * Records and directory grow towards each other, and the free space is what lies between. A length of 0 marks a tombstone.
          */
         const HEADER_BYTES = 4;
         const SLOT_BYTES = 4;
@@ -1294,7 +1294,7 @@ const stage2 = {
 
           return {
             insert(record: Uint8Array): number | null {
-              // 新记录要占 record.length 字节，它的 slot 还要再占 4 字节
+              // A new record takes record.length bytes, and its slot takes another 4
               const needed = record.length + SLOT_BYTES;
               if (needed > freeSpace()) return null;
 
@@ -1307,15 +1307,15 @@ const stage2 = {
             read(slotId: number): Uint8Array | null {
               const slot = slots[slotId];
               if (!slot || slot.length === 0) return null;
-              // slice 而不是 subarray：交出副本，调用方改不坏页
+              // slice rather than subarray: hand out a copy so callers cannot corrupt the page
               return data.slice(slot.offset, slot.offset + slot.length);
             },
 
             remove(slotId: number): boolean {
               const slot = slots[slotId];
               if (!slot || slot.length === 0) return false;
-              // 只留墓碑，不搬移：搬移会让其他记录的 slotId 失效，
-              // 而索引里存的正是 slotId
+              // Leave a tombstone rather than compacting: compacting would invalidate the other records\u2019 slotIds,
+              // and slotIds are exactly what the index stores
               slot.length = 0;
               return true;
             },
@@ -1631,7 +1631,7 @@ const stage3 = {
           row: Row;
         }
 
-        /** 一次一行的游标。后面所有查询算子都是这个形状 */
+        /** A one-row-at-a-time cursor. Every query operator below has this shape */
         export interface HeapCursor {
           next(): Promise<HeapEntry | null>;
         }
@@ -1641,13 +1641,13 @@ const stage3 = {
           read(slot: Slot): Promise<Row | null>;
           remove(slot: Slot): Promise<boolean>;
           scan(): HeapCursor;
-          /** 这张表占用的页，按顺序 */
+          /** The pages this table occupies, in order */
           pages(): number[];
         }
 
-        /** 不传 pageIds 建一张新表，传了则打开已有的表 */
+        /** Omit pageIds to create a new table, or pass them to open an existing one */
         export function createHeapFile(pager: Pager, pageIds?: number[]): Promise<HeapFile> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -1685,23 +1685,23 @@ const stage3 = {
           return rows;
         }
 
-        describe('阶段3 · 堆文件与表扫描', () => {
-          it('插入后能按 slot 读回来', async () => {
+        describe('Stage 3 · Heap files and table scans', () => {
+          it('an inserted row can be read back by slot', async () => {
             const { heap } = await freshHeap();
             const slot = await heap.insert(row(1, 'alice'));
             expect(await heap.read(slot)).toEqual(row(1, 'alice'));
           });
 
-          it('插入很多行会跨页', async () => {
+          it('inserting many rows spills across pages', async () => {
             const { heap } = await freshHeap();
             for (let index = 0; index < 40; index += 1) {
               await heap.insert(row(index, 'user' + index));
             }
-            // 一页 128 字节装不下 40 行
+            // A 128-byte page cannot hold 40 rows
             expect(heap.pages().length).toBeGreaterThan(1);
           });
 
-          it('跨页之后每一行都还读得到', async () => {
+          it('every row is still readable once it spans pages', async () => {
             const { heap } = await freshHeap();
             const slots: any[] = [];
             for (let index = 0; index < 40; index += 1) {
@@ -1712,14 +1712,14 @@ const stage3 = {
             }
           });
 
-          it('读不存在的位置返回 null', async () => {
+          it('reading a nonexistent position returns null', async () => {
             const { heap } = await freshHeap();
             await heap.insert(row(1, 'a'));
             expect(await heap.read({ pageId: 999, slotId: 0 })).toBeNull();
             expect(await heap.read({ pageId: heap.pages()[0], slotId: 99 })).toBeNull();
           });
 
-          it('删除之后读不到', async () => {
+          it('a deleted row is unreadable', async () => {
             const { heap } = await freshHeap();
             const slot = await heap.insert(row(1, 'a'));
             expect(await heap.remove(slot)).toBe(true);
@@ -1727,7 +1727,7 @@ const stage3 = {
             expect(await heap.remove(slot)).toBe(false);
           });
 
-          it('scan 吐出全部行', async () => {
+          it('scan yields every row', async () => {
             const { heap } = await freshHeap();
             for (let index = 0; index < 25; index += 1) {
               await heap.insert(row(index, 'u' + index));
@@ -1739,13 +1739,13 @@ const stage3 = {
             );
           });
 
-          it('scan 跳过删掉的行，包括页尾的那些', async () => {
+          it('scan skips deleted rows, including those at the end of a page', async () => {
             const { heap } = await freshHeap();
             const slots: any[] = [];
             for (let index = 0; index < 12; index += 1) {
               slots.push(await heap.insert(row(index, 'u' + index)));
             }
-            // 删掉第一个和最后一个：用 liveCount 当循环上界的实现会漏掉尾部
+            // Delete the first and the last: an implementation using liveCount as the loop bound misses the tail
             await heap.remove(slots[0]);
             await heap.remove(slots[slots.length - 1]);
 
@@ -1757,13 +1757,13 @@ const stage3 = {
             expect(ids).toContain(5);
           });
 
-          it('空表 scan 立刻返回 null', async () => {
+          it('scanning an empty table returns null immediately', async () => {
             const { heap } = await freshHeap();
             const cursor = heap.scan();
             expect(await cursor.next()).toBeNull();
           });
 
-          it('scan 给出的 slot 能直接拿去 read', async () => {
+          it('a slot from scan can be passed straight to read', async () => {
             const { heap } = await freshHeap();
             for (let index = 0; index < 8; index += 1) await heap.insert(row(index, 'u' + index));
 
@@ -1773,7 +1773,7 @@ const stage3 = {
             }
           });
 
-          it('flush 之后用 pages() 重新打开，数据还在', async () => {
+          it('the data is still there after flush and reopening via pages()', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 32 });
             const heap = await createHeapFile(pager);
@@ -1788,7 +1788,7 @@ const stage3 = {
             expect(found).toHaveLength(30);
           });
 
-          it('重新打开之后还能继续插入', async () => {
+          it('inserting continues to work after reopening', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 32 });
             const heap = await createHeapFile(pager);
@@ -1802,7 +1802,7 @@ const stage3 = {
             expect(await drain(reopened)).toHaveLength(2);
           });
 
-          it('全表扫描每页只读一次 [gate:scan]', async () => {
+          it('a full table scan reads each page exactly once [gate:scan]', async () => {
             const disk = new Disk();
             const warm = createPager(disk, { capacity: 64 });
             const heap = await createHeapFile(warm);
@@ -1812,7 +1812,7 @@ const stage3 = {
             const pageIds = heap.pages();
             await warm.flush();
 
-            // capacity 1 = 没有缓存，每次 readPage 都是一次真实读盘
+            // capacity 1 = no cache, so every readPage is a real disk read
             const cold = createPager(disk, { capacity: 1 });
             const reopened = await createHeapFile(cold, pageIds);
 
@@ -1822,7 +1822,7 @@ const stage3 = {
             count('scanPageReads', reads);
 
             expect(found).toHaveLength(40);
-            // 逐行 readPage 的实现在这里是 40 次；每页读一次是 pageIds.length 次
+            // A row-by-row readPage implementation does 40 reads here; one read per page is pageIds.length
             expect(reads).toBeLessThanOrEqual(pageIds.length + 1);
           });
         });
@@ -1886,8 +1886,8 @@ const stage3 = {
             async insert(row: Row): Promise<Slot> {
               const bytes = encodeRow(row);
 
-              // 只往最后一页塞。真实引擎会查空闲空间图去复用前面页里的空洞，
-              // 那是另一个话题；这里的重点是「一张表 = 一串页」。
+              // Only append to the last page. A real engine consults a free-space map to reuse holes in earlier pages,
+              // which is a separate topic; the point here is that a table is a chain of pages.
               let pageId = pageList[pageList.length - 1];
               let page = await loadPage(pageId);
               let slotId = page.insert(bytes);
@@ -1902,7 +1902,7 @@ const stage3 = {
                 }
               }
 
-              // 改的是副本，必须写回去，否则这一行只活在这个临时对象里
+              // What was modified is a copy, so it has to be written back, or this row lives only in that temporary object
               await pager.writePage(pageId, page.toBytes());
               return { pageId, slotId };
             },
@@ -1930,11 +1930,11 @@ const stage3 = {
               return {
                 async next(): Promise<HeapEntry | null> {
                   while (pageIndex < pageList.length) {
-                    // 只在跨页时读一次盘，页内的行全部从同一个对象里取
+                    // Read the disk once per page boundary and take every row on the page from that one object
                     if (!page) page = await loadPage(pageList[pageIndex]);
 
-                    // 上界必须是 slotCount：墓碑仍然占着编号，
-                    // 用 liveCount 会让页尾的行永远扫不到
+                    // The bound has to be slotCount: tombstones still occupy ids,
+                    // and using liveCount leaves the rows at the end of a page unreachable forever
                     while (slotId < page.slotCount()) {
                       const bytes = page.read(slotId);
                       const slot: Slot = { pageId: pageList[pageIndex], slotId };
@@ -1999,30 +1999,30 @@ const btreeNode = readonlyFile(
   'src/btree-node.ts',
   code`
     /**
-     * B+Tree 节点的编解码（只读，平台提供）
+     * B+Tree node encoding (read-only, provided by the platform)
      *
-     * 节点怎么变成字节，第 2 关已经练过了，这一关不重复。
-     * 你要写的是**树的算法**：查找路径、分裂、以及叶子之间的链表。
+     * Turning a node into bytes was already practised in stage 2 and is not repeated here.
+     * What you write is the **tree algorithm**: the search path, splitting, and the linked list between leaves.
      */
     import type { Slot } from './contract';
     import { PAGE_SIZE } from './disk';
 
-    /** 一个节点最多放几个 key。取小值是为了让分裂尽快发生，方便观察。 */
+    /** How many keys one node holds at most. A small value makes splits happen early, which is easier to observe. */
     export const MAX_KEYS = 4;
 
     export interface LeafNode {
       kind: 'leaf';
       keys: number[];
-      /** 与 keys 一一对应，指向真实记录的位置 */
+      /** One per key, pointing at where the real record lives */
       slots: Slot[];
-      /** 下一个叶子的 pageId，没有则为 -1。范围扫描靠它 */
+      /** The pageId of the next leaf, or -1 when there is none. Range scans rely on it */
       next: number;
     }
 
     export interface InternalNode {
       kind: 'internal';
       keys: number[];
-      /** 总是比 keys 多一个 */
+      /** Always one more than keys */
       children: number[];
     }
 
@@ -2370,9 +2370,9 @@ const stage4 = {
           rootPageId(): number;
         }
 
-        /** 不传 rootPageId 建新树，传了则打开磁盘上已有的树 */
+        /** Omit rootPageId to build a new tree, or pass it to open an existing tree on disk */
         export function createBTree(pager: Pager, rootPageId?: number): Promise<BTree> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -2400,35 +2400,35 @@ const stage4 = {
           return { disk, pager, tree };
         }
 
-        describe('阶段4 · B+Tree 索引', () => {
-          it('插入之后能查到', async () => {
+        describe('Stage 4 · B+Tree index', () => {
+          it('an inserted key can be found', async () => {
             const { tree } = await freshTree();
             await tree.insert(10, slotFor(10));
             expect(await tree.search(10)).toEqual(slotFor(10));
           });
 
-          it('查不存在的 key 返回 null', async () => {
+          it('searching for a missing key returns null', async () => {
             const { tree } = await freshTree();
             await tree.insert(10, slotFor(10));
             expect(await tree.search(11)).toBeNull();
           });
 
-          it('空树查任何 key 都返回 null', async () => {
+          it('any key on an empty tree returns null', async () => {
             const { tree } = await freshTree();
             expect(await tree.search(1)).toBeNull();
           });
 
-          it('重复 key 覆盖旧的 slot', async () => {
+          it('a duplicate key overwrites the old slot', async () => {
             const { tree } = await freshTree();
             await tree.insert(5, { pageId: 1, slotId: 1 });
             await tree.insert(5, { pageId: 9, slotId: 3 });
             expect(await tree.search(5)).toEqual({ pageId: 9, slotId: 3 });
           });
 
-          it('乱序插入几十个 key，每个都查得到', async () => {
+          it('dozens of keys inserted out of order are all findable', async () => {
             const { tree } = await freshTree();
             const keys: number[] = [];
-            // 用一个固定的乘法散列打乱顺序，保证可复现
+            // Shuffle with a fixed multiplicative hash to keep it reproducible
             for (let index = 0; index < 60; index += 1) keys.push((index * 37) % 101);
 
             for (const key of keys) await tree.insert(key, slotFor(key));
@@ -2437,7 +2437,7 @@ const stage4 = {
             }
           });
 
-          it('插入足够多之后树会长高', async () => {
+          it('the tree grows taller once enough is inserted', async () => {
             const { tree } = await freshTree();
             expect(await tree.height()).toBe(1);
 
@@ -2452,7 +2452,7 @@ const stage4 = {
             expect(await tree.height()).toBeGreaterThanOrEqual(3);
           });
 
-          it('根分裂之后 rootPageId 会变', async () => {
+          it('rootPageId changes after a root split', async () => {
             const { tree } = await freshTree();
             const before = tree.rootPageId();
             for (let key = 1; key <= MAX_KEYS + 1; key += 1) {
@@ -2461,7 +2461,7 @@ const stage4 = {
             expect(tree.rootPageId()).not.toBe(before);
           });
 
-          it('range 返回升序结果', async () => {
+          it('range returns results in ascending order', async () => {
             const { tree } = await freshTree();
             for (let key = 1; key <= 40; key += 1) await tree.insert(key, slotFor(key));
 
@@ -2470,25 +2470,25 @@ const stage4 = {
             expect(found[0].slot).toEqual(slotFor(12));
           });
 
-          it('range 能跨越多个叶子', async () => {
+          it('range can span several leaves', async () => {
             const { tree } = await freshTree();
             for (let key = 1; key <= 60; key += 1) await tree.insert(key, slotFor(key));
 
-            // 一个叶子最多 MAX_KEYS 个 key，这个区间必然横跨好几个叶子
+            // A leaf holds at most MAX_KEYS keys, so this interval is bound to span several
             const found = await tree.range(5, 55);
             const expected: number[] = [];
             for (let key = 5; key <= 55; key += 1) expected.push(key);
             expect(found.map((entry) => entry.key)).toEqual(expected);
           });
 
-          it('range 区间内没有 key 时返回空数组', async () => {
+          it('range returns an empty array when the interval holds no keys', async () => {
             const { tree } = await freshTree();
             for (let key = 1; key <= 20; key += 1) await tree.insert(key * 10, slotFor(key * 10));
 
             expect(await tree.range(101, 109)).toEqual([]);
           });
 
-          it('range 的边界是闭区间', async () => {
+          it('the range bounds are inclusive', async () => {
             const { tree } = await freshTree();
             for (let key = 1; key <= 20; key += 1) await tree.insert(key, slotFor(key));
 
@@ -2496,7 +2496,7 @@ const stage4 = {
             expect(found.map((entry) => entry.key)).toEqual([7]);
           });
 
-          it('flush 之后换一个 pager 打开，数据还在', async () => {
+          it('the data survives flush and opening with a different pager', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 32 });
             const tree = await createBTree(pager);
@@ -2509,7 +2509,7 @@ const stage4 = {
             expect((await reopened.range(30, 33)).map((entry) => entry.key)).toEqual([30, 31, 32, 33]);
           });
 
-          it('单点查找只读了树高那么多页 [gate:logarithmic]', async () => {
+          it('a point lookup reads only as many pages as the tree is tall [gate:logarithmic]', async () => {
             const disk = new Disk();
             const warm = createPager(disk, { capacity: 64 });
             const tree = await createBTree(warm);
@@ -2518,7 +2518,7 @@ const stage4 = {
             const treeHeight = await tree.height();
             await warm.flush();
 
-            // capacity 1 的缓冲池等于没有缓存：每读一个节点就是一次真实读盘
+            // A buffer pool of capacity 1 is no cache at all: every node read is a real disk read
             const cold = createPager(disk, { capacity: 1 });
             const reopened = await createBTree(cold, rootPageId);
 
@@ -2528,7 +2528,7 @@ const stage4 = {
             count('searchPageReads', reads);
 
             expect(found).toEqual(slotFor(37));
-            // 60 个 key 至少 15 个叶子；扫一遍要十几次读盘，走索引只要树高那么多次
+            // 60 keys means at least 15 leaves; a scan costs a dozen or more reads, while the index costs only the tree height
             expect(reads).toBeLessThanOrEqual(treeHeight + 1);
             expect(reads).toBeLessThanOrEqual(6);
           });
@@ -2569,7 +2569,7 @@ const stage4 = {
           rootPageId(): number;
         }
 
-        /** 子节点分裂后交给父节点的东西：一个分界 key 和新的右兄弟 */
+        /** What a split child hands back to its parent: a separator key and the new right sibling */
         interface Split {
           key: number;
           rightPageId: number;
@@ -2593,8 +2593,8 @@ const stage4 = {
           }
 
           /**
-           * 分界 key 是右子树的最小值，所以「等于分界值」要往右走。
-           * 写成 key > keys[index] 的话，等于分界值的 key 会掉进左子树，插得进去查不出来。
+           * The separator key is the minimum of the right subtree, so a key equal to it goes right.
+           * Written as key > keys[index], a key equal to the separator falls into the left subtree, where it can be inserted but never found.
            */
           function childIndexFor(node: InternalNode, key: number): number {
             let index = 0;
@@ -2616,7 +2616,7 @@ const stage4 = {
             const rightSlots = node.slots.splice(mid);
 
             const rightPageId = await pager.allocatePage();
-            // 新叶子接管旧叶子的后继，旧叶子再指向新叶子——顺序反了 range 就会断链
+            // The new leaf takes over the old one\u2019s successor, and only then does the old leaf point at it — reverse the order and range walks off a broken chain
             const rightNode: LeafNode = {
               kind: 'leaf',
               keys: rightKeys,
@@ -2627,13 +2627,13 @@ const stage4 = {
 
             await writeNode(pageId, node);
             await writeNode(rightPageId, rightNode);
-            // 叶子分裂是「复制」分界 key：叶子必须保有全部数据
+            // A leaf split **copies** the separator key up: the leaf has to keep all of the data
             return { key: rightNode.keys[0], rightPageId };
           }
 
           async function splitInternal(pageId: number, node: InternalNode): Promise<Split> {
             const mid = Math.floor(node.keys.length / 2);
-            // 内部节点分裂是「移动」分界 key：它只是路标，留在下面会多出一个指不到数据的分界
+            // An internal split **moves** the separator key up: it is only a signpost, and leaving it below adds a separator pointing at no data
             const promoted = node.keys[mid];
             const rightNode: InternalNode = {
               kind: 'internal',
@@ -2689,7 +2689,7 @@ const stage4 = {
               const split = await insertInto(root, key, slot);
               if (!split) return;
 
-              // 根分裂：必须新分配一页当根，不能就地把旧根改成内部节点
+              // A root split has to allocate a fresh page for the new root rather than turning the old root into an internal node in place
               const newRoot = await pager.allocatePage();
               await writeNode(newRoot, {
                 kind: 'internal',
@@ -2716,7 +2716,7 @@ const stage4 = {
                 }
 
                 const largest = leaf.keys[leaf.keys.length - 1];
-                // 叶子是有序链，最大的 key 都超过 hi 了，后面不可能还有命中
+                // A leaf chain is ordered, so once the largest key exceeds hi there can be no more matches further along
                 if (leaf.next === -1 || (largest !== undefined && largest > hi)) break;
                 leaf = (await readNode(leaf.next)) as LeafNode;
               }
@@ -2789,11 +2789,11 @@ const walCodec = readonlyFile(
   'src/wal-codec.ts',
   code`
     /**
-     * 日志记录的编解码（只读，平台提供）
+     * Log record encoding (read-only, provided by the platform)
      *
-     * 这里用 JSON，因为日志的字节格式不是这一关要教的东西。
-     * 真实的 WAL 是紧凑二进制，每条记录还带 LSN 和校验和——
-     * 校验和用来识别「最后一条记录只写了一半」，那是崩溃时的常态。
+     * JSON is used here because the byte format of the log is not what this stage teaches.
+     * A real WAL is compact binary, and every record also carries an LSN and a checksum —
+     * the checksum is what identifies a last record that was only half written, which is the normal state after a crash.
      */
     import type { LogRecord } from './contract';
 
@@ -3040,7 +3040,7 @@ const stage5 = {
 
         export interface WalTransaction {
           id: number;
-          /** 登记一次页修改。注意：此时不要写数据页 */
+          /** Register one page modification. Note: do not write the data page at this point */
           write(pageId: number, data: Uint8Array): Promise<void>;
           commit(): Promise<void>;
           rollback(): Promise<void>;
@@ -3049,12 +3049,12 @@ const stage5 = {
         export interface WalStore {
           begin(): WalTransaction;
           readPage(pageId: number): Promise<Uint8Array>;
-          /** 重放日志里所有已提交的事务，返回重放的事务数 */
+          /** Replay every committed transaction in the log and return how many were replayed */
           recover(): Promise<number>;
         }
 
         export function createWalStore(disk: Disk): WalStore {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -3075,7 +3075,7 @@ const stage5 = {
           return page;
         }
 
-        /** 先把页分配好并持久化，模拟一个已经存在的数据库文件 */
+        /** Allocate and persist the pages first, simulating a database file that already exists */
         async function preparedDisk(pageCount: number) {
           const disk = new Disk();
           const pages: number[] = [];
@@ -3086,8 +3086,8 @@ const stage5 = {
           return { disk, pages };
         }
 
-        describe('阶段5 · WAL 与崩溃恢复', () => {
-          it('提交之后读得到', async () => {
+        describe('Stage 5 · WAL and crash recovery', () => {
+          it('data is readable after commit', async () => {
             const { disk, pages } = await preparedDisk(1);
             const store = createWalStore(disk);
 
@@ -3098,7 +3098,7 @@ const stage5 = {
             expect(Array.from(await store.readPage(pages[0]))).toEqual(Array.from(bytes(1)));
           });
 
-          it('提交之后掉电，数据还在', async () => {
+          it('the data survives a power loss after commit', async () => {
             const { disk, pages } = await preparedDisk(1);
             const store = createWalStore(disk);
 
@@ -3113,13 +3113,13 @@ const stage5 = {
             expect(Array.from(await store.readPage(pages[0]))).toEqual(Array.from(bytes(2)));
           });
 
-          it('没提交就掉电，改动不存在', async () => {
+          it('changes do not exist after a power loss without commit', async () => {
             const { disk, pages } = await preparedDisk(1);
             const store = createWalStore(disk);
 
             const tx = store.begin();
             await tx.write(pages[0], bytes(3));
-            // 没有 commit
+            // No commit
             disk.crash();
             const replayed = await store.recover();
 
@@ -3127,7 +3127,7 @@ const stage5 = {
             expect(Array.from(await store.readPage(pages[0]))).toEqual(Array.from(new Uint8Array(PAGE_SIZE)));
           });
 
-          it('rollback 之后改动不可见', async () => {
+          it('changes are invisible after rollback', async () => {
             const { disk, pages } = await preparedDisk(1);
             const store = createWalStore(disk);
 
@@ -3138,7 +3138,7 @@ const stage5 = {
             expect(Array.from(await store.readPage(pages[0]))).toEqual(Array.from(new Uint8Array(PAGE_SIZE)));
           });
 
-          it('一个事务改多页，崩溃后要么全在要么全不在', async () => {
+          it('a transaction spanning several pages is all-or-nothing after a crash', async () => {
             const { disk, pages } = await preparedDisk(3);
             const store = createWalStore(disk);
 
@@ -3156,7 +3156,7 @@ const stage5 = {
             expect(Array.from(await store.readPage(pages[2]))).toEqual(Array.from(bytes(9)));
           });
 
-          it('未提交事务的页不会被别人的 fsync 带下去', async () => {
+          it("an uncommitted transaction's pages are not dragged down by someone else's fsync", async () => {
             const { disk, pages } = await preparedDisk(3);
             const store = createWalStore(disk);
 
@@ -3164,12 +3164,12 @@ const stage5 = {
             await committed.write(pages[0], bytes(1));
             await committed.commit();
 
-            // 这个事务永远不提交，它的改动一个字节都不该留在盘上
+            // This transaction never commits, and not one byte of its changes should remain on disk
             const inFlight = store.begin();
             await inFlight.write(pages[2], bytes(66));
 
-            // 另一个事务提交时会 fsync；如果 inFlight 的页已经写进了页缓存，
-            // 这一次 fsync 会把它一起刷成持久的
+            // Another transaction fsyncs when it commits; if the in-flight pages have already been written to the page cache,
+            // that fsync makes them durable along with everything else
             const later = store.begin();
             await later.write(pages[1], bytes(3));
             await later.commit();
@@ -3182,7 +3182,7 @@ const stage5 = {
             expect(Array.from(await store.readPage(pages[2]))).toEqual(Array.from(new Uint8Array(PAGE_SIZE)));
           });
 
-          it('同一页被多个事务改过，重放后是最后提交的那个', async () => {
+          it('when several transactions modify one page, replay leaves the last committed one', async () => {
             const { disk, pages } = await preparedDisk(1);
             const store = createWalStore(disk);
 
@@ -3199,7 +3199,7 @@ const stage5 = {
             expect(Array.from(await store.readPage(pages[0]))).toEqual(Array.from(bytes(3)));
           });
 
-          it('recover 之后日志被清空，再调用返回 0', async () => {
+          it('the log is cleared after recover, and calling it again returns 0', async () => {
             const { disk, pages } = await preparedDisk(1);
             const store = createWalStore(disk);
 
@@ -3213,13 +3213,13 @@ const stage5 = {
             expect(Array.from(await store.readPage(pages[0]))).toEqual(Array.from(bytes(5)));
           });
 
-          it('空日志上恢复不出错', async () => {
+          it('recovering from an empty log does not error', async () => {
             const { disk } = await preparedDisk(1);
             const store = createWalStore(disk);
             expect(await store.recover()).toBe(0);
           });
 
-          it('事务号互不相同', async () => {
+          it('transaction numbers are distinct', async () => {
             const { disk } = await preparedDisk(1);
             const store = createWalStore(disk);
             const a = store.begin();
@@ -3227,7 +3227,7 @@ const stage5 = {
             expect(a.id).not.toBe(b.id);
           });
 
-          it('write 时不写数据页', async () => {
+          it('write does not write the data page', async () => {
             const { disk, pages } = await preparedDisk(1);
             const store = createWalStore(disk);
 
@@ -3239,7 +3239,7 @@ const stage5 = {
             expect(after).toBe(before);
           });
 
-          it('一个事务只 fsync 一次 [gate:commit]', async () => {
+          it('one transaction costs exactly one fsync [gate:commit]', async () => {
             const { disk, pages } = await preparedDisk(5);
             const store = createWalStore(disk);
 
@@ -3305,8 +3305,8 @@ const stage5 = {
               const id = nextTxId;
               nextTxId += 1;
 
-              // 改动先攒在这里，提交之前一个字节都不落盘（no-steal）。
-              // 这样别的事务 fsync 时不会顺手把它刷下去，恢复也就只需要 redo。
+              // Changes accumulate here first, and not a byte goes to disk before commit (no-steal).
+              // That way another transaction\u2019s fsync cannot flush them out, and recovery needs redo only.
               const buffered: BufferedWrite[] = [];
               let settled = false;
 
@@ -3329,11 +3329,11 @@ const stage5 = {
                   settled = true;
 
                   disk.appendLog(encodeLogRecord({ txId: id, type: 'commit' }));
-                  // write-ahead：日志先落盘，整个事务只用这一次 fsync。
-                  // 这一行返回之后事务就算提交成功了，哪怕数据页一页都还没写。
+                  // Write-ahead: the log goes to disk first, and the whole transaction costs just this one fsync.
+                  // Once this line returns the transaction has committed, even with not a single data page written.
                   await disk.fsync();
 
-                  // 数据页可以慢慢来：它们即使丢了，日志里也还记着该改成什么
+                  // The data pages can take their time: even if they are lost, the log still records what they should become
                   for (const entry of buffered) {
                     await disk.writePage(entry.pageId, entry.data);
                   }
@@ -3341,8 +3341,8 @@ const stage5 = {
 
                 async rollback(): Promise<void> {
                   settled = true;
-                  // 日志里没有 commit 记录，恢复时这个事务会被跳过，
-                  // 数据页从来没被碰过，所以没有任何东西需要撤销
+                  // With no commit record in the log, recovery skips this transaction,
+                  // and since the data pages were never touched there is nothing to undo
                   buffered.length = 0;
                 },
               };
@@ -3355,14 +3355,14 @@ const stage5 = {
             async recover(): Promise<number> {
               const records: LogRecord[] = disk.readLog().map(decodeLogRecord);
 
-              // 第一趟：哪些事务真的提交了。崩溃瞬间正在跑的事务同样留下了 write 记录，
-              // 不先筛一遍就会把没提交的改动一起重放进去。
+              // First pass: which transactions actually committed. A transaction running at the moment of the crash left write records too,
+              // and without filtering first you would replay its uncommitted changes along with the rest.
               const committed = new Set<number>();
               for (const record of records) {
                 if (record.type === 'commit') committed.add(record.txId);
               }
 
-              // 第二趟：按日志顺序重放。顺序不能乱——同一页被改过两次时后写的必须赢。
+              // Second pass: replay in log order. The order matters — when one page was modified twice, the later write has to win.
               let replayed = 0;
               for (const record of records) {
                 if (!committed.has(record.txId)) continue;
@@ -3374,7 +3374,7 @@ const stage5 = {
               }
 
               await disk.fsync();
-              // 重放过的日志没用了。真实系统在这里打检查点，而不是直接丢。
+              // Replayed log entries are no longer needed. A real system takes a checkpoint here rather than simply discarding them.
               disk.truncateLog();
               return replayed;
             },
@@ -3663,7 +3663,7 @@ const stage6 = {
       code`
         export type LockMode = 'shared' | 'exclusive';
 
-        /** 请求会成环时抛出，请求方应当回滚 */
+        /** Thrown when a request would form a cycle; the requester should roll back */
         export class DeadlockError extends Error {
           txId: number;
 
@@ -3678,12 +3678,12 @@ const stage6 = {
           acquire(txId: number, resource: string, mode: LockMode): Promise<void>;
           release(txId: number): void;
           holders(resource: string): number[];
-          /** 正在等待的事务数，用于观察 */
+          /** How many transactions are currently waiting, for observability */
           waiterCount(): number;
         }
 
         export function createLockManager(): LockManager {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -3697,8 +3697,8 @@ const stage6 = {
         import { createLockManager, DeadlockError } from '../src/locks';
         import { sleep, now } from '@lab/env';
 
-        describe('阶段6 · 两阶段锁与死锁检测', () => {
-          it('多个共享锁可以同时持有', async () => {
+        describe('Stage 6 · Two-phase locking and deadlock detection', () => {
+          it('several shared locks can be held at once', async () => {
             const locks = createLockManager();
             await locks.acquire(1, 'users', 'shared');
             await locks.acquire(2, 'users', 'shared');
@@ -3706,7 +3706,7 @@ const stage6 = {
             expect(locks.holders('users').sort()).toEqual([1, 2]);
           });
 
-          it('排他锁挡住共享锁，释放后放行', async () => {
+          it('an exclusive lock blocks shared locks and admits them on release', async () => {
             const locks = createLockManager();
             await locks.acquire(1, 'users', 'exclusive');
 
@@ -3725,7 +3725,7 @@ const stage6 = {
             expect(locks.holders('users')).toEqual([2]);
           });
 
-          it('排他锁之间互斥', async () => {
+          it('exclusive locks are mutually exclusive', async () => {
             const locks = createLockManager();
             await locks.acquire(1, 'users', 'exclusive');
 
@@ -3741,7 +3741,7 @@ const stage6 = {
             expect(granted).toBe(true);
           });
 
-          it('唯一持有者可以把共享锁升级为排他锁', async () => {
+          it('the sole holder can upgrade a shared lock to exclusive', async () => {
             const locks = createLockManager();
             await locks.acquire(1, 'users', 'shared');
             await locks.acquire(1, 'users', 'exclusive');
@@ -3753,12 +3753,12 @@ const stage6 = {
               granted = true;
             });
             await sleep(5);
-            // 升级成功之后别人就读不到了
+            // Once the upgrade succeeds nobody else can read
             expect(granted).toBe(false);
             locks.release(1);
           });
 
-          it('还有别的持有者时升级要排队', async () => {
+          it('an upgrade queues while other holders remain', async () => {
             const locks = createLockManager();
             await locks.acquire(1, 'users', 'shared');
             await locks.acquire(2, 'users', 'shared');
@@ -3775,21 +3775,21 @@ const stage6 = {
             expect(upgraded).toBe(true);
           });
 
-          it('重复申请同一把锁不会自己卡住自己', async () => {
+          it('requesting the same lock again does not block you against yourself', async () => {
             const locks = createLockManager();
             await locks.acquire(1, 'users', 'exclusive');
             await locks.acquire(1, 'users', 'exclusive');
             expect(locks.holders('users')).toEqual([1]);
           });
 
-          it('等待队列先进先出，读不会饿死写', async () => {
+          it('the wait queue is FIFO, so readers do not starve writers', async () => {
             const locks = createLockManager();
             await locks.acquire(1, 'users', 'shared');
 
             const order: string[] = [];
             const writer = locks.acquire(2, 'users', 'exclusive').then(() => order.push('writer'));
             await sleep(1);
-            // 这个读请求和当前持有者相容，但它排在写请求后面，不许插队
+            // This read request is compatible with the current holder, but it is queued behind a writer and may not jump ahead
             const reader = locks.acquire(3, 'users', 'shared').then(() => order.push('reader'));
 
             await sleep(5);
@@ -3801,19 +3801,19 @@ const stage6 = {
             expect(order).toEqual(['writer', 'reader']);
           });
 
-          it('环形等待会被拒绝，而不是永远挂着', async () => {
+          it('a wait cycle is rejected rather than hanging forever', async () => {
             const locks = createLockManager();
             await locks.acquire(1, 'A', 'exclusive');
             await locks.acquire(2, 'B', 'exclusive');
 
-            // T1 等 B
+            // T1 waits on B
             let firstGranted = false;
             const first = locks.acquire(1, 'B', 'exclusive').then(() => {
               firstGranted = true;
             });
             await sleep(1);
 
-            // T2 再等 A 就成环了，必须当场失败
+            // T2 waiting on A closes the cycle, so it has to fail on the spot
             let error: unknown = null;
             try {
               await locks.acquire(2, 'A', 'exclusive');
@@ -3824,13 +3824,13 @@ const stage6 = {
             expect(error).toBeInstanceOf(DeadlockError);
             expect(firstGranted).toBe(false);
 
-            // 被判负的事务回滚，另一个就能走下去
+            // The transaction chosen as the victim rolls back, letting the other one proceed
             locks.release(2);
             await first;
             expect(firstGranted).toBe(true);
           });
 
-          it('三个事务的环也能抓出来', async () => {
+          it('a cycle across three transactions is caught too', async () => {
             const locks = createLockManager();
             await locks.acquire(1, 'A', 'exclusive');
             await locks.acquire(2, 'B', 'exclusive');
@@ -3854,11 +3854,11 @@ const stage6 = {
             locks.release(1);
           });
 
-          it('不成环的等待不会被误判', async () => {
+          it('a wait that forms no cycle is not falsely rejected', async () => {
             const locks = createLockManager();
             await locks.acquire(1, 'A', 'exclusive');
 
-            // T2 等 A，但 T1 没有在等任何东西，这不是死锁
+            // T2 waits on A, but T1 is not waiting on anything, so this is no deadlock
             let granted = false;
             const waiting = locks.acquire(2, 'A', 'exclusive').then(() => {
               granted = true;
@@ -3871,7 +3871,7 @@ const stage6 = {
             expect(granted).toBe(true);
           });
 
-          it('release 释放该事务的全部锁', async () => {
+          it("release drops all of that transaction's locks", async () => {
             const locks = createLockManager();
             await locks.acquire(1, 'A', 'exclusive');
             await locks.acquire(1, 'B', 'exclusive');
@@ -3881,13 +3881,13 @@ const stage6 = {
             expect(locks.holders('B')).toEqual([]);
           });
 
-          it('释放没持有锁的事务是无操作', () => {
+          it('releasing a transaction that holds no locks is a no-op', () => {
             const locks = createLockManager();
             locks.release(42);
             expect(locks.waiterCount()).toBe(0);
           });
 
-          it('共享锁之间不会互相排队 [gate:shared]', async () => {
+          it('shared locks do not queue behind one another [gate:shared]', async () => {
             const locks = createLockManager();
             const startedAt = now();
 
@@ -3899,7 +3899,7 @@ const stage6 = {
               })
             );
 
-            // 串行化的实现是 50ms，正确的实现是 10ms
+            // A serialising implementation takes 50ms; a correct one takes 10ms
             expect(now() - startedAt).toBe(10);
           });
         });
@@ -3971,10 +3971,10 @@ const stage6 = {
           function compatible(resource: string, txId: number, mode: LockMode): boolean {
             const current = holdersOf(resource);
             if (current.size === 0) return true;
-            // 唯一持有者是自己：重复申请或升级，都直接放行
+            // The sole holder is yourself: a repeat request or an upgrade is admitted immediately
             if (current.size === 1 && current.has(txId)) return true;
             if (mode === 'exclusive') return false;
-            // 共享请求：只要没有别人拿着排他锁就相容
+            // A shared request is compatible as long as nobody else holds it exclusively
             for (const entry of Array.from(current.entries())) {
               if (entry[0] !== txId && entry[1] === 'exclusive') return false;
             }
@@ -3983,7 +3983,7 @@ const stage6 = {
 
           function grant(resource: string, txId: number, mode: LockMode): void {
             const current = holdersOf(resource);
-            // 已经是排他锁就不要被一次共享申请降级
+            // Already exclusive: do not let a shared request downgrade it
             const existing = current.get(txId);
             current.set(txId, existing === 'exclusive' ? 'exclusive' : mode);
 
@@ -3994,7 +3994,7 @@ const stage6 = {
 
           function drain(resource: string): void {
             const queue = queueOf(resource);
-            // 只从队头放行：相容的请求也不许插队，否则源源不断的读会饿死写
+            // Admit from the head only: even a compatible request may not jump the queue, or a stream of readers starves the writers
             while (queue.length > 0 && compatible(resource, queue[0].txId, queue[0].mode)) {
               const waiter = queue.shift() as Waiter;
               grant(resource, waiter.txId, waiter.mode);
@@ -4004,8 +4004,8 @@ const stage6 = {
           }
 
           /**
-           * 等待图：每个正在等待的事务，连边指向它所等资源的每个持有者。
-           * 把新请求这条边也加进去，从请求方出发能走回自己就是环。
+           * The wait-for graph: every waiting transaction has an edge to each holder of the resource it waits on.
+           * Add the new request as an edge too; if you can walk from the requester back to itself, that is a cycle.
            */
           function wouldCycle(txId: number, resource: string): boolean {
             const waitsFor = new Map<number, Set<number>>();
@@ -4043,8 +4043,8 @@ const stage6 = {
                 return;
               }
 
-              // 判死锁要在进队列**之前**：进了队列再发现成环，
-              // 就得把已经在等的人也叫醒，处理起来麻烦得多
+              // Deadlock has to be detected **before** joining the queue: discovering the cycle afterwards
+              // means waking up everyone already waiting, which is far more work to handle
               if (wouldCycle(txId, resource)) throw new DeadlockError(txId);
 
               await new Promise<void>((resolve) => {
@@ -4060,7 +4060,7 @@ const stage6 = {
                 holdersOf(resource).delete(txId);
               }
               byTx.delete(txId);
-              // 释放之后必须主动唤醒，等待者不会自己醒过来
+              // Waiters have to be woken explicitly on release; they do not wake up by themselves
               for (const resource of Array.from(owned)) drain(resource);
             },
 
@@ -4352,7 +4352,7 @@ const stage7 = {
       code`
         import type { Row } from './contract';
 
-        /** 在我的快照之后已经有人改过同一个 key */
+        /** Somebody has already modified this key since my snapshot */
         export class WriteConflictError extends Error {
           txId: number;
           key: string;
@@ -4368,7 +4368,7 @@ const stage7 = {
         export interface MvccTransaction {
           id: number;
           read(key: string): Row | null;
-          /** row 为 null 表示删除 */
+          /** A row of null means a delete */
           write(key: string, row: Row | null): void;
           commit(): void;
           rollback(): void;
@@ -4376,17 +4376,17 @@ const stage7 = {
 
         export interface MvccStore {
           begin(): MvccTransaction;
-          /** 最新已提交的值，测试和运维用 */
+          /** The latest committed value, for tests and operations */
           current(key: string): Row | null;
-          /** 这个 key 的版本链有多长 */
+          /** How long this key\u2019s version chain is */
           chainLength(key: string): number;
-          /** 清掉没人看得见的旧版本，返回清理数量 */
+          /** Purge old versions nobody can see any more, returning how many were removed */
           vacuum(): number;
           activeCount(): number;
         }
 
         export function createMvccStore(): MvccStore {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -4404,8 +4404,8 @@ const stage7 = {
           return { id, name, active };
         }
 
-        describe('阶段7 · 快照隔离与版本链', () => {
-          it('提交之后别的事务读得到', () => {
+        describe('Stage 7 · Snapshot isolation and version chains', () => {
+          it('another transaction can read it after commit', () => {
             const store = createMvccStore();
             const writer = store.begin();
             writer.write('u1', row(1, 'alice'));
@@ -4416,19 +4416,19 @@ const stage7 = {
             expect(store.current('u1')).toEqual(row(1, 'alice'));
           });
 
-          it('没写过的 key 读出来是 null', () => {
+          it('a key never written reads as null', () => {
             const store = createMvccStore();
             expect(store.begin().read('nobody')).toBeNull();
           });
 
-          it('自己没提交的写，自己看得见', () => {
+          it('your own uncommitted write is visible to you', () => {
             const store = createMvccStore();
             const tx = store.begin();
             tx.write('u1', row(1, 'draft'));
             expect(tx.read('u1')).toEqual(row(1, 'draft'));
           });
 
-          it('自己没提交的写，别人看不见', () => {
+          it('your own uncommitted write is invisible to others', () => {
             const store = createMvccStore();
             const writer = store.begin();
             writer.write('u1', row(1, 'draft'));
@@ -4437,7 +4437,7 @@ const stage7 = {
             expect(other.read('u1')).toBeNull();
           });
 
-          it('快照建立之后，别人的提交与我无关（可重复读）', () => {
+          it('once a snapshot is taken, other commits do not concern it (repeatable read)', () => {
             const store = createMvccStore();
             const setup = store.begin();
             setup.write('u1', row(1, 'v1'));
@@ -4450,13 +4450,13 @@ const stage7 = {
             writer.write('u1', row(1, 'v2'));
             writer.commit();
 
-            // 同一个事务里读第二次，还是 v1
+            // A second read in the same transaction still sees v1
             expect(reader.read('u1')).toEqual(row(1, 'v1'));
-            // 但新开的事务看到的是 v2
+            // But a freshly started transaction sees v2
             expect(store.begin().read('u1')).toEqual(row(1, 'v2'));
           });
 
-          it('多次更新之后读到的是最新的可见版本', () => {
+          it('after several updates the read returns the newest visible version', () => {
             const store = createMvccStore();
             for (const name of ['v1', 'v2', 'v3']) {
               const tx = store.begin();
@@ -4466,7 +4466,7 @@ const stage7 = {
             expect(store.begin().read('u1')).toEqual(row(1, 'v3'));
           });
 
-          it('写同一个 key，后提交的那个冲突失败', () => {
+          it('with two writes to one key, the one that commits later fails on conflict', () => {
             const store = createMvccStore();
             const setup = store.begin();
             setup.write('u1', row(1, 'base'));
@@ -4491,7 +4491,7 @@ const stage7 = {
             expect(store.current('u1')).toEqual(row(1, 'from-first'));
           });
 
-          it('冲突失败之后不会在版本链里留下垃圾', () => {
+          it('a failed conflict leaves no garbage in the version chain', () => {
             const store = createMvccStore();
             const setup = store.begin();
             setup.write('u1', row(1, 'base'));
@@ -4505,7 +4505,7 @@ const stage7 = {
             try {
               second.commit();
             } catch (caught) {
-              // 预期之内
+              // Expected
             }
 
             expect(store.vacuum()).toBeGreaterThanOrEqual(0);
@@ -4513,7 +4513,7 @@ const stage7 = {
             expect(store.current('u1')).toEqual(row(1, 'a'));
           });
 
-          it('改不同 key 的事务互不干扰', () => {
+          it('transactions modifying different keys do not interfere', () => {
             const store = createMvccStore();
             const first = store.begin();
             const second = store.begin();
@@ -4527,7 +4527,7 @@ const stage7 = {
             expect(store.current('u2')).toEqual(row(2, 'b'));
           });
 
-          it('rollback 之后什么都没留下', () => {
+          it('rollback leaves nothing behind', () => {
             const store = createMvccStore();
             const tx = store.begin();
             tx.write('u1', row(1, 'gone'));
@@ -4537,7 +4537,7 @@ const stage7 = {
             expect(store.begin().read('u1')).toBeNull();
           });
 
-          it('写 null 表示删除', () => {
+          it('writing null means a delete', () => {
             const store = createMvccStore();
             const setup = store.begin();
             setup.write('u1', row(1, 'alice'));
@@ -4551,7 +4551,7 @@ const stage7 = {
             expect(store.begin().read('u1')).toBeNull();
           });
 
-          it('活跃事务还在时，vacuum 不能清掉它要看的版本', () => {
+          it('vacuum cannot remove a version an active transaction still needs', () => {
             const store = createMvccStore();
             const setup = store.begin();
             setup.write('u1', row(1, 'v1'));
@@ -4564,18 +4564,18 @@ const stage7 = {
             writer.commit();
 
             store.vacuum();
-            // reader 的快照还需要 v1
+            // reader\u2019s snapshot still needs v1
             expect(reader.read('u1')).toEqual(row(1, 'v1'));
           });
 
-          it('快照隔离挡不住写偏斜——这是它的已知边界', () => {
+          it('snapshot isolation does not prevent write skew — that is its known boundary', () => {
             const store = createMvccStore();
             const setup = store.begin();
             setup.write('x', row(0, '10'));
             setup.write('y', row(0, '10'));
             setup.commit();
 
-            // 两个事务各自检查「x + y >= 0」，各自只改一个
+            // Each transaction checks that x + y >= 0 and each modifies only one of them
             const first = store.begin();
             const second = store.begin();
 
@@ -4587,16 +4587,16 @@ const stage7 = {
             first.write('x', row(0, '-15'));
             second.write('y', row(0, '-15'));
 
-            // 写的是不同的 key，没有写写冲突，两个都提交成功
+            // They write different keys, so there is no write-write conflict and both commit
             first.commit();
             second.commit();
 
             const finalSum = Number(store.current('x')!.name) + Number(store.current('y')!.name);
-            // 两个事务分别都维护住了不变量，合起来把它破坏了
+            // Each transaction preserved the invariant on its own, and together they broke it
             expect(finalSum).toBe(-30);
           });
 
-          it('没有活跃事务时 vacuum 把版本链塌回一个 [gate:vacuum]', () => {
+          it('with no active transactions vacuum collapses the chain to one [gate:vacuum]', () => {
             const store = createMvccStore();
             for (let index = 0; index < 20; index += 1) {
               const tx = store.begin();
@@ -4612,7 +4612,7 @@ const stage7 = {
 
             expect(removed).toBeGreaterThanOrEqual(19);
             expect(store.chainLength('u1')).toBe(1);
-            // 清理不能改变可见的值
+            // Cleaning must not change the visible value
             expect(store.current('u1')).toEqual(row(1, 'v19'));
           });
         });
@@ -4667,14 +4667,14 @@ const stage7 = {
 
         interface Version {
           createdBy: number;
-          /** null 表示还没提交 */
+          /** null means not yet committed */
           commitSeq: number | null;
           row: Row | null;
         }
 
         export function createMvccStore(): MvccStore {
           let nextTxId = 1;
-          // 全局提交序号。可见性和冲突判定都只是在比较两个整数
+          // The global commit sequence number. Visibility and conflict checks are just comparisons of two integers
           let commitSeq = 0;
           const chains = new Map<string, Version[]>();
           const active = new Map<number, number>();
@@ -4721,12 +4721,12 @@ const stage7 = {
 
                 read(key: string): Row | null {
                   const versions = chains.get(key) || [];
-                  // 从新往旧扫，第一个可见的就是答案。
-                  // 反过来扫会永远返回最初那个值
+                  // Scan newest to oldest; the first visible one is the answer.
+                  // Scanning the other way would always return the original value
                   for (let index = versions.length - 1; index >= 0; index -= 1) {
                     const version = versions[index];
                     if (version.createdBy === id) return version.row;
-                    // <= 而不是 <：开始那一刻已经提交的必须可见
+                    // <= rather than <: whatever was already committed at that instant has to be visible
                     if (version.commitSeq !== null && version.commitSeq <= startSeq) return version.row;
                   }
                   return null;
@@ -4749,13 +4749,13 @@ const stage7 = {
                 commit(): void {
                   if (settled) throw new Error('transaction ' + id + ' has already finished');
 
-                  // 条件是「有没有**任何**版本在我的快照之后提交」，
-                  // 只比较最新版本会在连续提交时漏判
+                  // The condition is whether **any** version committed after my snapshot;
+                  // comparing only the newest version misses conflicts under consecutive commits
                   for (const key of Array.from(written)) {
                     for (const version of chainOf(key)) {
                       if (version.commitSeq !== null && version.commitSeq > startSeq) {
-                        // 先把自己造的版本摘掉再抛：留在链里的话
-                        // 既不可见也 vacuum 不掉，链只会越来越长
+                        // Detach the version you created before throwing: left in the chain it is
+                        // neither visible nor vacuumable, and the chain only grows
                         discardOwn();
                         settled = true;
                         active.delete(id);
@@ -4795,8 +4795,8 @@ const stage7 = {
             },
 
             vacuum(): number {
-              // 水位线取所有活跃事务里最老的那个快照：比它更旧、
-              // 而且后面还有更新版本的，谁也看不见了
+              // The watermark is the oldest snapshot among all active transactions: anything older than it
+              // that has a newer version after it is visible to nobody
               let watermark = commitSeq;
               for (const startSeq of Array.from(active.values())) {
                 watermark = Math.min(watermark, startSeq);
@@ -4878,15 +4878,15 @@ const stage7 = {
 const ast = readonlyFile(
   'src/ast.ts',
   code`
-    /** 语法树的形状（只读，平台提供）——解析器的输出必须长这样 */
+    /** The shape of the syntax tree (read-only, provided by the platform) — the parser output has to look like this */
 
     export type TokenType = 'keyword' | 'identifier' | 'number' | 'string' | 'operator' | 'punctuation' | 'eof';
 
     export interface Token {
       type: TokenType;
-      /** 关键字统一大写，标识符保留原样 */
+      /** Keywords are uppercased; identifiers are kept as written */
       value: string;
-      /** 在原始 SQL 里的下标，报错要用 */
+      /** The index within the original SQL, needed for error reporting */
       position: number;
     }
 
@@ -4905,7 +4905,7 @@ const ast = readonlyFile(
 
     export interface SelectStatement {
       kind: 'select';
-      /** ['*'] 表示全部列 */
+      /** ['*'] means every column */
       columns: string[];
       table: string;
       where?: Expr;
@@ -5194,7 +5194,7 @@ const stage8 = {
         }
 
         export function tokenize(sql: string): Token[] {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -5206,7 +5206,7 @@ const stage8 = {
         import type { Statement } from './ast';
 
         export function parse(sql: string): Statement {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -5220,8 +5220,8 @@ const stage8 = {
         import { tokenize, SqlSyntaxError } from '../src/lexer';
         import { parse } from '../src/parser';
 
-        describe('阶段8 · 词法分析', () => {
-          it('切出关键字、标识符和数字', () => {
+        describe('Stage 8 · Lexing', () => {
+          it('splits out keywords, identifiers and numbers', () => {
             const tokens = tokenize('SELECT id FROM users');
             expect(tokens.map((token) => token.type)).toEqual([
               'keyword',
@@ -5233,28 +5233,28 @@ const stage8 = {
             expect(tokens.map((token) => token.value)).toEqual(['SELECT', 'id', 'FROM', 'users', '']);
           });
 
-          it('关键字大小写不敏感，统一成大写', () => {
+          it('keywords are case-insensitive and normalised to uppercase', () => {
             const tokens = tokenize('select ID from Users');
             expect(tokens[0]).toEqual({ type: 'keyword', value: 'SELECT', position: 0 });
             expect(tokens[2].value).toBe('FROM');
-            // 标识符保留原样
+            // Identifiers are kept as written
             expect(tokens[1].value).toBe('ID');
             expect(tokens[3].value).toBe('Users');
           });
 
-          it('两字符运算符不会被切开', () => {
+          it('two-character operators are not split apart', () => {
             const tokens = tokenize('a >= 1 AND b != 2 AND c <= 3');
             const operators = tokens.filter((token) => token.type === 'operator').map((token) => token.value);
             expect(operators).toEqual(['>=', '!=', '<=']);
           });
 
-          it('字符串字面量支持两个连写的单引号转义', () => {
+          it('string literals support two consecutive single quotes as an escape', () => {
             const tokens = tokenize("name = 'it''s ok'");
             const literal = tokens.filter((token) => token.type === 'string')[0];
             expect(literal.value).toBe("it's ok");
           });
 
-          it('未闭合的字符串会报错并带位置', () => {
+          it('an unterminated string errors with a position', () => {
             let error: any = null;
             try {
               tokenize("name = 'unterminated");
@@ -5265,7 +5265,7 @@ const stage8 = {
             expect(error.position).toBe(7);
           });
 
-          it('非法字符会报错', () => {
+          it('an illegal character errors', () => {
             let error: any = null;
             try {
               tokenize('SELECT # FROM t');
@@ -5276,15 +5276,15 @@ const stage8 = {
             expect(error.position).toBe(7);
           });
 
-          it('位置信息指向 token 的起点', () => {
+          it('the position points at the start of the token', () => {
             const tokens = tokenize('SELECT  id');
             expect(tokens[0].position).toBe(0);
             expect(tokens[1].position).toBe(8);
           });
         });
 
-        describe('阶段8 · 语法分析', () => {
-          it('解析最简单的 SELECT', () => {
+        describe('Stage 8 · Parsing', () => {
+          it('parses the simplest SELECT', () => {
             expect(parse('SELECT * FROM users')).toEqual({
               kind: 'select',
               columns: ['*'],
@@ -5292,12 +5292,12 @@ const stage8 = {
             });
           });
 
-          it('解析列清单', () => {
+          it('parses a column list', () => {
             const statement: any = parse('SELECT id, name FROM users');
             expect(statement.columns).toEqual(['id', 'name']);
           });
 
-          it('解析 WHERE 比较', () => {
+          it('parses a WHERE comparison', () => {
             const statement: any = parse('SELECT * FROM users WHERE age >= 18');
             expect(statement.where).toEqual({
               kind: 'binary',
@@ -5307,32 +5307,32 @@ const stage8 = {
             });
           });
 
-          it('字符串字面量进入语法树', () => {
+          it('string literals reach the syntax tree', () => {
             const statement: any = parse("SELECT * FROM users WHERE city = 'Beijing'");
             expect(statement.where.right).toEqual({ kind: 'literal', value: 'Beijing' });
           });
 
-          it('AND 比 OR 优先级高', () => {
+          it('AND binds tighter than OR', () => {
             const statement: any = parse('SELECT * FROM t WHERE a = 1 OR b = 2 AND c = 3');
             expect(statement.where.op).toBe('OR');
             expect(statement.where.left.op).toBe('=');
             expect(statement.where.right.op).toBe('AND');
           });
 
-          it('括号可以覆盖优先级', () => {
+          it('parentheses override precedence', () => {
             const statement: any = parse('SELECT * FROM t WHERE (a = 1 OR b = 2) AND c = 3');
             expect(statement.where.op).toBe('AND');
             expect(statement.where.left.op).toBe('OR');
           });
 
-          it('多个 AND 左结合', () => {
+          it('several ANDs associate to the left', () => {
             const statement: any = parse('SELECT * FROM t WHERE a = 1 AND b = 2 AND c = 3');
             expect(statement.where.op).toBe('AND');
             expect(statement.where.left.op).toBe('AND');
             expect(statement.where.right.left).toEqual({ kind: 'column', name: 'c' });
           });
 
-          it('解析 ORDER BY 与方向', () => {
+          it('parses ORDER BY and its direction', () => {
             const ascending: any = parse('SELECT * FROM t ORDER BY age');
             expect(ascending.orderBy).toEqual({ column: 'age', direction: 'asc' });
 
@@ -5340,12 +5340,12 @@ const stage8 = {
             expect(descending.orderBy).toEqual({ column: 'age', direction: 'desc' });
           });
 
-          it('解析 LIMIT', () => {
+          it('parses LIMIT', () => {
             const statement: any = parse('SELECT * FROM t LIMIT 10');
             expect(statement.limit).toBe(10);
           });
 
-          it('子句可以组合', () => {
+          it('clauses can be combined', () => {
             const statement: any = parse(
               "SELECT id, name FROM users WHERE age >= 18 AND city = 'Beijing' ORDER BY age DESC LIMIT 5"
             );
@@ -5356,7 +5356,7 @@ const stage8 = {
             expect(statement.limit).toBe(5);
           });
 
-          it('解析 INSERT', () => {
+          it('parses INSERT', () => {
             expect(parse("INSERT INTO users VALUES (7, 'alice', 1)")).toEqual({
               kind: 'insert',
               table: 'users',
@@ -5364,12 +5364,12 @@ const stage8 = {
             });
           });
 
-          it('负数字面量', () => {
+          it('negative numeric literals', () => {
             const statement: any = parse('SELECT * FROM t WHERE balance < -100');
             expect(statement.where.right).toEqual({ kind: 'literal', value: -100 });
           });
 
-          it('缺少 FROM 会报错并带位置', () => {
+          it('a missing FROM errors with a position', () => {
             let error: any = null;
             try {
               parse('SELECT *');
@@ -5380,7 +5380,7 @@ const stage8 = {
             expect(typeof error.position).toBe('number');
           });
 
-          it('尾部多余的内容不会被静默忽略', () => {
+          it('trailing junk is not silently ignored', () => {
             let error: any = null;
             try {
               parse('SELECT * FROM users GARBAGE');
@@ -5416,7 +5416,7 @@ const stage8 = {
           'LIMIT', 'INSERT', 'INTO', 'VALUES', 'AND', 'OR',
         ];
 
-        // 先长后短：反过来的话 '>=' 会被切成 '>' 和 '='
+        // Longest first: the other way round would split '>=' into '>' and '='
         const TWO_CHAR_OPERATORS = ['>=', '<=', '!=', '<>'];
         const ONE_CHAR_OPERATORS = ['=', '<', '>', '*', '-'];
 
@@ -5451,7 +5451,7 @@ const stage8 = {
               let closed = false;
               while (cursor < sql.length) {
                 if (sql[cursor] === "'") {
-                  // 两个连写的单引号是一个转义，不是结束
+                  // Two consecutive single quotes are an escape, not the end
                   if (sql[cursor + 1] === "'") {
                     value += "'";
                     cursor += 2;
@@ -5483,8 +5483,8 @@ const stage8 = {
               const word = sql.slice(start, index);
               const upper = word.toUpperCase();
               const keyword = KEYWORDS.indexOf(upper) !== -1;
-              // 关键字统一大写便于比较，标识符保留原样——
-              // 把整条 SQL 转大写会连字符串字面量一起改掉
+              // Keywords are uppercased for easy comparison while identifiers keep their case —
+              // uppercasing the whole SQL statement would rewrite the string literals along with it
               const type: TokenType = keyword ? 'keyword' : 'identifier';
               tokens.push({ type, value: keyword ? upper : word, position: start });
               continue;
@@ -5550,7 +5550,7 @@ const stage8 = {
             return token;
           }
 
-          /* --- 表达式：一层文法一个函数，越往下优先级越高 --- */
+          /* --- Expressions: one function per grammar level, tighter binding further down --- */
 
           function parsePrimary(): Expr {
             if (at('punctuation', '(')) {
@@ -5586,7 +5586,7 @@ const stage8 = {
 
           function parseAnd(): Expr {
             let left = parseCompare();
-            // 循环而不是递归：文法写成 X (op X)* 才不会左递归
+            // A loop rather than recursion: writing the grammar as X (op X)* avoids left recursion
             while (at('keyword', 'AND')) {
               eat('keyword', 'AND');
               left = { kind: 'binary', op: 'AND' as BinaryOp, left, right: parseCompare() };
@@ -5595,7 +5595,7 @@ const stage8 = {
           }
 
           function parseExpr(): Expr {
-            // OR 在最外层，所以它的优先级最低
+            // OR sits outermost, which is why it binds loosest
             let left = parseAnd();
             while (at('keyword', 'OR')) {
               eat('keyword', 'OR');
@@ -5604,7 +5604,7 @@ const stage8 = {
             return left;
           }
 
-          /* --- 语句 --- */
+          /* --- Statements --- */
 
           function parseSelect(): SelectStatement {
             eat('keyword', 'SELECT');
@@ -5681,8 +5681,8 @@ const stage8 = {
 
           const statement = at('keyword', 'INSERT') ? parseInsert() : parseSelect();
 
-          // 不检查这一步，"SELECT * FROM users GARBAGE" 会安静地成功，
-          // 用户以为写的东西生效了，其实尾巴被丢掉了
+          // Without this check, "SELECT * FROM users GARBAGE" succeeds silently and the user believes
+          // what they wrote took effect, when in fact the tail was thrown away
           if (!at('eof')) {
             throw new SqlSyntaxError('unexpected "' + peek().value + '" after the statement', peek().position);
           }
@@ -5739,7 +5739,7 @@ const stage8 = {
 const planTypes = readonlyFile(
   'src/plan.ts',
   code`
-    /** 逻辑计划的形状（只读，平台提供） */
+    /** The shape of the logical plan (read-only, provided by the platform) */
     import type { Expr } from './ast';
 
     export type ColumnType = 'number' | 'string';
@@ -5752,11 +5752,11 @@ const planTypes = readonlyFile(
     export interface TableSchema {
       name: string;
       columns: ColumnDef[];
-      /** 这张表的堆文件占用的页 */
+      /** The pages this table\u2019s heap file occupies */
       pages: number[];
     }
 
-    /** 执行期在算子之间流动的一行 */
+    /** One row flowing between operators at execution time */
     export type Tuple = Record<string, number | string>;
 
     export type LogicalPlan =
@@ -6037,13 +6037,13 @@ const stage9 = {
         export interface Catalog {
           createTable(name: string, columns: ColumnDef[], pages: number[]): void;
           getTable(name: string): TableSchema | null;
-          /** 表被写入之后页列表会变，要能更新 */
+          /** The page list changes when a table is written to, so it has to be updatable */
           setPages(name: string, pages: number[]): void;
           tables(): string[];
         }
 
         export function createCatalog(): Catalog {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -6056,7 +6056,7 @@ const stage9 = {
         import type { LogicalPlan } from './plan';
         import type { Catalog } from './catalog';
 
-        /** 语法对但引用了不存在的东西 */
+        /** Syntactically valid but referring to something that does not exist */
         export class BindError extends Error {
           constructor(message: string) {
             super(message);
@@ -6065,7 +6065,7 @@ const stage9 = {
         }
 
         export function plan(statement: Statement, catalog: Catalog): LogicalPlan {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -6108,8 +6108,8 @@ const stage9 = {
           expect(error).toBeInstanceOf(BindError);
         }
 
-        describe('阶段9 · 目录', () => {
-          it('登记之后能查到表结构', () => {
+        describe('Stage 9 · Catalog', () => {
+          it('a registered table can be looked up', () => {
             const catalog = catalogWithUsers();
             const table = catalog.getTable('users');
             expect(table).not.toBeNull();
@@ -6117,51 +6117,51 @@ const stage9 = {
             expect(table!.pages).toEqual([0, 1]);
           });
 
-          it('没登记的表返回 null', () => {
+          it('an unregistered table returns null', () => {
             expect(catalogWithUsers().getTable('ghosts')).toBeNull();
           });
 
-          it('页列表可以更新', () => {
+          it('the page list can be updated', () => {
             const catalog = catalogWithUsers();
             catalog.setPages('users', [0, 1, 2, 3]);
             expect(catalog.getTable('users')!.pages).toEqual([0, 1, 2, 3]);
           });
 
-          it('tables 列出所有表名', () => {
+          it('tables lists every table name', () => {
             const catalog = catalogWithUsers();
             catalog.createTable('orders', [{ name: 'id', type: 'number' }], [9]);
             expect(catalog.tables().sort()).toEqual(['orders', 'users']);
           });
         });
 
-        describe('阶段9 · 绑定与逻辑计划', () => {
-          it('最简单的查询是 project(scan)', () => {
+        describe('Stage 9 · Binding and the logical plan', () => {
+          it('the simplest query is project(scan)', () => {
             const logical = planFor('SELECT id FROM users');
             expect(logical.kind).toBe('project');
             expect(logical.columns).toEqual(['id']);
             expect(logical.input).toEqual({ kind: 'scan', table: 'users' });
           });
 
-          it('SELECT * 在绑定期就展开成真实列名', () => {
+          it('SELECT * expands to real column names at bind time', () => {
             const logical = planFor('SELECT * FROM users');
             expect(logical.kind).toBe('project');
-            // 计划里不该再留下需要查目录才能理解的 '*'
+            // No '*' requiring a catalog lookup should remain in the plan
             expect(logical.columns).toEqual(['id', 'name', 'active']);
           });
 
-          it('WHERE 变成 filter 节点', () => {
+          it('WHERE becomes a filter node', () => {
             const logical = planFor('SELECT id FROM users WHERE active = 1');
             expect(logical.kind).toBe('project');
             expect(logical.input.kind).toBe('filter');
             expect(logical.input.input).toEqual({ kind: 'scan', table: 'users' });
           });
 
-          it('没有 WHERE 就没有 filter 节点', () => {
+          it('no WHERE means no filter node', () => {
             const logical = planFor('SELECT id FROM users');
             expect(logical.input.kind).toBe('scan');
           });
 
-          it('ORDER BY 排在 project 下面', () => {
+          it('ORDER BY sits below project', () => {
             const logical = planFor('SELECT id FROM users ORDER BY name DESC');
             expect(logical.kind).toBe('project');
             expect(logical.input.kind).toBe('sort');
@@ -6169,20 +6169,20 @@ const stage9 = {
             expect(logical.input.direction).toBe('desc');
           });
 
-          it('ORDER BY 可以用没被选中的列', () => {
+          it('ORDER BY can use a column that was not selected', () => {
             const logical = planFor('SELECT id FROM users ORDER BY name');
             expect(logical.columns).toEqual(['id']);
             expect(logical.input.column).toBe('name');
           });
 
-          it('LIMIT 在最外层', () => {
+          it('LIMIT sits outermost', () => {
             const logical = planFor('SELECT id FROM users LIMIT 3');
             expect(logical.kind).toBe('limit');
             expect(logical.count).toBe(3);
             expect(logical.input.kind).toBe('project');
           });
 
-          it('完整查询的嵌套顺序', () => {
+          it('the nesting order of a complete query', () => {
             const logical = planFor(
               "SELECT id, name FROM users WHERE active = 1 ORDER BY name DESC LIMIT 2"
             );
@@ -6193,46 +6193,46 @@ const stage9 = {
             expect(logical.input.input.input.input.kind).toBe('scan');
           });
 
-          it('表不存在会报 BindError', () => {
+          it('a missing table raises BindError', () => {
             expectBindError('SELECT id FROM ghosts');
           });
 
-          it('SELECT 列表里的未知列会报错', () => {
+          it('an unknown column in the SELECT list errors', () => {
             expectBindError('SELECT nmae FROM users');
           });
 
-          it('WHERE 里的未知列会报错', () => {
+          it('an unknown column in WHERE errors', () => {
             expectBindError('SELECT id FROM users WHERE nmae = 1');
           });
 
-          it('ORDER BY 里的未知列会报错', () => {
+          it('an unknown column in ORDER BY errors', () => {
             expectBindError('SELECT id FROM users ORDER BY nmae');
           });
 
-          it('字面量类型和列类型不符会报错', () => {
+          it('a literal whose type does not match the column errors', () => {
             expectBindError("SELECT id FROM users WHERE id = 'abc'");
             expectBindError('SELECT id FROM users WHERE name = 1');
           });
 
-          it('类型相符则通过', () => {
+          it('a matching type passes', () => {
             const logical = planFor("SELECT id FROM users WHERE name = 'alice'");
             expect(logical.input.kind).toBe('filter');
           });
 
-          it('嵌套表达式里的列也会被检查', () => {
+          it('columns inside nested expressions are checked too', () => {
             expectBindError('SELECT id FROM users WHERE active = 1 AND nmae = 2');
           });
 
-          it('INSERT 变成 insert 节点', () => {
+          it('INSERT becomes an insert node', () => {
             const logical = plan(parse("INSERT INTO users VALUES (1, 'alice', 1)"), catalogWithUsers()) as any;
             expect(logical).toEqual({ kind: 'insert', table: 'users', values: [1, 'alice', 1] });
           });
 
-          it('INSERT 值的个数不对会报错', () => {
+          it('the wrong number of INSERT values errors', () => {
             expectBindError('INSERT INTO users VALUES (1)');
           });
 
-          it('INSERT 值的类型不对会报错', () => {
+          it('the wrong type of INSERT value errors', () => {
             expectBindError("INSERT INTO users VALUES ('one', 'alice', 1)");
           });
         });
@@ -6264,7 +6264,7 @@ const stage9 = {
             getTable(name: string): TableSchema | null {
               const schema = schemas.get(name);
               if (!schema) return null;
-              // 交出副本：调用方改坏了目录，后面所有查询都会跟着错
+              // Hand out a copy: a caller corrupting the catalog makes every later query wrong
               return { name: schema.name, columns: schema.columns.slice(), pages: schema.pages.slice() };
             },
 
@@ -6306,9 +6306,9 @@ const stage9 = {
         }
 
         /**
-         * 递归检查表达式里的每一个列引用和每一处类型。
-         * 只查 SELECT 列表是不够的：WHERE 里的错别字会在执行期
-         * 静默求值成 undefined，返回一个空结果集而不报任何错。
+         * Recursively check every column reference and every type in an expression.
+         * Checking the SELECT list alone is not enough: a typo in WHERE evaluates silently to
+         * undefined at execution time and returns an empty result set without any error.
          */
         function checkExpr(expr: Expr, schema: TableSchema): void {
           if (expr.kind === 'column') {
@@ -6322,7 +6322,7 @@ const stage9 = {
 
           if (expr.op === 'AND' || expr.op === 'OR') return;
 
-          // 列和字面量放在一起比较时，拿字面量的实际类型去对列定义
+          // When a column is compared against a literal, check the literal\u2019s actual type against the column definition
           const sides: Array<[Expr, Expr]> = [
             [expr.left, expr.right],
             [expr.right, expr.left],
@@ -6341,7 +6341,7 @@ const stage9 = {
         }
 
         function planSelect(statement: SelectStatement, schema: TableSchema): LogicalPlan {
-          // 从内往外一层层套，顺序就是 SQL 的求值顺序
+          // Wrapped layer by layer from the inside out, in the order SQL evaluates them
           let current: LogicalPlan = { kind: 'scan', table: schema.name };
 
           if (statement.where) {
@@ -6350,7 +6350,7 @@ const stage9 = {
           }
 
           if (statement.orderBy) {
-            // sort 必须在 project 之前：ORDER BY 能引用没被选中的列
+            // sort has to come before project: ORDER BY may reference a column that was not selected
             columnOf(schema, statement.orderBy.column);
             current = {
               kind: 'sort',
@@ -6360,7 +6360,7 @@ const stage9 = {
             };
           }
 
-          // '*' 在这里就展开：绑定之后的计划不该再有需要查目录才能理解的东西
+          // '*' is expanded right here: a bound plan should hold nothing that needs a catalog lookup to understand
           const columns =
             statement.columns.length === 1 && statement.columns[0] === '*'
               ? schema.columns.map((column) => column.name)
@@ -6699,14 +6699,14 @@ const stage10 = {
           pager: Pager;
         }
 
-        /** 对一行求表达式的值 */
+        /** Evaluate an expression against one row */
         export function evaluate(expr: Expr, tuple: Tuple): number | string | boolean {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
 
         export function buildOperator(plan: LogicalPlan, ctx: ExecutionContext): Operator {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -6755,13 +6755,13 @@ const stage10 = {
           return rows;
         }
 
-        describe('阶段10 · 表达式求值', () => {
-          it('列引用和字面量', () => {
+        describe('Stage 10 · Expression evaluation', () => {
+          it('column references and literals', () => {
             expect(evaluate({ kind: 'column', name: 'id' }, { id: 7 })).toBe(7);
             expect(evaluate({ kind: 'literal', value: 'x' }, {})).toBe('x');
           });
 
-          it('比较运算符', () => {
+          it('comparison operators', () => {
             const tuple = { id: 5, name: 'alice' };
             const compare = (op: any, value: any) =>
               evaluate(
@@ -6776,7 +6776,7 @@ const stage10 = {
             expect(compare('>=', 6)).toBe(false);
           });
 
-          it('字符串也能比较', () => {
+          it('strings compare too', () => {
             expect(
               evaluate(
                 {
@@ -6806,41 +6806,41 @@ const stage10 = {
           });
         });
 
-        describe('阶段10 · 算子', () => {
-          it('扫描吐出全部行', async () => {
+        describe('Stage 10 · Operators', () => {
+          it('a scan yields every row', async () => {
             const ctx = await seed(12);
             const rows = await run('SELECT * FROM users', ctx);
             expect(rows).toHaveLength(12);
             expect(rows[0]).toEqual({ id: 0, name: 'user0', active: 0 });
           });
 
-          it('空表返回空结果', async () => {
+          it('an empty table returns an empty result', async () => {
             const ctx = await seed(0);
             expect(await run('SELECT * FROM users', ctx)).toEqual([]);
           });
 
-          it('WHERE 过滤', async () => {
+          it('WHERE filters', async () => {
             const ctx = await seed(12);
             const rows = await run('SELECT * FROM users WHERE active = 1', ctx);
             expect(rows).toHaveLength(6);
             expect(rows.every((row: any) => row.active === 1)).toBe(true);
           });
 
-          it('投影只留下选中的列', async () => {
+          it('projection keeps only the selected columns', async () => {
             const ctx = await seed(4);
             const rows = await run('SELECT id FROM users', ctx);
             expect(Object.keys(rows[0])).toEqual(['id']);
           });
 
-          it('投影不会改坏下层传上来的行', async () => {
+          it('projection does not corrupt the rows handed up from below', async () => {
             const ctx = await seed(6);
             const projected = await run('SELECT id FROM users ORDER BY name', ctx);
-            // sort 把整批行攒在数组里，project 若原地删键会把它们一起改掉
+            // sort holds the whole batch in an array, and a project that deletes keys in place would modify them too
             expect(projected).toHaveLength(6);
             expect(Object.keys(projected[0])).toEqual(['id']);
           });
 
-          it('ORDER BY 升序和降序', async () => {
+          it('ORDER BY ascending and descending', async () => {
             const ctx = await seed(6);
             const ascending = await run('SELECT id FROM users ORDER BY id', ctx);
             expect(ascending.map((row: any) => row.id)).toEqual([0, 1, 2, 3, 4, 5]);
@@ -6849,24 +6849,24 @@ const stage10 = {
             expect(descending.map((row: any) => row.id)).toEqual([5, 4, 3, 2, 1, 0]);
           });
 
-          it('按字符串列排序', async () => {
+          it('sorting by a string column', async () => {
             const ctx = await seed(3);
             const rows = await run('SELECT name FROM users ORDER BY name DESC', ctx);
             expect(rows.map((row: any) => row.name)).toEqual(['user2', 'user1', 'user0']);
           });
 
-          it('LIMIT 截断', async () => {
+          it('LIMIT truncates', async () => {
             const ctx = await seed(12);
             expect(await run('SELECT * FROM users LIMIT 3', ctx)).toHaveLength(3);
             expect(await run('SELECT * FROM users LIMIT 0', ctx)).toHaveLength(0);
           });
 
-          it('LIMIT 大于总行数也没问题', async () => {
+          it('a LIMIT larger than the row count is fine', async () => {
             const ctx = await seed(3);
             expect(await run('SELECT * FROM users LIMIT 100', ctx)).toHaveLength(3);
           });
 
-          it('完整流水线', async () => {
+          it('the full pipeline', async () => {
             const ctx = await seed(20);
             const rows = await run(
               'SELECT id, name FROM users WHERE active = 1 ORDER BY id DESC LIMIT 3',
@@ -6876,7 +6876,7 @@ const stage10 = {
             expect(Object.keys(rows[0]).sort()).toEqual(['id', 'name']);
           });
 
-          it('INSERT 之后扫得到新行', async () => {
+          it('a new row is visible to a scan after INSERT', async () => {
             const ctx = await seed(3);
             const inserted = await run("INSERT INTO users VALUES (99, 'zoe', 1)", ctx);
             expect(inserted).toHaveLength(1);
@@ -6885,7 +6885,7 @@ const stage10 = {
             expect(rows).toEqual([{ id: 99, name: 'zoe', active: 1 }]);
           });
 
-          it('sort 是阻塞算子：它下面享受不到提前退出', async () => {
+          it('sort is a blocking operator: nothing below it benefits from early exit', async () => {
             const disk = new Disk();
             const warm = createPager(disk, { capacity: 64 });
             const heap = await createHeapFile(warm);
@@ -6903,11 +6903,11 @@ const stage10 = {
             await run('SELECT * FROM users ORDER BY name LIMIT 1', { catalog, pager: cold });
             const reads = (getCounters()['diskReads'] || 0) - before;
 
-            // 排序必须看完所有行才知道第一行是谁
+            // Sorting has to see every row before it knows which one comes first
             expect(reads).toBeGreaterThanOrEqual(pages.length);
           });
 
-          it('LIMIT 让扫描提前停下 [gate:early-exit]', async () => {
+          it('LIMIT stops the scan early [gate:early-exit]', async () => {
             const disk = new Disk();
             const warm = createPager(disk, { capacity: 64 });
             const heap = await createHeapFile(warm);
@@ -6927,7 +6927,7 @@ const stage10 = {
             count('limitPageReads', reads);
 
             expect(rows).toHaveLength(1);
-            // 攒完再截断的实现在这里是 pages.length 次
+            // An implementation that collects everything and then truncates does pages.length reads here
             expect(reads).toBeLessThanOrEqual(2);
           });
         });
@@ -6969,7 +6969,7 @@ const stage10 = {
           if (expr.kind === 'column') return tuple[expr.name];
           if (expr.kind === 'literal') return expr.value;
 
-          // 短路：一旦表达式里出现函数调用或除法，这就不再只是性能问题
+          // Short-circuit: the moment an expression contains a function call or a division, this stops being merely a performance question
           if (expr.op === 'AND') {
             return Boolean(evaluate(expr.left, tuple)) && Boolean(evaluate(expr.right, tuple));
           }
@@ -7001,7 +7001,7 @@ const stage10 = {
                 cursor = heap.scan();
               }
               const entry = await cursor.next();
-              // 行在算子之间是只读的：交出一个副本，上层原地改也伤不到下层
+              // Rows are read-only between operators: hand up a copy so an in-place edit above cannot hurt what is below
               return entry ? ({ ...(entry.row as object) } as Tuple) : null;
             },
           };
@@ -7010,7 +7010,7 @@ const stage10 = {
         function filterOperator(input: Operator, predicate: Expr): Operator {
           return {
             async next(): Promise<Tuple | null> {
-              // 一次拉一行，不满足就继续拉。先把输入读干净会让整棵树变成阻塞的
+              // Pull one row at a time and keep pulling while it does not match. Draining the input first makes the whole tree blocking
               for (;;) {
                 const tuple = await input.next();
                 if (!tuple) return null;
@@ -7025,7 +7025,7 @@ const stage10 = {
             async next(): Promise<Tuple | null> {
               const tuple = await input.next();
               if (!tuple) return null;
-              // 造新对象，不要在原对象上删键：sort 可能还握着同一个引用
+              // Build a new object rather than deleting keys from the original: sort may still be holding the same reference
               const projected: Tuple = {};
               for (const column of columns) projected[column] = tuple[column];
               return projected;
@@ -7039,7 +7039,7 @@ const stage10 = {
 
           return {
             async next(): Promise<Tuple | null> {
-              // 阻塞算子：不看完全部输入就不知道第一行是谁
+              // A blocking operator: without seeing the whole input there is no telling which row comes first
               if (!buffered) {
                 buffered = [];
                 for (;;) {
@@ -7066,7 +7066,7 @@ const stage10 = {
           let emitted = 0;
           return {
             async next(): Promise<Tuple | null> {
-              // 拉够了就再也不碰 input：这一句才是「提前退出」本身
+              // Once enough has been pulled, input is never touched again: this line is the early exit itself
               if (emitted >= count) return null;
               const tuple = await input.next();
               if (!tuple) return null;
@@ -7093,7 +7093,7 @@ const stage10 = {
 
               const heap = await createHeapFile(ctx.pager, schema.pages);
               await heap.insert(row as unknown as Row);
-              // 插入可能新开了页，目录要跟上，否则下一次扫描看不到新行
+              // An insert may have opened a new page, and the catalog has to keep up or the next scan will not see the new rows
               ctx.catalog.setPages(table, heap.pages());
 
               return { inserted: 1 };
@@ -7407,20 +7407,20 @@ const stage11 = {
         import type { Operator } from './executor';
 
         export interface JoinCondition {
-          /** 左侧参与连接的列 */
+          /** The column on the left side of the join */
           left: string;
-          /** 右侧参与连接的列 */
+          /** The column on the right side of the join */
           right: string;
         }
 
-        /** 右侧要被反复重扫，所以传工厂而不是算子实例 */
+        /** The right side is rescanned repeatedly, so pass a factory rather than an operator instance */
         export function nestedLoopJoin(
           left: Operator,
           rightFactory: () => Operator,
           on: JoinCondition,
           rightPrefix: string
         ): Operator {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
 
@@ -7430,7 +7430,7 @@ const stage11 = {
           on: JoinCondition,
           rightPrefix: string
         ): Operator {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -7458,7 +7458,7 @@ const stage11 = {
           { name: 'active', type: 'number' as const },
         ];
 
-        /** 用一个数组直接造算子，方便测纯连接逻辑 */
+        /** Build an operator straight from an array, which makes the pure join logic easy to test */
         function fromRows(rows: Tuple[]): Operator {
           let index = 0;
           return {
@@ -7485,8 +7485,8 @@ const stage11 = {
 
         const ON = { left: 'id', right: 'id' };
 
-        describe('阶段11 · 连接算法', () => {
-          it('嵌套循环连接匹配得上', async () => {
+        describe('Stage 11 · Join algorithms', () => {
+          it('a nested loop join matches', async () => {
             const left = fromRows([{ id: 1, name: 'a' }, { id: 2, name: 'b' }]);
             const rightRows = [{ id: 1, name: 'x' }, { id: 3, name: 'y' }];
             const joined = await drain(nestedLoopJoin(left, () => fromRows(rightRows), ON, 'r'));
@@ -7494,7 +7494,7 @@ const stage11 = {
             expect(joined).toEqual([{ id: 1, name: 'a', r_id: 1, r_name: 'x' }]);
           });
 
-          it('哈希连接结果与嵌套循环一致', async () => {
+          it('a hash join produces the same results as the nested loop', async () => {
             const leftRows = [{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }];
             const rightRows = [{ id: 3, name: 'z' }, { id: 1, name: 'x' }];
 
@@ -7509,7 +7509,7 @@ const stage11 = {
             expect(viaHash).toHaveLength(2);
           });
 
-          it('右侧列名加前缀，不覆盖左侧同名列', async () => {
+          it('right-side column names are prefixed and do not shadow same-named left columns', async () => {
             const joined = await drain(
               hashJoin(fromRows([{ id: 1, name: 'left' }]), fromRows([{ id: 1, name: 'right' }]), ON, 'orders')
             );
@@ -7518,7 +7518,7 @@ const stage11 = {
             expect(joined[0].orders_id).toBe(1);
           });
 
-          it('一对多：一条左行匹配多条右行', async () => {
+          it('one to many: one left row matches several right rows', async () => {
             const rightRows = [{ id: 1, name: 'x' }, { id: 1, name: 'y' }, { id: 1, name: 'z' }];
 
             const viaLoop = await drain(
@@ -7528,12 +7528,12 @@ const stage11 = {
 
             expect(viaLoop).toHaveLength(3);
             expect(viaHash).toHaveLength(3);
-            // 左行不能被前一次合并改坏
+            // The left row must not be corrupted by the previous merge
             expect(viaHash.map((row) => row.name)).toEqual(['a', 'a', 'a']);
             expect(viaHash.map((row) => row.r_name).sort()).toEqual(['x', 'y', 'z']);
           });
 
-          it('多对一：多条左行匹配同一条右行', async () => {
+          it('many to one: several left rows match the same right row', async () => {
             const leftRows = [{ id: 1, name: 'a' }, { id: 1, name: 'b' }];
             const rightRows = [{ id: 1, name: 'x' }];
 
@@ -7543,7 +7543,7 @@ const stage11 = {
             ).toHaveLength(2);
           });
 
-          it('嵌套循环会为每一条左行重扫右侧', async () => {
+          it('the nested loop rescans the right side for every left row', async () => {
             const leftRows = [{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }];
             let builds = 0;
             const factory = () => {
@@ -7552,17 +7552,17 @@ const stage11 = {
             };
 
             await drain(nestedLoopJoin(fromRows(leftRows), factory, ON, 'r'));
-            // 只建一次的实现只有第一条左行能匹配上
+            // An implementation that builds it once matches only on the first left row
             expect(builds).toBe(3);
           });
 
-          it('没有匹配时返回空', async () => {
+          it('returns empty when nothing matches', async () => {
             expect(
               await drain(hashJoin(fromRows([{ id: 1 }]), fromRows([{ id: 2 }]), ON, 'r'))
             ).toEqual([]);
           });
 
-          it('任一侧为空则结果为空', async () => {
+          it('an empty side on either end gives an empty result', async () => {
             expect(await drain(hashJoin(fromRows([]), fromRows([{ id: 1 }]), ON, 'r'))).toEqual([]);
             expect(await drain(hashJoin(fromRows([{ id: 1 }]), fromRows([]), ON, 'r'))).toEqual([]);
             expect(
@@ -7570,15 +7570,15 @@ const stage11 = {
             ).toEqual([]);
           });
 
-          it('数字键和字符串键不会被混为一谈', async () => {
+          it('numeric keys and string keys are not conflated', async () => {
             const joined = await drain(
               hashJoin(fromRows([{ id: 1 }]), fromRows([{ id: '1' }]), ON, 'r')
             );
-            // 用对象当哈希表会把 1 和 '1' 折叠成同一个键
+            // Using a plain object as the hash table would fold 1 and '1' into one key
             expect(joined).toEqual([]);
           });
 
-          it('可以连接不同名的列', async () => {
+          it('columns with different names can be joined', async () => {
             const joined = await drain(
               hashJoin(
                 fromRows([{ id: 7, name: 'a' }]),
@@ -7590,7 +7590,7 @@ const stage11 = {
             expect(joined).toEqual([{ id: 7, name: 'a', o_userId: 7, o_note: 'n' }]);
           });
 
-          it('接在真实扫描算子后面也能跑', async () => {
+          it('it runs on top of real scan operators too', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 64 });
             const users = await createHeapFile(pager);
@@ -7609,7 +7609,7 @@ const stage11 = {
             expect(joined[0].r_name).toBe('match');
           });
 
-          it('哈希连接每侧只扫一遍 [gate:hash-join]', async () => {
+          it('a hash join scans each side exactly once [gate:hash-join]', async () => {
             const disk = new Disk();
             const warm = createPager(disk, { capacity: 64 });
 
@@ -7640,11 +7640,11 @@ const stage11 = {
             count('joinPageReads', reads);
 
             expect(joined).toHaveLength(24);
-            // 每侧扫一遍就是两边页数之和；嵌套循环在这里是 24 倍
+            // One pass per side is the sum of both page counts; the nested loop is 24 times that here
             expect(reads).toBeLessThanOrEqual(userPages.length + orderPages.length + 2);
           });
 
-          it('同样的数据，嵌套循环的读盘次数远高于哈希连接', async () => {
+          it('on the same data the nested loop reads far more pages than the hash join', async () => {
             const disk = new Disk();
             const warm = createPager(disk, { capacity: 64 });
             const users = await createHeapFile(warm);
@@ -7660,7 +7660,7 @@ const stage11 = {
             catalog.createTable('orders', COLUMNS, orders.pages());
             await warm.flush();
 
-            // capacity 1：每次换页都是一次真实读盘，重扫的代价藏不住
+            // capacity 1: every page change is a real disk read, so the cost of rescanning cannot hide
             const measure = async (build: (ctx: any) => Operator) => {
               const cold = createPager(disk, { capacity: 1 });
               const ctx = { catalog, pager: cold };
@@ -7678,7 +7678,7 @@ const stage11 = {
               nestedLoopJoin(scanOf(ctx, 'users'), () => scanOf(ctx, 'orders'), ON, 'o')
             );
 
-            // 结果必须一样，代价不一样
+            // The results have to match; the cost does not
             expect(hash.rows).toBe(18);
             expect(loop.rows).toBe(18);
             expect(loop.reads).toBeGreaterThan(hash.reads * 3);
@@ -7711,7 +7711,7 @@ const stage11 = {
           right: string;
         }
 
-        /** 造新对象：左行可能还要和右边其他行匹配，不能被就地改掉 */
+        /** Build a new object: the left row may still match other right rows and must not be modified in place */
         function merge(left: Tuple, right: Tuple, prefix: string): Tuple {
           const merged: Tuple = { ...left };
           for (const key of Object.keys(right)) {
@@ -7735,8 +7735,8 @@ const stage11 = {
                 if (!leftTuple) {
                   leftTuple = await left.next();
                   if (!leftTuple) return null;
-                  // 每一条左行都要一个全新的右侧算子：复用的话
-                  // 第一行之后右侧早已耗尽，结果里只剩第一行的匹配
+                  // Every left row needs a brand-new right-side operator: reusing one leaves
+                  // the right side exhausted after the first row, so only its matches survive
                   right = rightFactory();
                 }
 
@@ -7760,7 +7760,7 @@ const stage11 = {
           on: JoinCondition,
           rightPrefix: string
         ): Operator {
-          // Map 而不是普通对象：对象会把数字 1 和字符串 '1' 折叠成同一个键
+          // A Map rather than a plain object: an object folds the number 1 and the string '1' into one key
           let buckets: Map<number | string, Tuple[]> | null = null;
           let leftTuple: Tuple | null = null;
           let matches: Tuple[] = [];
@@ -7768,7 +7768,7 @@ const stage11 = {
 
           return {
             async next(): Promise<Tuple | null> {
-              // build 阶段是阻塞的，而且只做一次
+              // The build phase is blocking, and it happens exactly once
               if (!buckets) {
                 buckets = new Map<number | string, Tuple[]>();
                 for (;;) {
@@ -7782,7 +7782,7 @@ const stage11 = {
               }
 
               for (;;) {
-                // 一条左行可能匹配多条右行，先把这一批吐完
+                // One left row may match several right rows, so drain that batch first
                 if (matchIndex < matches.length) {
                   const rightTuple = matches[matchIndex];
                   matchIndex += 1;
@@ -8143,7 +8143,7 @@ const stage12 = {
         import type { Tuple } from './plan';
 
         export interface ColumnStats {
-          /** 不同值的个数 */
+          /** How many distinct values there are */
           distinct: number;
           min: number | string;
           max: number | string;
@@ -8151,13 +8151,13 @@ const stage12 = {
 
         export interface TableStats {
           rowCount: number;
-          /** 这张表占多少页，顺序扫描的代价就是它 */
+          /** How many pages this table occupies, which is exactly the cost of a sequential scan */
           pageCount: number;
           columns: Record<string, ColumnStats>;
         }
 
         export function analyze(rows: Tuple[], pageCount: number): TableStats {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -8176,17 +8176,17 @@ const stage12 = {
         }
 
         export interface AccessOptions {
-          /** 建了索引的列 */
+          /** The column carrying an index */
           indexedColumns: string[];
-          /** B+Tree 的层数，索引扫描的固定开销 */
+          /** The B+Tree height, which is the fixed overhead of an index scan */
           indexHeight: number;
         }
 
-        /** 估不出来时的兜底选择率 */
+        /** The fallback selectivity for when it cannot be estimated */
         export const DEFAULT_SELECTIVITY = 1 / 3;
 
         export function estimateSelectivity(expr: Expr, stats: TableStats): number {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
 
@@ -8195,7 +8195,7 @@ const stage12 = {
           stats: TableStats,
           options: AccessOptions
         ): AccessPath {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -8219,68 +8219,68 @@ const stage12 = {
           return built;
         }
 
-        /** 从一条 SQL 里把 WHERE 抠出来，省得手搭语法树 */
+        /** Pull the WHERE out of a SQL statement, to save building syntax trees by hand */
         function whereOf(sql: string) {
           return (parse(sql) as any).where;
         }
 
         const STATS = analyze(rows(100), 20);
 
-        describe('阶段12 · 统计信息', () => {
-          it('统计行数和页数', () => {
+        describe('Stage 12 · Statistics', () => {
+          it('counts rows and pages', () => {
             expect(STATS.rowCount).toBe(100);
             expect(STATS.pageCount).toBe(20);
           });
 
-          it('统计每列的不同值个数', () => {
+          it('counts distinct values per column', () => {
             expect(STATS.columns.id.distinct).toBe(100);
-            // active 只有 0 和 1
+            // active holds only 0 and 1
             expect(STATS.columns.active.distinct).toBe(2);
           });
 
-          it('统计最小值和最大值', () => {
+          it('records the minimum and maximum', () => {
             expect(STATS.columns.id.min).toBe(0);
             expect(STATS.columns.id.max).toBe(99);
             expect(STATS.columns.active.min).toBe(0);
             expect(STATS.columns.active.max).toBe(1);
           });
 
-          it('字符串列也有 min/max', () => {
+          it('string columns get a min and max too', () => {
             expect(typeof STATS.columns.name.min).toBe('string');
             expect(STATS.columns.name.distinct).toBe(100);
           });
 
-          it('空表不会炸', () => {
+          it('an empty table does not blow up', () => {
             const empty = analyze([], 0);
             expect(empty.rowCount).toBe(0);
             expect(empty.columns).toEqual({});
           });
         });
 
-        describe('阶段12 · 选择率估算', () => {
-          it('等值谓词是 1 / distinct', () => {
+        describe('Stage 12 · Selectivity estimation', () => {
+          it('an equality predicate is 1 / distinct', () => {
             expect(estimateSelectivity(whereOf('SELECT * FROM t WHERE id = 5'), STATS)).toBeCloseTo(0.01, 4);
             expect(estimateSelectivity(whereOf('SELECT * FROM t WHERE active = 1'), STATS)).toBeCloseTo(0.5, 4);
           });
 
-          it('不等谓词是 1 - 1 / distinct', () => {
+          it('an inequality predicate is 1 - 1 / distinct', () => {
             expect(estimateSelectivity(whereOf('SELECT * FROM t WHERE active != 1'), STATS)).toBeCloseTo(0.5, 4);
             expect(estimateSelectivity(whereOf('SELECT * FROM t WHERE id != 5'), STATS)).toBeCloseTo(0.99, 4);
           });
 
-          it('范围谓词按 min/max 线性插值', () => {
-            // id 落在 0..99，< 25 大约是四分之一
+          it('a range predicate interpolates linearly over min/max', () => {
+            // id falls in 0..99, so < 25 is roughly a quarter
             expect(estimateSelectivity(whereOf('SELECT * FROM t WHERE id < 25'), STATS)).toBeCloseTo(0.2525, 3);
             expect(estimateSelectivity(whereOf('SELECT * FROM t WHERE id > 75'), STATS)).toBeCloseTo(0.2424, 3);
           });
 
-          it('列在右边时运算符要翻转', () => {
+          it('the operator is flipped when the column is on the right', () => {
             const left = estimateSelectivity(whereOf('SELECT * FROM t WHERE id > 75'), STATS);
             const right = estimateSelectivity(whereOf('SELECT * FROM t WHERE 75 < id'), STATS);
             expect(right).toBeCloseTo(left, 6);
           });
 
-          it('AND 相乘', () => {
+          it('AND multiplies', () => {
             const combined = estimateSelectivity(
               whereOf('SELECT * FROM t WHERE active = 1 AND id = 5'),
               STATS
@@ -8288,7 +8288,7 @@ const stage12 = {
             expect(combined).toBeCloseTo(0.5 * 0.01, 6);
           });
 
-          it('OR 用容斥', () => {
+          it('OR uses inclusion-exclusion', () => {
             const combined = estimateSelectivity(
               whereOf('SELECT * FROM t WHERE active = 1 OR id = 5'),
               STATS
@@ -8296,57 +8296,57 @@ const stage12 = {
             expect(combined).toBeCloseTo(0.5 + 0.01 - 0.5 * 0.01, 6);
           });
 
-          it('超出范围的边界被夹到 0 和 1', () => {
+          it('out-of-range bounds are clamped to 0 and 1', () => {
             expect(estimateSelectivity(whereOf('SELECT * FROM t WHERE id < -100'), STATS)).toBe(0);
             expect(estimateSelectivity(whereOf('SELECT * FROM t WHERE id < 99999'), STATS)).toBe(1);
             expect(estimateSelectivity(whereOf('SELECT * FROM t WHERE id > 99999'), STATS)).toBe(0);
           });
 
-          it('没统计过的列用兜底值', () => {
+          it('a column with no statistics uses the fallback', () => {
             expect(estimateSelectivity(whereOf('SELECT * FROM t WHERE unknown = 1'), STATS)).toBeCloseTo(
               DEFAULT_SELECTIVITY,
               6
             );
           });
 
-          it('字符串范围估不出来，用兜底值', () => {
+          it('a string range cannot be estimated and uses the fallback', () => {
             expect(
               estimateSelectivity(whereOf("SELECT * FROM t WHERE name < 'user5'"), STATS)
             ).toBeCloseTo(DEFAULT_SELECTIVITY, 6);
           });
         });
 
-        describe('阶段12 · 访问路径选择', () => {
+        describe('Stage 12 · Access path selection', () => {
           const options = { indexedColumns: ['id'], indexHeight: 3 };
 
-          it('没有谓词就是全表扫描，代价是页数', () => {
+          it('with no predicate it is a full scan, costing the page count', () => {
             const path = chooseAccessPath(undefined, STATS, options);
             expect(path.kind).toBe('seq-scan');
             expect(path.estimatedCost).toBe(20);
             expect(path.estimatedRows).toBe(100);
           });
 
-          it('高选择率的谓词走索引', () => {
-            // id = 5 只命中 1 行：索引代价 3 + 1 = 4，远低于 20
+          it('a highly selective predicate uses the index', () => {
+            // id = 5 matches a single row: the index costs 3 + 1 = 4, far below 20
             const path = chooseAccessPath(whereOf('SELECT * FROM t WHERE id = 5'), STATS, options);
             expect(path.kind).toBe('index-scan');
             expect(path.estimatedRows).toBe(1);
             expect(path.estimatedCost).toBe(4);
           });
 
-          it('低选择率的谓词走全表扫描', () => {
-            // id > 10 命中约 90 行：索引代价 3 + 90 = 93，比整表 20 页贵得多
+          it('a poorly selective predicate uses a full scan', () => {
+            // id > 10 matches about 90 rows: the index costs 3 + 90 = 93, far more than the 20 pages of the whole table
             const path = chooseAccessPath(whereOf('SELECT * FROM t WHERE id > 10'), STATS, options);
             expect(path.kind).toBe('seq-scan');
             expect(path.estimatedCost).toBe(20);
           });
 
-          it('列上没有索引就只能全表扫描', () => {
+          it('a column without an index leaves only the full scan', () => {
             const path = chooseAccessPath(whereOf('SELECT * FROM t WHERE active = 1'), STATS, options);
             expect(path.kind).toBe('seq-scan');
           });
 
-          it('AND 里只要有一边能用索引就能用', () => {
+          it('an AND can use an index as long as one side can', () => {
             const path = chooseAccessPath(
               whereOf('SELECT * FROM t WHERE id = 5 AND active = 1'),
               STATS,
@@ -8355,7 +8355,7 @@ const stage12 = {
             expect(path.kind).toBe('index-scan');
           });
 
-          it('OR 用不上单列索引', () => {
+          it('an OR cannot use a single-column index', () => {
             const path = chooseAccessPath(
               whereOf('SELECT * FROM t WHERE id = 5 OR active = 1'),
               STATS,
@@ -8364,7 +8364,7 @@ const stage12 = {
             expect(path.kind).toBe('seq-scan');
           });
 
-          it('树越高索引越不划算', () => {
+          it('the taller the tree, the less an index pays off', () => {
             const shallow = chooseAccessPath(whereOf('SELECT * FROM t WHERE id < 3'), STATS, {
               indexedColumns: ['id'],
               indexHeight: 3,
@@ -8377,7 +8377,7 @@ const stage12 = {
             expect(deep.kind).toBe('seq-scan');
           });
 
-          it('每一种场景都选中了真正便宜的那条路 [gate:optimizer]', () => {
+          it('every scenario picks the genuinely cheaper path [gate:optimizer]', () => {
             const scenarios = [
               'SELECT * FROM t WHERE id = 5',
               'SELECT * FROM t WHERE id = 50',
@@ -8397,7 +8397,7 @@ const stage12 = {
               const seqCost = STATS.pageCount;
               const indexCost = options.indexHeight + rowsHit;
               const cheapest = Math.min(seqCost, indexCost);
-              // 选中的那条路，代价必须就是两条里最便宜的
+              // The chosen path must cost exactly the cheaper of the two
               if (path.estimatedCost !== cheapest) mistakes += 1;
             }
 
@@ -8478,11 +8478,11 @@ const stage12 = {
 
         function clamp(value: number): number {
           if (!isFinite(value)) return DEFAULT_SELECTIVITY;
-          // 夹取不是可选的：负的选择率会让估算行数变成负数，代价模型直接崩
+          // Clamping is not optional: a negative selectivity makes the estimated row count negative and the cost model falls apart
           return Math.min(1, Math.max(0, value));
         }
 
-        /** 列在比较式右边时，把运算符翻过来，后面就只用考虑一种方向 */
+        /** When the column sits on the right of a comparison, flip the operator so only one direction needs handling below */
         function flip(op: CompareOp): CompareOp {
           if (op === '<') return '>';
           if (op === '<=') return '>=';
@@ -8495,7 +8495,7 @@ const stage12 = {
           if (expr.kind !== 'binary') return DEFAULT_SELECTIVITY;
 
           if (expr.op === 'AND') {
-            // 独立性假设：现实中相关的列会让这个乘积严重低估
+            // The independence assumption: correlated columns in the real world make this product badly underestimate
             return clamp(estimateSelectivity(expr.left, stats) * estimateSelectivity(expr.right, stats));
           }
           if (expr.op === 'OR') {
@@ -8504,7 +8504,7 @@ const stage12 = {
             return clamp(left + right - left * right);
           }
 
-          // 归一化：把列放到左边、字面量放到右边
+          // Normalise: column on the left, literal on the right
           let op: CompareOp = expr.op;
           let column = expr.left;
           let literal = expr.right;
@@ -8522,7 +8522,7 @@ const stage12 = {
           if (op === '=') return clamp(1 / distinct);
           if (op === '!=') return clamp(1 - 1 / distinct);
 
-          // 范围只在数值列上估得出来，字符串走兜底
+          // Ranges can only be estimated on numeric columns; strings fall back
           if (typeof stat.min !== 'number' || typeof stat.max !== 'number' || typeof literal.value !== 'number') {
             return DEFAULT_SELECTIVITY;
           }
@@ -8538,8 +8538,8 @@ const stage12 = {
         }
 
         /**
-         * 单列索引在 OR 下面用不上：两边命中的行集合没有包含关系，
-         * 两边都得查一遍。真实系统用位图索引扫描处理这种情况。
+         * A single-column index is useless under an OR: neither side\u2019s matching rows contain the other\u2019s,
+         * so both have to be looked up. Real systems handle this with a bitmap index scan.
          */
         function indexUsable(expr: Expr, indexedColumns: string[]): boolean {
           if (expr.kind !== 'binary') return false;
@@ -8565,15 +8565,15 @@ const stage12 = {
           const selectivity = predicate ? estimateSelectivity(predicate, stats) : 1;
           const estimatedRows = Math.ceil(selectivity * stats.rowCount);
 
-          // 顺序扫描：每页读一次
+          // Sequential scan: one read per page
           const seqCost = stats.pageCount;
 
           if (!predicate || !indexUsable(predicate, options.indexedColumns)) {
             return { kind: 'seq-scan', estimatedRows, estimatedCost: seqCost };
           }
 
-          // 索引扫描：先走一次树，再为每个命中行回表读一页。
-          // 命中行一多，这个数就会超过整表页数——这正是「有索引也别走索引」的算术依据
+          // Index scan: walk the tree once, then read one page per matching row to fetch it.
+          // With many matches this exceeds the whole table\u2019s page count — which is the arithmetic behind not using an index even when one exists
           const indexCost = options.indexHeight + estimatedRows;
 
           return indexCost < seqCost
