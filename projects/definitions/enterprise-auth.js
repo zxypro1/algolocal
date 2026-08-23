@@ -572,7 +572,7 @@ const stage1 = {
             await store.register('alice', 'hunter2-secret');
 
             const record = store.record('alice');
-            expect(record).toBeDefined();
+            expect(record).toBeTruthy();
             expect(JSON.stringify(record)).not.toContain('hunter2-secret');
           });
 
@@ -1046,7 +1046,7 @@ const stage2 = {
       'specs/stage-2.spec.ts',
       code`
         import { createSessionIssuer } from '../src/session';
-        import { encodeSegment, hmac } from '../src/support/crypto';
+        import { decodeSegment, encodeSegment, hmac } from '../src/support/crypto';
         import { now, sleep } from '@lab/env';
         import { count } from '@lab/metrics';
 
@@ -1070,7 +1070,7 @@ const stage2 = {
             const token = issuer.issue({ userId: 'alice', tenantId: 'acme' });
 
             const claims = issuer.verify(token);
-            expect(claims).toBeDefined();
+            expect(claims).toBeTruthy();
             expect(claims.sub).toBe('alice');
             expect(claims.tenantId).toBe('acme');
             expect(claims.exp).toBe(claims.iat + TTL);
@@ -1081,7 +1081,7 @@ const stage2 = {
             const first = issuer.verify(issuer.issue({ userId: 'alice', tenantId: 'acme' }));
             const second = issuer.verify(issuer.issue({ userId: 'alice', tenantId: 'acme' }));
 
-            expect(first.sid).toBeDefined();
+            expect(first.sid).toBeTruthy();
             expect(second.sid).not.toBe(first.sid);
           });
 
@@ -1149,7 +1149,7 @@ const stage2 = {
             const token = issuer.issue({ userId: 'alice', tenantId: 'acme' });
 
             await sleep(TTL - 1);
-            expect(issuer.verify(token)).toBeDefined();
+            expect(issuer.verify(token)).toBeTruthy();
           });
 
           it('畸形输入返回 null，不抛异常', () => {
@@ -1173,7 +1173,7 @@ const stage2 = {
             const token = issuer.issue({ userId: 'alice', tenantId: 'acme' });
 
             // 这不是 bug：任何拿到令牌的人都能读出载荷，所以里面不能放秘密
-            expect(token.split('.')[0]).toBe(encodeSegment(issuer.verify(token)));
+            expect(decodeSegment(token.split('.')[0])).toEqual(issuer.verify(token));
           });
         });
       `
@@ -1595,7 +1595,7 @@ const stage3 = {
 
             const issuer = createSessionIssuer({ secret: SECRET, ttlMs: 60000 });
             expect(issuer.verify(pair.accessToken).sub).toBe('alice');
-            expect(pair.refreshToken).toBeDefined();
+            expect(pair.refreshToken).toBeTruthy();
           });
 
           it('刷新换回一对全新的令牌', () => {
@@ -1603,7 +1603,7 @@ const stage3 = {
             const first = login(service);
 
             const second = service.rotate(first.refreshToken);
-            expect(second).toBeDefined();
+            expect(second).toBeTruthy();
             expect(second.refreshToken).not.toBe(first.refreshToken);
 
             const issuer = createSessionIssuer({ secret: SECRET, ttlMs: 60000 });
@@ -1654,7 +1654,7 @@ const stage3 = {
             service.rotate(alice.refreshToken);
             service.rotate(alice.refreshToken);
 
-            expect(service.rotate(bob.refreshToken)).toBeDefined();
+            expect(service.rotate(bob.refreshToken)).toBeTruthy();
           });
 
           it('没见过的刷新令牌返回 null', () => {
@@ -1689,7 +1689,7 @@ const stage3 = {
 
             // 服务重启、请求打到另一台机器
             const rebuilt = makeService(store);
-            expect(rebuilt.rotate(pair.refreshToken)).toBeDefined();
+            expect(rebuilt.rotate(pair.refreshToken)).toBeTruthy();
           });
 
           it('连坐之后再重放，依然拒绝', () => {
@@ -3286,10 +3286,10 @@ const stage6 = {
           it('完整流程走得通', () => {
             const server = makeServer(createStore());
             const code = authorize(server);
-            expect(code).toBeDefined();
+            expect(code).toBeTruthy();
 
             const pair = exchange(server, code);
-            expect(pair).toBeDefined();
+            expect(pair).toBeTruthy();
 
             const issuer = createSessionIssuer({ secret: SECRET, ttlMs: 60000 });
             expect(issuer.verify(pair.accessToken).sub).toBe('alice');
@@ -3298,7 +3298,7 @@ const stage6 = {
           it('一个授权码只能换一次', () => {
             const server = makeServer(createStore());
             const code = authorize(server);
-            expect(exchange(server, code)).toBeDefined();
+            expect(exchange(server, code)).toBeTruthy();
 
             const again = exchange(server, code);
             if (again) count('codeReuseAccepted');
@@ -3921,7 +3921,7 @@ const stage7 = {
             const verifier = makeVerifier();
 
             const claims = verifier.verify(mint(claimsFor()), NONCE);
-            expect(claims).toBeDefined();
+            expect(claims).toBeTruthy();
             expect(claims.sub).toBe('alice');
             expect(claims.tenantId).toBe('acme');
           });
@@ -3989,7 +3989,7 @@ const stage7 = {
             const verifier = makeVerifier();
 
             const claims = verifier.verify(mint(claimsFor({ aud: ['someone-else', AUDIENCE] })), NONCE);
-            expect(claims).toBeDefined();
+            expect(claims).toBeTruthy();
           });
 
           it('过期的令牌不接受', async () => {
@@ -4017,7 +4017,7 @@ const stage7 = {
           it('同一个 nonce 不能用第二次', () => {
             const verifier = makeVerifier();
             const token = mint(claimsFor());
-            expect(verifier.verify(token, NONCE)).toBeDefined();
+            expect(verifier.verify(token, NONCE)).toBeTruthy();
 
             const replay = verifier.verify(token, NONCE);
             if (replay) count('nonceReplayAccepted');
@@ -6367,7 +6367,7 @@ const stage11 = {
             repository.write({ id: 'doc-1', ownerId: 'alice', title: 'roadmap' });
 
             const document = repository.read('doc-1');
-            expect(document).toBeDefined();
+            expect(document).toBeTruthy();
             expect(document.title).toBe('roadmap');
             expect(document.tenant).toBe('acme');
           });

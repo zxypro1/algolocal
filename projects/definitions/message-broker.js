@@ -1178,7 +1178,7 @@ const stage2 = {
             fill(context.log, 100);
 
             const anchor = context.log.locate(37);
-            expect(anchor).toBeDefined();
+            expect(anchor).toBeTruthy();
             expect(anchor.offset).toBeLessThanOrEqual(37);
             expect(anchor.offset).toBeGreaterThan(37 - INTERVAL);
           });
@@ -3129,6 +3129,35 @@ const stage5 = {
             expect(context.queue.deadLetters()).toHaveLength(1);
           });
 
+          it('超时重投之后，上一张凭据就作废了', async () => {
+            const context = makeQueue(1);
+            const stale = context.queue.poll(1)[0];
+
+            await sleep(VISIBILITY);
+            const fresh = context.queue.poll(1)[0];
+
+            expect(fresh.receipt).not.toBe(stale.receipt);
+            // 旧凭据既 ack 不掉，也不该把别人手里的消息 nack 进死信
+            expect(context.queue.ack(stale.receipt)).toBe(false);
+            context.queue.nack(stale.receipt, 'from a zombie consumer');
+            expect(context.queue.deadLetters()).toEqual([]);
+            expect(context.queue.inflight()).toBe(1);
+
+            expect(context.queue.ack(fresh.receipt)).toBe(true);
+          });
+
+          it('inflight 不会被重投次数撑大', async () => {
+            const context = makeQueue(1);
+            context.queue.poll(1);
+
+            await sleep(VISIBILITY);
+            context.queue.poll(1);
+            await sleep(VISIBILITY);
+            context.queue.poll(1);
+
+            expect(context.queue.inflight()).toBe(1);
+          });
+
           it('不 ack 也不 nack 同样算一次尝试', async () => {
             const context = makeQueue(1);
 
@@ -3248,6 +3277,8 @@ const stage5 = {
           attempts: number;
           /** 早于这个时刻不参与投递：退避和可见性超时都写在这里 */
           notBefore: number;
+          /** 当前唯一有效的凭据；重投时上一张就作废 */
+          receipt: string;
         }
 
         export function createRetryingQueue(source: DeliveryQueue, options: RetryOptions): RetryingQueue {
@@ -3266,8 +3297,12 @@ const stage5 = {
             entry.attempts += 1;
             // 发出去之后就按可见性超时算，没回音就当失败
             entry.notBefore = now() + options.visibilityMs;
+            // 上一次投递的凭据就此作废：一条消息在任一时刻只能有一个持有者
+            outstanding.delete(entry.receipt);
+
             const receipt = 'r-' + nextReceipt;
             nextReceipt += 1;
+            entry.receipt = receipt;
             outstanding.set(receipt, entry.record.offset);
             return { record: entry.record, receipt, attempt: entry.attempts };
           }
@@ -3286,7 +3321,12 @@ const stage5 = {
               for (const delivery of fetched) {
                 // 立刻 ack 源队列：这条消息的生命周期从这里起归本层管
                 source.ack(delivery.receipt);
-                const entry: PendingEntry = { record: delivery.record, attempts: 0, notBefore: 0 };
+                const entry: PendingEntry = {
+                  record: delivery.record,
+                  attempts: 0,
+                  notBefore: 0,
+                  receipt: '',
+                };
                 pending.set(delivery.record.offset, entry);
                 batch.push(handOut(entry));
               }
@@ -3357,6 +3397,9 @@ const stage5 = {
       '',
       '**`outstanding` 只存 receipt 到 offset 的映射，不存状态。** 状态只有一份，',
       '在 `pending` 里。两张表都存状态的话，ack 和超时会各改各的，迟早对不上。',
+      '重投时那句 `outstanding.delete(entry.receipt)` 也是这个道理的延伸：',
+      '一条消息在任一时刻只能有一个有效凭据，否则「已经宕机的消费者」突然回来',
+      '一句 ack，就能把另一个消费者正在处理的消息标记成完成。',
       '',
       '**从源队列取货之后立刻 ack。** 这一行是两层之间的所有权交接：',
       '在此之前消息属于第 4 关的队列，在此之后属于重试层。',
@@ -3373,6 +3416,9 @@ const stage5 = {
       '',
       '`outstanding` maps receipts to offsets and holds no state. The state exists once, in `pending`. With',
       'state in both tables, acks and timeouts each update their own copy and the two eventually disagree.',
+      'The `outstanding.delete(entry.receipt)` on redelivery extends the same idea: a message has exactly one',
+      'valid receipt at a time, or a consumer everyone assumed was dead comes back with an ack and marks a',
+      "message another consumer is actively processing as complete.",
       '',
       'Acknowledging the source queue immediately after fetching is the ownership handover between the layers:',
       'before that line the message belongs to stage 4, after it to the retry layer. Without the handover, two',
@@ -5758,7 +5804,36 @@ const stage9 = {
 
             // 这正是它和压缩的区别：保留会连活着的 key 一起删
             expect(context.keeper.latest(keyOf(0))).toBeNull();
-            expect(context.keeper.latest(keyOf(99))).toBeDefined();
+            expect(context.keeper.latest(keyOf(99))).toBeTruthy();
+          });
+
+          it('压缩出来的段不会被当成老段立刻删掉', async () => {
+            const context = makeKeeper(HUGE, 1000);
+            // 时钟先走一段，段是之后才出生的：它们并不老
+            await sleep(3000);
+            fill(context.keeper, 40, 25);
+            const live = context.keeper.live();
+
+            context.keeper.compact();
+            context.keeper.enforce();
+
+            // 新段要是没有生日，年龄就会被算成「从开机到现在」，一清就没
+            for (const record of live) {
+              if (!context.keeper.latest(record.key)) count('liveKeysLost');
+            }
+            expect(context.keeper.live()).toHaveLength(live.length);
+          });
+
+          it('压缩不会重置保留时钟', async () => {
+            const context = makeKeeper(HUGE, 1000);
+            fill(context.keeper, 40, 40);
+
+            await sleep(1000);
+            context.keeper.append('later', valueOf(99));
+            context.keeper.compact();
+
+            // 这些段本来就该到期了，压缩过一手也一样
+            expect(context.keeper.enforce()).toBeGreaterThan(0);
           });
 
           it('live 按 offset 升序返回', () => {
@@ -5909,14 +5984,22 @@ const stage9 = {
               const removed = sealed.length - survivors.length;
               if (removed === 0) return { removed: 0, kept: entries.length };
 
+              const replaced = Array.from(new Set(sealed.map((entry) => entry.segmentId)));
+
               if (survivors.length > 0) {
                 const target = storage.createSegment(survivors[0].record.offset);
+                // 新段继承被它替换掉的那些段里最早的生日：
+                // 压缩是整理，不是「让这批数据重新变年轻」，保留时钟不该被它重置
+                const ages = replaced.map((segmentId) => bornAt.get(segmentId));
+                const known = ages.filter((age) => typeof age === 'number') as number[];
+                bornAt.set(target, known.length > 0 ? Math.min.apply(null, known) : now());
                 // offset 原样搬过去：消费者记住的位置不能被重排
                 for (const entry of survivors) storage.append(target, entry.record);
               }
-              for (const entry of sealed) {
-                storage.deleteSegment(entry.segmentId);
-                bornAt.delete(entry.segmentId);
+
+              for (const segmentId of replaced) {
+                storage.deleteSegment(segmentId);
+                bornAt.delete(segmentId);
               }
 
               return { removed, kept: entries.length - removed };
@@ -5952,6 +6035,10 @@ const stage9 = {
       '而把它们写成同一个才是这一关最常见的 bug：',
       '「谁是最新」必须看全局，否则活动段里的新值会被旧段里的版本盖住。',
       '',
+      '**压缩出来的新段继承最早的那个生日。** 否则下一次 `enforce` 会把它当成',
+      '刚出生的段留下 —— 或者反过来，如果生日缺失被当成 0，它会被当成最老的段',
+      '立刻删掉，而它恰恰装着每个 key 唯一的存活版本。压缩是整理，不是让数据重新变年轻。',
+      '',
       '**幸存者保留原来的 offset。** `storage.append(target, entry.record)` 传的是',
       '整条原始记录，包括它的 offset。重新编号会让所有消费者记住的位置指向别的消息 ——',
       '压缩允许 offset 有空洞，但不允许同一个 offset 换内容。',
@@ -5967,6 +6054,10 @@ const stage9 = {
       '`scan` covers every segment while `compact` only touches sealed ones. Those two ranges differ, and',
       'collapsing them into one is the classic bug of this stage: "which is newest" is a global question, or a',
       'fresh value in the active segment gets shadowed by an older version.',
+      '',
+      'The compacted segment inherits the earliest birthday it replaced. Otherwise the next `enforce` treats it',
+      'as newborn — or, if a missing birthday reads as zero, as the oldest segment there is and deletes it',
+      'immediately, along with the only surviving version of every key. Compaction is tidying, not rejuvenation.',
       '',
       'Survivors keep their original offsets. `storage.append(target, entry.record)` passes the whole original',
       'record, offset included. Renumbering would make every position a consumer remembers point at a different',
