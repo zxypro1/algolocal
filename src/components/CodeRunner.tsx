@@ -29,6 +29,9 @@ import {
   IconWand,
 } from '@tabler/icons-react';
 import Editor from '@monaco-editor/react';
+import { IconBug } from '@tabler/icons-react';
+import { Modal as TraceModal } from '@mantine/core';
+import TracePlayer from './TracePlayer';
 import { useTranslation, useI18n } from '../contexts/I18nContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { useWasmExecutor } from '../hooks/useWasmExecutor';
@@ -94,7 +97,7 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
   const { config: aiConfig } = useAiConfig();
   
   // WASM 执行器 hook
-  const { runTests: runWasmTests, runtimeStatus, preloadRuntime } = useWasmExecutor();
+  const { runTests: runWasmTests, traceExecution, runtimeStatus, preloadRuntime } = useWasmExecutor();
 
   // 编辑器偏好与工程实战工作区共用一份，改一次两边都生效
   const [prefs, setPrefs] = useState<EditorPrefs>(DEFAULT_PREFS);
@@ -219,6 +222,29 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
     }
   );
   
+  /** 轨迹回放：只跑第一条用例，录下每一步 */
+  const [trace, setTrace] = useState<any>(null);
+  const [tracing, setTracing] = useState(false);
+  const [traceOpen, setTraceOpen] = useState(false);
+  const [tracedSource, setTracedSource] = useState('');
+
+  const runTrace = async () => {
+    setTracing(true);
+    setTraceOpen(true);
+    // 记下这次录制用的源码：录完之后编辑器里的代码还能继续改，
+    // 高亮必须对着录制那一刻的版本，不然行号会对不上
+    setTracedSource(code);
+    try {
+      const outcome = await traceExecution(problem, code, selectedLanguage, 0);
+      setTrace(outcome.trace);
+    } catch (error: any) {
+      setTrace({ steps: [], droppedSteps: 0, truncated: false, completed: false,
+        error: error?.message || String(error) });
+    } finally {
+      setTracing(false);
+    }
+  };
+
   const runTests = async () => {
     setIsRunning(true);
     const runningStatus = { status: 'running' };
@@ -626,6 +652,14 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
               size="sm"
               w={130}
             />
+            <Button
+              onClick={runTrace}
+              disabled={tracing || isRunning || runtimeStatus[selectedLanguage as 'javascript' | 'typescript' | 'python'] === 'loading'}
+              variant="default"
+              leftSection={tracing ? <Loader size={14} /> : <IconBug size={15} />}
+            >
+              {tracing ? t('trace.running') : t('trace.button')}
+            </Button>
             <Tooltip label="⌘/Ctrl + Enter" position="bottom">
               <Button
                 onClick={runTests}
@@ -798,6 +832,18 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
           </Group>
         </Stack>
       </Modal>
+      <TraceModal
+        opened={traceOpen}
+        onClose={() => setTraceOpen(false)}
+        title={t('trace.title')}
+        size="xl"
+      >
+        {tracing ? (
+          <Group gap="xs"><Loader size={16} /><Text size="sm">{t('trace.running')}</Text></Group>
+        ) : trace ? (
+          <TracePlayer trace={trace} source={tracedSource} />
+        ) : null}
+      </TraceModal>
     </div>
   );
 }

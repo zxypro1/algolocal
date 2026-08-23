@@ -1,4 +1,20 @@
 {
+  "trace": {
+    "button": "Debug",
+    "title": "Execution trace",
+    "running": "Recording…",
+    "empty": "Nothing was recorded for this run.",
+    "step": "Step",
+    "line": "Line",
+    "variables": "Variables at this step",
+    "noVariables": "No variables in scope yet.",
+    "truncated": "Recording stopped after the step limit; {{count}} later steps were not kept.",
+    "first": "First step",
+    "prev": "Previous step",
+    "next": "Next step",
+    "last": "Last step",
+    "aborted": "The run stopped early: {{error}}"
+  },
   "common": {
     "language": "Language",
     "theme": "Theme",
