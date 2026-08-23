@@ -5,7 +5,7 @@
  * 不接受自定义 temperature，以及流式协议的解析。
  */
 import { capabilitiesFor, DEFAULT_MODELS, SUGGESTED_MODELS } from '../../src/lib/aiModels';
-import { resolveProvider } from '../../src/lib/server/aiProvider';
+import { normalizeCompatibleEndpoint, resolveProvider } from '../../src/lib/server/aiProvider';
 
 describe('model capabilities', () => {
   it('uses max_completion_tokens for OpenAI reasoning models', () => {
@@ -31,8 +31,21 @@ describe('model capabilities', () => {
 
   it('lists every provider default among its suggestions', () => {
     for (const kind of Object.keys(DEFAULT_MODELS) as Array<keyof typeof DEFAULT_MODELS>) {
+      // 'compatible' 指向的是任意一台 OpenAI 兼容服务，模型 id 由对端决定，
+      // 没有默认值可猜 —— 所以它的默认值是空串，建议列表在设置页动态填充。
+      // 这里不是放宽断言：空默认值必须同时意味着空建议列表，
+      // 免得「留空 -> 用默认」这条路径悄悄退化成发一个不存在的模型 id 上去。
+      if (DEFAULT_MODELS[kind] === '') {
+        expect(SUGGESTED_MODELS[kind]).toEqual([]);
+        continue;
+      }
       expect(SUGGESTED_MODELS[kind]).toContain(DEFAULT_MODELS[kind]);
     }
+  });
+
+  it('requires an explicit model for the compatible provider', () => {
+    // 端点填了、模型没填，不能被当成「配好了」而进入 auto 顺序
+    expect(DEFAULT_MODELS.compatible).toBe('');
   });
 });
 
@@ -45,6 +58,9 @@ describe('provider resolution', () => {
     'OLLAMA_MODEL',
     'DEEPSEEK_MODEL',
     'OPENAI_MODEL',
+    'OPENAI_COMPATIBLE_ENDPOINT',
+    'OPENAI_COMPATIBLE_MODEL',
+    'OPENAI_COMPATIBLE_API_KEY',
   ];
   const saved: Record<string, string | undefined> = {};
 
@@ -99,5 +115,57 @@ describe('provider resolution', () => {
 
   it('throws when nothing is configured', () => {
     expect(() => resolveProvider({})).toThrow(/No AI provider/);
+  });
+});
+
+describe('OpenAI-compatible endpoint', () => {
+  it('appends /v1 only when the address carries no path of its own', () => {
+    // LM Studio 的地址，两种写法的人一样多
+    expect(normalizeCompatibleEndpoint('http://localhost:1234')).toBe('http://localhost:1234/v1');
+    expect(normalizeCompatibleEndpoint('http://localhost:1234/')).toBe('http://localhost:1234/v1');
+    expect(normalizeCompatibleEndpoint('http://localhost:1234/v1')).toBe('http://localhost:1234/v1');
+    // 明确写了路径就不要动它：不是所有兼容服务都挂在 /v1
+    expect(normalizeCompatibleEndpoint('http://localhost:8000/openai/v1')).toBe(
+      'http://localhost:8000/openai/v1'
+    );
+    expect(normalizeCompatibleEndpoint('  http://localhost:1234/v1//  ')).toBe(
+      'http://localhost:1234/v1'
+    );
+  });
+
+  it('resolves with the endpoint normalised and the key optional', () => {
+    const provider = resolveProvider({
+      compatible: { endpoint: 'http://localhost:1234', model: 'qwen2.5-coder-7b-instruct' },
+      selectedProvider: 'compatible',
+    });
+    expect(provider.kind).toBe('compatible');
+    expect(provider.endpoint).toBe('http://localhost:1234/v1');
+    expect(provider.model).toBe('qwen2.5-coder-7b-instruct');
+    expect(provider.apiKey).toBeUndefined();
+    // 本地模型多半不是推理模型，按经典参数发
+    expect(provider.capabilities.maxTokensParam).toBe('max_tokens');
+    expect(provider.capabilities.supportsTemperature).toBe(true);
+  });
+
+  it('does not count as configured when the model is missing', () => {
+    // 模型 id 由对端决定，没有它就不该被 auto 选中，更不该拿空模型去请求
+    expect(() =>
+      resolveProvider({
+        compatible: { endpoint: 'http://localhost:1234', model: '' },
+        selectedProvider: 'compatible',
+      })
+    ).toThrow(/no API key configured|not/i);
+
+    expect(() =>
+      resolveProvider({ compatible: { endpoint: 'http://localhost:1234', model: '' } })
+    ).toThrow();
+  });
+
+  it('is last in the auto order, so it never displaces a configured cloud vendor', () => {
+    const provider = resolveProvider({
+      deepSeek: { apiKey: 'a', model: '' },
+      compatible: { endpoint: 'http://localhost:1234', model: 'local' },
+    });
+    expect(provider.kind).toBe('deepseek');
   });
 });

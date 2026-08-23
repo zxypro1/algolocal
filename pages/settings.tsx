@@ -59,6 +59,48 @@ export default function SettingsPage() {
     endpoint: '',
     model: ''
   });
+
+  const [compatibleConfig, setCompatibleConfig] = useState({
+    endpoint: '',
+    model: '',
+    apiKey: ''
+  });
+  // 从端点拉回来的模型列表，填充下拉框
+  const [compatibleModels, setCompatibleModels] = useState<string[]>([]);
+  const [compatibleLoading, setCompatibleLoading] = useState(false);
+  const [compatibleError, setCompatibleError] = useState<string | null>(null);
+
+  const fetchCompatibleModels = async () => {
+    setCompatibleLoading(true);
+    setCompatibleError(null);
+    try {
+      const response = await fetch('/api/compatible-models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpoint: compatibleConfig.endpoint, apiKey: compatibleConfig.apiKey }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setCompatibleError(data?.error || t('settings.compatible.fetchFailed'));
+        setCompatibleModels([]);
+        return;
+      }
+      setCompatibleModels(data.models || []);
+      if (!data.models?.length) {
+        setCompatibleError(t('settings.compatible.noModels'));
+        return;
+      }
+      // 只有一个模型时直接替用户选上，省一次点击
+      if (data.models.length === 1 && !compatibleConfig.model) {
+        setCompatibleConfig((prev) => ({ ...prev, model: data.models[0] }));
+      }
+    } catch (error: any) {
+      setCompatibleError(error?.message || t('settings.compatible.fetchFailed'));
+      setCompatibleModels([]);
+    } finally {
+      setCompatibleLoading(false);
+    }
+  };
   
   // Global AI provider selection
   const [selectedProvider, setSelectedProvider] = useState('auto');
@@ -78,6 +120,7 @@ export default function SettingsPage() {
             setQwenConfig(data.qwen || { apiKey: '', model: '' });
             setClaudeConfig(data.claude || { apiKey: '', model: '' });
             setOllamaConfig(data.ollama || { endpoint: '', model: '' });
+            setCompatibleConfig(data.compatible || { endpoint: '', model: '', apiKey: '' });
             setSelectedProvider(data.selectedProvider || 'auto');
           }
         } else {
@@ -91,6 +134,7 @@ export default function SettingsPage() {
               setQwenConfig(config.qwen || { apiKey: '', model: '' });
               setClaudeConfig(config.claude || { apiKey: '', model: '' });
               setOllamaConfig(config.ollama || { endpoint: '', model: '' });
+              setCompatibleConfig(config.compatible || { endpoint: '', model: '', apiKey: '' });
               setSelectedProvider(config.selectedProvider || 'auto');
             } catch (parseError) {
               console.error('Error parsing saved configuration:', parseError);
@@ -176,6 +220,7 @@ export default function SettingsPage() {
         qwen: qwenConfig,
         claude: claudeConfig,
         ollama: ollamaConfig,
+        compatible: compatibleConfig,
         selectedProvider: selectedProvider
       };
       
@@ -281,6 +326,12 @@ export default function SettingsPage() {
                   { value: 'qwen', label: 'Qwen (通义千问)', disabled: !qwenConfig.apiKey },
                   { value: 'claude', label: 'Claude', disabled: !claudeConfig.apiKey },
                   { value: 'ollama', label: 'Ollama (Local)', disabled: !ollamaConfig.endpoint && !ollamaConfig.model },
+                  {
+                    value: 'compatible',
+                    label: t('settings.compatible.title'),
+                    // 端点和模型缺一不可
+                    disabled: !compatibleConfig.endpoint || !compatibleConfig.model,
+                  },
                 ]}
                 w={300}
               />
@@ -419,7 +470,60 @@ export default function SettingsPage() {
                 />
               </Stack>
             </Box>
-            
+
+            <Divider />
+
+            {/* 任意 OpenAI 兼容端点 */}
+            <Box>
+              <Title order={3} mb={4}>{t('settings.compatible.title')}</Title>
+              <Text size="sm" c="dimmed" mb="md">
+                {t('settings.compatible.intro')}
+              </Text>
+              <Stack gap="sm">
+                <TextInput
+                  label={t('settings.compatible.endpoint')}
+                  placeholder="http://localhost:1234/v1"
+                  description={t('settings.compatible.endpointHint')}
+                  value={compatibleConfig.endpoint}
+                  onChange={(e) => setCompatibleConfig({...compatibleConfig, endpoint: e.target.value})}
+                />
+                <PasswordInput
+                  label={t('settings.compatible.apiKey')}
+                  placeholder={t('settings.compatible.apiKeyPlaceholder')}
+                  description={t('settings.compatible.apiKeyHint')}
+                  value={compatibleConfig.apiKey}
+                  onChange={(e) => setCompatibleConfig({...compatibleConfig, apiKey: e.target.value})}
+                />
+                <Group align="flex-end" gap="sm" wrap="nowrap">
+                  <Autocomplete
+                    style={{ flex: 1 }}
+                    label={t('settings.compatible.model')}
+                    placeholder={t('settings.compatible.modelPlaceholder')}
+                    description={t('settings.compatible.modelHint')}
+                    data={compatibleModels}
+                    value={compatibleConfig.model}
+                    onChange={(value) => setCompatibleConfig({...compatibleConfig, model: value})}
+                  />
+                  <Button
+                    variant="light"
+                    onClick={fetchCompatibleModels}
+                    loading={compatibleLoading}
+                    disabled={!compatibleConfig.endpoint}
+                  >
+                    {t('settings.compatible.fetchModels')}
+                  </Button>
+                </Group>
+                {compatibleError && (
+                  <Text size="xs" c="red">{compatibleError}</Text>
+                )}
+                {!compatibleError && compatibleModels.length > 0 && (
+                  <Text size="xs" c="teal">
+                    {t('settings.compatible.foundModels').replace('{count}', String(compatibleModels.length))}
+                  </Text>
+                )}
+              </Stack>
+            </Box>
+
             <Group justify="flex-end">
               <Button 
                 onClick={handleSave} 
