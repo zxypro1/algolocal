@@ -47,6 +47,7 @@ import {
 import { clearDraft, loadDraft, saveDraft } from '../lib/problemDrafts';
 import { useAiConfig } from '../hooks/useAiConfig';
 import { readableErrorBody } from '../lib/errorBody';
+import { splitTextStreamError } from '../lib/textStreamProtocol';
 
 // WASM 支持的语言配置
 const WASM_SUPPORTED_LANGUAGES = [
@@ -499,6 +500,8 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
     setIsGeneratingSolution(true);
     setSolutionError(null);
     setConfirmModalOpen(false);
+    // 生成过程会一边流一边替换编辑器内容，失败时要能还原
+    const codeBeforeGeneration = code;
 
     try {
       const response = await fetch('/api/ai-solution', {
@@ -548,24 +551,25 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        setCode(cleanCodeFromResponse(buffer));
+        setCode(cleanCodeFromResponse(splitTextStreamError(buffer).text));
       }
 
       buffer += decoder.decode();
 
       /*
-       * 这条路径是纯文本流，流开始之后出错只能作为正文里的一行 `[error] ...`
-       * 送过来（头已经发出去了，状态码改不动）。不认它的话，这行字会被当成
-       * 代码写进编辑器，800ms 后连草稿一起覆盖掉 —— 而且界面上不报错。
+       * 这条路径是纯文本流：头发出去之后再出错，错误只能写进正文里。
+       * 不认这个标记的话，那句话会被当成代码写进编辑器，800ms 后连草稿一起
+       * 覆盖掉 —— 而且界面上一点错都不报。
        */
-      const failure = buffer.match(/\n\n\[error\] ([\s\S]*)$/);
-      if (failure) {
-        const partial = buffer.slice(0, failure.index);
-        if (partial.trim()) updateCode(cleanCodeFromResponse(partial));
-        throw new Error(failure[1].trim() || 'Failed to generate AI solution');
+      const { text, error: streamed } = splitTextStreamError(buffer);
+      if (streamed) {
+        // 一个字都没生成出来就失败了，把编辑器恢复原状，
+        // 别把一句报错留在那里当代码
+        updateCode(text.trim() ? cleanCodeFromResponse(text) : codeBeforeGeneration);
+        throw new Error(streamed);
       }
 
-      updateCode(cleanCodeFromResponse(buffer));
+      updateCode(cleanCodeFromResponse(text));
     } catch (error: any) {
       setSolutionError(error.message || 'Failed to generate AI solution');
     } finally {

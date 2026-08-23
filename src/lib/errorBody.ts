@@ -17,6 +17,8 @@ export function looksLikeMarkup(body: string): boolean {
 
 export function readableErrorBody(body: string): string {
   const text = (body || '').trim();
-  if (!text || looksLikeMarkup(text) || text.length > MAX_READABLE_LENGTH) return '';
-  return text;
+  if (!text || looksLikeMarkup(text)) return '';
+  // 长的截断，不要整段丢掉：自建网关的报错可能是一段模板渲染栈，
+  // 前 300 个字符里通常就有那句关键的话。
+  return text.length > MAX_READABLE_LENGTH ? `${text.slice(0, MAX_READABLE_LENGTH)}…` : text;
 }

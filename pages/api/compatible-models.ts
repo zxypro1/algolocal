@@ -7,7 +7,12 @@
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { normalizeCompatibleEndpoint } from '../../src/lib/server/aiProvider';
-import { checkEndpointSyntax, describeNetworkError, guardedFetch } from '../../src/lib/server/endpointPolicy';
+import {
+  checkEndpointSyntax,
+  describeNetworkError,
+  EndpointPolicyError,
+  guardedFetch,
+} from '../../src/lib/server/endpointPolicy';
 import { looksLikeMarkup, readableErrorBody } from '../../src/lib/errorBody';
 
 // 远程端点可能在地球另一端，10 秒对跨洋链路偏紧
@@ -44,9 +49,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (!response.ok) {
       const detail = await response.text();
+      const words = readableErrorBody(detail);
       return res.status(502).json({
-        error: `The endpoint answered ${response.status}.`,
-        detail: readableErrorBody(detail) || undefined,
+        error: words
+          ? `The endpoint answered ${response.status}: ${words}`
+          : `The endpoint answered ${response.status}.`,
       });
     }
 
@@ -60,8 +67,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(502).json({
         error: looksLikeMarkup(payload)
           ? `${base} answered with a web page, not JSON. Check that the URL points at the API (it usually ends in /v1).`
-          : `${base} answered with something that is not JSON.`,
-        detail: readableErrorBody(payload) || undefined,
+          : `${base} answered with something that is not JSON: ${readableErrorBody(payload)}`,
       });
     }
     // OpenAI 的形状是 { data: [{ id }] }；有些实现直接返回数组，两种都收
@@ -72,6 +78,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     return res.status(200).json({ endpoint: base, models });
   } catch (error: any) {
+    // 地址被策略拦下时根本没发出请求，报成「连不上」是错的，
+    // 而且它的 message 本来就是写给用户看的那一句
+    if (error instanceof EndpointPolicyError) {
+      return res.status(error.status).json({ error: error.message });
+    }
     return res.status(502).json({ error: describeNetworkError(error, base, TIMEOUT_MS) });
   } finally {
     clearTimeout(timer);

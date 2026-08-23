@@ -11,6 +11,7 @@
 import type { NextApiResponse } from 'next';
 import { describeNetworkError, EndpointPolicyError, guardedFetch } from './endpointPolicy';
 import { looksLikeMarkup, readableErrorBody } from '../errorBody';
+import { TEXT_STREAM_ERROR_MARK } from '../textStreamProtocol';
 import { isPrivateHostname } from '../endpointHosts';
 import {
   capabilitiesFor,
@@ -353,6 +354,8 @@ function buildRequest(
 const DEFAULT_TIMEOUT_MS = 120_000;
 /** 正文两块之间最多能停多久 —— 本地模型慢是常态，卡死不是 */
 const STREAM_IDLE_TIMEOUT_MS = 120_000;
+/** 第一块可以等更久：整段生成完才发第一个字节的上游是存在的 */
+const STREAM_FIRST_CHUNK_TIMEOUT_MS = 600_000;
 
 /**
  * 上游明确拒绝了这次请求。
@@ -407,6 +410,8 @@ export class EmptyConversationError extends Error {
  * 上下文塞满了，或者模板渲染出了一段我们解析不了的东西。
  */
 export class AIEmptyResponseError extends Error {
+  // 目前两个抛点都在响应头之后，所以它实际总是以流里的 error 事件到达前端；
+  // status 是给「哪天在发头之前也能判空」留的，不是当前行为。
   status = 502;
 
   constructor(origin: string) {
@@ -543,8 +548,18 @@ async function fetchUpstream(
         body: JSON.stringify(request.body),
         signal: controller.signal,
       });
+
+      // 读错误正文这一步也要放进来：上游发完头就卡住的话，超时会在这里触发，
+      // 漏在外面的话它会以一个裸的 AbortError 冒出去，被当成「客户端走了」
+      // 而静默收尾 —— 用户又拿到一个空白气泡。
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new AIUpstreamError(describeUpstreamError(response.status, detail), response.status);
+      }
     } catch (error) {
       const origin = originOf(request.url);
+      // 上游自己的拒绝已经是最终结论了，别再往下分类
+      if (error instanceof AIUpstreamError) throw error;
       if (timedOut) {
         throw new AITimeoutError(
           describeNetworkError({ name: 'AbortError' }, origin, DEFAULT_TIMEOUT_MS)
@@ -559,11 +574,6 @@ async function fetchUpstream(
       // 只翻译传输层失败 —— endpointPolicy 的拦截理由本身就是给人看的，别再包一层。
       if (isTransportFailure(error)) throw new AINetworkError(describeNetworkError(error, origin));
       throw error;
-    }
-
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new AIUpstreamError(describeUpstreamError(response.status, detail), response.status);
     }
 
     return response;
@@ -656,20 +666,32 @@ async function pipeUpstream(
    * 的那一段：本地模型加载权重、被 OOM 杀掉、或者干脆不吐 token。没有这道
    * 看门狗的话，连接会一直开着，界面上就是一个永远转下去的圈。
    */
+  let started = false;
   const readNext = async () => {
+    // 第一块给的预算宽得多：上游可能整段生成完才发第一个字节（无视 stream:true
+    // 的实现就是这样），CPU 上跑一个 8B 模型几分钟很正常。开始吐了之后再停两
+    // 分钟，那就是真的卡住了。
+    const budget = started ? STREAM_IDLE_TIMEOUT_MS : STREAM_FIRST_CHUNK_TIMEOUT_MS;
     let timer: NodeJS.Timeout | undefined;
     try {
-      return await Promise.race([
+      const result = await Promise.race([
         reader.read(),
         new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(
-            () => reject(new AITimeoutError(
-              `${origin} stopped sending data for ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)}s. If it is a local model, check its own log.`
-            )),
-            STREAM_IDLE_TIMEOUT_MS
-          );
+          timer = setTimeout(() => {
+            // 光 reject 不够：连接还开着，上游会继续生成一段没人看的回答
+            void reader.cancel().catch(() => undefined);
+            reject(
+              new AITimeoutError(
+                started
+                  ? `${origin} stopped sending data for ${Math.round(budget / 1000)}s. If it is a local model, check its own log.`
+                  : `${origin} sent nothing for ${Math.round(budget / 1000)}s. If it is a local model, check that the model is loaded and its own log.`
+              )
+            );
+          }, budget);
         }),
       ]);
+      started = true;
+      return result;
     } finally {
       clearTimeout(timer);
     }
@@ -821,6 +843,8 @@ export async function streamAI(
       const text = await callAI(messages, config, options);
       writeHeaders(res, format);
       declareNotIncremental();
+      // 空回答走的也是失败路径，别在两条分支里只挡一条
+      if (!text) throw new AIEmptyResponseError(provider.kind);
       emit(text);
     } else {
       const request = buildRequest(provider, messages, { stream: true, temperature });
@@ -856,7 +880,7 @@ export async function streamAI(
       return;
     }
     if (format === 'sse') sseEvent(res, { type: 'error', message });
-    else res.write(`\n\n[error] ${message}`);
+    else writeNow(res, `${TEXT_STREAM_ERROR_MARK}${message}`);
     res.end();
   }
 }

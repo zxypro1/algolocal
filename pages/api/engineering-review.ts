@@ -129,7 +129,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   try {
-    const { context, quality, language = 'zh', config } = req.body as ReviewRequest;
+    // aiConfig 而不是 config：模块顶上那个 export const config 是路由配置
+    const { context, quality, language = 'zh', config: aiConfig } = req.body as ReviewRequest;
 
     if (!context || !Array.isArray(context.files) || context.files.length === 0) {
       return res.status(400).json({ error: 'Workspace files are required' });
@@ -153,7 +154,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     ];
 
     // 评审是给人读的长文，没有理由攒到最后一次性甩出来
-    await streamStructured(res, messages, config, {
+    await streamStructured(res, messages, aiConfig, {
       temperature: 0.3,
       maxTokens: 4000,
       signal: abortSignalFor(res),

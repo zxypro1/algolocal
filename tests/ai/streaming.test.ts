@@ -145,6 +145,19 @@ describe('message normalisation', () => {
     ).toEqual([{ role: 'user', content: 'first\n\nsecond' }]);
   });
 
+  it('drops messages with a role we do not recognise', () => {
+    // 转发一个上游不认识的 role，换回来的是一个看不懂的 400；
+    // 而两条都没有 role 的消息还会因为 undefined === undefined 被并成一条
+    expect(
+      normalizeMessages([
+        { role: 'tool', content: 'tool output' },
+        { content: 'no role at all' },
+        { content: 'also no role' },
+        { role: 'user', content: 'hi' },
+      ] as any)
+    ).toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
   it('survives a malformed messages array instead of throwing', () => {
     const messages = [
       null,
@@ -607,6 +620,24 @@ describe('server streaming', () => {
 
     const failure = collectEvents(res).find((event: any) => event.type === 'error');
     expect((failure as any).message).toMatch(/closed the connection unexpectedly/);
+  });
+
+  it('keeps a long plain-text upstream error, truncated rather than dropped', async () => {
+    const long = `context length exceeded. ${'detail '.repeat(80)}`;
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () => long,
+    }) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      openAI: { apiKey: 'k', model: 'gpt-4.1' },
+      selectedProvider: 'openai',
+    });
+
+    expect((res.jsonBody as any).error).toMatch(/^context length exceeded/);
+    expect(((res.jsonBody as any).error as string).length).toBeLessThan(long.length);
   });
 
   it('does not paste an HTML error page into the message', async () => {

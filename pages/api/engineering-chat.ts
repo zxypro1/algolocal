@@ -63,7 +63,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   try {
-    const { messages, context, language = 'zh', config } = req.body as EngineeringChatRequest;
+    // aiConfig 而不是 config：模块顶上那个 export const config 是路由配置，
+    // 同名会让下一个人读到请求体里的东西还以为是它
+    const { messages, context, language = 'zh', config: aiConfig } = req.body as EngineeringChatRequest;
 
     if (!Array.isArray(messages)) {
       return res.status(400).json({ error: 'Messages array is required' });
@@ -81,7 +83,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       ...messages,
     ];
 
-    await streamAI(res, fullMessages, config, {
+    await streamAI(res, fullMessages, aiConfig, {
       temperature: 0.6,
       maxTokens: 2500,
       format: 'sse',
