@@ -379,20 +379,22 @@
       "modelPlaceholder": "输入模型名称 (例如: llama3)"
     },
     "compatible": {
-      "title": "OpenAI 兼容端点（本地）",
-      "intro": "任何提供 OpenAI 接口的服务都能连。用 LM Studio 的话，把它的本地服务打开，然后在下面填 http://localhost:1234/v1 即可。vLLM、LocalAI、llama.cpp server 同理。",
+      "title": "OpenAI 兼容端点",
+      "intro": "任何提供 OpenAI 接口的服务都能连，本地和远程都行。用 LM Studio 就填 http://localhost:1234/v1；用托管网关或某个提供 OpenAI 兼容接口的服务商，就填它的 https 地址。vLLM、LocalAI、llama.cpp server 同理。",
       "endpoint": "服务地址",
-      "endpointHint": "LM Studio 填 http://localhost:1234/v1。只填主机和端口时会自动补上 /v1。",
-      "apiKey": "API Key（可选）",
-      "apiKeyPlaceholder": "本地服务通常不需要",
-      "apiKeyHint": "本地服务一般不校验这一项，只有你的端点要求鉴权时才填。",
+      "endpointHint": "LM Studio 填 http://localhost:1234/v1。只填主机和端口时会自动补 /v1，并且除本地地址外默认用 https。",
+      "apiKey": "API Key",
+      "apiKeyPlaceholder": "远程端点通常必填",
+      "apiKeyHint": "本地服务一般不校验，可以留空；远程端点几乎都要求填。",
       "model": "模型",
       "modelPlaceholder": "点「获取模型列表」，或直接输入 id",
       "modelHint": "模型 id 由服务端决定，所以没有默认值可用。",
       "fetchModels": "获取模型列表",
       "fetchFailed": "连不上这个地址。",
       "noModels": "端点有响应，但没有列出任何模型。请先在服务端加载一个模型。",
-      "foundModels": "找到 {count} 个模型。"
+      "foundModels": "找到 {count} 个模型。",
+      "remoteNeedsKey": "这看起来是远程地址，但没有填 API Key —— 多数远程端点会直接拒绝请求。",
+      "insecureRemote": "这个远程地址用的是明文 http，API Key 和你的代码会以明文发送，建议改用 https。"
     },
     "modelHint": "留空则使用默认模型。可直接输入任意模型 id。"
   },

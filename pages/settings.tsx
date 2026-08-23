@@ -23,6 +23,7 @@ import { IconRobot } from '@tabler/icons-react';
 import { useTranslation, useI18n } from '../src/contexts/I18nContext';
 import { AppHeader, HEADER_HEIGHT } from '../src/components/AppHeader';
 import { DEFAULT_MODELS, SUGGESTED_MODELS } from '../src/lib/aiModels';
+import { isInsecureRemote, looksRemote } from '../src/lib/endpointHosts';
 
 export default function SettingsPage() {
   const { t } = useTranslation();
@@ -69,6 +70,21 @@ export default function SettingsPage() {
   const [compatibleModels, setCompatibleModels] = useState<string[]>([]);
   const [compatibleLoading, setCompatibleLoading] = useState(false);
   const [compatibleError, setCompatibleError] = useState<string | null>(null);
+
+  /**
+   * 判断用户填的是不是远程地址。补协议的规则要和服务端的
+   * normalizeCompatibleEndpoint 一致，否则提示会和实际行为对不上。
+   */
+  const compatibleProbeUrl = useMemo(() => {
+    const raw = (compatibleConfig.endpoint || '').trim();
+    if (!raw) return '';
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw)) return raw;
+    const hostPart = raw.split('/')[0].replace(/:\d+$/, '');
+    return `${looksRemote(`http://${hostPart}`) ? 'https' : 'http'}://${raw}`;
+  }, [compatibleConfig.endpoint]);
+
+  const compatibleRemote = compatibleProbeUrl ? looksRemote(compatibleProbeUrl) : false;
+  const compatibleInsecure = compatibleProbeUrl ? isInsecureRemote(compatibleProbeUrl) : false;
 
   const fetchCompatibleModels = async () => {
     setCompatibleLoading(true);
@@ -513,6 +529,13 @@ export default function SettingsPage() {
                     {t('settings.compatible.fetchModels')}
                   </Button>
                 </Group>
+                {/* 远程端点的两个常见配错，与其让请求失败后再猜，不如当场说清楚 */}
+                {compatibleRemote && !compatibleConfig.apiKey && (
+                  <Text size="xs" c="orange">{t('settings.compatible.remoteNeedsKey')}</Text>
+                )}
+                {compatibleInsecure && (
+                  <Text size="xs" c="orange">{t('settings.compatible.insecureRemote')}</Text>
+                )}
                 {compatibleError && (
                   <Text size="xs" c="red">{compatibleError}</Text>
                 )}

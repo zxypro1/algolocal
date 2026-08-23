@@ -144,7 +144,7 @@ All four features share a single provider configuration.
 | Chat assistant | Answers questions about the code currently in the editor without revealing the full solution |
 | Engineering review | Reviews a completed stage on concurrency safety, failure behaviour, module boundaries and style |
 
-Supported providers: DeepSeek, OpenAI, Claude, Qwen, and local models through Ollama or any OpenAI-compatible endpoint (LM Studio, vLLM, LocalAI, llama.cpp). See [AI_PROVIDER_GUIDE.md](./AI_PROVIDER_GUIDE.md).
+Supported providers: DeepSeek, OpenAI, Claude, Qwen, and any OpenAI-compatible endpoint, local or remote (Ollama, LM Studio, vLLM, LocalAI, llama.cpp, or a hosted gateway). See [AI_PROVIDER_GUIDE.md](./AI_PROVIDER_GUIDE.md).
 
 ## Usage
 
