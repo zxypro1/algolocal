@@ -28,6 +28,19 @@ export interface StructuredStreamHandlers {
   flushMs?: number;
 }
 
+/**
+ * 非 JSON 的错误体里，哪些还值得给用户看。
+ *
+ * 一律丢掉是过头了：Next 自己的 `Body exceeded 1mb limit`（工程对话把整个
+ * 工作区发上去时会撞到）就是一句纯文本，丢了用户就只剩一个 413。
+ * 真正要挡的是代理和框架的 HTML 错误页 —— 那是一屏标签。
+ */
+export function readableErrorBody(body: string): string {
+  const text = (body || '').trim();
+  if (!text || text.startsWith('<') || text.length > 200) return '';
+  return text;
+}
+
 export class StreamRequestError extends Error {
   /** 服务端附带的数据，例如 JSON 解析失败时的模型原文 */
   details?: unknown;
@@ -61,9 +74,11 @@ export async function requestStructuredStream<T>(
     try {
       data = JSON.parse(text);
     } catch {
-      // 不是 JSON 的响应体多半是代理或框架的 HTML 错误页。
-      // 把整页塞进错误提示里只会让用户看到一屏标签，状态码才是有用的那部分。
-      throw new StreamRequestError(`Request failed with ${response.status}`);
+      // 不是 JSON 的响应体可能是一句纯文本的框架错误，也可能是整页 HTML。
+      // 前者留着（有信息），后者只保留状态码（那只是一屏标签）。
+      throw new StreamRequestError(
+        readableErrorBody(text) || `Request failed with ${response.status}`
+      );
     }
     if (!response.ok) {
       throw new StreamRequestError(

@@ -46,6 +46,7 @@ import {
 } from '../lib/editorPrefs';
 import { clearDraft, loadDraft, saveDraft } from '../lib/problemDrafts';
 import { useAiConfig } from '../hooks/useAiConfig';
+import { readableErrorBody } from '../lib/streamRequest';
 
 // WASM 支持的语言配置
 const WASM_SUPPORTED_LANGUAGES = [
@@ -521,13 +522,17 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
       });
 
       if (!response.ok) {
+        // throw 不能放进 try 里 —— 它会被下面这个 catch 接住，
+        // 于是刚解析出来的那句话又被换回了整段原始响应体。
         const text = await response.text();
+        let message = '';
         try {
-          const data = JSON.parse(text);
-          throw new Error(data.error || 'Failed to generate solution');
+          message = JSON.parse(text).error || '';
         } catch {
-          throw new Error(text || 'Failed to generate solution');
+          // 不是 JSON 的错误体多半是错误页，别整页糊到界面上
+          message = readableErrorBody(text);
         }
+        throw new Error(message || `Failed to generate solution (HTTP ${response.status})`);
       }
 
       const reader = response.body?.getReader();

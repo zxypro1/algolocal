@@ -13,6 +13,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createSseParser } from '../lib/chatStreamProtocol';
+import { readableErrorBody } from '../lib/streamRequest';
 
 export interface StreamMessage {
   id: string;
@@ -132,8 +133,9 @@ export function useChatStream({ url, body }: SendOptions) {
           try {
             message = JSON.parse(detail).error || '';
           } catch {
-            // 不是 JSON 的错误体多半是代理或框架的 HTML 错误页。
-            // 把整页贴进对话框只会给用户一屏标签，状态码才是有用的那部分。
+            // 不是 JSON 的错误体：一句纯文本（例如 Next 的 `Body exceeded 1mb limit`）
+            // 留着，整页 HTML 错误页丢掉 —— 贴进对话框只会给用户一屏标签。
+            message = readableErrorBody(detail);
           }
           throw new Error(message || `Request failed with ${response.status}`);
         }

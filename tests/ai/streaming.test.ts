@@ -6,6 +6,7 @@
  */
 import { createSseParser, parseSseLine } from '../../src/lib/chatStreamProtocol';
 import {
+  callAI,
   NoProviderError,
   normalizeMessages,
   resolveProvider,
@@ -126,6 +127,33 @@ describe('message normalisation', () => {
       { role: 'assistant' as const, content: 'hello' },
     ];
     expect(normalizeMessages(messages)).toEqual(messages);
+  });
+
+  /**
+   * 一次失败的请求会在历史里留下一条空的 assistant 消息，下次发送会带上它。
+   * Anthropic 拒绝空的 content block，一部分模板也一样 ——
+   * 结果是一次偶发失败把整个会话钉死。
+   */
+  it('drops the empty assistant turn a failed request leaves behind', () => {
+    expect(
+      normalizeMessages([
+        { role: 'user', content: 'first' },
+        { role: 'assistant', content: '' },
+        { role: 'user', content: 'second' },
+      ])
+    ).toEqual([{ role: 'user', content: 'first\n\nsecond' }]);
+  });
+
+  it('survives a malformed messages array instead of throwing', () => {
+    const messages = [
+      null,
+      { role: 'system', content: { nope: true } },
+      { role: 'user', content: 'hi' },
+    ] as any;
+    expect(() => normalizeMessages(messages)).not.toThrow();
+    // 非字符串的 content 直接丢掉：硬转出来的 "[object Object]" 会变成
+    // 模型真的看到的提示词
+    expect(normalizeMessages(messages)).toEqual([{ role: 'user', content: 'hi' }]);
   });
 });
 
@@ -412,8 +440,117 @@ describe('server streaming', () => {
   it('classifies a missing provider as 400, not 500', () => {
     // 没配 provider 是「你还没设置」，不是「服务器坏了」。
     // resolveProvider 在写响应头之前就抛，由路由的 catch 统一映射状态码。
-    expect(() => resolveProvider({}, 4000)).toThrow(NoProviderError);
-    expect(statusForError(new NoProviderError())).toBe(400);
+    // 这里要把环境变量清干净：本机（或 CI）上导了任意一把 key，auto 顺序就会选中它。
+    const envKeys = [
+      'DEEPSEEK_API_KEY',
+      'OPENAI_API_KEY',
+      'QWEN_API_KEY',
+      'CLAUDE_API_KEY',
+      'OLLAMA_MODEL',
+      'OPENAI_COMPATIBLE_ENDPOINT',
+      'OPENAI_COMPATIBLE_MODEL',
+    ];
+    const saved: Record<string, string | undefined> = {};
+    envKeys.forEach((key) => {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    });
+
+    try {
+      expect(() => resolveProvider({}, 4000)).toThrow(NoProviderError);
+      expect(statusForError(new NoProviderError())).toBe(400);
+    } finally {
+      envKeys.forEach((key) => {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      });
+    }
+  });
+
+  it('reports a connection failure as a fixable message, not "fetch failed"', async () => {
+    const refused: any = new TypeError('fetch failed');
+    refused.cause = { code: 'ECONNREFUSED' };
+    global.fetch = jest.fn().mockRejectedValue(refused) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      compatible: { endpoint: 'http://127.0.0.1:1234/v1', model: 'qwen3-8b' },
+      selectedProvider: 'compatible',
+    });
+
+    expect(res.statusCode).toBe(502);
+    expect((res.jsonBody as any).error).toContain('refused the connection');
+    expect((res.jsonBody as any).error).not.toContain('fetch failed');
+  });
+
+  /**
+   * 超时和「客户端自己走了」都是 AbortError，但两者的正确反应相反：
+   * 前者要告诉用户，后者只需安静收尾。混在一起的后果是等满两分钟之后
+   * 拿到一个空白气泡 —— 没内容、没报错，看不出发生了什么。
+   */
+  it('reports an upstream timeout as 504, not as a silent empty response', async () => {
+    jest.useFakeTimers();
+    global.fetch = jest.fn(
+      (_url: any, init: any) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => {
+            const error = new Error('The operation was aborted');
+            error.name = 'AbortError';
+            reject(error);
+          });
+        })
+    ) as any;
+
+    const res = createFakeRes();
+    const pending = streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      openAI: { apiKey: 'k', model: 'gpt-4.1' },
+      selectedProvider: 'openai',
+    });
+    jest.advanceTimersByTime(130_000);
+    await pending;
+    jest.useRealTimers();
+
+    expect(res.statusCode).toBe(504);
+    expect((res.jsonBody as any).error).toMatch(/No response from https:\/\/api\.openai\.com/);
+  });
+
+  it('stays quiet when it is the client that left', async () => {
+    const controller = new AbortController();
+    global.fetch = jest.fn(() => {
+      controller.abort();
+      const error = new Error('The operation was aborted');
+      error.name = 'AbortError';
+      return Promise.reject(error);
+    }) as any;
+
+    const res = createFakeRes();
+    await streamAI(
+      res as any,
+      [{ role: 'user', content: 'hi' }],
+      { openAI: { apiKey: 'k', model: 'gpt-4.1' }, selectedProvider: 'openai' },
+      { signal: controller.signal }
+    );
+
+    expect(res.statusCode).toBeUndefined();
+    expect(res.jsonBody).toBeFalsy();
+    expect(res.ended).toBe(true);
+  });
+
+  it('does not paste an HTML error page into the message', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: async () => '<html><head><title>502 Bad Gateway</title></head><body>...</body></html>',
+    }) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      openAI: { apiKey: 'k', model: 'gpt-4.1' },
+      selectedProvider: 'openai',
+    });
+
+    expect((res.jsonBody as any).error).not.toContain('<html>');
+    expect((res.jsonBody as any).error).toMatch(/HTML error page/);
   });
 
   it('reports a mid-stream failure as an error event, not a broken body', async () => {
@@ -639,6 +776,50 @@ describe('server streaming', () => {
       expect([kind, roles[0]]).toEqual([kind, 'system']);
       expect([kind, body.messages[0].content]).toEqual([kind, 'persona\n\nworkspace context']);
     }
+  });
+
+  /**
+   * buildRequest 有三个入口：callAI（非流式）、streamAI、streamStructured。
+   * 规整必须留在 buildRequest 里 —— 只在 streamAI 里做的话，生成类接口
+   * （出题、生成工程题、AI 评审）会在本地模型上重新踩回同一个 400。
+   */
+  it('normalises on the structured-stream path too, not just chat', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(fakeStreamResponse([])) as any;
+    global.fetch = fetchMock;
+
+    await streamStructured(createFakeRes() as any, [
+      { role: 'system', content: 'persona' },
+      { role: 'system', content: 'schema' },
+      { role: 'user', content: 'make one' },
+    ], {
+      compatible: { endpoint: 'http://localhost:1234/v1', model: 'qwen3-8b' },
+      selectedProvider: 'compatible',
+    }, { onComplete: async () => ({ ok: true }) });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.messages.filter((message: any) => message.role === 'system')).toHaveLength(1);
+    expect(body.messages[0]).toEqual({ role: 'system', content: 'persona\n\nschema' });
+  });
+
+  it('normalises on the non-streaming path too', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: 'done' } }] }),
+    }) as any;
+    global.fetch = fetchMock;
+
+    await callAI(
+      [
+        { role: 'system', content: 'persona' },
+        { role: 'system', content: 'context' },
+        { role: 'user', content: 'hi' },
+      ],
+      { openAI: { apiKey: 'k', model: 'gpt-4.1' }, selectedProvider: 'openai' }
+    );
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.messages.filter((message: any) => message.role === 'system')).toHaveLength(1);
+    expect(body.stream).toBe(false);
   });
 
   it('keeps Claude on its separate system field', async () => {

@@ -9,7 +9,7 @@
  *    并且客户端断开时把上游请求一起 abort 掉，不再白烧 token。
  */
 import type { NextApiResponse } from 'next';
-import { guardedFetch } from './endpointPolicy';
+import { describeNetworkError, guardedFetch } from './endpointPolicy';
 import { isPrivateHostname } from '../endpointHosts';
 import {
   capabilitiesFor,
@@ -208,12 +208,38 @@ export function normalizeMessages(messages: ChatMessage[]): ChatMessage[] {
   const rest: ChatMessage[] = [];
 
   for (const message of messages) {
+    // messages 是请求体里来的，路由只校验了它是个数组。这里读到的每个字段
+    // 都可能不是字符串，甚至不是对象 —— 让 .trim() 抛 TypeError 只会变成
+    // 一个内部错误的 500，还不如把这条丢掉。
+    if (!message || typeof message !== 'object') continue;
+    // content 不是字符串就当它不存在。硬转出来的 "[object Object]" 会原样
+    // 变成模型看到的提示词，比少一条消息更糟。
+    const content = typeof message.content === 'string' ? message.content : '';
+
     if (message.role === 'system') {
-      const content = (message.content || '').trim();
-      if (content) systemParts.push(content);
-    } else {
-      rest.push(message);
+      if (content.trim()) systemParts.push(content.trim());
+      continue;
     }
+
+    /*
+     * 空的 user/assistant 也要丢掉。
+     *
+     * 一次失败的请求会在对话历史里留下一条**空的** assistant 消息（内容还没
+     * 流出来就断了），下一次发送会把它一起带上。Anthropic 直接拒绝空的
+     * content block，一部分 chat 模板也一样 —— 于是一次偶发失败会把整个
+     * 会话钉死，用户只能关掉对话框重开。
+     */
+    if (!content.trim()) continue;
+
+    // 丢掉空消息可能让两条同角色的消息挨在一起（user, assistant(空), user）。
+    // Anthropic 要求角色交替，所以这里把它们并成一条，而不是留个坑给上游。
+    const previous = rest[rest.length - 1];
+    if (previous && previous.role === message.role) {
+      rest[rest.length - 1] = { ...previous, content: `${previous.content}\n\n${content}` };
+      continue;
+    }
+
+    rest.push({ ...message, content });
   }
 
   if (systemParts.length === 0) return rest;
@@ -269,10 +295,8 @@ function buildRequest(
       };
 
     case 'claude': {
-      const system = messages
-        .filter((message) => message.role === 'system')
-        .map((message) => message.content)
-        .join('\n\n');
+      // normalizeMessages 保证了：要么没有 system，要么就是唯一一条、在 index 0
+      const system = messages[0]?.role === 'system' ? messages[0].content : '';
       return {
         url: 'https://api.anthropic.com/v1/messages',
         headers: {
@@ -284,7 +308,7 @@ function buildRequest(
         body: {
           model: provider.model,
           system: system || undefined,
-          messages: messages.filter((message) => message.role !== 'system'),
+          messages: system ? messages.slice(1) : messages,
           temperature: options.temperature,
           max_tokens: provider.maxTokens,
           stream: options.stream,
@@ -340,9 +364,40 @@ export class AIUpstreamError extends Error {
   }
 }
 
+/**
+ * 根本没连上上游：服务没起、端口写错、域名解析不了、证书不受信任。
+ *
+ * 和上游返回 4xx 一样，这也是「要改的是配置」，只不过失败发生在更早的一层。
+ */
+export class AINetworkError extends Error {
+  status = 502;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'AINetworkError';
+  }
+}
+
+/**
+ * 上游在超时窗口内没有回应。
+ *
+ * 它必须和「客户端自己走了」区分开：两者都是 AbortError，但前者要告诉用户，
+ * 后者只需要安静收尾。混在一起的后果是，一次超时会变成一个空白的回答气泡 ——
+ * 没有报错、没有内容，用户等了两分钟什么也没得到。
+ */
+export class AITimeoutError extends Error {
+  status = 504;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'AITimeoutError';
+  }
+}
+
 /** 该用哪个状态码回给客户端 */
 export function statusForError(error: unknown): number {
   if (error instanceof AIUpstreamError) return error.status;
+  if (error instanceof AITimeoutError || error instanceof AINetworkError) return error.status;
   // 没配 provider 属于「请求缺前提」，不是服务端故障
   if (error instanceof NoProviderError) return 400;
   return 500;
@@ -371,7 +426,20 @@ function describeUpstreamError(status: number, body: string): string {
     // 不是 JSON，按纯文本处理
   }
 
+  // 代理和框架的错误页是 HTML。把 300 个字符的标签塞进错误提示里，用户看到的
+  // 是一屏 <html><head><title>502 Bad Gateway —— 状态码才是有用的那部分。
+  if (text.startsWith('<')) return `The AI endpoint returned ${status} with an HTML error page, not JSON. Check that the endpoint URL points at the API and not at a web page.`;
+
   return text.slice(0, 300);
+}
+
+/** 只取协议 + 主机，错误提示里没必要出现完整路径 */
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url;
+  }
 }
 
 async function fetchUpstream(
@@ -384,7 +452,13 @@ async function fetchUpstream(
   userSuppliedUrl = false
 ): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  // 超时和「客户端走了」都会 abort 同一个 controller，但后面要分别处理，
+  // 所以这里自己记一笔 —— AbortError 本身分不出是谁触发的。
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, DEFAULT_TIMEOUT_MS);
   // 客户端断开 -> 连带取消上游，不再为没人看的回答付费
   signal?.addEventListener('abort', () => controller.abort(), { once: true });
 
@@ -392,12 +466,29 @@ async function fetchUpstream(
     // 聊天请求打的是同一个用户填的地址，所以 SSRF 面不只是「列模型」那个路由；
     // guardedFetch 会逐跳校验重定向。
     const send = userSuppliedUrl ? guardedFetch : fetch;
-    const response = await send(request.url, {
-      method: 'POST',
-      headers: request.headers,
-      body: JSON.stringify(request.body),
-      signal: controller.signal,
-    });
+    let response: Response;
+    try {
+      response = await send(request.url, {
+        method: 'POST',
+        headers: request.headers,
+        body: JSON.stringify(request.body),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      const origin = originOf(request.url);
+      if (timedOut) {
+        throw new AITimeoutError(
+          describeNetworkError({ name: 'AbortError' }, origin, DEFAULT_TIMEOUT_MS)
+        );
+      }
+      // 连都没连上：服务没起、端口写错、域名解析不了、证书不受信任。这是本地
+      // 模型场景里最常见的一类失败，不该以「fetch failed」的形式露出来。
+      // 只翻译传输层失败 —— endpointPolicy 的拦截理由本身就是给人看的，别再包一层。
+      const transport =
+        (error as any)?.cause?.code || (error as any)?.code || /fetch failed/i.test((error as Error)?.message || '');
+      if (transport) throw new AINetworkError(describeNetworkError(error, origin));
+      throw error;
+    }
 
     if (!response.ok) {
       const detail = await response.text();
