@@ -8,13 +8,12 @@
     "line": "Line",
     "variables": "Variables at this step",
     "noVariables": "No variables in scope yet.",
-    "truncated": "Recording stopped after the step limit; {count} later steps were not kept.",
+    "truncated": "Recording stopped after the step limit; {{count}} later steps were not kept.",
     "first": "First step",
     "prev": "Previous step",
     "next": "Next step",
     "last": "Last step",
-    "caseLabel": "Tracing test case {n}",
-    "failed": "Could not record a trace: {error}"
+    "aborted": "The run stopped early: {{error}}"
   },
   "common": {
     "language": "Language",

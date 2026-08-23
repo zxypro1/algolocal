@@ -18,7 +18,7 @@ import {
 import { instrumentSource } from '../lib/trace/instrument';
 import { createTraceRecorder } from '../lib/trace/recorder';
 import { buildPythonTraceProgram } from '../lib/trace/pythonTrace';
-import { EMPTY_TRACE, type ExecutionTrace } from '../lib/trace/types';
+import { emptyTrace, type ExecutionTrace } from '../lib/trace/types';
 
 export type { ExecutionTrace, TraceStep } from '../lib/trace/types';
 
@@ -970,7 +970,7 @@ export function useWasmExecutor() {
   ): Promise<{ trace: ExecutionTrace; result: any; error: string | null; logs: ConsoleLogEntry[] }> => {
     const test = (problem.tests || [])[testIndex];
     if (!test) {
-      return { trace: { ...EMPTY_TRACE, error: 'No such test case' }, result: null, error: 'No such test case', logs: [] };
+      return { trace: { ...emptyTrace(), error: 'No such test case' }, result: null, error: 'No such test case', logs: [] };
     }
 
     const args = parseTestInput(test.input);
@@ -990,7 +990,7 @@ export function useWasmExecutor() {
       instrumented = instrumentSource(tsModule, code);
     } catch (error: any) {
       return {
-        trace: { ...EMPTY_TRACE, error: `Could not instrument the code: ${error?.message || error}` },
+        trace: { ...emptyTrace(), error: `Could not instrument the code: ${error?.message || error}` },
         result: null,
         error: error?.message || String(error),
         logs: [],
@@ -1001,13 +1001,26 @@ export function useWasmExecutor() {
     // instrumentSource 已经把 TS 转成 JS 了，所以这里统一走 JS 路径
     const outcome = await executeJavaScript(instrumented, args, isLinkedListProblem, collector, recorder.api);
 
-    recorder.trace.completed = !outcome.error;
-    if (outcome.error) recorder.trace.error = outcome.error;
+    // async 解法返回的是 Promise：不等它完成就读轨迹的话，
+    // 拿到的是函数体才跑了一半的快照，而记录器还在往同一个数组里追加。
+    let resolved = outcome.result;
+    let failure = outcome.error;
+    if (resolved && typeof resolved.then === 'function') {
+      try {
+        resolved = await resolved;
+      } catch (error: any) {
+        failure = error?.message || String(error);
+        resolved = null;
+      }
+    }
+
+    recorder.trace.completed = !failure;
+    if (failure) recorder.trace.error = failure;
 
     return {
       trace: recorder.trace,
-      result: outcome.result,
-      error: outcome.error,
+      result: resolved,
+      error: failure,
       logs: collector.entries,
     };
   }, []);
@@ -1039,17 +1052,17 @@ async function tracePython(
     collector.entries.push(...entries);
     if (truncated) collector.truncated = true;
 
-    let trace: ExecutionTrace = { ...EMPTY_TRACE };
+    let trace: ExecutionTrace = emptyTrace();
     try {
       trace = JSON.parse(js.trace);
     } catch {
-      trace = { ...EMPTY_TRACE, error: 'Could not read the trace back from Python' };
+      trace = { ...emptyTrace(), error: 'Could not read the trace back from Python' };
     }
 
     return { trace, result: js.result ?? null, error: js.error || null, logs: collector.entries };
   } catch (error: any) {
     return {
-      trace: { ...EMPTY_TRACE, error: error?.message || String(error) },
+      trace: { ...emptyTrace(), error: error?.message || String(error) },
       result: null,
       error: error?.message || String(error),
       logs: collector.entries,

@@ -46,9 +46,10 @@ export const TRACE_LIMITS = {
   maxVarsPerStep: 24,
 } as const;
 
-export const EMPTY_TRACE: ExecutionTrace = {
-  steps: [],
-  droppedSteps: 0,
-  truncated: false,
-  completed: false,
-};
+/**
+ * 工厂而不是常量：导出一个共享对象的话，`{ ...EMPTY_TRACE, error }`
+ * 展开出来的每一份都指向同一个 steps 数组。
+ */
+export function emptyTrace(): ExecutionTrace {
+  return { steps: [], droppedSteps: 0, truncated: false, completed: false };
+}

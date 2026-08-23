@@ -159,6 +159,76 @@ describe('instrumented code behaves like the original', () => {
   });
 });
 
+describe('instrumentation must not break code that already worked', () => {
+  it('does not put shadowed block-scoped names into the TDZ', () => {
+    // 插桩前跑得好好的代码，插桩后不能变成 ReferenceError。
+    // 内层块稍后声明的 let/const 会遮蔽外层同名变量，声明点之前引用它
+    // 命中的是尚未初始化的内层绑定。
+    const { result } = runTraced(
+      `function run() { let x = 1; { let x = 2; x += 1; } return x; }
+       module.exports = run;`
+    );
+    expect(result).toBe(1);
+  });
+
+  it('handles a loop-local const shadowing an outer name', () => {
+    const { result } = runTraced(
+      `function run(rows) {
+         let count = 0;
+         for (const row of rows) { const count = row.length; }
+         return count;
+       }
+       module.exports = run;`,
+      [[[1, 2], [3]]]
+    );
+    expect(result).toBe(0);
+  });
+
+  it('handles a shadowing const inside an if block', () => {
+    const { result } = runTraced(
+      `function run(c) {
+         const helper = 1;
+         if (c) { const helper = 2; return helper; }
+         return helper;
+       }
+       module.exports = run;`,
+      [true]
+    );
+    expect(result).toBe(2);
+  });
+
+  it('treats constructors as their own frame', () => {
+    const { result, trace } = runTraced(
+      `class Node {
+         constructor(val, next) { this.val = val; this.next = next; }
+       }
+       function run() { const n = new Node(7, null); return n.val; }
+       module.exports = run;`
+    );
+    expect(result).toBe(7);
+    // 不把构造函数当作函数边界的话，这里会报成调用者的栈帧
+    expect(trace.steps.some((step) => step.fn.includes('constructor'))).toBe(true);
+  });
+
+  it('instruments statements under switch cases', () => {
+    const { result, trace } = runTraced(
+      `function run(kind) {
+         let out = '';
+         switch (kind) {
+           case 'a': out = 'first'; break;
+           default: out = 'other';
+         }
+         return out;
+       }
+       module.exports = run;`,
+      ['a']
+    );
+    expect(result).toBe('first');
+    // case 下面挂的是裸语句列表，不单独处理的话整个 switch 在轨迹里是空白
+    expect(trace.steps.some((step) => step.vars.some((v) => v.name === 'out'))).toBe(true);
+  });
+});
+
 describe('trace bounds', () => {
   it('stops recording past the cap but lets the program finish', () => {
     const { result, trace } = runTraced(

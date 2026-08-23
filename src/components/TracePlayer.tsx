@@ -103,9 +103,16 @@ export default function TracePlayer({ trace, source }: TracePlayerProps) {
         </Text>
       </Group>
 
+      {/* 代码中途抛了异常：轨迹是残缺的，得说清楚，否则最后一步看起来像正常结束 */}
+      {trace.error && (
+        <Alert color="red" variant="light">
+          {t('trace.aborted', { error: trace.error })}
+        </Alert>
+      )}
+
       {trace.truncated && (
         <Text size="xs" c="dimmed" fs="italic">
-          {t('trace.truncated').replace('{count}', String(trace.droppedSteps))}
+          {t('trace.truncated', { count: trace.droppedSteps })}
         </Text>
       )}
 

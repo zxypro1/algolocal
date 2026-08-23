@@ -22,11 +22,6 @@ export function buildPythonTraceProgram(
   functionName: string,
   argsJson: string
 ): string {
-  const indented = userCode
-    .split('\n')
-    .map((line) => `    ${line}`)
-    .join('\n');
-
   return `
 import json, sys
 from io import StringIO
