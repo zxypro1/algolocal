@@ -38,8 +38,6 @@ export function coerceProject(raw: any): EngineeringProject {
         id: String(stage?.id || `stage-${index + 1}`),
         title: normalizeLocalized(stage?.title, `Stage ${index + 1}`),
         goal: normalizeLocalized(stage?.goal),
-        overview: stage?.overview ? normalizeLocalized(stage.overview) : undefined,
-        details: stage?.details ? normalizeLocalized(stage.details) : undefined,
         architecture: stage?.architecture ? normalizeLocalized(stage.architecture) : undefined,
         checklist: Array.isArray(stage?.checklist)
           ? stage.checklist.map((item: any) => normalizeLocalized(item))
@@ -85,13 +83,6 @@ export function coerceProject(raw: any): EngineeringProject {
     estimatedMinutes: Number(raw?.estimatedMinutes) || 90,
     language: raw?.language === 'javascript' ? 'javascript' : 'typescript',
     brief: normalizeLocalized(raw?.brief),
-    learningOutcomes: Array.isArray(raw?.learningOutcomes)
-      ? raw.learningOutcomes.map((item: any) => normalizeLocalized(item))
-      : [],
-    prerequisites: Array.isArray(raw?.prerequisites)
-      ? raw.prerequisites.map((item: any) => normalizeLocalized(item))
-      : [],
-    architecture: raw?.architecture ? normalizeLocalized(raw.architecture) : undefined,
     weights: raw?.weights && typeof raw.weights === 'object' ? raw.weights : undefined,
     files: normalizeFiles(raw?.files),
     stages,
@@ -109,12 +100,7 @@ export function validateProjectShape(project: EngineeringProject): string[] {
 
   project.stages.forEach((stage, index) => {
     const label = `stage ${index + 1} (${stage.id})`;
-    // overview + details 是新写法，goal 是旧写法，至少要有一套
-    const hasSplit = Boolean(stage.overview?.zh || stage.overview?.en) &&
-      Boolean(stage.details?.zh || stage.details?.en);
-    if (!hasSplit && !stage.goal.zh && !stage.goal.en) {
-      errors.push(`${label}: needs either overview + details, or the legacy goal`);
-    }
+    if (!stage.goal.zh && !stage.goal.en) errors.push(`${label}: goal is empty`);
     if (!stage.specs.length) errors.push(`${label}: no spec files`);
     if (!stage.referenceFiles?.length) {
       errors.push(`${label}: referenceFiles missing — a stage without a reference solution cannot be verified`);

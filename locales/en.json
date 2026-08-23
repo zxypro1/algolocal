@@ -470,7 +470,12 @@
       "next": "Go to next stage",
       "pitfalls": "Common traps",
       "pitfallsHint": "These pass some specs but are wrong as engineering",
-      "extension": "Going further: the real-world counterpart"
+      "extension": "Going further: the real-world counterpart",
+      "revealReference": "Show the reference implementation",
+      "revealTitle": "Spoil this stage?",
+      "revealBody": "This shows a complete working solution for this stage. Once you have seen it, you cannot unsee it — most of the value here is in getting stuck first.",
+      "revealConfirm": "Show it anyway",
+      "revealCancel": "Not yet"
     },
     "workspace": {
       "files": "Workspace",
@@ -516,8 +521,7 @@
       "languageHint": "Switching swaps the starter files and specs; each language keeps its own drafts"
     },
     "tabs": {
-      "stage": "Task overview",
-      "brief": "Task details",
+      "stage": "Task",
       "architecture": "Reference architecture",
       "tests": "Specs",
       "metrics": "Metrics",
@@ -609,10 +613,7 @@
       "repairing": "Verification failed, asking for a fix…",
       "saving": "Verified, saving…"
     },
-    "brief": {
-      "outcomes": "What you will learn",
-      "prerequisites": "Prerequisites"
-    }
+    "brief": {}
   },
   "editor": {
     "toggleWrap": "Word wrap",

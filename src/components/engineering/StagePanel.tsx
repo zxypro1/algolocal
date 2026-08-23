@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Alert, Badge, Button, Card, Collapse, Group, List, Stack, Text, ThemeIcon } from '@mantine/core';
+import { Alert, Badge, Button, Card, Collapse, Group, List, Modal, Stack, Text, ThemeIcon } from '@mantine/core';
 import {
   IconAlertTriangle,
   IconBook2,
@@ -39,6 +39,15 @@ export default function StagePanel({
   hasNextStage,
 }: StagePanelProps) {
   const { t } = useTranslation();
+
+  /**
+   * 参考实现的「已确认查看」只记在这一关、这一次停留里。
+   * 不写进进度存档：确认的意思是「我现在想看这一关的解法」，
+   * 不是「以后所有关卡都别再问我」—— 后者会让这道确认形同虚设。
+   * 组件按 stage.id 做了 key，换关卡即重新挂载，状态自然归零。
+   */
+  const [revealed, setRevealed] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const { locale } = useI18n();
   const [extensionOpen, setExtensionOpen] = useState(false);
 
@@ -62,8 +71,7 @@ export default function StagePanel({
       </Group>
 
       <Card withBorder radius="lg" padding="lg">
-        {/* 任务概述：本关背景。没迁移的关卡回退到旧的 goal。 */}
-        <MarkdownRenderer content={pick(stage.overview || stage.goal)} />
+        <MarkdownRenderer content={pick(stage.goal)} />
       </Card>
 
       {stage.checklist && stage.checklist.length > 0 && (
@@ -161,7 +169,35 @@ export default function StagePanel({
         </Card>
       )}
 
-      {completed && stage.referenceFiles && stage.referenceFiles.length > 0 && (
+      {/*
+        没通关也能看参考实现，但要按一下「确定要看解法吗」。
+        通关之后不再问 —— 那时已经没什么可剧透的了。
+      */}
+      {!completed && stage.referenceFiles && stage.referenceFiles.length > 0 && !revealed && (
+        <Group justify="center" py="sm">
+          <Button variant="subtle" size="compact-sm" color="gray"
+            leftSection={<IconLock size={13} />}
+            onClick={() => setConfirmOpen(true)}>
+            {t('engineering.stage.revealReference')}
+          </Button>
+        </Group>
+      )}
+
+      <Modal opened={confirmOpen} onClose={() => setConfirmOpen(false)}
+        title={t('engineering.stage.revealTitle')} size="sm" centered>
+        <Text size="sm" mb="md">{t('engineering.stage.revealBody')}</Text>
+        <Group justify="flex-end" gap="sm">
+          <Button variant="default" size="compact-sm" onClick={() => setConfirmOpen(false)}>
+            {t('engineering.stage.revealCancel')}
+          </Button>
+          <Button color="orange" size="compact-sm"
+            onClick={() => { setRevealed(true); setConfirmOpen(false); }}>
+            {t('engineering.stage.revealConfirm')}
+          </Button>
+        </Group>
+      </Modal>
+
+      {(completed || revealed) && stage.referenceFiles && stage.referenceFiles.length > 0 && (
         <Card withBorder radius="lg" padding="md">
           <Text size="sm" fw={600} mb={8}>
             {t('engineering.stage.reference')}
@@ -184,14 +220,6 @@ export default function StagePanel({
         </Card>
       )}
 
-      {!completed && stage.referenceFiles && stage.referenceFiles.length > 0 && (
-        <Group gap={6} justify="center" py="sm">
-          <IconLock size={13} />
-          <Text size="xs" c="dimmed">
-            {t('engineering.stage.referenceLocked')}
-          </Text>
-        </Group>
-      )}
 
       {completed && hasNextStage && (
         <Button fullWidth color="teal" onClick={onAdvance}>

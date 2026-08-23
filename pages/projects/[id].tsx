@@ -664,9 +664,6 @@ export default function ProjectWorkspacePage() {
                   <Tabs.Tab value="stage" leftSection={<IconChecklist size={14} />}>
                     {t('engineering.tabs.stage')}
                   </Tabs.Tab>
-                  <Tabs.Tab value="brief" leftSection={<IconFileText size={14} />}>
-                    {t('engineering.tabs.brief')}
-                  </Tabs.Tab>
                   {(stage.architecture || project.architecture) && (
                     <Tabs.Tab value="architecture" leftSection={<IconSitemap size={14} />}>
                       {t('engineering.tabs.architecture')}
@@ -686,6 +683,9 @@ export default function ProjectWorkspacePage() {
                 >
                   <Tabs.Panel value="stage">
                     <StagePanel
+                      // 按关卡 key：不这样的话组件会被复用，
+                      // 在一关点过「仍然查看」之后，后面每一关的参考实现都直接敞开了
+                      key={stage.id}
                       stage={stage}
                       stageIndex={stageIndex}
                       stageCount={project.stages.length}
@@ -702,49 +702,6 @@ export default function ProjectWorkspacePage() {
                     />
                   </Tabs.Panel>
 
-                  <Tabs.Panel value="brief">
-                    <Stack gap="md">
-                      {project.learningOutcomes && project.learningOutcomes.length > 0 && (
-                        <Paper withBorder radius="lg" p="md">
-                          <Text size="sm" fw={600} mb={8}>
-                            {t('engineering.brief.outcomes')}
-                          </Text>
-                          <List
-                            size="sm"
-                            spacing={6}
-                            icon={
-                              <ThemeIcon size={18} radius="xl" variant="light" color="teal">
-                                <IconTargetArrow size={11} />
-                              </ThemeIcon>
-                            }
-                          >
-                            {project.learningOutcomes.map((outcome, index) => (
-                              <List.Item key={index}>{pick(outcome)}</List.Item>
-                            ))}
-                          </List>
-                        </Paper>
-                      )}
-
-                      {project.prerequisites && project.prerequisites.length > 0 && (
-                        <Paper withBorder radius="lg" p="md">
-                          <Text size="sm" fw={600} mb={6}>
-                            {t('engineering.brief.prerequisites')}
-                          </Text>
-                          <Group gap={6} wrap="wrap">
-                            {project.prerequisites.map((item, index) => (
-                              <Badge key={index} variant="light" color="gray" size="sm">
-                                {pick(item)}
-                              </Badge>
-                            ))}
-                          </Group>
-                        </Paper>
-                      )}
-
-                      <Paper withBorder radius="lg" p="lg">
-                        <MarkdownRenderer content={pick(stage.details || project.brief)} />
-                      </Paper>
-                    </Stack>
-                  </Tabs.Panel>
 
                   {(stage.architecture || project.architecture) && (
                     <Tabs.Panel value="architecture">

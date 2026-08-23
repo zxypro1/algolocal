@@ -5049,33 +5049,6 @@ module.exports = {
     encapsulation: 1.5,
     elegance: 1.5,
   },
-  prerequisites: [
-    t('async / await 与 Promise.race', 'async/await and Promise.race'),
-    t('了解状态机的概念会更容易理解熔断器', 'Familiarity with state machines helps for the breaker'),
-    t('建议先做完《高可用抓取管线》', 'Doing the resilient fetch pipeline first is recommended'),
-  ],
-  learningOutcomes: [
-    t(
-      '手写令牌桶，并说清它和漏桶、和「QPS 限制」的区别',
-      'Write a token bucket and explain how it differs from a leaky bucket and from a plain QPS cap'
-    ),
-    t(
-      '实现三态熔断器，理解半开状态为什么是这个设计的核心',
-      'Implement a three-state breaker and see why half-open is the heart of the design'
-    ),
-    t(
-      '把「慢」也当成一种失败：超时必须落在熔断器的视野之内',
-      'Treat slowness as failure: timeouts must be visible to the breaker'
-    ),
-    t(
-      '论证三层保护的组合顺序，并说清顺序错了会漏掉什么',
-      'Justify the ordering of the three protections and what breaks when it is wrong'
-    ),
-    t(
-      '用「不依赖定时器的状态机」写出可测试的时间相关逻辑',
-      'Write testable time-dependent logic as a state machine that needs no timers'
-    ),
-  ],
   brief: t(
     [
       '## 背景',

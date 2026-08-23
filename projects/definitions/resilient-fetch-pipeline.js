@@ -5025,33 +5025,6 @@ module.exports = {
     encapsulation: 1.5,
     elegance: 1,
   },
-  prerequisites: [
-    t('async / await 与 Promise 的基本用法', 'async/await and Promise basics'),
-    t('TypeScript 的接口与泛型', 'TypeScript interfaces and generics'),
-    t('不需要任何分布式系统背景', 'No distributed-systems background required'),
-  ],
-  learningOutcomes: [
-    t(
-      '写出一个带上限的并发原语，并说清它为什么比「分批 Promise.all」更好',
-      'Write a bounded-concurrency primitive and explain why it beats chunked Promise.all'
-    ),
-    t(
-      '实现指数退避，并判断哪些错误值得重试、哪些重试多少次都没用',
-      'Implement exponential backoff and tell retryable failures from hopeless ones'
-    ),
-    t(
-      '用缓存解决「再次」、用单飞解决「同时」，防住热点 key 击穿',
-      'Use a cache for "again" and single-flight for "at the same time" to stop hot-key stampedes'
-    ),
-    t(
-      '把一堆能力收进一个可实例化、可取消、可观测的组件里',
-      'Fold a pile of capabilities into one instantiable, cancellable, observable component'
-    ),
-    t(
-      '读懂并发度与延迟指标，用它们判断一个实现是快还是只是「看起来快」',
-      'Read concurrency and latency metrics to tell a fast implementation from one that merely looks fast'
-    ),
-  ],
   brief: t(
     [
       '## 背景',

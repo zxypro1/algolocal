@@ -5111,32 +5111,6 @@ module.exports = {
     encapsulation: 2.5,
     elegance: 2,
   },
-  prerequisites: [
-    t('async / await 与 Promise 的基本用法', 'async/await and Promise basics'),
-    t('用过任意一种中间件（Express/Koa/Redux 都行）会更容易上手', 'Having used any middleware system (Express/Koa/Redux) helps'),
-  ],
-  learningOutcomes: [
-    t(
-      '用事件总线把副作用从主流程里摘出去，并知道什么时候**不该**这么做',
-      'Lift side effects out of the main flow with an event bus, and know when not to'
-    ),
-    t(
-      '手写一个正确的洋葱中间件 compose，包括短路、错误传播和重复 next 检测',
-      'Write a correct onion compose, including short-circuit, error propagation and double-next detection'
-    ),
-    t(
-      '说清 at-least-once 为什么无法避免，以及幂等消费如何把它变成「效果上的 exactly-once」',
-      'Explain why at-least-once is unavoidable and how idempotent consumption yields effective exactly-once'
-    ),
-    t(
-      '区分「投递语义」（重试、幂等、死信）和「业务逻辑」，并让它们各自独立演进',
-      'Separate delivery semantics (retry, idempotency, DLQ) from business logic so each evolves alone'
-    ),
-    t(
-      '识别错误隔离的边界该放在哪一层，包整体还是包每一个',
-      'Place the error-isolation boundary correctly: around the whole batch, or around each item'
-    ),
-  ],
   brief: t(
     [
       '## 背景',

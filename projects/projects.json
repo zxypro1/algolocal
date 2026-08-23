@@ -32,58 +32,6 @@
       "encapsulation": 2,
       "elegance": 1.5
     },
-    "prerequisites": [
-      {
-        "zh": "会用 Uint8Array / DataView 读写二进制",
-        "en": "Comfortable reading and writing binary with Uint8Array / DataView"
-      },
-      {
-        "zh": "知道二叉查找树是什么（B+Tree 那一关会从头讲）",
-        "en": "Know what a binary search tree is (the B+Tree stage starts from scratch)"
-      },
-      {
-        "zh": "写过 async/await，理解 Promise 什么时候才 resolve",
-        "en": "Have written async/await and understand when a Promise actually settles"
-      },
-      {
-        "zh": "用过 SQL 的 SELECT / WHERE / JOIN / GROUP BY，不需要知道它们怎么实现",
-        "en": "Have used SQL SELECT / WHERE / JOIN / GROUP BY, with no idea how they are implemented"
-      }
-    ],
-    "learningOutcomes": [
-      {
-        "zh": "说清数据库为什么以「页」为单位读写，以及缓冲池凭什么能把 IO 降一个数量级",
-        "en": "Explain why a database reads and writes in pages, and how a buffer pool cuts IO by an order of magnitude"
-      },
-      {
-        "zh": "手写一棵会分裂的 B+Tree，并用「读了几页」证明它确实是对数级的",
-        "en": "Write a splitting B+Tree by hand, and prove it is logarithmic by counting pages read"
-      },
-      {
-        "zh": "解释 WAL 为什么必须先写日志再写数据页，以及崩溃后靠什么把数据库拉回一致状态",
-        "en": "Explain why WAL must reach the log before the data page, and what pulls the database back to a consistent state after a crash"
-      },
-      {
-        "zh": "实现两阶段锁并用等待图抓出死锁，说清「可串行化」到底保证了什么",
-        "en": "Implement two-phase locking, catch deadlocks with a wait-for graph, and say precisely what serialisability guarantees"
-      },
-      {
-        "zh": "用版本链做出快照隔离，并演示它挡得住不可重复读、挡不住写偏斜",
-        "en": "Build snapshot isolation on version chains, and demonstrate that it stops non-repeatable reads but not write skew"
-      },
-      {
-        "zh": "把一条 SQL 从字符串变成 AST、逻辑计划、物理算子树，看着它一步步变成能跑的东西",
-        "en": "Turn a SQL string into an AST, a logical plan and a physical operator tree, and watch it become something that runs"
-      },
-      {
-        "zh": "用火山模型写出可组合的算子，理解为什么它统治了三十年、又为什么现在被向量化取代",
-        "en": "Write composable operators in the Volcano model, and understand why it ruled for thirty years and why vectorisation replaced it"
-      },
-      {
-        "zh": "基于统计信息估算选择率与代价，让优化器**算出**该走索引还是全表扫描，而不是猜",
-        "en": "Estimate selectivity and cost from statistics so the optimiser computes whether to use an index or scan, instead of guessing"
-      }
-    ],
     "brief": {
       "zh": "## 背景\n\n「数据库」听起来像个不可拆的黑盒。它不是。把一台商用数据库切开，里面是四叠\n互相咬合的东西，每一叠都在回答一组很具体的问题：\n\n| 层 | 关卡 | 回答的问题 |\n| --- | --- | --- |\n| 存储 | 1-3 | 数据在磁盘上怎么排，怎么少读盘，一行怎么变成字节 |\n| 索引 | 4 | 一百万行里找一行，怎么不扫全表 |\n| 事务 | 5-7 | 掉电怎么办，两个人同时改一行怎么办，读到一半别人提交了怎么办 |\n| 查询 | 8-12 | 一条 SQL 字符串怎么变成能跑的算子树，以及**该走哪条路** |\n\n十二关做完，你手上是一个能执行 SQL、有索引、有事务、掉电不丢数据、\n并且会自己判断该走索引还是全表扫描的引擎。\n\n## 平台提供什么\n\n`src/disk.ts` 是一块模拟磁盘，只读，你不能改它。它保留了真实磁盘的三个特性：\n\n```ts\nawait disk.writePage(id, bytes);  // 只进了操作系统的页缓存\nawait disk.fsync();               // 到这一步才真正持久\ndisk.crash();                     // 没 fsync 的写入全部消失\n```\n\n每次读、写、fsync 都会计数，所以「你的实现读了几次盘」是能被量出来的，\n好几关的工程门槛量的正是它——一个跑得通但读盘二十次的实现，在这里过不了关。\n\n## 这十二关怎么串起来\n\n前一关的产物就是后一关的地基，而且是**真的**用上去：\n\n- 堆文件（3）建在缓冲池（1）和 slotted page（2）上；\n- B+Tree（4）的节点也是页，同样走缓冲池；\n- 执行器（10）的顺序扫描算子读的是堆文件，索引扫描算子读的是 B+Tree；\n- 优化器（12）算出来的代价，单位就是前面这些层真实消耗的页数。\n\n## 硬性约束\n\n1. 一页固定 128 字节，不能读写半页；\n2. `writePage` 之后、`fsync` 之前发生 crash，那次写入就是丢了——这不是 bug，是题设；\n3. 已提交的事务在崩溃后必须还在，没提交的必须消失；\n4. 并发事务不能观察到彼此的中间状态；\n5. 优化器必须**算**，不许写死「有索引就走索引」——低选择率的谓词走索引比全表扫描更慢。\n\n## 非目标\n\n- 不做网络协议、连接池、权限系统：这些是数据库的外壳，不是引擎；\n- 不做真正的多线程：并发用协作式的 async 模拟，锁和 MVCC 的语义一模一样，\n  但不必处理内存屏障和真实竞态；\n- 不做 B+Tree 删除后的合并、页回收、以及分布式相关的一切。\n\n## 术语\n\n- **页（page）**：磁盘 IO 的最小单位。\n- **缓冲池（buffer pool）**：页在内存里的缓存，数据库里最重要的那块内存。\n- **slot 目录**：页尾的一张小表，记录每条记录在页内的偏移和长度。\n- **WAL**：write-ahead log，先写日志再写数据页。\n- **2PL**：两阶段锁，加锁阶段只加不放，解锁阶段只放不加。\n- **MVCC**：多版本并发控制，读不阻塞写、写不阻塞读。\n- **火山模型**：每个算子都是一个 `next()`，算子树靠逐行拉取驱动。\n- **选择率（selectivity）**：一个谓词能筛掉多少行，优化器估代价的核心输入。",
       "en": "## Context\n\n\"A database\" sounds like an indivisible black box. It is not. Cut a commercial one open and you\nfind four interlocking stacks, each answering a specific set of questions:\n\n| Layer | Stages | Questions it answers |\n| --- | --- | --- |\n| Storage | 1-3 | How is data laid out, how do we read less of it, how does a row become bytes |\n| Index | 4 | How do we find one row among a million without reading a million |\n| Transactions | 5-7 | What about power loss, two writers on one row, a commit landing mid-read |\n| Query | 8-12 | How does a SQL string become a runnable operator tree, and which plan should win |\n\nTwelve stages later you have an engine that executes SQL, has indexes and transactions, survives\na power cut, and decides for itself whether to use an index or scan the table.\n\n## What the platform gives you\n\n`src/disk.ts` is a simulated disk. It is read-only and keeps three real-disk behaviours:\n\n```ts\nawait disk.writePage(id, bytes);  // only reached the OS page cache\nawait disk.fsync();               // now it is durable\ndisk.crash();                     // everything not fsynced is gone\n```\n\nEvery read, write and fsync is counted, so \"how many times did your implementation touch the\ndisk\" is measurable — and that is what several stage gates measure. An implementation that works\nbut reads twenty pages where three would do does not pass here.\n\n## How the twelve stages connect\n\nEach stage is the foundation of the next, and actually gets used:\n\n- the heap file (3) sits on the buffer pool (1) and slotted pages (2);\n- B+Tree nodes (4) are pages too, and go through the same buffer pool;\n- the executor's (10) sequential scan reads the heap file, its index scan reads the B+Tree;\n- the costs the optimiser (12) computes are denominated in pages those layers really consume.\n\n## Hard constraints\n\n1. A page is exactly 128 bytes; there is no such thing as half a page;\n2. A crash between `writePage` and `fsync` loses that write. That is the premise, not a bug;\n3. Committed transactions must survive a crash, uncommitted ones must not;\n4. Concurrent transactions must not observe each other's intermediate state;\n5. The optimiser must compute. Hard-coding \"use the index when one exists\" is wrong — an index\n   scan under a low-selectivity predicate is slower than a sequential scan.\n\n## Non-goals\n\n- No wire protocol, connection pool or permission system: those are the shell, not the engine;\n- No real threads: concurrency is cooperative async, which has identical lock and MVCC semantics\n  without memory barriers and genuine races;\n- No B+Tree merging after deletes, no page reclamation, nothing distributed.\n\n## Glossary\n\n- Page: the smallest unit of disk IO.\n- Buffer pool: the in-memory cache of pages, the most important memory in a database.\n- Slot directory: a small table at the end of a page recording each record's offset and length.\n- WAL: write-ahead log, the log reaches disk before the data page does.\n- 2PL: two-phase locking — a growing phase that only acquires, a shrinking phase that only releases.\n- MVCC: multi-version concurrency control, where reads do not block writes and writes do not block reads.\n- Volcano model: every operator is a `next()`, and the tree is driven by pulling one row at a time.\n- Selectivity: what fraction of rows a predicate keeps — the core input to cost estimation."
@@ -553,21 +501,13 @@
           "zh": "第 5 关 · WAL 与崩溃恢复",
           "en": "Stage 5 · WAL and crash recovery"
         },
-        "overview": {
-          "zh": "前三关的数据只要不 fsync 就会丢，而且丢得没有规律：一个事务改了 3 页，\n可能落盘 1 页就掉电，重启后数据库处在一个「半个事务」的状态 ——\n既不是改之前，也不是改之后。\n\nWAL 的思路是：**别指望数据页写得原子，让日志来记账**。\n事务提交前，先把「我要改哪些页、改成什么」写进日志并 fsync；\n日志一旦持久，事务就算提交成功了 —— 哪怕数据页一页都还没写。\n崩溃之后照着日志把改动重放一遍，数据库就回到了一致状态。\n\n这一关是整个事务层的地基：第 6 关的锁和第 7 关的 MVCC 都建立在\n「提交过的东西一定还在」这个前提上。",
-          "en": "Through the first three stages, anything not fsynced is lost — and lost unevenly: a transaction\ntouching three pages might get one of them to disk before the power cut, leaving the database in a\nhalf-transaction state that is neither the before nor the after.\n\nWAL's idea is to stop expecting data pages to be written atomically and let a log keep the books.\nBefore a transaction commits, write \"which pages I am changing and to what\" into the log and fsync\nit; once the log is durable the transaction is committed, even if not one data page has been\nwritten. After a crash, replay the log and the database is consistent again.\n\nThis stage is the foundation the whole transaction layer sits on: the locking in stage 6 and the\nMVCC in stage 7 both assume that anything committed is still there."
-        },
-        "details": {
-          "zh": "在 `src/wal.ts` 实现 `createWalStore(disk)`，导出以下接口：\n\n| 方法 | 行为 |\n| --- | --- |\n| `begin()` | 开一个事务，返回 `{ id, write, commit, rollback }` |\n| `tx.write(pageId, data)` | 登记一次修改，**此时不要碰数据页** |\n| `tx.commit()` | 写 commit 日志 → fsync → 再落数据页 |\n| `tx.rollback()` | 丢弃事务，日志里没有 commit 记录，恢复时忽略 |\n| `readPage(pageId)` | 读已提交的数据 |\n| `recover()` | 重放日志里所有**已提交**的事务，返回重放了几个 |\n\n**通关标准**\n\n- 提交后掉电，数据仍然读得到；\n- 没提交就掉电，改动完全不存在；\n- `write()` 期间数据页一个字节都没动；\n- 一个事务**只 fsync 一次**（门槛 `counters.diskFsync` 会数）；\n- `recover()` 返回重放的事务数，且重复调用结果一致。\n\n**为什么是 no-steal**\n\n`write` 的时候不能直接写数据页。一旦写了，别的事务 fsync 时会顺手把你\n没提交的改动一起刷到盘上 —— 这就是所谓 steal，它会逼你实现 undo 日志。\n把改动攒到 commit 再落盘（no-steal），恢复就只需要 redo。",
-          "en": "Implement `createWalStore(disk)` in `src/wal.ts`, exposing:\n\n| Method | Behaviour |\n| --- | --- |\n| `begin()` | Start a transaction, returning `{ id, write, commit, rollback }` |\n| `tx.write(pageId, data)` | Record a change, and do not touch the data page |\n| `tx.commit()` | Append the commit record, fsync, then write pages |\n| `tx.rollback()` | Drop it; with no commit record, recovery ignores it |\n| `readPage(pageId)` | Read committed data |\n| `recover()` | Replay every committed transaction, returning how many |\n\n**Passing criteria**\n\n- Data is still readable after a crash that follows a commit;\n- An uncommitted change leaves no trace after a crash;\n- Not one byte of a data page moves during `write()`;\n- One transaction costs **exactly one fsync** (the `counters.diskFsync` gate counts them);\n- `recover()` reports how many transactions it replayed, and repeats identically.\n\n**Why no-steal**\n\n`write` must not touch the data page. If it does, another transaction's fsync will push your\nuncommitted change to disk with it — that is \"steal\", and it forces you to write an undo log.\nBuffering until commit (no-steal) means recovery only ever needs redo."
+        "goal": {
+          "zh": "前三关的数据只要不 fsync 就会丢，而且丢得没有规律：一个事务改了 3 页，\n可能落盘 1 页就掉电，重启后数据库处在一个「半个事务」的状态 ——\n既不是改之前，也不是改之后。\n\nWAL 的思路是：**别指望数据页写得原子，让日志来记账**。\n事务提交前，先把「我要改哪些页、改成什么」写进日志并 fsync；\n日志一旦持久，事务就算提交成功了 —— 哪怕数据页一页都还没写。\n崩溃之后照着日志把改动重放一遍，数据库就回到了一致状态。\n\n这一关是整个事务层的地基：第 6 关的锁和第 7 关的 MVCC 都建立在\n「提交过的东西一定还在」这个前提上。\n\n## 要实现什么\n\n在 `src/wal.ts` 实现 `createWalStore(disk)`：\n\n| 方法 | 行为 |\n| --- | --- |\n| `begin()` | 开一个事务，返回 `{ id, write, commit, rollback }` |\n| `tx.write(pageId, data)` | 登记一次修改，**此时不要碰数据页** |\n| `tx.commit()` | 写 commit 日志 → fsync → 再落数据页 |\n| `tx.rollback()` | 丢弃事务，日志里没有 commit 记录，恢复时忽略 |\n| `readPage(pageId)` | 读已提交的数据 |\n| `recover()` | 重放日志里所有**已提交**的事务，返回重放了几个 |\n\n## 怎么算过\n\n- 提交后掉电，数据仍然读得到；\n- 没提交就掉电，改动完全不存在；\n- `write()` 期间数据页一个字节都没动；\n- 一个事务**只 fsync 一次**（门槛 `counters.diskFsync` 会数）；\n- `recover()` 返回重放的事务数，且重复调用结果一致。\n\n## 为什么是 no-steal\n\n`write` 的时候不能直接写数据页。一旦写了，别的事务 fsync 时会顺手把你\n没提交的改动一起刷到盘上 —— 这就是所谓 steal，它会逼你实现 undo 日志。\n把改动攒到 commit 再落盘（no-steal），恢复就只需要 redo。",
+          "en": "Through the first three stages, anything not fsynced is lost — and lost unevenly: a transaction\ntouching three pages might get one of them to disk before the power cut, leaving the database in a\nhalf-transaction state that is neither the before nor the after.\n\nWAL's idea is to stop expecting data pages to be written atomically and let a log keep the books.\nBefore a transaction commits, write \"which pages I am changing and to what\" into the log and fsync\nit; once the log is durable the transaction is committed, even if not one data page has been\nwritten. After a crash, replay the log and the database is consistent again.\n\nThis stage is the foundation the whole transaction layer sits on: the locking in stage 6 and the\nMVCC in stage 7 both assume that anything committed is still there.\n\n## What to build\n\nImplement `createWalStore(disk)` in `src/wal.ts`:\n\n| Method | Behaviour |\n| --- | --- |\n| `begin()` | Start a transaction, returning `{ id, write, commit, rollback }` |\n| `tx.write(pageId, data)` | Record a change, and do not touch the data page |\n| `tx.commit()` | Append the commit record, fsync, then write pages |\n| `tx.rollback()` | Drop it; with no commit record, recovery ignores it |\n| `readPage(pageId)` | Read committed data |\n| `recover()` | Replay every committed transaction, returning how many |\n\n## What counts as passing\n\n- Data is still readable after a crash that follows a commit;\n- An uncommitted change leaves no trace after a crash;\n- Not one byte of a data page moves during `write()`;\n- One transaction costs **exactly one fsync** (the `counters.diskFsync` gate counts them);\n- `recover()` reports how many transactions it replayed, and repeats identically.\n\n## Why no-steal\n\n`write` must not touch the data page. If it does, another transaction's fsync will push your\nuncommitted change to disk with it — that is \"steal\", and it forces you to write an undo log.\nBuffering until commit (no-steal) means recovery only ever needs redo."
         },
         "architecture": {
           "zh": "```mermaid\nflowchart TD\n  subgraph caller[\"调用方\"]\n    TX[\"tx.write()\"]\n    CM[\"tx.commit()\"]\n    RC[\"recover()\"]\n  end\n  subgraph wal[\"createWalStore\"]\n    BUF[\"pending<br/>每个事务一份改动缓冲\"]\n    LOG[\"log records<br/>{txId, pageId, data}\"]\n    APP[\"appendCommit()\"]\n    FLU[\"flushPages()\"]\n    RPL[\"replay()\"]\n  end\n  DISK[(\"disk<br/>appendLog / writePage / fsync\")]\n\n  TX --> BUF\n  CM --> LOG --> APP --> DISK\n  APP --> FLU --> DISK\n  RC --> RPL\n  DISK -.读回日志.-> RPL\n  RPL --> FLU\n```\n\n要点：`write` 只碰 `pending`，只有 `commit` 这条路径会走到 disk，\n并且 fsync 发生在写数据页**之前**。`recover` 复用同一个 `flushPages`，\n这样「重放」和「正常提交」走的是同一段落盘逻辑，不会两边行为不一致。",
           "en": "```mermaid\nflowchart TD\n  subgraph caller[\"caller\"]\n    TX[\"tx.write()\"]\n    CM[\"tx.commit()\"]\n    RC[\"recover()\"]\n  end\n  subgraph wal[\"createWalStore\"]\n    BUF[\"pending<br/>one buffer per transaction\"]\n    LOG[\"log records<br/>{txId, pageId, data}\"]\n    APP[\"appendCommit()\"]\n    FLU[\"flushPages()\"]\n    RPL[\"replay()\"]\n  end\n  DISK[(\"disk<br/>appendLog / writePage / fsync\")]\n\n  TX --> BUF\n  CM --> LOG --> APP --> DISK\n  APP --> FLU --> DISK\n  RC --> RPL\n  DISK -.read log back.-> RPL\n  RPL --> FLU\n```\n\nThe points that matter: `write` only touches `pending`, only the `commit` path reaches disk, and\nthe fsync happens **before** any data page is written. `recover` reuses the same `flushPages`, so\nreplay and normal commit share one code path rather than drifting apart."
-        },
-        "goal": {
-          "zh": "前三关的数据只要不 fsync 就会丢，而且丢得没有规律：一个事务改了 3 页，\n可能落盘 1 页就掉电，重启后数据库处在一个「半个事务」的状态。\n\nWAL 的思路是：**别指望数据页写得原子，让日志来记账**。\n事务提交前，先把「我要改哪些页、改成什么」写进日志并 fsync；\n日志一旦持久，事务就算提交成功了——哪怕数据页一页都还没写。\n崩溃之后照着日志把改动重放一遍，数据库就回到了一致状态。\n\n在 `src/wal.ts` 实现 `createWalStore(disk)`：\n\n- `begin()`：开一个事务，返回 `{ id, write, commit, rollback }`；\n- `tx.write(pageId, data)`：登记一次修改，**此时不要碰数据页**；\n- `tx.commit()`：写 commit 日志 → fsync（整个事务**只 fsync 一次**）→ 再落数据页；\n- `tx.rollback()`：丢弃这个事务，日志里没有 commit 记录，恢复时它会被忽略；\n- `readPage(pageId)`：读已提交的数据；\n- `recover()`：重放日志里所有**已提交**的事务，返回重放了几个事务。\n\n关键在于 `write` 的时候不能直接写数据页。一旦写了，别的事务 fsync 时会顺手把你\n没提交的改动一起刷到盘上——这就是所谓 steal，它会逼你实现 undo 日志。\n把改动攒到 commit 再落盘（no-steal），恢复就只需要 redo。",
-          "en": "Through the first three stages, anything not fsynced is lost — and lost unevenly: a transaction\ntouching three pages might get one of them to disk before the power cut, leaving the database in a\nhalf-transaction state.\n\nWAL's idea is to stop expecting data pages to be written atomically and let a log keep the books.\nBefore a transaction commits, write \"which pages I am changing and to what\" into the log and fsync\nit; once the log is durable the transaction is committed, even if not one data page has been\nwritten. After a crash, replay the log and the database is consistent again.\n\nImplement `createWalStore(disk)` in `src/wal.ts`:\n\n- `begin()`: start a transaction, returning `{ id, write, commit, rollback }`;\n- `tx.write(pageId, data)`: record a change, and do not touch the data page yet;\n- `tx.commit()`: append the commit record, fsync once for the whole transaction, then write pages;\n- `tx.rollback()`: drop the transaction; with no commit record, recovery ignores it;\n- `readPage(pageId)`: read committed data;\n- `recover()`: replay every committed transaction in the log, returning how many were replayed.\n\nThe crux is that `write` must not touch the data page. If it does, another transaction's fsync\nwill push your uncommitted change to disk with it — that is \"steal\", and it forces you to write an\nundo log. Buffering until commit (no-steal) means recovery only ever needs redo."
         },
         "checklist": [
           {
@@ -1816,38 +1756,6 @@
       "encapsulation": 2.5,
       "elegance": 2
     },
-    "prerequisites": [
-      {
-        "zh": "async / await 与 Promise 的基本用法",
-        "en": "async/await and Promise basics"
-      },
-      {
-        "zh": "用过任意一种中间件（Express/Koa/Redux 都行）会更容易上手",
-        "en": "Having used any middleware system (Express/Koa/Redux) helps"
-      }
-    ],
-    "learningOutcomes": [
-      {
-        "zh": "用事件总线把副作用从主流程里摘出去，并知道什么时候**不该**这么做",
-        "en": "Lift side effects out of the main flow with an event bus, and know when not to"
-      },
-      {
-        "zh": "手写一个正确的洋葱中间件 compose，包括短路、错误传播和重复 next 检测",
-        "en": "Write a correct onion compose, including short-circuit, error propagation and double-next detection"
-      },
-      {
-        "zh": "说清 at-least-once 为什么无法避免，以及幂等消费如何把它变成「效果上的 exactly-once」",
-        "en": "Explain why at-least-once is unavoidable and how idempotent consumption yields effective exactly-once"
-      },
-      {
-        "zh": "区分「投递语义」（重试、幂等、死信）和「业务逻辑」，并让它们各自独立演进",
-        "en": "Separate delivery semantics (retry, idempotency, DLQ) from business logic so each evolves alone"
-      },
-      {
-        "zh": "识别错误隔离的边界该放在哪一层，包整体还是包每一个",
-        "en": "Place the error-isolation boundary correctly: around the whole batch, or around each item"
-      }
-    ],
     "brief": {
       "zh": "## 背景\n\n一个电商的下单接口已经膨胀成 400 行。翻开来看，里面挤着六件互不相干的事：\n\n```ts\nasync function checkout(order) {\n  await auth(order);              // 鉴权\n  await rateLimit(order.userId);  // 限流\n  await audit(order);             // 审计日志\n  await createOrder(order);       // 真正的业务\n  await decrementStock(order);    // 副作用 1\n  await grantPoints(order);       // 副作用 2\n  await notify(order);            // 副作用 3  ← 加个短信通知就要动这个函数\n}\n```\n\n两个直接后果：\n\n1. 每加一个下游都要改核心逻辑，回归测试要跑整条链路；\n2. 总延迟是所有下游之和。通知服务抖一下，下单接口就跟着慢。\n\n更麻烦的是上游消息队列只保证 at-least-once，同一个事件会被投递多次。\n上周就出过一次事故：一条消息被重投，库存被扣了两次。\n\n## 目标\n\n十一关重构出一套事件驱动的处理骨架：\n\n| 关卡 | 解决的问题 |\n| --- | --- |\n| 1 模式演进 | 事件结构变了，旧事件还读得懂 |\n| 2 事件总线 | 副作用与主流程解耦，互不依赖的下游并行执行 |\n| 3 分区与顺序 | 同一订单严格有序，不同订单完全并行 |\n| 4 洋葱中间件 | 横切关注点变成可组合的层，而不是复制粘贴 |\n| 5 消费者组 | 分区唯一归属，再平衡尽量少移动 |\n| 6 事务性 outbox | 业务写入和事件发出不再是两件事 |\n| 7 幂等与死信 | 重复投递不产生重复副作用，毒消息不阻塞队列 |\n| 8 Saga | 跨服务失败时逆序补偿，不留中间态 |\n| 9 事件溯源 | 事件成为真相，快照让重放代价可控 |\n| 10 读模型投影 | 查询走派生模型，可续、可重放、可重建 |\n| 11 端到端对账 | 承认上面十关加起来仍然会错，并把错找出来 |\n\n## 硬性约束\n\n1. `emit` 永远不 reject，一个下游挂掉不能让下单失败；\n2. 互不依赖的 handler **必须并行**，总延迟等于最慢的那个，而不是所有之和；\n3. 同一个 `event.id` 重复投递，副作用只能发生一次；\n4. 中间件的顺序即嵌套顺序，`await next()` 之后的代码在回程执行。\n\n## 非目标\n\n- 不做持久化与跨进程投递（那需要 outbox + 真正的消息队列）；\n- 不做事件溯源（event sourcing），这里的事件是**通知**，不是**事实存储**；\n- 不处理事件顺序问题：本关假设事件之间没有先后依赖。\n\n## 术语\n\n- at-least-once：消息至少投递一次，可能多次。想「恰好一次」只能靠消费端幂等。\n- 幂等：同一个操作执行多次，效果与执行一次相同。\n- 死信队列（DLQ）：反复处理失败的消息被移到这里，避免阻塞正常消息。\n- **洋葱模型**：每层中间件在进入和返回时各执行一次，像洋葱一样层层包裹。\n\n这道题的评审权重偏向封装与优雅程度。用例只是底线，\n真正被看的是模块边界清不清晰、每个模块是不是只做一件事。",
       "en": "## Context\n\nA checkout endpoint has grown to 400 lines. Opening it up, six unrelated concerns are crammed together:\n\n```ts\nasync function checkout(order) {\n  await auth(order);              // auth\n  await rateLimit(order.userId);  // rate limiting\n  await audit(order);             // audit log\n  await createOrder(order);       // the actual business\n  await decrementStock(order);    // side effect 1\n  await grantPoints(order);       // side effect 2\n  await notify(order);            // side effect 3  ← adding SMS means editing this function\n}\n```\n\nTwo direct consequences:\n\n1. Every new consumer edits core logic, and regression means testing the whole path;\n2. Latency is the sum of all consumers. When notifications hiccup, checkout hiccups.\n\nWorse, the upstream queue only guarantees at-least-once, the same event arrives more than\nonce. Last week a redelivered message decremented stock twice.\n\n## Goal\n\nRefactor into an event-driven skeleton across eleven stages:\n\n| Stage | Problem solved |\n| --- | --- |\n| 1 Schema evolution | The shape changed and old events are still readable |\n| 2 Event bus | Side effects decoupled from the main flow, independent consumers run in parallel |\n| 3 Partitioning | One order strictly ordered, different orders fully parallel |\n| 4 Onion middleware | Cross-cutting concerns become composable layers instead of copy-paste |\n| 5 Consumer groups | Exactly one owner per partition, minimal movement on rebalance |\n| 6 Transactional outbox | Writing data and emitting an event stop being two things |\n| 7 Idempotency and DLQ | Duplicate delivery causes one side effect; poison messages do not block the queue |\n| 8 Sagas | Cross-service failure compensates in reverse, leaving no partial state |\n| 9 Event sourcing | Events become the truth, snapshots keep replay affordable |\n| 10 Projections | Queries read a derived model that resumes, replays and rebuilds |\n| 11 Reconciliation | Accept that all ten above still get it wrong, and find where |\n\n## Hard constraints\n\n1. `emit` never rejects, one failing consumer must not fail checkout;\n2. Independent handlers must run in parallel: total latency equals the slowest, not the sum;\n3. A repeated `event.id` may cause its side effect only once;\n4. Middleware order is nesting order; code after `await next()` runs on the way out.\n\n## Non-goals\n\n- No durability or cross-process delivery (that needs an outbox and a real broker);\n- No event sourcing, events here are notifications, not the source of truth;\n- No ordering guarantees: this stage assumes events are independent.\n\n## Glossary\n\n- at-least-once: delivered one or more times. \"Exactly once\" is only achievable via idempotent consumers.\n- Idempotent: running the operation twice has the same effect as running it once.\n- Dead-letter queue (DLQ): where repeatedly failing messages go so they stop blocking healthy ones.\n- Onion model: each middleware layer acts once on the way in and once on the way out.\n\nReview weights here lean towards encapsulation and elegance. Passing the specs is the baseline;\nwhat gets looked at is whether your module boundaries and responsibilities are clean."
@@ -3413,42 +3321,6 @@
       "encapsulation": 1.5,
       "elegance": 1.5
     },
-    "prerequisites": [
-      {
-        "zh": "async / await 与 Promise.race",
-        "en": "async/await and Promise.race"
-      },
-      {
-        "zh": "了解状态机的概念会更容易理解熔断器",
-        "en": "Familiarity with state machines helps for the breaker"
-      },
-      {
-        "zh": "建议先做完《高可用抓取管线》",
-        "en": "Doing the resilient fetch pipeline first is recommended"
-      }
-    ],
-    "learningOutcomes": [
-      {
-        "zh": "手写令牌桶，并说清它和漏桶、和「QPS 限制」的区别",
-        "en": "Write a token bucket and explain how it differs from a leaky bucket and from a plain QPS cap"
-      },
-      {
-        "zh": "实现三态熔断器，理解半开状态为什么是这个设计的核心",
-        "en": "Implement a three-state breaker and see why half-open is the heart of the design"
-      },
-      {
-        "zh": "把「慢」也当成一种失败：超时必须落在熔断器的视野之内",
-        "en": "Treat slowness as failure: timeouts must be visible to the breaker"
-      },
-      {
-        "zh": "论证三层保护的组合顺序，并说清顺序错了会漏掉什么",
-        "en": "Justify the ordering of the three protections and what breaks when it is wrong"
-      },
-      {
-        "zh": "用「不依赖定时器的状态机」写出可测试的时间相关逻辑",
-        "en": "Write testable time-dependent logic as a state machine that needs no timers"
-      }
-    ],
     "brief": {
       "zh": "## 背景\n\n你负责一个对外网关，它前面是自家业务，后面是合作方的接口。合作方给的约束很硬：\n\n- 长期平均 **10 QPS**，允许短时突发；\n- 服务偶尔整体故障，故障期间响应会**变慢**而不是立刻报错；\n- 恢复需要时间，故障期间持续打流量会让恢复更慢。\n\n## 上周的故障复盘\n\n```\n14:02  合作方开始抖动，响应从 100ms 涨到 8s\n14:02  我们的客户端超时是 30s，于是所有请求都在那儿傻等\n14:03  连接池被占满，正常请求也开始排队\n14:04  客户端重试逻辑生效，流量放大到 6 倍\n14:05  合作方彻底挂掉\n14:44  合作方恢复（他们的抖动其实 14:04 就结束了）\n```\n\n结论写得很清楚：一次 2 分钟的抖动被我们自己拖成了 40 分钟的不可用。\n三个直接原因，超时太长、没有熔断、重试没有退避。\n\n## 目标\n\n| 关卡 | 保护什么 | 核心指标 |\n| --- | --- | --- |\n| 1 窗口算法 | 边界突刺 | 滑动窗口不放两倍流量，内存有界 |\n| 2 令牌桶 | 下游的速率 | 长期速率受控，突发可控 |\n| 3 多维配额 | 用户 / IP / 接口 | 被拒请求不消耗其他维度的额度 |\n| 4 分布式租约 | 全局额度 | 多实例合计不超限，协调次数与请求数无关 |\n| 5 熔断器 | 下游的恢复时间 | 打开后下游零打扰 |\n| 6 负载均衡 | 单个坏节点 | 摘除节点零流量，重映射不超过 40% |\n| 7 舱壁 | 资源边界 | 一个池被占满不影响其他池 |\n| 8 重试预算 | 重试放大 | 下游全挂时重试不翻倍流量 |\n| 9 超时 + 组合 | 自己的**资源** | 超时预算严格生效 |\n| 10 降级 | 用户看到什么 | 零异常，且不反复打已知故障的下游 |\n| 11 流量镜像 | 新版本上线 | canary 异常零泄漏，零额外延迟 |\n\n## 硬性约束\n\n1. 合作方长期平均 **10 QPS**，允许突发（突发大小由 `capacity` 决定）；\n2. 熔断打开期间，下游必须收到**零个**请求；\n3. 超时必须计入熔断的失败，「只慢不错」的下游同样需要被熔断；\n4. `call` 永远不抛异常，把失败翻译成 `GatewayResult`；\n5. 所有时间逻辑必须走 `@lab/env` 的 `now()` / `sleep()`（沙箱里的 `setTimeout` 也已接到虚拟时钟）。\n\n## 非目标\n\n- 不做分布式限流（本关是单进程，多实例的问题见第 1 关「延伸」）；\n- 不做重试：重试属于调用方，而且它和熔断的交互需要单独讨论；\n- 不做服务发现与配置下发：节点列表是静态传入的。\n\n## 术语\n\n- **令牌桶**：按固定速率补充令牌，请求消耗令牌；桶容量决定允许多大的突发。\n- **熔断器**：连续失败到阈值后停止调用下游，一段时间后放少量探针试探恢复。\n- 半开（half-open）：熔断后的试探状态，只允许极少量请求通过。\n- **超时预算**：一次调用最多允许花费的时间；它应该沿调用链分配，而不是每层各写一个常量。\n\n这道题的门槛几乎都压在故障时的行为上。正常路径能跑通是其中最容易的部分。",
       "en": "## Context\n\nYou own an egress gateway: your services in front, a partner API behind. The partner's constraints are hard:\n\n- **10 QPS** long-run average, short bursts allowed;\n- the service occasionally fails wholesale, and during failures it gets **slow** rather than erroring fast;\n- recovery takes time, and sustained traffic during an outage makes it take longer.\n\n## Last week's postmortem\n\n```\n14:02  partner starts wobbling, latency goes from 100ms to 8s\n14:02  our client timeout is 30s, so every request just waits\n14:03  connection pool saturates, healthy requests start queuing\n14:04  client retries kick in, traffic amplifies 6x\n14:05  partner goes down completely\n14:44  partner recovers (their actual wobble ended at 14:04)\n```\n\nThe conclusion was blunt: we turned a 2-minute wobble into 40 minutes of downtime ourselves.\nThree direct causes, timeouts too long, no breaker, retries without backoff.\n\n## Goal\n\n| Stage | Protects | Key gate |\n| --- | --- | --- |\n| 1 Window algorithms | boundary bursts | no double traffic at the edge, bounded memory |\n| 2 Token bucket | the downstream rate | long-run rate bounded, bursts controlled |\n| 3 Multi-dimensional quota | user / IP / route | a rejected request consumes no other dimension |\n| 4 Distributed leases | the global allowance | instances stay within it, coordination is not per request |\n| 5 Circuit breaker | the downstream recovery time | zero downstream traffic while open |\n| 6 Load balancing | one bad node | a removed node gets zero traffic, remap under 40% |\n| 7 Bulkheads | resource boundaries | one saturated pool leaves the others untouched |\n| 8 Retry budget | retry amplification | a dead downstream does not double the traffic |\n| 9 Timeout + composition | **your own** resources | timeout budget strictly enforced |\n| 10 Degradation | what the user sees | zero throws, and no hammering a known-failing downstream |\n| 11 Shadowing | shipping a new version | zero canary leaks, zero added latency |\n\n## Hard constraints\n\n1. The partner allows **10 QPS** long-run, with bursts sized by `capacity`;\n2. While the breaker is open the downstream must receive **zero** requests;\n3. Timeouts must count as breaker failures, a dependency that only ever hangs deserves tripping too;\n4. `call` never throws; failures become a `GatewayResult`;\n5. All time-dependent logic goes through `now()` / `sleep()` from `@lab/env` (the sandbox `setTimeout` is wired to the virtual clock too).\n\n## Non-goals\n\n- No distributed rate limiting (single process here; see the stage 1 \"going further\" note);\n- No retries: they belong to the caller, and their interaction with the breaker deserves its own discussion;\n- No bulkheads or fallback responses, mentioned in the stage 3 note.\n\n## Glossary\n\n- Token bucket: tokens refill at a fixed rate and requests consume them; capacity sets the burst size.\n- Circuit breaker: stops calling a dependency after consecutive failures, then probes for recovery.\n- Half-open: the probing state after a breaker opens; only a trickle is admitted.\n- Timeout budget: the maximum time one call may take, allocated across the chain rather than hard-coded per layer.\n\nNearly every gate here is about behaviour during failure. The happy path is the easy part of it."
@@ -5088,42 +4960,6 @@
       "encapsulation": 1.5,
       "elegance": 1
     },
-    "prerequisites": [
-      {
-        "zh": "async / await 与 Promise 的基本用法",
-        "en": "async/await and Promise basics"
-      },
-      {
-        "zh": "TypeScript 的接口与泛型",
-        "en": "TypeScript interfaces and generics"
-      },
-      {
-        "zh": "不需要任何分布式系统背景",
-        "en": "No distributed-systems background required"
-      }
-    ],
-    "learningOutcomes": [
-      {
-        "zh": "写出一个带上限的并发原语，并说清它为什么比「分批 Promise.all」更好",
-        "en": "Write a bounded-concurrency primitive and explain why it beats chunked Promise.all"
-      },
-      {
-        "zh": "实现指数退避，并判断哪些错误值得重试、哪些重试多少次都没用",
-        "en": "Implement exponential backoff and tell retryable failures from hopeless ones"
-      },
-      {
-        "zh": "用缓存解决「再次」、用单飞解决「同时」，防住热点 key 击穿",
-        "en": "Use a cache for \"again\" and single-flight for \"at the same time\" to stop hot-key stampedes"
-      },
-      {
-        "zh": "把一堆能力收进一个可实例化、可取消、可观测的组件里",
-        "en": "Fold a pile of capabilities into one instantiable, cancellable, observable component"
-      },
-      {
-        "zh": "读懂并发度与延迟指标，用它们判断一个实现是快还是只是「看起来快」",
-        "en": "Read concurrency and latency metrics to tell a fast implementation from one that merely looks fast"
-      }
-    ],
     "brief": {
       "zh": "## 背景\n\n你接手了一个内容聚合服务。它需要从合作方的接口批量抓取页面，然后喂给下游的索引服务。\n接手第一天你就发现，这个上游**不太稳定**：\n\n- 单次响应约 **100ms**；\n- 只接受 5 路并发，超过直接返回 `429`；\n- 少量地址会间歇性失败（`503`），重试几次就能成功；\n- 同一批任务里经常出现重复地址，热点地址还会被并发请求。\n\n现在的实现是一个 `for` 循环 + `await`：\n\n```ts\nfor (const url of urls) {\n  results.push(await request(url));   // 200 个地址 = 20 秒\n}\n```\n\n正确，但太慢。有人试过直接换成 `Promise.all`，结果当天就被合作方限流封了半小时。\n\n## 目标\n\n分 12 关把它改造成一个真正能上线的抓取管线：\n\n| 关卡 | 引入的能力 | 主要指标 |\n| --- | --- | --- |\n| 1 | 错误边界：失败是数据，不是异常 | 不重复请求 |\n| 2 | 有上限的并发 | 峰值并发 ≤ 4，12 个请求 ≤ 300ms |\n| 3 | 超时与总预算 | 僵死请求立刻让出槽位；预算用完不再发请求 |\n| 4 | 指数退避重试 | 确实重试，且退避不过度 |\n| 5 | 错误分类与限流 | 4xx 零重试；429 真的退避 |\n| 6 | 对冲请求 | 尾延迟压到副本速度，主副本快时零额外流量 |\n| 7 | 缓存 + 并发去重 | 热点地址只回源一次 |\n| 8 | 优先级调度与老化 | 低优先级不被饿死 |\n| 9 | 背压与队列上限 | 排队数有界；拒绝立刻返回 |\n| 10 | 游标分页 | 翻 N 页发 N 个请求；成环立刻停 |\n| 11 | 收敛成可运维组件 | 并发受控、可取消、有埋点 |\n| 12 | 指标与归因 | 一万次观测内存不增长 |\n\n## 硬性约束\n\n1. 下游并发上限是 **5**，任何时刻超过就会被 `429`；被限流的请求算失败。\n2. 结果顺序**必须**与输入顺序一致，下游索引服务依赖这个顺序做增量对比。\n3. `fetchAll` 不允许因为个别地址失败而整批失败。\n4. 只能用工作区内的文件和 `@lab/*` 模块，没有 npm 依赖。\n\n## 非目标\n\n- 不做持久化：进程重启后缓存丢失是可以接受的；\n- 不做分布式协调：这是一个单进程组件；\n- 不做分布式协调：优先级、背压、限流都只在这一个进程里生效。\n\n## 术语\n\n- 并发度（concurrency）：某一时刻同时在飞行中的请求数。注意它和「速率（QPS）」是两件事。\n- 单飞（single-flight）：同一个 key 的并发请求合并成一次真实调用，其余共享结果。\n- **回源**：缓存没命中时真正去请求下游。\n\n## 运行环境\n\n工作区里的代码运行在一个**虚拟时钟**上。`sleep(100)` 不会真的等 100ms，\n但延迟与并发度会被精确计量，因此结果可复现、跑得飞快，你可以放心地在用例里\n断言「正好 300ms」。\n\n```ts\nimport { request } from '@lab/net';        // 模拟下游服务，会计量并发与延迟\nimport { sleep, now } from '@lab/env';     // 虚拟时钟\nimport { count } from '@lab/metrics';      // 自定义埋点\n```\n\n每一关都有隐藏的验收用例和工程指标门槛。跑对只是底线，\n并发不能失控，延迟不能退化，下游也不能被重复请求淹没。",
       "en": "## Context\n\nYou inherited a content aggregation service that pulls pages from a partner API and feeds them\nto a downstream indexer. On day one you find the upstream is **flaky**:\n\n- each response takes about **100ms**;\n- it accepts 5 concurrent calls and returns `429` beyond that;\n- some urls fail intermittently (`503`) and succeed after a couple of retries;\n- batches contain duplicate urls, and hot urls get requested concurrently.\n\nThe current implementation is a `for` loop with `await`:\n\n```ts\nfor (const url of urls) {\n  results.push(await request(url));   // 200 urls = 20 seconds\n}\n```\n\nCorrect, but slow. Someone tried swapping in `Promise.all` and got the partner to rate-limit\nthe whole service for half an hour.\n\n## Goal\n\nTurn it into a pipeline you could actually ship, across 5 stages:\n\n| Stage | Capability | Key gates |\n| --- | --- | --- |\n| 1 | Error boundary: failure is data, not an exception | No duplicate calls |\n| 2 | Bounded concurrency | Peak ≤ 4, 12 requests ≤ 300ms |\n| 3 | Timeouts and a batch budget | A stuck request yields its slot; nothing is sent past the budget |\n| 4 | Retry with exponential backoff | Retries happen, backoff is not wasteful |\n| 5 | Failure classification | Zero retries on 4xx; a real backoff on 429 |\n| 6 | Hedged requests | Tail latency drops to the replica, a fast primary costs nothing extra |\n| 7 | Caching + request coalescing | Hot key hits origin once |\n| 8 | Priority scheduling and aging | Low priority is never starved |\n| 9 | Backpressure | Queue depth is bounded; rejection is instant |\n| 10 | Cursor pagination | N pages cost N requests; a loop stops at once |\n| 11 | An operable component | Bounded, cancellable, instrumented |\n| 12 | Metrics and attribution | Ten thousand observations, unchanged memory |\n\n## Hard constraints\n\n1. The upstream concurrency limit is **5**; exceeding it at any instant yields `429`, which counts as a failure.\n2. Result order **must** match input order, the indexer relies on it for incremental diffing.\n3. `fetchAll` must never fail the whole batch because individual urls failed.\n4. Only workspace files and `@lab/*` modules, no npm dependencies.\n\n## Non-goals\n\n- No persistence: losing the cache on restart is fine;\n- No distributed coordination: this is a single-process component;\n- No priority scheduling: all urls are equally important (see the stage 2 \"going further\" note).\n\n## Glossary\n\n- Concurrency: how many requests are in flight at one instant. Not the same thing as rate (QPS).\n- Single-flight: concurrent requests for one key collapse into a single real call.\n- Origin fetch: the real downstream call made on a cache miss.\n\n## Runtime\n\nYour code runs on a virtual clock. `sleep(100)` does not really wait 100ms, yet latency and\nconcurrency are measured precisely, runs are reproducible and instant, so specs can assert\n\"exactly 300ms\" without flaking.\n\n```ts\nimport { request } from '@lab/net';        // simulated upstream, measures concurrency and latency\nimport { sleep, now } from '@lab/env';     // virtual clock\nimport { count } from '@lab/metrics';      // custom counters\n```\n\nEvery stage has hidden acceptance specs and engineering gates. Passing them is the baseline:\nconcurrency must stay bounded, latency must not regress, and the upstream must not drown in\nduplicate calls."

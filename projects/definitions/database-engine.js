@@ -2357,8 +2357,8 @@ const stage5 = {
   id: 'wal',
   title: t('第 5 关 · WAL 与崩溃恢复', 'Stage 5 · WAL and crash recovery'),
 
-  // 任务概述：只讲背景 —— 上一关留下了什么问题，这一关的思路是什么
-  overview: t(
+  // 本关任务：背景 + 通关标准 + 代码细节，一整块
+  goal: t(
     [
       '前三关的数据只要不 fsync 就会丢，而且丢得没有规律：一个事务改了 3 页，',
       '可能落盘 1 页就掉电，重启后数据库处在一个「半个事务」的状态 ——',
@@ -2371,6 +2371,33 @@ const stage5 = {
       '',
       '这一关是整个事务层的地基：第 6 关的锁和第 7 关的 MVCC 都建立在',
       '「提交过的东西一定还在」这个前提上。',
+      '',
+      '## 要实现什么',
+      '',
+      '在 `src/wal.ts` 实现 `createWalStore(disk)`：',
+      '',
+      '| 方法 | 行为 |',
+      '| --- | --- |',
+      '| `begin()` | 开一个事务，返回 `{ id, write, commit, rollback }` |',
+      '| `tx.write(pageId, data)` | 登记一次修改，**此时不要碰数据页** |',
+      '| `tx.commit()` | 写 commit 日志 → fsync → 再落数据页 |',
+      '| `tx.rollback()` | 丢弃事务，日志里没有 commit 记录，恢复时忽略 |',
+      '| `readPage(pageId)` | 读已提交的数据 |',
+      '| `recover()` | 重放日志里所有**已提交**的事务，返回重放了几个 |',
+      '',
+      '## 怎么算过',
+      '',
+      '- 提交后掉电，数据仍然读得到；',
+      '- 没提交就掉电，改动完全不存在；',
+      '- `write()` 期间数据页一个字节都没动；',
+      '- 一个事务**只 fsync 一次**（门槛 `counters.diskFsync` 会数）；',
+      '- `recover()` 返回重放的事务数，且重复调用结果一致。',
+      '',
+      '## 为什么是 no-steal',
+      '',
+      '`write` 的时候不能直接写数据页。一旦写了，别的事务 fsync 时会顺手把你',
+      '没提交的改动一起刷到盘上 —— 这就是所谓 steal，它会逼你实现 undo 日志。',
+      '把改动攒到 commit 再落盘（no-steal），恢复就只需要 redo。',
     ].join('\n'),
     [
       'Through the first three stages, anything not fsynced is lost — and lost unevenly: a transaction',
@@ -2384,39 +2411,10 @@ const stage5 = {
       '',
       'This stage is the foundation the whole transaction layer sits on: the locking in stage 6 and the',
       'MVCC in stage 7 both assume that anything committed is still there.',
-    ].join('\n')
-  ),
-
-  // 任务详情：只讲通关标准和代码细节
-  details: t(
-    [
-      '在 `src/wal.ts` 实现 `createWalStore(disk)`，导出以下接口：',
       '',
-      '| 方法 | 行为 |',
-      '| --- | --- |',
-      '| `begin()` | 开一个事务，返回 `{ id, write, commit, rollback }` |',
-      '| `tx.write(pageId, data)` | 登记一次修改，**此时不要碰数据页** |',
-      '| `tx.commit()` | 写 commit 日志 → fsync → 再落数据页 |',
-      '| `tx.rollback()` | 丢弃事务，日志里没有 commit 记录，恢复时忽略 |',
-      '| `readPage(pageId)` | 读已提交的数据 |',
-      '| `recover()` | 重放日志里所有**已提交**的事务，返回重放了几个 |',
+      '## What to build',
       '',
-      '**通关标准**',
-      '',
-      '- 提交后掉电，数据仍然读得到；',
-      '- 没提交就掉电，改动完全不存在；',
-      '- `write()` 期间数据页一个字节都没动；',
-      '- 一个事务**只 fsync 一次**（门槛 `counters.diskFsync` 会数）；',
-      '- `recover()` 返回重放的事务数，且重复调用结果一致。',
-      '',
-      '**为什么是 no-steal**',
-      '',
-      '`write` 的时候不能直接写数据页。一旦写了，别的事务 fsync 时会顺手把你',
-      '没提交的改动一起刷到盘上 —— 这就是所谓 steal，它会逼你实现 undo 日志。',
-      '把改动攒到 commit 再落盘（no-steal），恢复就只需要 redo。',
-    ].join('\n'),
-    [
-      'Implement `createWalStore(disk)` in `src/wal.ts`, exposing:',
+      'Implement `createWalStore(disk)` in `src/wal.ts`:',
       '',
       '| Method | Behaviour |',
       '| --- | --- |',
@@ -2427,7 +2425,7 @@ const stage5 = {
       '| `readPage(pageId)` | Read committed data |',
       '| `recover()` | Replay every committed transaction, returning how many |',
       '',
-      '**Passing criteria**',
+      '## What counts as passing',
       '',
       '- Data is still readable after a crash that follows a commit;',
       '- An uncommitted change leaves no trace after a crash;',
@@ -2435,9 +2433,9 @@ const stage5 = {
       '- One transaction costs **exactly one fsync** (the `counters.diskFsync` gate counts them);',
       '- `recover()` reports how many transactions it replayed, and repeats identically.',
       '',
-      '**Why no-steal**',
+      '## Why no-steal',
       '',
-      '`write` must not touch the data page. If it does, another transaction\'s fsync will push your',
+      "`write` must not touch the data page. If it does, another transaction's fsync will push your",
       'uncommitted change to disk with it — that is "steal", and it forces you to write an undo log.',
       'Buffering until commit (no-steal) means recovery only ever needs redo.',
     ].join('\n')
@@ -2445,6 +2443,7 @@ const stage5 = {
 
   // 参考架构：一种可行的组织方式，不是唯一答案
   architecture: t(
+
     [
       '```mermaid',
       'flowchart TD',
@@ -2502,54 +2501,6 @@ const stage5 = {
       'The points that matter: `write` only touches `pending`, only the `commit` path reaches disk, and',
       'the fsync happens **before** any data page is written. `recover` reuses the same `flushPages`, so',
       'replay and normal commit share one code path rather than drifting apart.',
-    ].join('\n')
-  ),
-
-  goal: t(
-    [
-      '前三关的数据只要不 fsync 就会丢，而且丢得没有规律：一个事务改了 3 页，',
-      '可能落盘 1 页就掉电，重启后数据库处在一个「半个事务」的状态。',
-      '',
-      'WAL 的思路是：**别指望数据页写得原子，让日志来记账**。',
-      '事务提交前，先把「我要改哪些页、改成什么」写进日志并 fsync；',
-      '日志一旦持久，事务就算提交成功了——哪怕数据页一页都还没写。',
-      '崩溃之后照着日志把改动重放一遍，数据库就回到了一致状态。',
-      '',
-      '在 `src/wal.ts` 实现 `createWalStore(disk)`：',
-      '',
-      '- `begin()`：开一个事务，返回 `{ id, write, commit, rollback }`；',
-      '- `tx.write(pageId, data)`：登记一次修改，**此时不要碰数据页**；',
-      '- `tx.commit()`：写 commit 日志 → fsync（整个事务**只 fsync 一次**）→ 再落数据页；',
-      '- `tx.rollback()`：丢弃这个事务，日志里没有 commit 记录，恢复时它会被忽略；',
-      '- `readPage(pageId)`：读已提交的数据；',
-      '- `recover()`：重放日志里所有**已提交**的事务，返回重放了几个事务。',
-      '',
-      '关键在于 `write` 的时候不能直接写数据页。一旦写了，别的事务 fsync 时会顺手把你',
-      '没提交的改动一起刷到盘上——这就是所谓 steal，它会逼你实现 undo 日志。',
-      '把改动攒到 commit 再落盘（no-steal），恢复就只需要 redo。',
-    ].join('\n'),
-    [
-      'Through the first three stages, anything not fsynced is lost — and lost unevenly: a transaction',
-      'touching three pages might get one of them to disk before the power cut, leaving the database in a',
-      'half-transaction state.',
-      '',
-      'WAL\'s idea is to stop expecting data pages to be written atomically and let a log keep the books.',
-      'Before a transaction commits, write "which pages I am changing and to what" into the log and fsync',
-      'it; once the log is durable the transaction is committed, even if not one data page has been',
-      'written. After a crash, replay the log and the database is consistent again.',
-      '',
-      'Implement `createWalStore(disk)` in `src/wal.ts`:',
-      '',
-      '- `begin()`: start a transaction, returning `{ id, write, commit, rollback }`;',
-      '- `tx.write(pageId, data)`: record a change, and do not touch the data page yet;',
-      '- `tx.commit()`: append the commit record, fsync once for the whole transaction, then write pages;',
-      '- `tx.rollback()`: drop the transaction; with no commit record, recovery ignores it;',
-      '- `readPage(pageId)`: read committed data;',
-      '- `recover()`: replay every committed transaction in the log, returning how many were replayed.',
-      '',
-      'The crux is that `write` must not touch the data page. If it does, another transaction\'s fsync',
-      'will push your uncommitted change to disk with it — that is "steal", and it forces you to write an',
-      'undo log. Buffering until commit (no-steal) means recovery only ever needs redo.',
     ].join('\n')
   ),
   checklist: [
@@ -7450,46 +7401,6 @@ module.exports = {
     encapsulation: 2,
     elegance: 1.5,
   },
-  prerequisites: [
-    t('会用 Uint8Array / DataView 读写二进制', 'Comfortable reading and writing binary with Uint8Array / DataView'),
-    t('知道二叉查找树是什么（B+Tree 那一关会从头讲）', 'Know what a binary search tree is (the B+Tree stage starts from scratch)'),
-    t('写过 async/await，理解 Promise 什么时候才 resolve', 'Have written async/await and understand when a Promise actually settles'),
-    t('用过 SQL 的 SELECT / WHERE / JOIN / GROUP BY，不需要知道它们怎么实现', 'Have used SQL SELECT / WHERE / JOIN / GROUP BY, with no idea how they are implemented'),
-  ],
-  learningOutcomes: [
-    t(
-      '说清数据库为什么以「页」为单位读写，以及缓冲池凭什么能把 IO 降一个数量级',
-      'Explain why a database reads and writes in pages, and how a buffer pool cuts IO by an order of magnitude'
-    ),
-    t(
-      '手写一棵会分裂的 B+Tree，并用「读了几页」证明它确实是对数级的',
-      'Write a splitting B+Tree by hand, and prove it is logarithmic by counting pages read'
-    ),
-    t(
-      '解释 WAL 为什么必须先写日志再写数据页，以及崩溃后靠什么把数据库拉回一致状态',
-      'Explain why WAL must reach the log before the data page, and what pulls the database back to a consistent state after a crash'
-    ),
-    t(
-      '实现两阶段锁并用等待图抓出死锁，说清「可串行化」到底保证了什么',
-      'Implement two-phase locking, catch deadlocks with a wait-for graph, and say precisely what serialisability guarantees'
-    ),
-    t(
-      '用版本链做出快照隔离，并演示它挡得住不可重复读、挡不住写偏斜',
-      'Build snapshot isolation on version chains, and demonstrate that it stops non-repeatable reads but not write skew'
-    ),
-    t(
-      '把一条 SQL 从字符串变成 AST、逻辑计划、物理算子树，看着它一步步变成能跑的东西',
-      'Turn a SQL string into an AST, a logical plan and a physical operator tree, and watch it become something that runs'
-    ),
-    t(
-      '用火山模型写出可组合的算子，理解为什么它统治了三十年、又为什么现在被向量化取代',
-      'Write composable operators in the Volcano model, and understand why it ruled for thirty years and why vectorisation replaced it'
-    ),
-    t(
-      '基于统计信息估算选择率与代价，让优化器**算出**该走索引还是全表扫描，而不是猜',
-      'Estimate selectivity and cost from statistics so the optimiser computes whether to use an index or scan, instead of guessing'
-    ),
-  ],
   brief: t(
     [
       '## 背景',

@@ -58,8 +58,6 @@ const SCHEMA = `{
   "estimatedMinutes": 90,
   "language": "typescript",
   "brief": { "zh": "markdown: context, goal table, hard constraints, non-goals, glossary", "en": "same, in English" },
-  "learningOutcomes": [{ "zh": "what the learner can do after finishing", "en": "..." }],
-  "prerequisites": [{ "zh": "assumed knowledge", "en": "..." }],
   "architecture": { "zh": "optional markdown, may contain a mermaid diagram", "en": "..." },
   "weights": { "correctness": 3, "concurrency": 1.5, "latency": 1.5, "resilience": 1, "encapsulation": 1.5, "elegance": 1 },
   "files": [

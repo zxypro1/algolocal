@@ -470,7 +470,12 @@
       "next": "进入下一关",
       "pitfalls": "常见坑",
       "pitfallsHint": "这些写法能跑通一部分用例，但在工程上是错的",
-      "extension": "延伸：真实世界里的对应物"
+      "extension": "延伸：真实世界里的对应物",
+      "revealReference": "查看参考实现",
+      "revealTitle": "确定要看解法吗？",
+      "revealBody": "这会直接给出本关的完整实现。看过就回不去了 —— 这一关的价值大半在于先卡住。",
+      "revealConfirm": "仍然查看",
+      "revealCancel": "再想想"
     },
     "workspace": {
       "files": "工作区",
@@ -516,8 +521,7 @@
       "languageHint": "切换语言会换一套初始文件与用例，两边的代码各自保存"
     },
     "tabs": {
-      "stage": "任务概述",
-      "brief": "任务详情",
+      "stage": "本关任务",
       "architecture": "参考架构",
       "tests": "验收用例",
       "metrics": "工程指标",
@@ -609,10 +613,7 @@
       "repairing": "验证没过，正在让模型修一轮…",
       "saving": "验证通过，正在保存…"
     },
-    "brief": {
-      "outcomes": "通关后你会掌握",
-      "prerequisites": "前置知识"
-    }
+    "brief": {}
   },
   "editor": {
     "toggleWrap": "自动换行",
