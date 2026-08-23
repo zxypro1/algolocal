@@ -466,7 +466,6 @@
       "hints": "Hints",
       "revealHint": "Reveal hint {{current}}/{{total}}",
       "reference": "Reference implementation",
-      "referenceLocked": "Clear this stage to see the reference implementation",
       "next": "Go to next stage",
       "pitfalls": "Common traps",
       "pitfallsHint": "These pass some specs but are wrong as engineering",

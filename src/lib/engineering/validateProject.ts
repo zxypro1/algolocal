@@ -83,6 +83,9 @@ export function coerceProject(raw: any): EngineeringProject {
     estimatedMinutes: Number(raw?.estimatedMinutes) || 90,
     language: raw?.language === 'javascript' ? 'javascript' : 'typescript',
     brief: normalizeLocalized(raw?.brief),
+    // 项目级架构图：页面在关卡没有自己的架构图时会回退到它，
+    // 生成接口的 schema 也仍然要求模型产出这一项 —— 这里漏掉就等于静默丢弃
+    architecture: raw?.architecture ? normalizeLocalized(raw.architecture) : undefined,
     weights: raw?.weights && typeof raw.weights === 'object' ? raw.weights : undefined,
     files: normalizeFiles(raw?.files),
     stages,

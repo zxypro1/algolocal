@@ -466,7 +466,6 @@
       "hints": "提示",
       "revealHint": "解锁提示 {{current}}/{{total}}",
       "reference": "参考实现",
-      "referenceLocked": "通关后可查看参考实现",
       "next": "进入下一关",
       "pitfalls": "常见坑",
       "pitfallsHint": "这些写法能跑通一部分用例，但在工程上是错的",
