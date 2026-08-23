@@ -6,7 +6,9 @@ import {
   ChatMessage,
   NoProviderError,
   streamAI,
+  statusForError,
 } from '../../src/lib/server/aiProvider';
+import { TEXT_STREAM_ERROR_MARK } from '../../src/lib/textStreamProtocol';
 
 /**
  * 生成「一份文件里包含多个解法」的题解。
@@ -158,8 +160,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     console.error('AI Solution error:', error);
     const message =
       error instanceof NoProviderError ? error.message : error.message || 'Failed to generate solution';
-    if (!res.headersSent) return res.status(500).json({ error: message });
-    res.write(`\n\n[error] ${message}`);
+    if (!res.headersSent) return res.status(statusForError(error)).json({ error: message });
+    res.write(`${TEXT_STREAM_ERROR_MARK}${message}`);
     res.end();
   }
 }

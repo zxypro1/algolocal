@@ -46,6 +46,8 @@ import {
 } from '../lib/editorPrefs';
 import { clearDraft, loadDraft, saveDraft } from '../lib/problemDrafts';
 import { useAiConfig } from '../hooks/useAiConfig';
+import { readableErrorBody } from '../lib/errorBody';
+import { splitTextStreamError } from '../lib/textStreamProtocol';
 
 // WASM 支持的语言配置
 const WASM_SUPPORTED_LANGUAGES = [
@@ -498,6 +500,8 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
     setIsGeneratingSolution(true);
     setSolutionError(null);
     setConfirmModalOpen(false);
+    // 生成过程会一边流一边替换编辑器内容，失败时要能还原
+    const codeBeforeGeneration = code;
 
     try {
       const response = await fetch('/api/ai-solution', {
@@ -521,13 +525,17 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
       });
 
       if (!response.ok) {
+        // throw 不能放进 try 里 —— 它会被下面这个 catch 接住，
+        // 于是刚解析出来的那句话又被换回了整段原始响应体。
         const text = await response.text();
+        let message = '';
         try {
-          const data = JSON.parse(text);
-          throw new Error(data.error || 'Failed to generate solution');
+          message = JSON.parse(text).error || '';
         } catch {
-          throw new Error(text || 'Failed to generate solution');
+          // 不是 JSON 的错误体多半是错误页，别整页糊到界面上
+          message = readableErrorBody(text);
         }
+        throw new Error(message || `Failed to generate solution (HTTP ${response.status})`);
       }
 
       const reader = response.body?.getReader();
@@ -543,11 +551,25 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        setCode(cleanCodeFromResponse(buffer));
+        setCode(cleanCodeFromResponse(splitTextStreamError(buffer).text));
       }
 
       buffer += decoder.decode();
-      updateCode(cleanCodeFromResponse(buffer));
+
+      /*
+       * 这条路径是纯文本流：头发出去之后再出错，错误只能写进正文里。
+       * 不认这个标记的话，那句话会被当成代码写进编辑器，800ms 后连草稿一起
+       * 覆盖掉 —— 而且界面上一点错都不报。
+       */
+      const { text, error: streamed } = splitTextStreamError(buffer);
+      if (streamed) {
+        // 一个字都没生成出来就失败了，把编辑器恢复原状，
+        // 别把一句报错留在那里当代码
+        updateCode(text.trim() ? cleanCodeFromResponse(text) : codeBeforeGeneration);
+        throw new Error(streamed);
+      }
+
+      updateCode(cleanCodeFromResponse(text));
     } catch (error: any) {
       setSolutionError(error.message || 'Failed to generate AI solution');
     } finally {

@@ -97,13 +97,28 @@ export interface GuardedFetchInit extends RequestInit {
  * 重定向必须自己跟：交给 fetch 自动跟随的话，一个公网地址 302 到
  * 169.254.169.254 就把前面的检查整个绕过去了 —— 每一跳都要重新查。
  */
+/**
+ * 地址本身被策略拦下了（写错了、指向内网、绕太多跳）。
+ *
+ * 这属于「你填的配置不对」，和上游返回 4xx 是一类，不该以 500 的形式出现 ——
+ * 尤其它的 message 本来就是写给用户看的那一句。
+ */
+export class EndpointPolicyError extends Error {
+  status = 400;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'EndpointPolicyError';
+  }
+}
+
 export async function guardedFetch(url: string, init: GuardedFetchInit = {}): Promise<Response> {
   const { maxRedirects = 5, ...rest } = init;
   let current = url;
 
   for (let hop = 0; hop <= maxRedirects; hop += 1) {
     const verdict = await checkEndpoint(current);
-    if (!verdict.ok) throw new Error(verdict.reason || 'This endpoint is not allowed.');
+    if (!verdict.ok) throw new EndpointPolicyError(verdict.reason || 'This endpoint is not allowed.');
 
     const response = await fetch(current, {
       ...rest,
@@ -119,5 +134,45 @@ export async function guardedFetch(url: string, init: GuardedFetchInit = {}): Pr
     current = new URL(location, current).toString();
   }
 
-  throw new Error(`Too many redirects from ${url}.`);
+  throw new EndpointPolicyError(`Too many redirects from ${url}.`);
+}
+
+/**
+ * 把 fetch 的传输层失败翻译成用户能照着改的一句话。
+ *
+ * 「fetch failed」对用户毫无帮助，而端点填错、服务没起、证书不受信任是本地
+ * 模型场景里最常见的三种失败 —— 它们和上游返回的 4xx 一样，都是「你要改的
+ * 是配置」，不该以一个 500 的形式出现。
+ */
+export function describeNetworkError(error: any, base: string, timeoutMs?: number): string {
+  if (error?.name === 'AbortError') {
+    const within = timeoutMs ? ` within ${Math.round(timeoutMs / 1000)}s` : '';
+    return `No response from ${base}${within}. If it is remote, check that it is reachable from this machine.`;
+  }
+  const code = error?.cause?.code || error?.code;
+  switch (code) {
+    case 'ENOTFOUND':
+    case 'EAI_AGAIN':
+      return `Cannot resolve the host in ${base}. Check the address for typos.`;
+    case 'ECONNREFUSED':
+      return `${base} refused the connection. Check the port, and that the server is running.`;
+    case 'ECONNRESET':
+    // undici 对「连上了但对端把连接关了」用的是这个码。本地模型服务被 OOM
+    // 杀掉、或者地址其实是个非 HTTP 服务时就是它。
+    case 'UND_ERR_SOCKET':
+      return `${base} closed the connection unexpectedly. Check that it is an OpenAI-compatible HTTP endpoint, and look at its own log.`;
+    case 'CERT_HAS_EXPIRED':
+      return `The TLS certificate for ${base} has expired.`;
+    case 'DEPTH_ZERO_SELF_SIGNED_CERT':
+    case 'SELF_SIGNED_CERT_IN_CHAIN':
+    case 'UNABLE_TO_VERIFY_LEAF_SIGNATURE':
+      return `${base} uses a certificate this machine does not trust (self-signed or an unknown CA). Use a trusted certificate, or put the gateway behind one.`;
+    case 'ERR_TLS_CERT_ALTNAME_INVALID':
+      return `The TLS certificate for ${base} does not cover that hostname.`;
+    default: {
+      // 「fetch failed」本身没有信息量，能带上底层原因就带上
+      const detail = error?.cause?.message || error?.message || String(error);
+      return `Could not reach ${base}: ${detail}`;
+    }
+  }
 }

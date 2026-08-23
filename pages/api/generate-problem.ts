@@ -9,6 +9,7 @@ import {
   NoProviderError,
   streamStructured,
   StructuredStreamError,
+  statusForError,
 } from '../../src/lib/server/aiProvider';
 
 interface Problem {
@@ -244,6 +245,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       res.end();
       return;
     }
-    return res.status(500).json({ error: 'Failed to generate problem', details: message });
+    return res.status(statusForError(error)).json({ error: message });
   }
 }

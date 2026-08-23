@@ -5,7 +5,16 @@
  * 客户端：SSE 事件 -> 文本，重点是任意位置切分的分块
  */
 import { createSseParser, parseSseLine } from '../../src/lib/chatStreamProtocol';
-import { streamAI, streamStructured } from '../../src/lib/server/aiProvider';
+import { EndpointPolicyError } from '../../src/lib/server/endpointPolicy';
+import {
+  callAI,
+  NoProviderError,
+  normalizeMessages,
+  resolveProvider,
+  statusForError,
+  streamAI,
+  streamStructured,
+} from '../../src/lib/server/aiProvider';
 
 /* ------------------------------------------------------------------ */
 /* 客户端解析                                                          */
@@ -63,6 +72,102 @@ describe('client SSE parsing', () => {
 
   it('treats non-JSON payloads as plain text for legacy endpoints', () => {
     expect(parseSseLine('data: raw text')).toEqual({ text: 'raw text' });
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 消息规整                                                            */
+/* ------------------------------------------------------------------ */
+
+describe('message normalisation', () => {
+  /**
+   * 开放权重模型的 chat 模板（Qwen 等）在 Jinja 里写死了
+   * raise_exception('System message must be at the beginning.')，
+   * llama.cpp / LM Studio / Ollama 会把它变成一个 400。
+   * 托管 API 宽容，所以这个前提一直没被我们自己保证。
+   */
+  it('merges multiple system messages into one at the front', () => {
+    expect(
+      normalizeMessages([
+        { role: 'system', content: 'persona' },
+        { role: 'system', content: 'context' },
+        { role: 'user', content: 'hi' },
+      ])
+    ).toEqual([
+      { role: 'system', content: 'persona\n\ncontext' },
+      { role: 'user', content: 'hi' },
+    ]);
+  });
+
+  it('hoists a system message that arrived mid-conversation', () => {
+    expect(
+      normalizeMessages([
+        { role: 'user', content: 'hi' },
+        { role: 'system', content: 'late rule' },
+        { role: 'assistant', content: 'sure' },
+      ])
+    ).toEqual([
+      { role: 'system', content: 'late rule' },
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'sure' },
+    ]);
+  });
+
+  it('drops empty system messages instead of sending a blank one', () => {
+    expect(
+      normalizeMessages([
+        { role: 'system', content: '   ' },
+        { role: 'user', content: 'hi' },
+      ])
+    ).toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
+  it('leaves a conversation without a system message alone', () => {
+    const messages = [
+      { role: 'user' as const, content: 'hi' },
+      { role: 'assistant' as const, content: 'hello' },
+    ];
+    expect(normalizeMessages(messages)).toEqual(messages);
+  });
+
+  /**
+   * 一次失败的请求会在历史里留下一条空的 assistant 消息，下次发送会带上它。
+   * Anthropic 拒绝空的 content block，一部分模板也一样 ——
+   * 结果是一次偶发失败把整个会话钉死。
+   */
+  it('drops the empty assistant turn a failed request leaves behind', () => {
+    expect(
+      normalizeMessages([
+        { role: 'user', content: 'first' },
+        { role: 'assistant', content: '' },
+        { role: 'user', content: 'second' },
+      ])
+    ).toEqual([{ role: 'user', content: 'first\n\nsecond' }]);
+  });
+
+  it('drops messages with a role we do not recognise', () => {
+    // 转发一个上游不认识的 role，换回来的是一个看不懂的 400；
+    // 而两条都没有 role 的消息还会因为 undefined === undefined 被并成一条
+    expect(
+      normalizeMessages([
+        { role: 'tool', content: 'tool output' },
+        { content: 'no role at all' },
+        { content: 'also no role' },
+        { role: 'user', content: 'hi' },
+      ] as any)
+    ).toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
+  it('survives a malformed messages array instead of throwing', () => {
+    const messages = [
+      null,
+      { role: 'system', content: { nope: true } },
+      { role: 'user', content: 'hi' },
+    ] as any;
+    expect(() => normalizeMessages(messages)).not.toThrow();
+    // 非字符串的 content 直接丢掉：硬转出来的 "[object Object]" 会变成
+    // 模型真的看到的提示词
+    expect(normalizeMessages(messages)).toEqual([{ role: 'user', content: 'hi' }]);
   });
 });
 
@@ -286,7 +391,12 @@ describe('server streaming', () => {
     expect(body.temperature).toBeUndefined();
   });
 
-  it('reports upstream failure as JSON before headers are sent', async () => {
+  /**
+   * 上游拒绝了请求，是「这次请求不对」而不是「我们挂了」——
+   * 状态码要照传，消息要是人能读的那一句，否则用户只看到一个 500，
+   * 无从知道该去改 key、改模型名还是改端点。
+   */
+  it('passes an upstream 401 through as 401, with its message', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: false,
       status: 401,
@@ -299,9 +409,252 @@ describe('server streaming', () => {
       selectedProvider: 'openai',
     });
 
-    expect(res.statusCode).toBe(500);
-    expect((res.jsonBody as any).error).toMatch(/401/);
+    expect(res.statusCode).toBe(401);
+    expect((res.jsonBody as any).error).toBe('invalid api key');
     expect(res.written).toHaveLength(0);
+  });
+
+  it('unwraps an OpenAI-style error body instead of quoting the raw JSON', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () =>
+        JSON.stringify({
+          error: { message: 'system message must be at the beginning', code: 'template_error' },
+        }),
+    }) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      compatible: { endpoint: 'http://localhost:1234/v1', model: 'qwen3-8b' },
+      selectedProvider: 'compatible',
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect((res.jsonBody as any).error).toBe('system message must be at the beginning');
+  });
+
+  it('reports an upstream 5xx as 502, not as our own 500', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      text: async () => 'model is loading',
+    }) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      openAI: { apiKey: 'k', model: 'gpt-4.1' },
+      selectedProvider: 'openai',
+    });
+
+    expect(res.statusCode).toBe(502);
+    expect((res.jsonBody as any).error).toBe('model is loading');
+  });
+
+  it('classifies a blocked or malformed endpoint as 400, not 500', () => {
+    // 这句 message 本来就是写给用户看的（「不是合法的 URL」「指向了内网」），
+    // 包成 500 只会让人以为是应用坏了
+    expect(statusForError(new EndpointPolicyError('Not a valid URL: localhost;1234'))).toBe(400);
+  });
+
+  it('classifies a missing provider as 400, not 500', () => {
+    // 没配 provider 是「你还没设置」，不是「服务器坏了」。
+    // resolveProvider 在写响应头之前就抛，由路由的 catch 统一映射状态码。
+    // 这里要把环境变量清干净：本机（或 CI）上导了任意一把 key，auto 顺序就会选中它。
+    const envKeys = [
+      'DEEPSEEK_API_KEY',
+      'OPENAI_API_KEY',
+      'QWEN_API_KEY',
+      'CLAUDE_API_KEY',
+      'OLLAMA_MODEL',
+      'OPENAI_COMPATIBLE_ENDPOINT',
+      'OPENAI_COMPATIBLE_MODEL',
+    ];
+    const saved: Record<string, string | undefined> = {};
+    envKeys.forEach((key) => {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    });
+
+    try {
+      expect(() => resolveProvider({}, 4000)).toThrow(NoProviderError);
+      expect(statusForError(new NoProviderError())).toBe(400);
+    } finally {
+      envKeys.forEach((key) => {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      });
+    }
+  });
+
+  it('reports a connection failure as a fixable message, not "fetch failed"', async () => {
+    const refused: any = new TypeError('fetch failed');
+    refused.cause = { code: 'ECONNREFUSED' };
+    global.fetch = jest.fn().mockRejectedValue(refused) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      compatible: { endpoint: 'http://127.0.0.1:1234/v1', model: 'qwen3-8b' },
+      selectedProvider: 'compatible',
+    });
+
+    expect(res.statusCode).toBe(502);
+    expect((res.jsonBody as any).error).toContain('refused the connection');
+    expect((res.jsonBody as any).error).not.toContain('fetch failed');
+  });
+
+  /**
+   * 超时和「客户端自己走了」都是 AbortError，但两者的正确反应相反：
+   * 前者要告诉用户，后者只需安静收尾。混在一起的后果是等满两分钟之后
+   * 拿到一个空白气泡 —— 没内容、没报错，看不出发生了什么。
+   */
+  it('reports an upstream timeout as 504, not as a silent empty response', async () => {
+    jest.useFakeTimers();
+    global.fetch = jest.fn(
+      (_url: any, init: any) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => {
+            const error = new Error('The operation was aborted');
+            error.name = 'AbortError';
+            reject(error);
+          });
+        })
+    ) as any;
+
+    const res = createFakeRes();
+    try {
+      const pending = streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+        openAI: { apiKey: 'k', model: 'gpt-4.1' },
+        selectedProvider: 'openai',
+      });
+      jest.advanceTimersByTime(130_000);
+      await pending;
+    } finally {
+      // 不放 finally 的话，这个用例一失败，后面所有量时间的用例都会跟着挂
+      jest.useRealTimers();
+    }
+
+    expect(res.statusCode).toBe(504);
+    expect((res.jsonBody as any).error).toMatch(/No response from https:\/\/api\.openai\.com/);
+  });
+
+  it('stays quiet when it is the client that left', async () => {
+    const controller = new AbortController();
+    global.fetch = jest.fn(() => {
+      controller.abort();
+      // Node 真正抛的是 DOMException，它带着遗留的数字 code 20 ——
+      // 用 new Error 造一个假的，就测不出「有 code 就当成网络故障」这个错判
+      return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'));
+    }) as any;
+
+    const res = createFakeRes();
+    await streamAI(
+      res as any,
+      [{ role: 'user', content: 'hi' }],
+      { openAI: { apiKey: 'k', model: 'gpt-4.1' }, selectedProvider: 'openai' },
+      { signal: controller.signal }
+    );
+
+    expect(res.statusCode).toBeUndefined();
+    expect(res.jsonBody).toBeFalsy();
+    expect(res.ended).toBe(true);
+  });
+
+  /**
+   * 空回答不能算成功：界面上是一个空白气泡 —— 没内容、没报错，
+   * 连重试按钮都不亮，用户看不出发生了什么。
+   */
+  it('reports an empty upstream response instead of a blank answer', async () => {
+    global.fetch = jest.fn().mockResolvedValue(fakeStreamResponse(['data: [DONE]\n\n'])) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      openAI: { apiKey: 'k', model: 'gpt-4.1' },
+      selectedProvider: 'openai',
+    });
+
+    const events = collectEvents(res);
+    const failure = events.find((event: any) => event.type === 'error');
+    expect(failure).toBeTruthy();
+    expect((failure as any).message).toMatch(/empty response/i);
+  });
+
+  it('refuses a conversation with nothing in it, before calling upstream', async () => {
+    const fetchMock = jest.fn() as any;
+    global.fetch = fetchMock;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: '   ' }], {
+      openAI: { apiKey: 'k', model: 'gpt-4.1' },
+      selectedProvider: 'openai',
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(400);
+    expect((res.jsonBody as any).error).toMatch(/nothing to send/i);
+  });
+
+  /**
+   * 正文读到一半断了（本地模型被 OOM 杀掉是最常见的原因）。
+   * 头已经发出去了，状态码改不动，但至少不能只丢给用户一个词：terminated。
+   */
+  it('translates a mid-stream disconnect into something actionable', async () => {
+    const broken: any = new TypeError('terminated');
+    broken.cause = { code: 'UND_ERR_SOCKET' };
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            throw broken;
+          },
+        }),
+      },
+    }) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      compatible: { endpoint: 'http://127.0.0.1:1234/v1', model: 'qwen3-8b' },
+      selectedProvider: 'compatible',
+    });
+
+    const failure = collectEvents(res).find((event: any) => event.type === 'error');
+    expect((failure as any).message).toMatch(/closed the connection unexpectedly/);
+  });
+
+  it('keeps a long plain-text upstream error, truncated rather than dropped', async () => {
+    const long = `context length exceeded. ${'detail '.repeat(80)}`;
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () => long,
+    }) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      openAI: { apiKey: 'k', model: 'gpt-4.1' },
+      selectedProvider: 'openai',
+    });
+
+    expect((res.jsonBody as any).error).toMatch(/^context length exceeded/);
+    expect(((res.jsonBody as any).error as string).length).toBeLessThan(long.length);
+  });
+
+  it('does not paste an HTML error page into the message', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: async () => '<html><head><title>502 Bad Gateway</title></head><body>...</body></html>',
+    }) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      openAI: { apiKey: 'k', model: 'gpt-4.1' },
+      selectedProvider: 'openai',
+    });
+
+    expect((res.jsonBody as any).error).not.toContain('<html>');
+    expect((res.jsonBody as any).error).toMatch(/HTML error page/);
   });
 
   it('reports a mid-stream failure as an error event, not a broken body', async () => {
@@ -494,6 +847,102 @@ describe('server streaming', () => {
     expect(collectText(res)).toBe('real stream');
     // 它确实是流，所以不该被标成 non-incremental
     expect(collectEvents(res)).not.toContainEqual({ type: 'meta', incremental: false });
+  });
+
+  it('never sends more than one system message, and always first', async () => {
+    const configs: Array<[string, any]> = [
+      ['deepseek', { deepSeek: { apiKey: 'k', model: 'deepseek-chat' }, selectedProvider: 'deepseek' }],
+      ['openai', { openAI: { apiKey: 'k', model: 'gpt-4.1' }, selectedProvider: 'openai' }],
+      ['qwen', { qwen: { apiKey: 'k', model: 'qwen-plus' }, selectedProvider: 'qwen' }],
+      ['ollama', { ollama: { endpoint: 'http://localhost:11434', model: 'llama3.1' }, selectedProvider: 'ollama' }],
+      [
+        'compatible',
+        { compatible: { endpoint: 'http://localhost:1234/v1', model: 'qwen3-8b' }, selectedProvider: 'compatible' },
+      ],
+    ];
+
+    // 这正是 ai-chat / engineering-chat 以前发出去的形状：两条 system
+    const messages: any = [
+      { role: 'system', content: 'persona' },
+      { role: 'system', content: 'workspace context' },
+      { role: 'user', content: 'hi' },
+    ];
+
+    for (const [kind, config] of configs) {
+      const fetchMock = jest.fn().mockResolvedValue(fakeStreamResponse([])) as any;
+      global.fetch = fetchMock;
+
+      await streamAI(createFakeRes() as any, messages, config);
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      const roles = body.messages.map((message: any) => message.role);
+      expect([kind, roles.filter((role: string) => role === 'system').length]).toEqual([kind, 1]);
+      expect([kind, roles[0]]).toEqual([kind, 'system']);
+      expect([kind, body.messages[0].content]).toEqual([kind, 'persona\n\nworkspace context']);
+    }
+  });
+
+  /**
+   * buildRequest 有三个入口：callAI（非流式）、streamAI、streamStructured。
+   * 规整必须留在 buildRequest 里 —— 只在 streamAI 里做的话，生成类接口
+   * （出题、生成工程题、AI 评审）会在本地模型上重新踩回同一个 400。
+   */
+  it('normalises on the structured-stream path too, not just chat', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(fakeStreamResponse([])) as any;
+    global.fetch = fetchMock;
+
+    await streamStructured(createFakeRes() as any, [
+      { role: 'system', content: 'persona' },
+      { role: 'system', content: 'schema' },
+      { role: 'user', content: 'make one' },
+    ], {
+      compatible: { endpoint: 'http://localhost:1234/v1', model: 'qwen3-8b' },
+      selectedProvider: 'compatible',
+    }, { onComplete: async () => ({ ok: true }) });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.messages.filter((message: any) => message.role === 'system')).toHaveLength(1);
+    expect(body.messages[0]).toEqual({ role: 'system', content: 'persona\n\nschema' });
+  });
+
+  it('normalises on the non-streaming path too', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: 'done' } }] }),
+    }) as any;
+    global.fetch = fetchMock;
+
+    await callAI(
+      [
+        { role: 'system', content: 'persona' },
+        { role: 'system', content: 'context' },
+        { role: 'user', content: 'hi' },
+      ],
+      { openAI: { apiKey: 'k', model: 'gpt-4.1' }, selectedProvider: 'openai' }
+    );
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.messages.filter((message: any) => message.role === 'system')).toHaveLength(1);
+    expect(body.stream).toBe(false);
+  });
+
+  it('keeps Claude on its separate system field', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(fakeStreamResponse([])) as any;
+    global.fetch = fetchMock;
+
+    await streamAI(
+      createFakeRes() as any,
+      [
+        { role: 'system', content: 'persona' },
+        { role: 'system', content: 'context' },
+        { role: 'user', content: 'hi' },
+      ],
+      { claude: { apiKey: 'k', model: 'claude-sonnet-5' }, selectedProvider: 'claude' }
+    );
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.system).toBe('persona\n\ncontext');
+    expect(body.messages.every((message: any) => message.role !== 'system')).toBe(true);
   });
 
   it('streams raw text when format is text', async () => {

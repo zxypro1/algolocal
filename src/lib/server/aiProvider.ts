@@ -9,7 +9,9 @@
  *    并且客户端断开时把上游请求一起 abort 掉，不再白烧 token。
  */
 import type { NextApiResponse } from 'next';
-import { guardedFetch } from './endpointPolicy';
+import { describeNetworkError, EndpointPolicyError, guardedFetch } from './endpointPolicy';
+import { looksLikeMarkup, readableErrorBody } from '../errorBody';
+import { TEXT_STREAM_ERROR_MARK } from '../textStreamProtocol';
 import { isPrivateHostname } from '../endpointHosts';
 import {
   capabilitiesFor,
@@ -188,6 +190,66 @@ interface UpstreamRequest {
   body: Record<string, unknown>;
 }
 
+/**
+ * 把消息规整成「至多一条 system，而且在最前面」。
+ *
+ * 这不是给某个后端打的补丁，是**开放权重模型的 chat 模板普遍要求**：
+ * Qwen 等模型的 Jinja 模板里写着 `raise_exception('System message must be at
+ * the beginning.')`，llama.cpp / LM Studio / Ollama 走模板渲染时会原样抛出来，
+ * 变成一个 400。llama.cpp 把这视为模板的既定行为而不是 bug（#20733 closed as
+ * not planned），也就是说客户端本来就该保证这个前提。
+ *
+ * 托管 API（OpenAI、DeepSeek）接受多条 system、也接受它出现在中间，所以同一份
+ * 代码在它们那里一直是好的 —— 这正是这个 bug 只在本地模型上暴露的原因。
+ *
+ * 我们自己的路由从来只在开头放 system（只是放了两条：一条人设、一条上下文），
+ * 所以这里把它们按顺序拼成一条，语义不变。
+ */
+export function normalizeMessages(messages: ChatMessage[]): ChatMessage[] {
+  const systemParts: string[] = [];
+  const rest: ChatMessage[] = [];
+
+  for (const message of messages) {
+    // messages 是请求体里来的，路由只校验了它是个数组。这里读到的每个字段
+    // 都可能不是字符串，甚至不是对象 —— 让 .trim() 抛 TypeError 只会变成
+    // 一个内部错误的 500，还不如把这条丢掉。
+    if (!message || typeof message !== 'object') continue;
+    // role 没写或者写了个我们不认识的值，转发上去只会换来一个看不懂的 400
+    if (message.role !== 'system' && message.role !== 'user' && message.role !== 'assistant') continue;
+    // content 不是字符串就当它不存在。硬转出来的 "[object Object]" 会原样
+    // 变成模型看到的提示词，比少一条消息更糟。
+    const content = typeof message.content === 'string' ? message.content : '';
+
+    if (message.role === 'system') {
+      if (content.trim()) systemParts.push(content.trim());
+      continue;
+    }
+
+    /*
+     * 空的 user/assistant 也要丢掉。
+     *
+     * 一次失败的请求会在对话历史里留下一条**空的** assistant 消息（内容还没
+     * 流出来就断了），下一次发送会把它一起带上。Anthropic 直接拒绝空的
+     * content block，一部分 chat 模板也一样 —— 于是一次偶发失败会把整个
+     * 会话钉死，用户只能关掉对话框重开。
+     */
+    if (!content.trim()) continue;
+
+    // 丢掉空消息可能让两条同角色的消息挨在一起（user, assistant(空), user）。
+    // Anthropic 要求角色交替，所以这里把它们并成一条，而不是留个坑给上游。
+    const previous = rest[rest.length - 1];
+    if (previous && previous.role === message.role) {
+      rest[rest.length - 1] = { ...previous, content: `${previous.content}\n\n${content}` };
+      continue;
+    }
+
+    rest.push({ ...message, content });
+  }
+
+  if (systemParts.length === 0) return rest;
+  return [{ role: 'system', content: systemParts.join('\n\n') }, ...rest];
+}
+
 /** OpenAI 兼容格式：DeepSeek、Qwen（compatible-mode）、OpenAI 自己都走这套 */
 function openAiCompatibleBody(
   provider: ResolvedProvider,
@@ -207,9 +269,18 @@ function openAiCompatibleBody(
 
 function buildRequest(
   provider: ResolvedProvider,
-  messages: ChatMessage[],
+  rawMessages: ChatMessage[],
   options: { stream: boolean; temperature: number }
 ): UpstreamRequest {
+  // 所有 provider 共用同一份规整：system 合成一条、放最前
+  const messages = normalizeMessages(rawMessages);
+
+  // 规整之后一条对话都不剩（全是空消息，或者本来就没发）。发上去只会换回一个
+  // 各家措辞不同的 400，不如自己说清楚。
+  if (!messages.some((message) => message.role !== 'system')) {
+    throw new EmptyConversationError();
+  }
+
   switch (provider.kind) {
     case 'deepseek':
       return {
@@ -234,10 +305,8 @@ function buildRequest(
       };
 
     case 'claude': {
-      const system = messages
-        .filter((message) => message.role === 'system')
-        .map((message) => message.content)
-        .join('\n\n');
+      // normalizeMessages 保证了：要么没有 system，要么就是唯一一条、在 index 0
+      const system = messages[0]?.role === 'system' ? messages[0].content : '';
       return {
         url: 'https://api.anthropic.com/v1/messages',
         headers: {
@@ -249,7 +318,7 @@ function buildRequest(
         body: {
           model: provider.model,
           system: system || undefined,
-          messages: messages.filter((message) => message.role !== 'system'),
+          messages: system ? messages.slice(1) : messages,
           temperature: options.temperature,
           max_tokens: provider.maxTokens,
           stream: options.stream,
@@ -283,6 +352,169 @@ function buildRequest(
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
+/** 正文两块之间最多能停多久 —— 本地模型慢是常态，卡死不是 */
+const STREAM_IDLE_TIMEOUT_MS = 120_000;
+/** 第一块可以等更久：整段生成完才发第一个字节的上游是存在的 */
+const STREAM_FIRST_CHUNK_TIMEOUT_MS = 600_000;
+
+/**
+ * 上游明确拒绝了这次请求。
+ *
+ * 它和「我们自己挂了」是两件事，所以要带着上游的状态码往外传：
+ * 端点填错、key 过期、模型名不存在、超出上下文长度，用户看到 400/401/404
+ * 才知道该去改什么；一律报 500 只会让人以为是应用坏了。
+ */
+export class AIUpstreamError extends Error {
+  /** 上游返回的状态码 */
+  upstreamStatus: number;
+  /** 转给客户端用的状态码：上游的 4xx 照传，5xx 归一成 502 */
+  status: number;
+
+  constructor(message: string, upstreamStatus: number) {
+    super(message);
+    this.name = 'AIUpstreamError';
+    this.upstreamStatus = upstreamStatus;
+    this.status = upstreamStatus >= 400 && upstreamStatus < 500 ? upstreamStatus : 502;
+  }
+}
+
+/**
+ * 根本没连上上游：服务没起、端口写错、域名解析不了、证书不受信任。
+ *
+ * 和上游返回 4xx 一样，这也是「要改的是配置」，只不过失败发生在更早的一层。
+ */
+export class AINetworkError extends Error {
+  status = 502;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'AINetworkError';
+  }
+}
+
+/** 规整之后没有任何一条真正的对话消息 */
+export class EmptyConversationError extends Error {
+  status = 400;
+
+  constructor() {
+    super('There is nothing to send: the conversation has no message with any content.');
+    this.name = 'EmptyConversationError';
+  }
+}
+
+/**
+ * 上游 200 了，但一个字都没有。
+ *
+ * 空回答不能当成成功：界面上是一个空白气泡 —— 没内容、没报错、连重试按钮
+ * 都不亮，用户看不出发生了什么。本地模型上这通常意味着它被换出去了、
+ * 上下文塞满了，或者模板渲染出了一段我们解析不了的东西。
+ */
+export class AIEmptyResponseError extends Error {
+  // 目前两个抛点都在响应头之后，所以它实际总是以流里的 error 事件到达前端；
+  // status 是给「哪天在发头之前也能判空」留的，不是当前行为。
+  status = 502;
+
+  constructor(origin: string) {
+    super(
+      `${origin} returned an empty response. If it is a local model, check its own log — it may have run out of context or unloaded the model.`
+    );
+    this.name = 'AIEmptyResponseError';
+  }
+}
+
+/**
+ * 上游在超时窗口内没有回应。
+ *
+ * 它必须和「客户端自己走了」区分开：两者都是 AbortError，但前者要告诉用户，
+ * 后者只需要安静收尾。混在一起的后果是，一次超时会变成一个空白的回答气泡 ——
+ * 没有报错、没有内容，用户等了两分钟什么也没得到。
+ */
+export class AITimeoutError extends Error {
+  status = 504;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'AITimeoutError';
+  }
+}
+
+/** 该用哪个状态码回给客户端 */
+export function statusForError(error: unknown): number {
+  if (error instanceof AIUpstreamError) return error.status;
+  if (error instanceof AITimeoutError || error instanceof AINetworkError) return error.status;
+  if (error instanceof AIEmptyResponseError || error instanceof EmptyConversationError) return error.status;
+  if (error instanceof EndpointPolicyError) return error.status;
+  // 没配 provider 属于「请求缺前提」，不是服务端故障
+  if (error instanceof NoProviderError) return 400;
+  return 500;
+}
+
+/**
+ * 从上游的错误响应体里抠出一句人能读的话。
+ *
+ * 各家的形状不一样：OpenAI 兼容端点是 { error: { message } }，
+ * Ollama 是 { error: "..." }，还有直接回一段文本的。
+ * 抠不出来就退回截断后的原文 —— 那也比一个纯粹的 500 强。
+ */
+function describeUpstreamError(status: number, body: string): string {
+  const text = (body || '').trim();
+  if (!text) return `The AI endpoint returned ${status} with an empty body.`;
+
+  try {
+    const parsed = JSON.parse(text);
+    const message =
+      (typeof parsed?.error === 'string' && parsed.error) ||
+      parsed?.error?.message ||
+      parsed?.message ||
+      parsed?.detail;
+    if (typeof message === 'string' && message.trim()) return message.trim();
+  } catch {
+    // 不是 JSON，按纯文本处理
+  }
+
+  // 代理和框架的错误页是 HTML。把几百个字符的标签塞进错误提示里，用户看到的
+  // 是一屏 <html><head><title>502 Bad Gateway —— 状态码才是有用的那部分。
+  if (looksLikeMarkup(text)) {
+    return `The AI endpoint returned ${status} with an HTML error page, not JSON. Check that the endpoint URL points at the API and not at a web page.`;
+  }
+
+  // 和客户端共用同一把尺子，免得一边转发、一边丢弃
+  return readableErrorBody(text) || `The AI endpoint returned ${status}.`;
+}
+
+/**
+ * 这个错误是不是「网络层没接上/断了」。
+ *
+ * 注意不能只看有没有 code：abort 抛的是 DOMException，它带着遗留的
+ * 数字 code 20，会把「用户关掉了对话框」误判成一次网络故障。
+ */
+function isTransportFailure(error: unknown): boolean {
+  if ((error as Error)?.name === 'AbortError') return false;
+  const code = (error as any)?.cause?.code || (error as any)?.code;
+  if (typeof code === 'string') return true;
+  return /fetch failed|terminated|socket hang up/i.test((error as Error)?.message || '');
+}
+
+/**
+ * 正文读到一半断了，同样要翻译。
+ *
+ * 这一段发生在响应头之后，所以走不到 fetchUpstream 里那个分支 —— 本地模型
+ * 生成到一半被 OOM 杀掉时，用户看到的原本只有一个词：terminated。
+ */
+function translateStreamFailure(error: unknown, origin: string): unknown {
+  if (error instanceof AITimeoutError || error instanceof AINetworkError) return error;
+  if (!isTransportFailure(error)) return error;
+  return new AINetworkError(describeNetworkError(error, origin));
+}
+
+/** 只取协议 + 主机，错误提示里没必要出现完整路径 */
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url;
+  }
+}
 
 async function fetchUpstream(
   request: UpstreamRequest,
@@ -294,7 +526,13 @@ async function fetchUpstream(
   userSuppliedUrl = false
 ): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  // 超时和「客户端走了」都会 abort 同一个 controller，但后面要分别处理，
+  // 所以这里自己记一笔 —— AbortError 本身分不出是谁触发的。
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, DEFAULT_TIMEOUT_MS);
   // 客户端断开 -> 连带取消上游，不再为没人看的回答付费
   signal?.addEventListener('abort', () => controller.abort(), { once: true });
 
@@ -302,16 +540,40 @@ async function fetchUpstream(
     // 聊天请求打的是同一个用户填的地址，所以 SSRF 面不只是「列模型」那个路由；
     // guardedFetch 会逐跳校验重定向。
     const send = userSuppliedUrl ? guardedFetch : fetch;
-    const response = await send(request.url, {
-      method: 'POST',
-      headers: request.headers,
-      body: JSON.stringify(request.body),
-      signal: controller.signal,
-    });
+    let response: Response;
+    try {
+      response = await send(request.url, {
+        method: 'POST',
+        headers: request.headers,
+        body: JSON.stringify(request.body),
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`AI provider error ${response.status}: ${detail.slice(0, 500)}`);
+      // 读错误正文这一步也要放进来：上游发完头就卡住的话，超时会在这里触发，
+      // 漏在外面的话它会以一个裸的 AbortError 冒出去，被当成「客户端走了」
+      // 而静默收尾 —— 用户又拿到一个空白气泡。
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new AIUpstreamError(describeUpstreamError(response.status, detail), response.status);
+      }
+    } catch (error) {
+      const origin = originOf(request.url);
+      // 上游自己的拒绝已经是最终结论了，别再往下分类
+      if (error instanceof AIUpstreamError) throw error;
+      if (timedOut) {
+        throw new AITimeoutError(
+          describeNetworkError({ name: 'AbortError' }, origin, DEFAULT_TIMEOUT_MS)
+        );
+      }
+      // 客户端自己走了：原样往上抛，让调用方安静收尾。
+      // 这一步必须在传输层判断之前 —— abort 抛的 DOMException 带着遗留的
+      // 数字 code 20，按「有 code 就是传输失败」判会把它误报成 502。
+      if ((error as Error)?.name === 'AbortError') throw error;
+      // 连都没连上：服务没起、端口写错、域名解析不了、证书不受信任。这是本地
+      // 模型场景里最常见的一类失败，不该以「fetch failed」的形式露出来。
+      // 只翻译传输层失败 —— endpointPolicy 的拦截理由本身就是给人看的，别再包一层。
+      if (isTransportFailure(error)) throw new AINetworkError(describeNetworkError(error, origin));
+      throw error;
     }
 
     return response;
@@ -380,15 +642,60 @@ function parseChunk(kind: ProviderKind, payload: string): string {
  * @returns 是否真的是逐块到达的。false 表示上游无视了 stream:true，
  *          整段内容是一次性拿到的 —— 调用方要如实告诉前端。
  */
+interface PipeResult {
+  /** 是不是逐块到达的。false 表示上游无视了 stream:true */
+  incremental: boolean;
+  /** 有没有拿到任何内容。false 表示这次回答是空的 */
+  delivered: boolean;
+}
+
 async function pipeUpstream(
   kind: ProviderKind,
   upstream: Response,
   onChunk: (text: string) => void,
   /** 确认上游不是流时先回调一次，永远早于第一次 onChunk */
-  onNotIncremental: () => void = () => undefined
-): Promise<boolean> {
+  onNotIncremental: () => void = () => undefined,
+  /** 报错时用得上：是哪个地址停住了 */
+  origin = 'the AI endpoint'
+): Promise<PipeResult> {
   const reader = upstream.body?.getReader();
-  if (!reader) return false;
+  if (!reader) return { incremental: false, delivered: false };
+
+  /**
+   * 响应头到手之后，fetchUpstream 的超时定时器就清掉了 —— 但正文可能才是卡住
+   * 的那一段：本地模型加载权重、被 OOM 杀掉、或者干脆不吐 token。没有这道
+   * 看门狗的话，连接会一直开着，界面上就是一个永远转下去的圈。
+   */
+  let started = false;
+  const readNext = async () => {
+    // 第一块给的预算宽得多：上游可能整段生成完才发第一个字节（无视 stream:true
+    // 的实现就是这样），CPU 上跑一个 8B 模型几分钟很正常。开始吐了之后再停两
+    // 分钟，那就是真的卡住了。
+    const budget = started ? STREAM_IDLE_TIMEOUT_MS : STREAM_FIRST_CHUNK_TIMEOUT_MS;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const result = await Promise.race([
+        reader.read(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            // 光 reject 不够：连接还开着，上游会继续生成一段没人看的回答
+            void reader.cancel().catch(() => undefined);
+            reject(
+              new AITimeoutError(
+                started
+                  ? `${origin} stopped sending data for ${Math.round(budget / 1000)}s. If it is a local model, check its own log.`
+                  : `${origin} sent nothing for ${Math.round(budget / 1000)}s. If it is a local model, check that the model is loaded and its own log.`
+              )
+            );
+          }, budget);
+        }),
+      ]);
+      started = true;
+      return result;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
@@ -401,7 +708,7 @@ async function pipeUpstream(
   };
 
   while (true) {
-    const { done, value } = await reader.read();
+    const { done, value } = await readNext();
     if (done) break;
     const decoded = decoder.decode(value, { stream: true });
     if (!emitted) rawSoFar += decoded;
@@ -416,7 +723,7 @@ async function pipeUpstream(
         try {
           const json = JSON.parse(line);
           if (json?.message?.content) emit(json.message.content);
-          if (json?.done) return true;
+          if (json?.done) return { incremental: emitted, delivered: emitted };
         } catch {
           // 半行，等下一批
         }
@@ -438,7 +745,7 @@ async function pipeUpstream(
     }
   }
 
-  if (emitted) return true;
+  if (emitted) return { incremental: true, delivered: true };
 
   /**
    * 走到这里说明整条流读完了，一个 delta 都没解析出来。
@@ -451,11 +758,12 @@ async function pipeUpstream(
     if (text) {
       onNotIncremental();
       onChunk(text);
+      return { incremental: false, delivered: true };
     }
   } catch {
     // 真的什么都解析不出来，交给上层按空回复处理
   }
-  return false;
+  return { incremental: false, delivered: false };
 }
 
 export type StreamFormat = 'sse' | 'text';
@@ -535,15 +843,24 @@ export async function streamAI(
       const text = await callAI(messages, config, options);
       writeHeaders(res, format);
       declareNotIncremental();
+      // 空回答走的也是失败路径，别在两条分支里只挡一条
+      if (!text) throw new AIEmptyResponseError(provider.kind);
       emit(text);
     } else {
-      const upstream = await fetchUpstream(
-        buildRequest(provider, messages, { stream: true, temperature }),
-        options.signal,
-        provider.kind === 'compatible'
-      );
+      const request = buildRequest(provider, messages, { stream: true, temperature });
+      const upstream = await fetchUpstream(request, options.signal, provider.kind === 'compatible');
       writeHeaders(res, format);
-      await pipeUpstream(provider.kind, upstream, emit, declareNotIncremental);
+      const piped = await pipeUpstream(
+        provider.kind,
+        upstream,
+        emit,
+        declareNotIncremental,
+        originOf(request.url)
+      ).catch((error) => {
+        throw translateStreamFailure(error, originOf(request.url));
+      });
+      // 空回答按失败报，别交出一个没有内容也没有解释的气泡
+      if (!piped.delivered) throw new AIEmptyResponseError(originOf(request.url));
     }
 
     if (format === 'sse') sseEvent(res, { type: 'done' });
@@ -558,11 +875,12 @@ export async function streamAI(
 
     const message = (error as Error).message || 'AI request failed';
     if (!res.headersSent) {
-      res.status(500).json({ error: message });
+      // 上游拒绝了就把它的状态码传下去：400 是「请求不对」，不是「我们挂了」
+      res.status(statusForError(error)).json({ error: message });
       return;
     }
     if (format === 'sse') sseEvent(res, { type: 'error', message });
-    else res.write(`\n\n[error] ${message}`);
+    else writeNow(res, `${TEXT_STREAM_ERROR_MARK}${message}`);
     res.end();
   }
 }
@@ -612,21 +930,23 @@ export async function streamStructured<T>(
       sseEvent(res, { type: 'meta', incremental: false });
       sseEvent(res, { type: 'delta', text: raw });
     } else {
-      const upstream = await fetchUpstream(
-        buildRequest(provider, messages, { stream: true, temperature }),
-        options.signal,
-        provider.kind === 'compatible'
-      );
+      const request = buildRequest(provider, messages, { stream: true, temperature });
+      const upstream = await fetchUpstream(request, options.signal, provider.kind === 'compatible');
       writeHeaders(res, 'sse');
-      incremental = await pipeUpstream(
+      const piped = await pipeUpstream(
         provider.kind,
         upstream,
         (text) => {
           raw += text;
           sseEvent(res, { type: 'delta', text });
         },
-        () => sseEvent(res, { type: 'meta', incremental: false })
-      );
+        () => sseEvent(res, { type: 'meta', incremental: false }),
+        originOf(request.url)
+      ).catch((error) => {
+        throw translateStreamFailure(error, originOf(request.url));
+      });
+      incremental = piped.incremental;
+      if (!piped.delivered) throw new AIEmptyResponseError(originOf(request.url));
     }
     void incremental;
 
@@ -646,7 +966,7 @@ export async function streamStructured<T>(
 
     // 头还没发出去时仍然用 HTTP 状态码报错，保持老调用方的行为
     if (!res.headersSent) {
-      res.status(500).json({ error: message, details, rawContent: raw || undefined });
+      res.status(statusForError(error)).json({ error: message, details, rawContent: raw || undefined });
       return;
     }
     sseEvent(res, { type: 'error', message, details });

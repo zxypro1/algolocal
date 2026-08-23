@@ -5,8 +5,22 @@ import {
   ChatMessage,
   NoProviderError,
   streamAI,
+  statusForError,
 } from '../../src/lib/server/aiProvider';
 import { buildWorkspaceContext, WorkspaceContext } from '../../src/lib/server/engineeringPrompt';
+
+/*
+ * 这个路由收的是整个工作区（每个文件的全文 + 最近一次运行报告），
+ * Next 默认的 1mb 一个中等项目就撞穿了，表现是一个 413 —— 功能直接不可用。
+ * 和 generate-project 保持同一个上限。responseLimit 关掉是因为回答是流式的。
+ */
+export const config = {
+  api: {
+    responseLimit: false,
+    bodyParser: { sizeLimit: '8mb' },
+  },
+};
+
 
 interface EngineeringChatRequest {
   messages: ChatMessage[];
@@ -49,7 +63,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   try {
-    const { messages, context, language = 'zh', config } = req.body as EngineeringChatRequest;
+    // aiConfig 而不是 config：模块顶上那个 export const config 是路由配置，
+    // 同名会让下一个人读到请求体里的东西还以为是它
+    const { messages, context, language = 'zh', config: aiConfig } = req.body as EngineeringChatRequest;
 
     if (!Array.isArray(messages)) {
       return res.status(400).json({ error: 'Messages array is required' });
@@ -67,7 +83,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       ...messages,
     ];
 
-    await streamAI(res, fullMessages, config, {
+    await streamAI(res, fullMessages, aiConfig, {
       temperature: 0.6,
       maxTokens: 2500,
       format: 'sse',
@@ -78,7 +94,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     console.error('Engineering chat error:', error);
     const message =
       error instanceof NoProviderError ? error.message : (error as Error).message || 'Failed to get AI response';
-    if (!res.headersSent) return res.status(500).json({ error: message });
+    if (!res.headersSent) return res.status(statusForError(error)).json({ error: message });
     res.write(`data: ${JSON.stringify({ type: 'error', message })}\n\n`);
     res.end();
   }

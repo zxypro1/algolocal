@@ -12,6 +12,7 @@
  * 它同时兼容「服务端直接回 JSON」的情况 —— 比如纯保存、或者还没进流就失败了。
  */
 import { createSseParser } from './chatStreamProtocol';
+import { readableErrorBody } from './errorBody';
 
 export interface StructuredStreamHandlers {
   /**
@@ -61,9 +62,11 @@ export async function requestStructuredStream<T>(
     try {
       data = JSON.parse(text);
     } catch {
-      // 不是 JSON 的响应体多半是代理或框架的 HTML 错误页。
-      // 把整页塞进错误提示里只会让用户看到一屏标签，状态码才是有用的那部分。
-      throw new StreamRequestError(`Request failed with ${response.status}`);
+      // 不是 JSON 的响应体可能是一句纯文本的框架错误，也可能是整页 HTML。
+      // 前者留着（有信息），后者只保留状态码（那只是一屏标签）。
+      throw new StreamRequestError(
+        readableErrorBody(text) || `Request failed with ${response.status}`
+      );
     }
     if (!response.ok) {
       throw new StreamRequestError(

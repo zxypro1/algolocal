@@ -7,38 +7,16 @@
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { normalizeCompatibleEndpoint } from '../../src/lib/server/aiProvider';
-import { checkEndpointSyntax, guardedFetch } from '../../src/lib/server/endpointPolicy';
+import {
+  checkEndpointSyntax,
+  describeNetworkError,
+  EndpointPolicyError,
+  guardedFetch,
+} from '../../src/lib/server/endpointPolicy';
+import { looksLikeMarkup, readableErrorBody } from '../../src/lib/errorBody';
 
 // 远程端点可能在地球另一端，10 秒对跨洋链路偏紧
 const TIMEOUT_MS = 20_000;
-
-/**
- * 远程端点失败的原因和本地不一样：DNS、证书、防火墙都可能。
- * 原样抛 fetch 的 "fetch failed" 对用户毫无帮助，这里翻译成能行动的说法。
- */
-function describeNetworkError(error: any, base: string): string {
-  if (error?.name === 'AbortError') {
-    return `No response from ${base} within ${TIMEOUT_MS / 1000}s. If it is remote, check that it is reachable from this machine.`;
-  }
-  const code = error?.cause?.code || error?.code;
-  switch (code) {
-    case 'ENOTFOUND':
-    case 'EAI_AGAIN':
-      return `Cannot resolve the host in ${base}. Check the address for typos.`;
-    case 'ECONNREFUSED':
-      return `${base} refused the connection. Check the port, and that the server is running.`;
-    case 'CERT_HAS_EXPIRED':
-      return `The TLS certificate for ${base} has expired.`;
-    case 'DEPTH_ZERO_SELF_SIGNED_CERT':
-    case 'SELF_SIGNED_CERT_IN_CHAIN':
-    case 'UNABLE_TO_VERIFY_LEAF_SIGNATURE':
-      return `${base} uses a certificate this machine does not trust (self-signed or an unknown CA). Use a trusted certificate, or put the gateway behind one.`;
-    case 'ERR_TLS_CERT_ALTNAME_INVALID':
-      return `The TLS certificate for ${base} does not cover that hostname.`;
-    default:
-      return `Could not reach ${base}: ${error?.message || String(error)}`;
-  }
-}
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
@@ -71,13 +49,27 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     if (!response.ok) {
       const detail = await response.text();
+      const words = readableErrorBody(detail);
       return res.status(502).json({
-        error: `The endpoint answered ${response.status}.`,
-        detail: detail.slice(0, 300),
+        error: words
+          ? `The endpoint answered ${response.status}: ${words}`
+          : `The endpoint answered ${response.status}.`,
       });
     }
 
-    const data = await response.json();
+    // 不要直接 response.json()：它抛的 SyntaxError 会落进下面的 catch，
+    // 被报成「连不上」—— 但这个地址明明答话了，只是答的是一个网页。
+    const payload = await response.text();
+    let data: any;
+    try {
+      data = JSON.parse(payload);
+    } catch {
+      return res.status(502).json({
+        error: looksLikeMarkup(payload)
+          ? `${base} answered with a web page, not JSON. Check that the URL points at the API (it usually ends in /v1).`
+          : `${base} answered with something that is not JSON: ${readableErrorBody(payload)}`,
+      });
+    }
     // OpenAI 的形状是 { data: [{ id }] }；有些实现直接返回数组，两种都收
     const list = Array.isArray(data) ? data : data?.data;
     const models = Array.isArray(list)
@@ -86,7 +78,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     return res.status(200).json({ endpoint: base, models });
   } catch (error: any) {
-    return res.status(502).json({ error: describeNetworkError(error, base) });
+    // 地址被策略拦下时根本没发出请求，报成「连不上」是错的，
+    // 而且它的 message 本来就是写给用户看的那一句
+    if (error instanceof EndpointPolicyError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    return res.status(502).json({ error: describeNetworkError(error, base, TIMEOUT_MS) });
   } finally {
     clearTimeout(timer);
   }

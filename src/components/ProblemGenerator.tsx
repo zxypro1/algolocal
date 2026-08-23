@@ -21,6 +21,7 @@ import {
 } from '@tabler/icons-react';
 import Editor from '@monaco-editor/react';
 import { requestStructuredStream, StreamRequestError } from '../lib/streamRequest';
+import { readableErrorBody } from '../lib/errorBody';
 
 interface GeneratedProblem {
   id: string;
@@ -316,7 +317,17 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
         body: JSON.stringify({ problem: parsed }),
       });
 
-      const data = await response.json();
+      // 这里不能直接 response.json()：它抛的 SyntaxError 会被下面的 catch
+      // 当成「你编辑的 JSON 有问题」，于是用户对着一段完全正确的 JSON 反复改。
+      const payload = await response.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(payload);
+      } catch {
+        throw new Error(
+          readableErrorBody(payload) || `Failed to save problem (HTTP ${response.status})`
+        );
+      }
 
       if (!response.ok) {
         throw new Error(data.error || 'Failed to save problem');

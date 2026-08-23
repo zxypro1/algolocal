@@ -6,10 +6,24 @@ import {
   extractJson,
   NoProviderError,
   streamStructured,
+  statusForError,
 } from '../../src/lib/server/aiProvider';
 import { buildWorkspaceContext, WorkspaceContext } from '../../src/lib/server/engineeringPrompt';
 import { DIMENSION_KEYS } from '../../src/lib/engineering/types';
 import type { AiReview, QualityReport } from '../../src/lib/engineering/types';
+
+/*
+ * 这个路由收的是整个工作区（每个文件的全文 + 最近一次运行报告），
+ * Next 默认的 1mb 一个中等项目就撞穿了，表现是一个 413 —— 功能直接不可用。
+ * 和 generate-project 保持同一个上限。responseLimit 关掉是因为回答是流式的。
+ */
+export const config = {
+  api: {
+    responseLimit: false,
+    bodyParser: { sizeLimit: '8mb' },
+  },
+};
+
 
 interface ReviewRequest {
   context: WorkspaceContext;
@@ -115,7 +129,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   try {
-    const { context, quality, language = 'zh', config } = req.body as ReviewRequest;
+    // aiConfig 而不是 config：模块顶上那个 export const config 是路由配置
+    const { context, quality, language = 'zh', config: aiConfig } = req.body as ReviewRequest;
 
     if (!context || !Array.isArray(context.files) || context.files.length === 0) {
       return res.status(400).json({ error: 'Workspace files are required' });
@@ -139,7 +154,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     ];
 
     // 评审是给人读的长文，没有理由攒到最后一次性甩出来
-    await streamStructured(res, messages, config, {
+    await streamStructured(res, messages, aiConfig, {
       temperature: 0.3,
       maxTokens: 4000,
       signal: abortSignalFor(res),
@@ -157,6 +172,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       res.end();
       return;
     }
-    return res.status(500).json({ error: message });
+    return res.status(statusForError(error)).json({ error: message });
   }
 }
