@@ -369,21 +369,43 @@ function parseChunk(kind: ProviderKind, payload: string): string {
   }
 }
 
+/**
+ * 把上游的流转成一次次 onChunk。
+ *
+ * 无论上游自称什么 content-type，这里一律**按流读**：一个真的流被代理标成
+ * application/json 是常有的事，而按 content-type 分派会让那种情况彻底读不出内容。
+ * 「上游其实没给流」由收尾时的兜底解析发现 —— 那时一条 delta 都还没发出去，
+ * 所以事件顺序（meta 先于正文）依然成立。
+ *
+ * @returns 是否真的是逐块到达的。false 表示上游无视了 stream:true，
+ *          整段内容是一次性拿到的 —— 调用方要如实告诉前端。
+ */
 async function pipeUpstream(
   kind: ProviderKind,
   upstream: Response,
-  onChunk: (text: string) => void
-): Promise<void> {
+  onChunk: (text: string) => void,
+  /** 确认上游不是流时先回调一次，永远早于第一次 onChunk */
+  onNotIncremental: () => void = () => undefined
+): Promise<boolean> {
   const reader = upstream.body?.getReader();
-  if (!reader) return;
+  if (!reader) return false;
 
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
+  /** 一条都没发出去之前，把原文留着，收尾时再兜底解析一次 */
+  let rawSoFar = '';
+  let emitted = false;
+  const emit = (text: string) => {
+    emitted = true;
+    onChunk(text);
+  };
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    const decoded = decoder.decode(value, { stream: true });
+    if (!emitted) rawSoFar += decoded;
+    buffer += decoded;
 
     if (kind === 'ollama') {
       // Ollama 是 NDJSON，不是 SSE
@@ -393,8 +415,8 @@ async function pipeUpstream(
         if (!line.trim()) continue;
         try {
           const json = JSON.parse(line);
-          if (json?.message?.content) onChunk(json.message.content);
-          if (json?.done) return;
+          if (json?.message?.content) emit(json.message.content);
+          if (json?.done) return true;
         } catch {
           // 半行，等下一批
         }
@@ -411,10 +433,29 @@ async function pipeUpstream(
         const payload = trimmed.slice(5).trim();
         if (!payload || payload === '[DONE]') continue;
         const text = parseChunk(kind, payload);
-        if (text) onChunk(text);
+        if (text) emit(text);
       }
     }
   }
+
+  if (emitted) return true;
+
+  /**
+   * 走到这里说明整条流读完了，一个 delta 都没解析出来。
+   * 常见原因：上游无视了 stream:true，回的其实是一整个 JSON。
+   * 与其交出一个空回答，不如把内容捞出来 —— 但要如实报告它不是流。
+   */
+  const tail = rawSoFar + decoder.decode();
+  try {
+    const text = extractContent(kind, JSON.parse(tail.trim()));
+    if (text) {
+      onNotIncremental();
+      onChunk(text);
+    }
+  } catch {
+    // 真的什么都解析不出来，交给上层按空回复处理
+  }
+  return false;
 }
 
 export type StreamFormat = 'sse' | 'text';
@@ -442,8 +483,20 @@ function writeHeaders(res: NextApiResponse, format: StreamFormat): void {
   (res as any).flushHeaders?.();
 }
 
+/**
+ * 写一段并立刻推出去。
+ *
+ * `flush` 只有在响应被压缩中间件包过时才存在（compression 会把 write 攒进
+ * gzip 缓冲区，不 flush 就要等缓冲满或流结束）。当前的部署形态下它不存在，
+ * 这一行是给「哪天前面多了一层压缩」准备的：漏掉它的表现正是所有块一起到达。
+ */
+function writeNow(res: NextApiResponse, chunk: string): void {
+  res.write(chunk);
+  (res as unknown as { flush?: () => void }).flush?.();
+}
+
 function sseEvent(res: NextApiResponse, payload: unknown): void {
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  writeNow(res, `data: ${JSON.stringify(payload)}\n\n`);
 }
 
 /**
@@ -464,13 +517,24 @@ export async function streamAI(
 
   const emit = (text: string) => {
     if (format === 'sse') sseEvent(res, { type: 'delta', text });
-    else res.write(text);
+    else writeNow(res, text);
+  };
+
+  /**
+   * 这一段不是逐字来的，就明说。
+   *
+   * 假流式的本质不是「一次性到达」——上游不给流我们也变不出来——
+   * 而是**假装**它是逐字到达的。前端拿到这个事件可以照实提示用户。
+   */
+  const declareNotIncremental = () => {
+    if (format === 'sse') sseEvent(res, { type: 'meta', incremental: false });
   };
 
   try {
     if (!provider.capabilities.supportsStreaming) {
       const text = await callAI(messages, config, options);
       writeHeaders(res, format);
+      declareNotIncremental();
       emit(text);
     } else {
       const upstream = await fetchUpstream(
@@ -479,7 +543,7 @@ export async function streamAI(
         provider.kind === 'compatible'
       );
       writeHeaders(res, format);
-      await pipeUpstream(provider.kind, upstream, emit);
+      await pipeUpstream(provider.kind, upstream, emit, declareNotIncremental);
     }
 
     if (format === 'sse') sseEvent(res, { type: 'done' });
@@ -499,6 +563,94 @@ export async function streamAI(
     }
     if (format === 'sse') sseEvent(res, { type: 'error', message });
     else res.write(`\n\n[error] ${message}`);
+    res.end();
+  }
+}
+
+export interface StructuredStreamOptions<T> extends Omit<StreamOptions, 'format'> {
+  /**
+   * 流结束之后拿完整原文做的事：解析、校验、落库，返回要发给前端的结果。
+   * 抛错会变成流里的 error 事件（附带 details，前端可以拿原文兜底）。
+   */
+  onComplete: (raw: string) => Promise<unknown> | unknown;
+}
+
+export class StructuredStreamError extends Error {
+  details: unknown;
+
+  constructor(message: string, details?: unknown) {
+    super(message);
+    this.name = 'StructuredStreamError';
+    this.details = details;
+  }
+}
+
+/**
+ * 生成类接口的流式版本。
+ *
+ * 这类接口最终要的是结构化结果（题目、项目、评审），但**没有理由让用户对着
+ * 转圈等一分钟**：模型的原文照样可以边写边看，结构化结果在流的末尾发一次。
+ *
+ * 正文走 delta，结果走 result —— 前端两样都能拿到，不必二选一。
+ */
+export async function streamStructured<T>(
+  res: NextApiResponse,
+  messages: ChatMessage[],
+  config: AIProviderConfig | undefined,
+  options: StructuredStreamOptions<T>
+): Promise<void> {
+  const provider = resolveProvider(config, options.maxTokens ?? 4000);
+  const temperature = options.temperature ?? 0.7;
+  let raw = '';
+
+  try {
+    let incremental = true;
+    if (!provider.capabilities.supportsStreaming) {
+      raw = await callAI(messages, config, options);
+      writeHeaders(res, 'sse');
+      incremental = false;
+      sseEvent(res, { type: 'meta', incremental: false });
+      sseEvent(res, { type: 'delta', text: raw });
+    } else {
+      const upstream = await fetchUpstream(
+        buildRequest(provider, messages, { stream: true, temperature }),
+        options.signal,
+        provider.kind === 'compatible'
+      );
+      writeHeaders(res, 'sse');
+      incremental = await pipeUpstream(
+        provider.kind,
+        upstream,
+        (text) => {
+          raw += text;
+          sseEvent(res, { type: 'delta', text });
+        },
+        () => sseEvent(res, { type: 'meta', incremental: false })
+      );
+    }
+    void incremental;
+
+    // 到这里正文已经全部发出去了，剩下的是解析和落库
+    const result = await options.onComplete(raw);
+    sseEvent(res, { type: 'result', result });
+    sseEvent(res, { type: 'done' });
+    res.end();
+  } catch (error) {
+    if ((error as Error)?.name === 'AbortError' || options.signal?.aborted) {
+      res.end();
+      return;
+    }
+
+    const message = (error as Error).message || 'AI request failed';
+    const details = error instanceof StructuredStreamError ? error.details : undefined;
+
+    // 头还没发出去时仍然用 HTTP 状态码报错，保持老调用方的行为
+    if (!res.headersSent) {
+      res.status(500).json({ error: message, details, rawContent: raw || undefined });
+      return;
+    }
+    sseEvent(res, { type: 'error', message, details });
+    sseEvent(res, { type: 'done' });
     res.end();
   }
 }

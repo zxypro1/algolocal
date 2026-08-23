@@ -20,6 +20,7 @@ import {
   IconDeviceFloppy
 } from '@tabler/icons-react';
 import Editor from '@monaco-editor/react';
+import { requestStructuredStream, StreamRequestError } from '../lib/streamRequest';
 
 interface GeneratedProblem {
   id: string;
@@ -50,6 +51,8 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [generatedProblem, setGeneratedProblem] = useState<GeneratedProblem | null>(null);
+  /** 模型正在写的原文。它比一个转圈的图标能说明的多得多。 */
+  const [draft, setDraft] = useState('');
   const [providersLoading, setProvidersLoading] = useState(true);
   const [canGenerate, setCanGenerate] = useState(false);
   const [isUsingLocalAI, setIsUsingLocalAI] = useState(false);
@@ -242,6 +245,7 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
     setShowJsonEditor(false);
     setJsonContent('');
     setJsonError(null);
+    setDraft('');
 
     try {
       // Prepare request body - config contains selectedProvider from settings
@@ -261,37 +265,29 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
         }
       }
 
-      const response = await fetch('/api/generate-problem', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(requestBody),
-      });
+      // 模型的原文边写边显示，结构化结果在流末尾拿到
+      const data = await requestStructuredStream<{ problem: any; message: string }>(
+        '/api/generate-problem',
+        requestBody,
+        { onDelta: (_chunk, full) => setDraft(full) }
+      );
 
-      const data = await response.json();
+      setGeneratedProblem(data.problem);
+      setSuccess(data.message);
 
-      if (!response.ok) {
-        // Check if it's a JSON parsing error
-        if (data.error && data.error.includes('Failed to parse generated problem data')) {
-          // Show JSON editor for user to fix the problem
-          setShowJsonEditor(true);
-          setJsonContent(data.rawContent || data.details || '');
-          setError(t('aiGenerator.jsonParseError'));
-        } else {
-          throw new Error(data.error || 'Failed to generate problem');
-        }
-      } else {
-        setGeneratedProblem(data.problem);
-        setSuccess(data.message);
-        
-        if (onProblemGenerated) {
-          onProblemGenerated(data.problem);
-        }
+      if (onProblemGenerated) {
+        onProblemGenerated(data.problem);
       }
-
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to generate problem');
+      const failure = err as StreamRequestError;
+      // JSON 解析失败时服务端会把原文附在 details 上，交给编辑器让用户手动修
+      if (failure?.message?.includes('Failed to parse generated problem data')) {
+        setShowJsonEditor(true);
+        setJsonContent(typeof failure.details === 'string' ? failure.details : '');
+        setError(t('aiGenerator.jsonParseError'));
+      } else {
+        setError(failure instanceof Error ? failure.message : 'Failed to generate problem');
+      }
     } finally {
       setLoading(false);
     }
@@ -480,6 +476,27 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
               </Button>
             )}
           </Group>
+
+          {/* 模型正在写的原文：让「还在生成」这件事有内容可看，而不只是一个转圈 */}
+          {loading && draft && (
+            <Card withBorder radius="md" padding="sm">
+              <Text size="xs" c="dimmed" mb={6}>
+                {t('aiGenerator.generating')}
+              </Text>
+              <Box
+                style={{
+                  maxHeight: 220,
+                  overflow: 'auto',
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                }}
+              >
+                {draft.slice(-4000)}
+              </Box>
+            </Card>
+          )}
 
           {/* Error Display */}
           {error && !showJsonEditor && (
