@@ -7,7 +7,7 @@
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { normalizeCompatibleEndpoint } from '../../src/lib/server/aiProvider';
-import { blocksPrivateNetwork, checkEndpoint } from '../../src/lib/server/endpointPolicy';
+import { checkEndpointSyntax, guardedFetch } from '../../src/lib/server/endpointPolicy';
 
 // 远程端点可能在地球另一端，10 秒对跨洋链路偏紧
 const TIMEOUT_MS = 20_000;
@@ -53,29 +53,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   // 这个路由按定义就是「去请求用户填的地址」。桌面版和自托管下这没有问题
   // （用户本来就能直接 curl），公网部署则由 endpointPolicy 按环境变量拦内网。
-  const verdict = checkEndpoint(`${base}/models`);
+  const verdict = checkEndpointSyntax(`${base}/models`);
   if (!verdict.ok) {
     return res.status(400).json({ error: verdict.reason });
   }
-  const target = new URL(`${base}/models`);
+  const target = `${base}/models`;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
-    const response = await fetch(target, {
+    // guardedFetch 负责内网判定与逐跳校验重定向
+    const response = await guardedFetch(target, {
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
       signal: controller.signal,
-      // 开了内网拦截时不能跟随重定向：否则一个公网地址可以 302 到
-      // 169.254.169.254，把刚才的检查绕过去。
-      redirect: blocksPrivateNetwork() ? 'manual' : 'follow',
     });
-
-    if (blocksPrivateNetwork() && response.status >= 300 && response.status < 400) {
-      return res.status(502).json({
-        error: 'The endpoint redirected, which this deployment does not follow. Use the final URL directly.',
-      });
-    }
 
     if (!response.ok) {
       const detail = await response.text();

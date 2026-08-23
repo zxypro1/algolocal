@@ -9,7 +9,8 @@
  *    并且客户端断开时把上游请求一起 abort 掉，不再白烧 token。
  */
 import type { NextApiResponse } from 'next';
-import { checkEndpoint, isPrivateHostname } from './endpointPolicy';
+import { guardedFetch } from './endpointPolicy';
+import { isPrivateHostname } from '../endpointHosts';
 import {
   capabilitiesFor,
   DEFAULT_MODELS,
@@ -283,21 +284,25 @@ function buildRequest(
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
-async function fetchUpstream(request: UpstreamRequest, signal?: AbortSignal): Promise<Response> {
-  // 聊天请求本身也会打到用户填的地址上，所以 SSRF 面不只是「列模型」那个路由。
-  // 公网部署开了拦截时，这里同样要挡。
-  const verdict = checkEndpoint(request.url);
-  if (!verdict.ok) {
-    throw new Error(verdict.reason || 'This endpoint is not allowed.');
-  }
-
+async function fetchUpstream(
+  request: UpstreamRequest,
+  signal?: AbortSignal,
+  /**
+   * 地址是不是用户填的。只有 compatible 是 —— 其余厂商的 URL 写死在代码里，
+   * 拿它们过内网策略只会误伤（Ollama 的默认地址就是 127.0.0.1）。
+   */
+  userSuppliedUrl = false
+): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
   // 客户端断开 -> 连带取消上游，不再为没人看的回答付费
   signal?.addEventListener('abort', () => controller.abort(), { once: true });
 
   try {
-    const response = await fetch(request.url, {
+    // 聊天请求打的是同一个用户填的地址，所以 SSRF 面不只是「列模型」那个路由；
+    // guardedFetch 会逐跳校验重定向。
+    const send = userSuppliedUrl ? guardedFetch : fetch;
+    const response = await send(request.url, {
       method: 'POST',
       headers: request.headers,
       body: JSON.stringify(request.body),
@@ -343,7 +348,7 @@ export async function callAI(
     stream: false,
     temperature: options.temperature ?? 0.7,
   });
-  const response = await fetchUpstream(request, options.signal);
+  const response = await fetchUpstream(request, options.signal, provider.kind === 'compatible');
   return extractContent(provider.kind, await response.json());
 }
 
@@ -470,7 +475,8 @@ export async function streamAI(
     } else {
       const upstream = await fetchUpstream(
         buildRequest(provider, messages, { stream: true, temperature }),
-        options.signal
+        options.signal,
+        provider.kind === 'compatible'
       );
       writeHeaders(res, format);
       await pipeUpstream(provider.kind, upstream, emit);

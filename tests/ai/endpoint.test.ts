@@ -4,7 +4,7 @@
  * 这层的判断会决定「API Key 明文发到哪」和「服务端愿意去请求谁」，
  * 错一个网段就是一个 SSRF 缺口，所以逐段钉住。
  */
-import { isInsecureRemote, isPrivateHostname, looksRemote } from '../../src/lib/endpointHosts';
+import { isInsecureRemote, isPrivateHostname, isPrivateIp, looksRemote } from '../../src/lib/endpointHosts';
 import { checkEndpoint } from '../../src/lib/server/endpointPolicy';
 import { normalizeCompatibleEndpoint } from '../../src/lib/server/aiProvider';
 
@@ -57,26 +57,39 @@ describe('endpoint policy', () => {
     else process.env.AI_ENDPOINT_BLOCK_PRIVATE_NETWORK = saved;
   });
 
-  it('allows anything http(s) by default, which is right for desktop and self-hosted', () => {
+  it('allows anything http(s) by default, which is right for desktop and self-hosted', async () => {
     delete process.env.AI_ENDPOINT_BLOCK_PRIVATE_NETWORK;
-    expect(checkEndpoint('http://localhost:1234/v1/models').ok).toBe(true);
-    expect(checkEndpoint('https://gw.example.com/v1/models').ok).toBe(true);
-    expect(checkEndpoint('http://169.254.169.254/latest/meta-data/').ok).toBe(true);
+    expect((await checkEndpoint('http://localhost:1234/v1/models')).ok).toBe(true);
+    expect((await checkEndpoint('http://169.254.169.254/latest/meta-data/')).ok).toBe(true);
   });
 
-  it('rejects non-http schemes regardless of deployment', () => {
+  it('rejects non-http schemes regardless of deployment', async () => {
     delete process.env.AI_ENDPOINT_BLOCK_PRIVATE_NETWORK;
-    expect(checkEndpoint('file:///etc/passwd').ok).toBe(false);
-    expect(checkEndpoint('gopher://x/1').ok).toBe(false);
+    expect((await checkEndpoint('file:///etc/passwd')).ok).toBe(false);
+    expect((await checkEndpoint('gopher://x/1')).ok).toBe(false);
   });
 
-  it('blocks private and loopback targets once a public deployment opts in', () => {
+  it('blocks private and loopback targets once a public deployment opts in', async () => {
     process.env.AI_ENDPOINT_BLOCK_PRIVATE_NETWORK = '1';
-    expect(checkEndpoint('http://169.254.169.254/latest/meta-data/').ok).toBe(false);
-    expect(checkEndpoint('http://localhost:1234/v1/models').ok).toBe(false);
-    expect(checkEndpoint('http://10.0.0.5/v1/models').ok).toBe(false);
-    // 公网地址仍然放行，否则这个开关等于关掉整个功能
-    expect(checkEndpoint('https://gw.example.com/v1/models').ok).toBe(true);
+    expect((await checkEndpoint('http://169.254.169.254/latest/meta-data/')).ok).toBe(false);
+    expect((await checkEndpoint('http://localhost:1234/v1/models')).ok).toBe(false);
+    expect((await checkEndpoint('http://10.0.0.5/v1/models')).ok).toBe(false);
+  });
+
+  it('is not fooled by equivalent spellings of a loopback address', async () => {
+    process.env.AI_ENDPOINT_BLOCK_PRIVATE_NETWORK = '1';
+    // WHATWG URL 会把 [::ffff:127.0.0.1] 规范化成 [::ffff:7f00:1]，
+    // 只比字符串的实现会在这里漏掉
+    for (const url of [
+      'http://[::ffff:127.0.0.1]:11434/v1/models',
+      'http://[::ffff:7f00:1]:11434/v1/models',
+      'http://[::ffff:a9fe:a9fe]/latest/meta-data/',
+      'http://[::1]:1234/v1/models',
+      'http://0.0.0.0:1234/v1/models',
+      'http://100.64.0.1/v1/models',
+    ]) {
+      expect([url, (await checkEndpoint(url)).ok]).toEqual([url, false]);
+    }
   });
 });
 
@@ -91,5 +104,30 @@ describe('warnings the settings page shows', () => {
     expect(isInsecureRemote('https://gw.example.com/v1')).toBe(false);
     // 本地明文没问题，不该报警
     expect(isInsecureRemote('http://localhost:1234/v1')).toBe(false);
+  });
+});
+
+describe('IP-level classification is the actual boundary', () => {
+  it('recognises loopback written as IPv4-mapped IPv6 in either spelling', () => {
+    expect(isPrivateIp('::ffff:127.0.0.1')).toBe(true);
+    expect(isPrivateIp('::ffff:7f00:1')).toBe(true);      // 同一个地址的十六进制写法
+    expect(isPrivateIp('::ffff:a9fe:a9fe')).toBe(true);   // 169.254.169.254
+    expect(isPrivateIp('::ffff:8.8.8.8')).toBe(false);
+  });
+
+  it('covers CGNAT, which is private but easy to forget', () => {
+    expect(isPrivateIp('100.64.0.1')).toBe(true);
+    expect(isPrivateIp('100.128.0.1')).toBe(false);
+  });
+});
+
+describe('LAN hostnames keep working', () => {
+  it('treats single-label and LAN-suffixed hosts as local, so http is kept', () => {
+    // 这些是真实存在的配置：把它们判成远程会自动补 https，直接连不上
+    for (const host of ['gpu-box', 'nas', 'nas.lan', 'server.home', 'svc.internal']) {
+      expect([host, isPrivateHostname(host)]).toEqual([host, true]);
+    }
+    expect(normalizeCompatibleEndpoint('gpu-box:1234')).toBe('http://gpu-box:1234/v1');
+    expect(normalizeCompatibleEndpoint('nas.lan:8000')).toBe('http://nas.lan:8000/v1');
   });
 });
