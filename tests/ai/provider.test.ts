@@ -119,6 +119,34 @@ describe('provider resolution', () => {
 });
 
 describe('OpenAI-compatible endpoint', () => {
+  // next/jest 会加载 .env，所以真配了这个功能的人跑测试时环境里就有这几个变量。
+  // 不清掉的话，下面「没配模型就不该被选中」这类断言会被环境里的值弄假。
+  const envKeys = [
+    'OPENAI_COMPATIBLE_ENDPOINT',
+    'OPENAI_COMPATIBLE_MODEL',
+    'OPENAI_COMPATIBLE_API_KEY',
+    'DEEPSEEK_API_KEY',
+    'OPENAI_API_KEY',
+    'QWEN_API_KEY',
+    'CLAUDE_API_KEY',
+    'OLLAMA_MODEL',
+  ];
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    envKeys.forEach((key) => {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    });
+  });
+
+  afterEach(() => {
+    envKeys.forEach((key) => {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    });
+  });
+
   it('appends /v1 only when the address carries no path of its own', () => {
     // LM Studio 的地址，两种写法的人一样多
     expect(normalizeCompatibleEndpoint('http://localhost:1234')).toBe('http://localhost:1234/v1');
@@ -130,6 +158,13 @@ describe('OpenAI-compatible endpoint', () => {
     );
     expect(normalizeCompatibleEndpoint('  http://localhost:1234/v1//  ')).toBe(
       'http://localhost:1234/v1'
+    );
+    // 没写协议头的写法也很常见。注意 new URL('localhost:1234') 会把 localhost:
+    // 当成协议，所以这里必须先补 http:// 再解析。
+    expect(normalizeCompatibleEndpoint('localhost:1234')).toBe('http://localhost:1234/v1');
+    expect(normalizeCompatibleEndpoint('127.0.0.1:1234/v1')).toBe('http://127.0.0.1:1234/v1');
+    expect(normalizeCompatibleEndpoint('https://gw.example.com/v1')).toBe(
+      'https://gw.example.com/v1'
     );
   });
 

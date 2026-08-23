@@ -21,11 +21,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(400).json({ error: 'An endpoint is required.' });
   }
 
+  // 这个路由按定义就是「去请求用户填的地址」，但也别让它变成一个万能的
+  // 服务端探测器：限定 http/https，挡掉 file:、gopher: 之类的协议。
+  // 部署成公网服务时这里应该再加一层内网地址白名单/黑名单。
+  let target: URL;
+  try {
+    target = new URL(`${base}/models`);
+  } catch {
+    return res.status(400).json({ error: `Not a valid URL: ${base}` });
+  }
+  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    return res.status(400).json({ error: 'Only http and https endpoints are supported.' });
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
-    const response = await fetch(`${base}/models`, {
+    const response = await fetch(target, {
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
       signal: controller.signal,
     });

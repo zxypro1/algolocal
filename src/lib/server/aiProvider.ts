@@ -68,17 +68,26 @@ export class SelectedProviderUnavailableError extends NoProviderError {
  * 一旦用户明确写了路径就原样尊重，因为不是所有兼容服务都挂在 /v1 下。
  */
 export function normalizeCompatibleEndpoint(raw: string): string {
-  const trimmed = (raw || '').trim().replace(/\/+$/, '');
+  let trimmed = (raw || '').trim().replace(/\/+$/, '');
   if (!trimmed) return trimmed;
+
+  // 少了协议头就补 http://。注意不能直接丢给 new URL：
+  // 'localhost:1234' 会被解析成协议 "localhost:"、路径 "1234"，
+  // 于是既补不上 /v1，最后 fetch 还会因为未知协议报一个看不懂的错。
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+    trimmed = `http://${trimmed}`;
+  }
+
   try {
     const url = new URL(trimmed);
     if (url.pathname === '' || url.pathname === '/') {
       return `${url.origin}/v1`;
     }
+    return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
   } catch {
-    // 不是合法 URL 就原样返回，让后面的请求自己报错，错误信息比这里猜更有用
+    // 实在解析不了就原样返回，让请求自己报错 —— 那个错误信息比这里瞎猜更有用
+    return trimmed;
   }
-  return trimmed;
 }
 
 const AUTO_ORDER: ProviderKind[] = ['deepseek', 'openai', 'qwen', 'claude', 'ollama', 'compatible'];

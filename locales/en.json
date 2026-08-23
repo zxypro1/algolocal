@@ -280,6 +280,7 @@
     "unlimitedProblems": "Generate unlimited coding problems",
     "usingOnlineAI": "Using Online AI ({{provider}})",
     "usingLocalAI": "Using Local AI (Ollama)",
+    "usingCompatibleAI": "Using an OpenAI-compatible endpoint",
     "changeInSettings": "Change in Settings",
     "selectAIProvider": "Select AI Provider",
     "autoSelect": "Auto",

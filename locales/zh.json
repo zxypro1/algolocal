@@ -280,6 +280,7 @@
     "unlimitedProblems": "生成无限编程题目",
     "usingOnlineAI": "使用在线 AI ({{provider}})",
     "usingLocalAI": "使用本地 AI (Ollama)",
+    "usingCompatibleAI": "使用 OpenAI 兼容端点",
     "changeInSettings": "在设置中更改",
     "selectAIProvider": "选择 AI 提供商",
     "autoSelect": "自动选择",
