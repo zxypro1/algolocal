@@ -3177,6 +3177,8 @@ const stage5 = {
 
             expect(context.queue.deadLetters()).toHaveLength(1);
             expect(context.queue.poll(1)).toEqual([]);
+            // 进了死信就不该再算在飞
+            expect(context.queue.inflight()).toBe(0);
           });
 
           it('死信之后 ack 旧凭据不再生效', async () => {
@@ -3289,6 +3291,8 @@ const stage5 = {
           let nextReceipt = 0;
 
           function retire(entry: PendingEntry, reason: string): void {
+            // 连同凭据一起收掉：超时进死信的那条路径上，旧凭据还挂在 outstanding 里
+            outstanding.delete(entry.receipt);
             pending.delete(entry.record.offset);
             dead.push({ record: entry.record, attempts: entry.attempts, reason });
           }
@@ -5826,7 +5830,8 @@ const stage9 = {
 
           it('压缩不会重置保留时钟', async () => {
             const context = makeKeeper(HUGE, 1000);
-            fill(context.keeper, 40, 40);
+            // 25 个 key 循环写 40 条，压缩才有活可干
+            fill(context.keeper, 40, 25);
 
             await sleep(1000);
             context.keeper.append('later', valueOf(99));
