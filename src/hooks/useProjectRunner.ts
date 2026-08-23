@@ -52,7 +52,10 @@ async function runInline(payload: RunPayload): Promise<StageRunReport> {
   const { trace: wantsTrace, traceFiles, ...rest } = payload;
   const recorder = wantsTrace ? createTraceRecorder() : null;
   // 主线程回退路径也要能录，否则「Worker 不可用」的环境等于没有调试
-  const ts = (globalThis as any).ts || (await import('typescript'));
+  // import() 回来的是命名空间对象 { default: ts }，直接丢给 instrumentSource
+  // 会抛，然后被 wrapTranspile 的 catch 吞掉 —— 表现为「录了个空轨迹，还不报错」。
+  const tsModule: any = await import('typescript');
+  const ts = tsModule.default || tsModule;
   const report = await runStage({
     ...rest,
     transpile,

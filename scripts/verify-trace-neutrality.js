@@ -94,13 +94,17 @@ async function main() {
 
   for (const project of selected) {
     console.log(`\n${project.id}`);
+    // 关卡是累积的：后面的关会 import 前面几关的文件。
+    // 只用本关的文件会让 11 关在跑第一条用例之前就死于模块找不到 ——
+    // 两次运行同样失败、指纹相同，于是脚本照样打勾。那不是「验证通过」。
+    let carried = { ...toFileMap(project.files) };
     for (const stage of project.stages) {
-      // 参考实现 = 这一关的正确答案，指标应该稳定可复现
       const files = {
-        ...toFileMap(project.files),
+        ...carried,
         ...toFileMap(stage.starterFiles),
         ...toFileMap(stage.referenceFiles),
       };
+      carried = files;
       const base = { files, specs: stage.specs, lab: stage.lab, gates: stage.gates, transpile };
 
       const plain = await runStage(base);
@@ -116,6 +120,14 @@ async function main() {
       const a = stableStringify(metricFingerprint(plain));
       const b = stableStringify(metricFingerprint(traced));
       checked += 1;
+
+      // 整关跑不起来（模块找不到之类）时两边都是 0 用例，指纹当然相同。
+      // 这种「一致」毫无意义，必须单独报出来，否则覆盖率就是假的。
+      if (plain.cases.length === 0) {
+        mismatches += 1;
+        console.log(`  ✗ ${stage.id.padEnd(22)} 这一关根本没跑起来（0 条用例），无法验证`);
+        continue;
+      }
 
       if (a === b) {
         console.log(`  ✓ ${stage.id.padEnd(22)} 指标一致（轨迹 ${recorder.trace.steps.length} 步）`);

@@ -16,9 +16,12 @@ import {
 export interface TraceRecorder {
   /** 注入给插桩代码的对象 */
   api: {
-    enter(fn: string): void;
-    exit(): void;
-    step(line: number, vars: Record<string, unknown>, file?: string): void;
+    /** 返回这次调用的帧 id，插桩代码会把它带在每一步上 */
+    /** 调用发生前由调用方宣告自己是谁，好让被调方的 enter 找到正确的父帧 */
+    at(frame: number): void;
+    enter(fn: string): number;
+    exit(frame: number): void;
+    step(line: number, vars: Record<string, unknown>, file?: string, frame?: number): void;
   };
   trace: ExecutionTrace;
 }
@@ -74,9 +77,28 @@ export function createTraceRecorder(
   breakpoints: Breakpoint[] = []
 ): TraceRecorder {
   const steps: TraceStep[] = [];
-  const stack: string[] = [entryName];
   let dropped = 0;
   let hitsAfterCap = 0;
+
+  /**
+   * 每次函数调用一个「帧」，帧在进入时把自己的调用栈固定下来。
+   *
+   * 不能让每一步去读一个共享的 LIFO 栈：工程题全是 async，两个协程交替
+   * 推进时，await 之后的步会被算到另一个函数头上 —— 实测 alpha 的语句
+   * 会显示成 fn=beta。进入时刻是同步发生在调用者体内的，那一刻的父帧是准的，
+   * 所以把栈在进入时算好、之后每一步都引用自己的帧。
+   */
+  interface Frame {
+    name: string;
+    stack: string[];
+    depth: number;
+    live: boolean;
+  }
+  const rootFrame: Frame = { name: entryName, stack: [entryName], depth: 0, live: true };
+  const frames = new Map<number, Frame>([[0, rootFrame]]);
+  let nextFrameId = 1;
+  /** 当前正在执行的帧。每条 step 都会更新它，所以嵌套调用能找到正确的父帧。 */
+  let currentFrame = 0;
 
   // 按行建索引：每一步都遍历一遍断点列表太浪费
   const byLine = new Map<number, Breakpoint[]>();
@@ -97,14 +119,43 @@ export function createTraceRecorder(
   return {
     trace,
     api: {
-      enter(fn: string) {
-        stack.push(fn);
+      at(frame: number) {
+        if (frames.has(frame)) currentFrame = frame;
       },
-      exit() {
-        // 保底：栈底那一层不弹，插桩配对出问题时也不至于把栈掏空
-        if (stack.length > 1) stack.pop();
+      enter(fn: string): number {
+        // 进入是同步发生在调用者体内的，此刻的 currentFrame 就是真正的调用者
+        const parent = frames.get(currentFrame) || rootFrame;
+        const id = nextFrameId++;
+        frames.set(id, {
+          name: fn,
+          stack: [...parent.stack, fn],
+          depth: parent.depth + 1,
+          live: true,
+        });
+        currentFrame = id;
+        return id;
       },
-      step(line: number, vars: Record<string, unknown>, file?: string) {
+      exit(frame: number) {
+        const target = frames.get(frame);
+        if (target) target.live = false;
+        // 回到调用者：帧自己记着父链，不依赖弹栈顺序，
+        // 所以 await 之后乱序退出也不会把归属搞错
+        if (currentFrame === frame) {
+          const parentName = target?.stack[target.stack.length - 2];
+          for (const [id, candidate] of frames) {
+            if (candidate.live && candidate.name === parentName && candidate.depth === (target?.depth ?? 1) - 1) {
+              currentFrame = id;
+              break;
+            }
+          }
+        }
+        // 帧用完就丢，否则一轮跑下来 Map 会一直涨
+        if (!target?.live) frames.delete(frame);
+      },
+      step(line: number, vars: Record<string, unknown>, file?: string, frame?: number) {
+        // 这一步属于哪个帧由插桩直接给出，不去猜共享栈的栈顶
+        const own = (frame !== undefined && frames.get(frame)) || frames.get(currentFrame) || rootFrame;
+        if (frame !== undefined) currentFrame = frame;
         // 先算断点，再考虑是否要记录：命中的步永远值得留下
         const active = byLine.get(line);
         let hit = false;
@@ -168,10 +219,10 @@ export function createTraceRecorder(
         steps.push({
           line,
           ...(file ? { file } : {}),
-          depth: stack.length - 1,
-          fn: stack[stack.length - 1],
+          depth: own.depth,
+          fn: own.name,
           vars: snapshot,
-          stack: [...stack],
+          stack: [...own.stack],
           ...(hit ? { hit: true } : {}),
           ...(logText !== undefined ? { log: logText } : {}),
         });

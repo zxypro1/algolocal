@@ -86,6 +86,7 @@ export default function ProjectWorkspacePage() {
 
   const [leftTab, setLeftTab] = useState<string>('stage');
   const [bottomTab, setBottomTab] = useState<string>('tests');
+  const [tracedSources, setTracedSources] = useState<Record<string, string>>({});
   const [leftWidth, setLeftWidth] = useState(34);
   const [bottomHeight, setBottomHeight] = useState(300);
   const [dragging, setDragging] = useState<'horizontal' | 'vertical' | null>(null);
@@ -335,6 +336,10 @@ export default function ProjectWorkspacePage() {
 
     setBottomTab(options?.trace ? 'trace' : 'tests');
     flushSave();
+    if (options?.trace) {
+      // 录制用的源码快照，播放器按它渲染
+      setTracedSources(Object.fromEntries(files.map((file) => [file.path, file.content])));
+    }
     const result = await run({
       files: toFileMap(files),
       specs: stage.specs,
@@ -866,8 +871,9 @@ export default function ProjectWorkspacePage() {
                       {report?.trace && report.trace.steps.length > 0 ? (
                         <TracePlayer
                           trace={report.trace}
-                          // 轨迹里的每一步都带文件名，播放器按当前步所在文件取源码
-                          sourceOf={(file: string) => files.find((f) => f.path === file)?.content || ''}
+                          // 取录制那一刻的快照，不是当前编辑器内容：
+                          // 录完继续改代码的话，行号会整体错位，高亮指到别的行去。
+                          sourceOf={(file: string) => tracedSources[file] ?? ''}
                           note={t('engineering.trace.note')}
                         />
                       ) : (

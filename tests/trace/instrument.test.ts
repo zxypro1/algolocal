@@ -339,3 +339,30 @@ describe('breakpoints', () => {
     expect(trace.steps.some((step) => step.hit)).toBe(false);
   });
 });
+
+describe('async attribution', () => {
+  it('keeps steps with their own function when two async calls interleave', async () => {
+    // 共享一个 LIFO 栈的写法在这里会把 alpha 的语句记成 fn=beta：
+    // await 挂起之后两个协程交替推进，退出顺序和进入顺序对不上。
+    // depth 也会跟着歪，而单步跳过/跳出正是按 depth 走的。
+    const { result, trace } = runTraced(
+      `async function alpha(n) { const a = n + 1; await Promise.resolve(); const afterA = a * 2; return afterA; }
+       async function beta(n) { const b = n + 10; await Promise.resolve(); const afterB = b * 3; return afterB; }
+       async function run() { const [x, y] = await Promise.all([alpha(1), beta(2)]); return x + y; }
+       module.exports = run;`
+    );
+    await expect(result as Promise<number>).resolves.toBe(40);
+
+    const find = (variable: string) =>
+      trace.steps.find((step) => step.vars.some((v) => v.name === variable));
+
+    const afterA = find('afterA');
+    const afterB = find('afterB');
+    expect(afterA?.fn).toBe('alpha');
+    expect(afterB?.fn).toBe('beta');
+    // 两者都是 run 的直接被调方，深度必须相同
+    expect(afterA?.depth).toBe(afterB?.depth);
+    expect(afterA?.stack).toEqual(['(top level)', 'run', 'alpha']);
+    expect(afterB?.stack).toEqual(['(top level)', 'run', 'beta']);
+  });
+});

@@ -37,6 +37,15 @@ function collectBindingNames(ts: TsModule, name: AnyNode, out: string[]): void {
   }
 }
 
+/** 别把插桩自己的调用再包一层 */
+function isRecorderCall(node: AnyNode): boolean {
+  const expr = node.expression;
+  return Boolean(
+    expr && expr.expression && expr.expression.escapedText &&
+    String(expr.expression.escapedText).startsWith('__trace')
+  );
+}
+
 function functionDisplayName(ts: TsModule, node: AnyNode): string {
   if (node.name && ts.isIdentifier(node.name)) return node.name.text;
   // const f = () => {} / const f = function () {}
@@ -150,6 +159,10 @@ export function instrumentSource(
       return out.reverse();
     };
 
+    /** 当前正在生成的函数体所用的帧变量名；顶层为 undefined */
+    let frameVar: string | undefined;
+    let frameCounter = 0;
+
     const makeStepCall = (line: number): AnyNode => {
       const names = visibleNames();
       const props = names.map((name) =>
@@ -168,27 +181,43 @@ export function instrumentSource(
           [
             factory.createNumericLiteral(line),
             factory.createObjectLiteralExpression(props, false),
-            ...(options.filePath ? [factory.createStringLiteral(options.filePath)] : []),
+            // 帧 id 是第四个参数，文件名是第三个 —— 带帧就必须把文件位补上
+            ...(options.filePath || frameVar
+              ? [factory.createStringLiteral(options.filePath || '')]
+              : []),
+            ...(frameVar ? [factory.createIdentifier(frameVar)] : []),
           ]
         )
       );
     };
 
-    const makeEnterCall = (name: string): AnyNode =>
-      factory.createExpressionStatement(
-        factory.createCallExpression(
-          factory.createPropertyAccessExpression(factory.createIdentifier(recorder), 'enter'),
-          undefined,
-          [factory.createStringLiteral(name)]
+    /** const __frN = __trace.enter("name") —— 帧 id 存成本次调用的局部常量 */
+    const makeEnterCall = (name: string, varName: string): AnyNode =>
+      factory.createVariableStatement(
+        undefined,
+        factory.createVariableDeclarationList(
+          [
+            factory.createVariableDeclaration(
+              varName,
+              undefined,
+              undefined,
+              factory.createCallExpression(
+                factory.createPropertyAccessExpression(factory.createIdentifier(recorder), 'enter'),
+                undefined,
+                [factory.createStringLiteral(name)]
+              )
+            ),
+          ],
+          ts.NodeFlags.Const
         )
       );
 
-    const makeExitCall = (): AnyNode =>
+    const makeExitCall = (varName: string): AnyNode =>
       factory.createExpressionStatement(
         factory.createCallExpression(
           factory.createPropertyAccessExpression(factory.createIdentifier(recorder), 'exit'),
           undefined,
-          []
+          [factory.createIdentifier(varName)]
         )
       );
 
@@ -266,8 +295,32 @@ export function instrumentSource(
       return node;
     };
 
+    /** __trace.at(__frN) —— 在调用真正发生之前宣告调用方 */
+    const makeAtCall = (varName: string): AnyNode =>
+      factory.createCallExpression(
+        factory.createPropertyAccessExpression(factory.createIdentifier(recorder), 'at'),
+        undefined,
+        [factory.createIdentifier(varName)]
+      );
+
     const visitor = (rawNode: AnyNode): AnyNode => {
       const node = normalizeBodies(rawNode);
+
+      /*
+       * 调用点包一层逗号表达式：(__trace.at(__frN), f(x))
+       *
+       * 光靠「最后一条 step 属于谁」推断父帧是不够的：
+       * Promise.all([alpha(1), beta(2)]) 这种写法里，alpha 先进入、跑到 await 挂起，
+       * 期间调用方 run 一条 step 都没执行，于是 beta 会把 alpha 当成父帧，
+       * 栈和 depth 全歪 —— 而 depth 正是单步跳过/跳出的依据。
+       * 调用点是唯一确切知道「谁在调用」的地方。
+       */
+      if (frameVar && ts.isCallExpression(node) && !isRecorderCall(node)) {
+        const visited = ts.visitEachChild(node, visitor, context);
+        return factory.createParenthesizedExpression(
+          factory.createCommaListExpression([makeAtCall(frameVar), visited])
+        );
+      }
 
       // ---- 函数：压一层作用域，body 包 try/finally ----
       // 构造函数和 getter/setter 也是函数边界。漏掉它们的话，
@@ -284,6 +337,9 @@ export function instrumentSource(
 
       if (isFunctionLike) {
         const displayName = functionDisplayName(ts, node);
+        const outerFrameVar = frameVar;
+        const myFrameVar = `__fr${frameCounter++}`;
+        frameVar = myFrameVar;
         pushScope(true);
         // 参数在函数体里立刻可见
         for (const param of node.parameters) {
@@ -300,11 +356,11 @@ export function instrumentSource(
           const inner = instrumentStatements(node.body.statements as unknown as AnyNode[], visitor);
           newBody = factory.createBlock(
             [
-              makeEnterCall(displayName),
+              makeEnterCall(displayName, myFrameVar),
               factory.createTryStatement(
                 factory.createBlock(inner, true),
                 undefined,
-                factory.createBlock([makeExitCall()], true)
+                factory.createBlock([makeExitCall(myFrameVar)], true)
               ),
             ],
             true
@@ -315,14 +371,14 @@ export function instrumentSource(
           const expr = ts.visitNode(node.body, visitor);
           newBody = factory.createBlock(
             [
-              makeEnterCall(displayName),
+              makeEnterCall(displayName, myFrameVar),
               factory.createTryStatement(
                 factory.createBlock(
                   [makeStepCall(lineOf(node.body)), factory.createReturnStatement(expr)],
                   true
                 ),
                 undefined,
-                factory.createBlock([makeExitCall()], true)
+                factory.createBlock([makeExitCall(myFrameVar)], true)
               ),
             ],
             true
@@ -332,6 +388,7 @@ export function instrumentSource(
         }
 
         popScope();
+        frameVar = outerFrameVar;
 
         if (ts.isFunctionDeclaration(node)) {
           return factory.updateFunctionDeclaration(

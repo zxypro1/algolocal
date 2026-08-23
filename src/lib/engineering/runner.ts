@@ -41,8 +41,10 @@ function wrapTranspile(
     let instrumented: string;
     try {
       instrumented = trace.instrument(code, normalized);
-    } catch {
-      // 插桩失败不该让这一关跑不起来 —— 退回原样，最多是这个文件没有轨迹
+    } catch (error) {
+      // 插桩失败不该让这一关跑不起来，但也不能装作没发生：
+      // 静默吞掉的话，用户看到的是「录了个空轨迹」而不是「这个文件没能插桩」。
+      trace.onInstrumentError?.(normalized, error as Error);
       return transpile(code, filePath);
     }
     return transpile(instrumented, filePath);
@@ -75,6 +77,8 @@ export interface RunStageOptions {
      * 又会把 5000 步的额度花在别人的代码上，自己的反而被截断。
      */
     onlyFiles?: Set<string>;
+    /** 某个文件插桩失败时的回调，用来让失败可见而不是变成空轨迹 */
+    onInstrumentError?: (filePath: string, error: Error) => void;
   };
 }
 
@@ -267,10 +271,9 @@ export async function runStage(options: RunStageOptions): Promise<StageRunReport
       // 顶层的 afterAll 要等整个文件求值完，才知道该挂到哪个用例后面
       collector.finalize();
 
-      // 归到「模块加载」这个来源下，和某一条用例的输出区分开
-      consoleEntries.push(
-        ...loadTimeConsole.map((entry) => ({ ...entry, source: 'system' as const }))
-      );
+      // 原样保留 source：这些就是用户在模块顶层打的，标成 system 会被 UI
+      // 渲染成 [runtime] 平台输出，还会丢掉 warn/error 级别。
+      consoleEntries.push(...loadTimeConsole);
 
       for (const testCase of collector.cases) {
         if (testCase.skipped) {
