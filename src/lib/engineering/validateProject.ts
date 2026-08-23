@@ -38,6 +38,7 @@ export function coerceProject(raw: any): EngineeringProject {
         id: String(stage?.id || `stage-${index + 1}`),
         title: normalizeLocalized(stage?.title, `Stage ${index + 1}`),
         goal: normalizeLocalized(stage?.goal),
+        architecture: stage?.architecture ? normalizeLocalized(stage.architecture) : undefined,
         checklist: Array.isArray(stage?.checklist)
           ? stage.checklist.map((item: any) => normalizeLocalized(item))
           : [],
@@ -82,12 +83,8 @@ export function coerceProject(raw: any): EngineeringProject {
     estimatedMinutes: Number(raw?.estimatedMinutes) || 90,
     language: raw?.language === 'javascript' ? 'javascript' : 'typescript',
     brief: normalizeLocalized(raw?.brief),
-    learningOutcomes: Array.isArray(raw?.learningOutcomes)
-      ? raw.learningOutcomes.map((item: any) => normalizeLocalized(item))
-      : [],
-    prerequisites: Array.isArray(raw?.prerequisites)
-      ? raw.prerequisites.map((item: any) => normalizeLocalized(item))
-      : [],
+    // 项目级架构图：页面在关卡没有自己的架构图时会回退到它，
+    // 生成接口的 schema 也仍然要求模型产出这一项 —— 这里漏掉就等于静默丢弃
     architecture: raw?.architecture ? normalizeLocalized(raw.architecture) : undefined,
     weights: raw?.weights && typeof raw.weights === 'object' ? raw.weights : undefined,
     files: normalizeFiles(raw?.files),

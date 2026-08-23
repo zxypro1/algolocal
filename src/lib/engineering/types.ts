@@ -101,7 +101,17 @@ export interface LabEndpointConfig {
 export interface ProjectStage {
   id: string;
   title: LocalizedText;
-  /** 本关目标，markdown */
+  /**
+   * 参考架构：这一关的参考代码结构，mermaid 流程图（flowchart TD）。
+   * 是「一种可行的组织方式」，不是唯一答案。
+   */
+  architecture?: LocalizedText;
+  /**
+   * 本关任务：背景 + 通关标准 + 代码细节，一整块。
+   *
+   * 曾经拆成过「概述 / 详情」两块，但读的人要在两个 tab 之间来回跳才能
+   * 拼出完整的一关，反而更碎 —— 合回一块。
+   */
   goal: LocalizedText;
   /** 任务清单，用于左侧 checklist 展示 */
   checklist?: LocalizedText[];
@@ -144,10 +154,6 @@ export interface EngineeringProject {
   language: 'typescript' | 'javascript';
   /** 需求文档，markdown */
   brief: LocalizedText;
-  /** 通关后你会掌握什么，用于列表页与需求页顶部 */
-  learningOutcomes?: LocalizedText[];
-  /** 前置知识 */
-  prerequisites?: LocalizedText[];
   /** 架构说明，markdown（支持 mermaid） */
   architecture?: LocalizedText;
   /** 评审维度权重 */

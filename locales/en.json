@@ -466,11 +466,15 @@
       "hints": "Hints",
       "revealHint": "Reveal hint {{current}}/{{total}}",
       "reference": "Reference implementation",
-      "referenceLocked": "Clear this stage to see the reference implementation",
       "next": "Go to next stage",
       "pitfalls": "Common traps",
       "pitfallsHint": "These pass some specs but are wrong as engineering",
-      "extension": "Going further: the real-world counterpart"
+      "extension": "Going further: the real-world counterpart",
+      "revealReference": "Show the reference implementation",
+      "revealTitle": "Spoil this stage?",
+      "revealBody": "This shows a complete working solution for this stage. Once you have seen it, you cannot unsee it — most of the value here is in getting stuck first.",
+      "revealConfirm": "Show it anyway",
+      "revealCancel": "Not yet"
     },
     "workspace": {
       "files": "Workspace",
@@ -516,9 +520,8 @@
       "languageHint": "Switching swaps the starter files and specs; each language keeps its own drafts"
     },
     "tabs": {
-      "stage": "Stage",
-      "brief": "Brief",
-      "architecture": "Architecture",
+      "stage": "Task",
+      "architecture": "Reference architecture",
       "tests": "Specs",
       "metrics": "Metrics",
       "score": "Score",
@@ -609,10 +612,6 @@
       "verifying": "Running it locally to verify…",
       "repairing": "Verification failed, asking for a fix…",
       "saving": "Verified, saving…"
-    },
-    "brief": {
-      "outcomes": "What you will learn",
-      "prerequisites": "Prerequisites"
     },
     "trace": {
       "empty": "No trace recorded yet. Recording instruments every statement, so it runs slower than a normal acceptance run — it is off by default.",

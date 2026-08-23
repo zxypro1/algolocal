@@ -778,8 +778,12 @@ describe('preset projects', () => {
       const broken: string[] = [];
       for (const block of mermaid) {
         for (const line of block.body.split('\n')) {
-          // "C, yes --> H" 是 "C -- yes --> H" 被改坏后的样子
-          if (/[A-Za-z0-9\]}],\s+\S+\s+-{2,}>/.test(line)) {
+          // "C, yes --> H" 是 "C -- yes --> H" 被改坏后的样子。
+          // 判断前先把带引号的节点标签抹掉：标签里出现逗号完全正常
+          // （`WP["writePage(id, data)"] --> MARK[...]`），
+          // 不抹的话这条规则会把正常的图整片误报。
+          const outsideLabels = line.replace(/"[^"]*"/g, '"L"');
+          if (/[A-Za-z0-9\]}],\s+\S+\s+-{2,}>/.test(outsideLabels)) {
             broken.push(`${block.where}: ${line.trim()}`);
           }
         }
