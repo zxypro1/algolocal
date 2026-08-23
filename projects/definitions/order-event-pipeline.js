@@ -372,7 +372,8 @@ const stage1 = {
             } catch (caught) {
               thrown = true;
             }
-            // When an old consumer reads newer data, field meanings may have changed; accepting it silently computes the wrong answer
+            // When an old consumer reads newer data, field meanings may have changed; accepting it
+            // silently computes the wrong answer
             expect(thrown).toBe(true);
           });
 
@@ -433,7 +434,8 @@ const stage1 = {
             } catch (caught) {
               thrown = true;
             }
-            // The 2->3 step is missing; skipping it silently would produce an in-between shape nobody recognises
+            // The 2->3 step is missing; skipping it silently would produce an in-between shape
+            // nobody recognises
             expect(thrown).toBe(true);
           });
         });
@@ -1401,7 +1403,8 @@ const stage3 = {
             const bus = createPartitionedBus(OPTIONS);
             const seen: number[] = [];
             bus.subscribe(async (incoming: any) => {
-              // Deliberately make the earlier one slow and the later one fast; an out-of-order implementation cannot survive this
+              // Deliberately make the earlier one slow and the later one fast; an out-of-order
+              // implementation cannot survive this
               await sleep(incoming.payload.index === 0 ? 80 : 10);
               seen.push(incoming.payload.index);
             });
@@ -1619,7 +1622,8 @@ const stage3 = {
               const run = async (): Promise<void> => {
                 try {
                   for (const handler of handlers.slice()) {
-                    // Await one at a time within the partition: Promise.all here would throw the ordering guarantee away
+                    // Await one at a time within the partition: Promise.all here would throw the
+                    // ordering guarantee away
                     await handler(event);
                   }
                 } catch (error) {
@@ -2156,7 +2160,8 @@ const stage4 = {
 
         export function compose(middlewares: Middleware[]): (ctx: Context, next?: Next) => Promise<void> {
           return function run(ctx: Context, next?: Next): Promise<void> {
-            // index is the deepest level already entered, which is how a second next() on the same level is spotted
+            // index is the deepest level already entered, which is how a second next() on the same
+            // level is spotted
             let index = -1;
 
             function dispatch(current: number): Promise<void> {
@@ -2653,7 +2658,8 @@ const stage5 = {
             const targetOf = (index: number) => base + (index < extra ? 1 : 0);
 
             // Record who held what *before* the adjustment. Computing unowned partitions from the
-            // post-adjustment keep would list the just-revoked ones as both surplus and unowned, assigning them twice
+            // post-adjustment keep would list the just-revoked ones as both surplus and unowned,
+            // assigning them twice
             const heldBefore = new Set<number>();
             for (const id of order) {
               for (const partition of assignments.get(id) || []) heldBefore.add(partition);
@@ -3096,7 +3102,10 @@ const stage6 = {
         import type { Database, Tx } from './support/db';
 
         export interface Outbox {
-          /** work runs inside a transaction; the events it returns commit or roll back with the business data */
+          /**
+           * work runs inside a transaction; the events it returns commit or roll back with the
+           * business data
+           */
           commit(work: (tx: Tx) => OrderEvent[]): void;
           /** Emit undelivered events in write order and return how many were delivered this round */
           dispatch(publish: (event: OrderEvent) => Promise<void>): Promise<number>;
@@ -3327,8 +3336,10 @@ const stage6 = {
             commit(work: (tx: Tx) => OrderEvent[]): void {
               db.transaction((tx) => {
                 const events = work(tx);
-                // The position of this line is the whole point: the event write sits inside the same transaction callback as the business write.
-                // Move it outside transaction and you are back to the two-step 'write the database, then write the outbox' problem
+                // The position of this line is the whole point: the event write sits inside the
+                // same transaction callback as the business write.
+                // Move it outside transaction and you are back to the two-step 'write the database,
+                // then write the outbox' problem
                 for (const event of events) {
                   tx.insert(TABLE, {
                     id: event.id,
@@ -5146,7 +5157,8 @@ const stage9 = {
             append(streamId: string, events: OrderEvent[], expectedVersion: number): void {
               const stream = streamOf(streamId);
               // The only guard against write conflicts in event sourcing. Without it, two concurrent
-              // writes based on the same old state both succeed and the stream ends up holding two contradictory events
+              // writes based on the same old state both succeed and the stream ends up holding two
+              // contradictory events
               if (stream.length !== expectedVersion) {
                 throw new ConcurrencyError(streamId, expectedVersion, stream.length);
               }
@@ -5692,7 +5704,8 @@ const stage10 = {
 
           return {
             catchUp(events: OrderEvent[]): number {
-              // This line is where idempotency comes from: on a second catch-up the slice is empty and nothing is reapplied
+              // This line is where idempotency comes from: on a second catch-up the slice is empty
+              // and nothing is reapplied
               const pending = events.slice(position);
 
               for (const event of pending) {
@@ -5710,7 +5723,8 @@ const stage10 = {
             },
 
             state(): Record<string, unknown> {
-              // Hand out a copy: the read model is queried from many places, and returning the internal object
+              // Hand out a copy: the read model is queried from many places, and returning the
+              // internal object
               // means any one caller can corrupt it
               return { ...current };
             },
@@ -6202,8 +6216,10 @@ const stage11 = {
 
         function equal(left: unknown, right: unknown, tolerance: number): boolean {
           if (typeof left === 'number' && typeof right === 'number') {
-            // Folding an event stream and accumulating a read model apply operations in a different order, so the last floating-point digits always differ.
-            // With === the reconciliation reports a pile of 0.0000001 differences every day, and people stop reading it
+            // Folding an event stream and accumulating a read model apply operations in a different
+            // order, so the last floating-point digits always differ.
+            // With === the reconciliation reports a pile of 0.0000001 differences every day, and
+            // people stop reading it
             return Math.abs(left - right) <= tolerance;
           }
           return left === right;
@@ -6216,7 +6232,8 @@ const stage11 = {
         ): Discrepancy[] {
           const tolerance = options?.tolerance ?? 0;
           // Both sides' keys have to be walked: going through expected alone never finds a record that
-          // appeared in the read model out of nowhere, and that is the most serious kind of difference there is
+          // appeared in the read model out of nowhere, and that is the most serious kind of
+          // difference there is
           const keys = new Set<string>([...Object.keys(expected), ...Object.keys(actual)]);
 
           const found: Discrepancy[] = [];

@@ -17,10 +17,12 @@ const storage = readonlyFile(
      *
      * It stands in for a real disk, and every stage of this project wrestles with three of its properties:
      *
-     * - **sequential writes are cheap, random writes are expensive**: append is the only path you should take; overwrite works,
+     * - **sequential writes are cheap, random writes are expensive**: append is the only path you
+     * should take; overwrite works,
      *   but every call records a counters.randomWrites;
      * - **only fsync makes it durable**: crash() after an append but before an fsync and that batch is gone,
-     *   and since fsync costs 5ms, batching many writes behind one fsync is something you can actually measure;
+     *   and since fsync costs 5ms, batching many writes behind one fsync is something you can
+     * actually measure;
      * - **reading one record is one IO**: every readAt records a counters.recordsScanned, so
      *   how many records you scanned to locate one message is a reading, not an estimate.
      */
@@ -53,7 +55,10 @@ const storage = readonlyFile(
     export interface StorageDevice {
       /** Create a segment. Every call counts towards counters.segmentsCreated. */
       createSegment(baseOffset: number): number;
-      /** Append one record to the segment tail and return its index within it. Counts towards counters.storageAppends. */
+      /**
+       * Append one record to the segment tail and return its index within it. Counts towards
+       * counters.storageAppends.
+       */
       append(segmentId: number, record: { offset: number; key: string; value: string }): number;
       /** Overwrite. It works, but it is a random write and counts towards counters.randomWrites. */
       overwrite(segmentId: number, index: number, record: { offset: number; key: string; value: string }): void;
@@ -117,7 +122,8 @@ const storage = readonlyFile(
           if (!segment || index < 0 || index >= segment.records.length) {
             throw new Error('cannot overwrite outside the segment');
           }
-          // A random write: on a real disk it costs an order of magnitude more than a sequential one, so record it here
+          // A random write: on a real disk it costs an order of magnitude more than a sequential
+          // one, so record it here
           count('randomWrites');
           const size = measure(record.key, record.value);
           segment.records[index] = { offset: record.offset, key: record.key, value: record.value, size };
@@ -131,7 +137,10 @@ const storage = readonlyFile(
           return record ? { ...record } : null;
         },
 
-        /** Returned sorted by baseOffset: in a real system segment files are ordered by name (baseOffset) too */
+        /**
+         * Returned sorted by baseOffset: in a real system segment files are ordered by name
+         * (baseOffset) too
+         */
         segments(): SegmentInfo[] {
           return segments
             .map((segment) => ({
@@ -184,8 +193,10 @@ const replica = readonlyFile(
     /**
      * Follower replica (read-only, provided by the platform)
      *
-     * It does exactly one thing: **acknowledge, but slowly**. Data sent to it counts as received only after lagMs,
-     * and longer still after stall(). The high watermark in stage 8 is computed from these acknowledged positions.
+     * It does exactly one thing: **acknowledge, but slowly**. Data sent to it counts as received
+     * only after lagMs,
+     * and longer still after stall(). The high watermark in stage 8 is computed from these
+     * acknowledged positions.
      */
     import { sleep } from '@lab/env';
     import type { StoredRecord } from './storage';
@@ -720,10 +731,14 @@ const stage1 = {
             activeBytes = 0;
           }
 
-          /** Decide before appending: appending first and then checking leaves every segment one record over */
+          /**
+           * Decide before appending: appending first and then checking leaves every segment one
+           * record over
+           */
           function segmentFor(size: number): number {
             if (activeSegmentId < 0) roll();
-            // Accept unconditionally while the segment is empty: an oversized single record still needs somewhere to go
+            // Accept unconditionally while the segment is empty: an oversized single record still
+            // needs somewhere to go
             else if (activeBytes > 0 && activeBytes + size > options.segmentBytes) roll();
             return activeSegmentId;
           }
@@ -1971,7 +1986,8 @@ const stage3 = {
           function flushNow(): Promise<void> {
             cancelTimer();
             // Swap the whole buffer out first, then do the async write:
-            // the other way round, messages arriving during the write fall into a batch whose resolves have already been handed out
+            // the other way round, messages arriving during the write fall into a batch whose
+            // resolves have already been handed out
             const batch = buffer;
             buffer = [];
             if (batch.length === 0) return chain;
@@ -2390,7 +2406,7 @@ const stage4 = {
             expect(offsetsOf(second)).toEqual([2, 3]);
           });
 
-          it('it becomes deliverable again after the timeout, with a new receipt', async () => {
+          it('a message becomes deliverable again after the timeout, with a new receipt', async () => {
             const context = makeQueue(2);
             const first = context.queue.poll(1)[0];
 
@@ -2401,7 +2417,7 @@ const stage4 = {
             expect(again.receipt).not.toBe(first.receipt);
           });
 
-          it('it does not become deliverable before the timeout', async () => {
+          it('a message does not become deliverable before the timeout', async () => {
             const context = makeQueue(1);
             const first = context.queue.poll(1)[0];
 
@@ -2598,7 +2614,8 @@ const stage4 = {
               const batch: Delivery[] = [];
               if (max <= 0) return batch;
 
-              // Timed-out redeliveries go first: under backlog, new messages keep arriving and the old ones would otherwise never get a turn
+              // Timed-out redeliveries go first: under backlog, new messages keep arriving and the
+              // old ones would otherwise never get a turn
               for (const entry of expired()) {
                 if (batch.length >= max) return batch;
                 inflight.delete(entry.receipt);
@@ -3137,7 +3154,7 @@ const stage5 = {
             const fresh = context.queue.poll(1)[0];
 
             expect(fresh.receipt).not.toBe(stale.receipt);
-            // The old receipt can neither ack, nor nack someone else\u2019s message into the dead-letter queue
+            // The old receipt can neither ack, nor nack someone else's message into the dead-letter queue
             expect(context.queue.ack(stale.receipt)).toBe(false);
             context.queue.nack(stale.receipt, 'from a zombie consumer');
             expect(context.queue.deadLetters()).toEqual([]);
@@ -3277,7 +3294,10 @@ const stage5 = {
         interface PendingEntry {
           record: StoredRecord;
           attempts: number;
-          /** Not eligible for delivery before this instant: both backoff and visibility timeout are recorded here */
+          /**
+           * Not eligible for delivery before this instant: both backoff and visibility timeout are
+           * recorded here
+           */
           notBefore: number;
           /** The only currently valid receipt; the previous one is voided on redelivery */
           receipt: string;
@@ -3291,7 +3311,8 @@ const stage5 = {
           let nextReceipt = 0;
 
           function retire(entry: PendingEntry, reason: string): void {
-            // Collect the receipt along with it: on the timeout-to-dead-letter path the old receipt is still sitting in outstanding
+            // Collect the receipt along with it: on the timeout-to-dead-letter path the old receipt
+            // is still sitting in outstanding
             outstanding.delete(entry.receipt);
             pending.delete(entry.record.offset);
             dead.push({ record: entry.record, attempts: entry.attempts, reason });
@@ -3301,7 +3322,8 @@ const stage5 = {
             entry.attempts += 1;
             // Once sent, the visibility timeout applies; no response counts as a failure
             entry.notBefore = now() + options.visibilityMs;
-            // The previous delivery\u2019s receipt is void from here: a message may have exactly one holder at any instant
+            // The previous delivery's receipt is void from here: a message may have exactly one
+            // holder at any instant
             outstanding.delete(entry.receipt);
 
             const receipt = 'r-' + nextReceipt;
@@ -3323,7 +3345,8 @@ const stage5 = {
               const fetched = source.poll(max - batch.length);
               if (fetched.length === 0) return;
               for (const delivery of fetched) {
-                // Ack the source queue immediately: this message\u2019s lifecycle belongs to this layer from here on
+                // Ack the source queue immediately: this message's lifecycle belongs to this layer
+                // from here on
                 source.ack(delivery.receipt);
                 const entry: PendingEntry = {
                   record: delivery.record,
@@ -3934,7 +3957,7 @@ const stage6 = {
         }
 
         export function createTopic(log: MessageLog): Topic {
-          /** A subscription\u2019s entire state is one integer here */
+          /** A subscription's entire state is one integer here */
           const cursors = new Map<string, number>();
 
           function positionOf(name: string): number {
@@ -3973,7 +3996,8 @@ const stage6 = {
 
           return {
             publish(key: string, value: string): number {
-              // The only place in this whole file that writes storage, independently of the subscription count
+              // The only place in this whole file that writes storage, independently of the
+              // subscription count
               return log.append(key, value).offset;
             },
 
@@ -4945,7 +4969,7 @@ const stage8 = {
           /** The committed boundary: this position itself is not yet visible */
           highWatermark(): number;
           inSyncReplicas(): string[];
-          /** The leader\u2019s end, which may be above the high watermark */
+          /** The leader's end, which may be above the high watermark */
           endOffset(): number;
         }
 
@@ -4992,7 +5016,10 @@ const stage8 = {
           return { log, replicas, replicated };
         }
 
-        /** Computed straight off the replica objects: the position at least minInSync replicas have acknowledged */
+        /**
+         * Computed straight off the replica objects: the position at least minInSync replicas have
+         * acknowledged
+         */
         function quorumBound(replicas: any[], minInSync: number): number {
           const acked = replicas
             .map((replica) => replica.ackedOffset())
@@ -5075,7 +5102,8 @@ const stage8 = {
             }
             const before = context.replicated.highWatermark();
 
-            // One replica falls behind and the ISR shrinks, but an already committed position cannot be taken back
+            // One replica falls behind and the ISR shrinks, but an already committed position
+            // cannot be taken back
             context.replicas[1].stall(10000);
             await context.replicated.produce('k3', 'v3');
 
@@ -5087,7 +5115,8 @@ const stage8 = {
             context.replicas[1].stall(200);
             context.replicas[2].stall(200);
 
-            // Only one fast replica has acknowledged, so until minInSync is met this record is written but not committed
+            // Only one fast replica has acknowledged, so until minInSync is met this record is
+            // written but not committed
             const pending = context.replicated.produce('k0', 'v0');
             expect(context.replicated.endOffset()).toBe(1);
             expect(context.replicated.highWatermark()).toBe(0);
@@ -5252,7 +5281,8 @@ const stage8 = {
                 size: RECORD_HEADER_BYTES + key.length + value.length,
               };
 
-              // Sent in parallel, so the replica count does not affect latency; late acknowledgements advance the watermark just the same
+              // Sent in parallel, so the replica count does not affect latency; late
+              // acknowledgements advance the watermark just the same
               const sends = replicas.map((replica) =>
                 replica.send([record]).then(() => {
                   recompute();
@@ -5265,7 +5295,8 @@ const stage8 = {
             },
 
             read(offset: number, max: number): StoredRecord[] {
-              // Visibility is enforced at the entry point, so data above the high watermark never leaves this module
+              // Visibility is enforced at the entry point, so data above the high watermark never
+              // leaves this module
               const room = Math.min(max, watermark - offset);
               if (room <= 0) return [];
               return log.read(offset, room);
@@ -5688,7 +5719,8 @@ const stage9 = {
         describe('Stage 9 · Retention and compaction', () => {
           it('after compaction only the last record per key remains', () => {
             const context = makeKeeper();
-            // 5 keys written round-robin for 30 records, plus one more so the last segment becomes the active one
+            // 5 keys written round-robin for 30 records, plus one more so the last segment becomes
+            // the active one
             fill(context.keeper, 30, 5);
 
             const result = context.keeper.compact();
@@ -5806,7 +5838,8 @@ const stage9 = {
 
             context.keeper.enforce();
 
-            // This is exactly what separates it from compaction: retention deletes live keys along with the rest
+            // This is exactly what separates it from compaction: retention deletes live keys along
+            // with the rest
             expect(context.keeper.latest(keyOf(0))).toBeNull();
             expect(context.keeper.latest(keyOf(99))).toBeTruthy();
           });
@@ -5821,7 +5854,7 @@ const stage9 = {
             context.keeper.compact();
             context.keeper.enforce();
 
-            // Without a birthday, a new segment\u2019s age counts from boot, and the first clean wipes it out
+            // Without a birthday, a new segment's age counts from boot, and the first clean wipes it out
             for (const record of live) {
               if (!context.keeper.latest(record.key)) count('liveKeysLost');
             }
@@ -5964,7 +5997,8 @@ const stage9 = {
                 const age = now() - (bornAt.get(segment.id) || 0);
                 const tooOld = age >= options.maxAgeMs;
                 const tooBig = total > options.maxBytes;
-                // Segments are sorted by baseOffset, so later ones are newer; everything after the first keeper is kept too
+                // Segments are sorted by baseOffset, so later ones are newer; everything after the
+                // first keeper is kept too
                 if (!tooOld && !tooBig) break;
 
                 storage.deleteSegment(segment.id);
@@ -5982,7 +6016,8 @@ const stage9 = {
               const active = activeSegmentId();
 
               const sealed = entries.filter((entry) => entry.segmentId !== active);
-              // Which record is newest is decided globally; which ones may be touched is limited to sealed segments
+              // Which record is newest is decided globally; which ones may be touched is limited to
+              // sealed segments
               const survivors = sealed.filter(
                 (entry) => last.get(entry.record.key) === entry.record.offset
               );
@@ -5994,7 +6029,8 @@ const stage9 = {
               if (survivors.length > 0) {
                 const target = storage.createSegment(survivors[0].record.offset);
                 // A new segment inherits the earliest birthday among the segments it replaces:
-                // compaction is tidying, not a way to make this data young again, and it must not reset the retention clock
+                // compaction is tidying, not a way to make this data young again, and it must not
+                // reset the retention clock
                 const ages = replaced.map((segmentId) => bornAt.get(segmentId));
                 const known = ages.filter((age) => typeof age === 'number') as number[];
                 bornAt.set(target, known.length > 0 ? Math.min.apply(null, known) : now());
@@ -6479,7 +6515,7 @@ const stage10 = {
             expect(coordinator.members()).toEqual(['a']);
           });
 
-          it('only the failed member\u2019s shards move when one dies [gate:rebalance]', async () => {
+          it("only the failed member's shards move when one dies [gate:rebalance]", async () => {
             const coordinator = makeCoordinator(['a', 'b', 'c']);
             const before = ownership(coordinator);
 
@@ -6594,7 +6630,10 @@ const stage10 = {
             return owner;
           }
 
-          /** How many each member should get: the quotient shared evenly, the remainder to those earlier in the list */
+          /**
+           * How many each member should get: the quotient shared evenly, the remainder to those
+           * earlier in the list
+           */
           function targets(members: string[]): Map<string, number> {
             const quota = new Map<string, number>();
             if (members.length === 0) return quota;
@@ -6616,7 +6655,8 @@ const stage10 = {
             for (let partition = 0; partition < options.partitions; partition += 1) {
               const holder = owner.get(partition);
               const kept = holder ? next.get(holder) : undefined;
-              // If the current owner is still around and still short, let it keep them — this step is what keeps shards from moving
+              // If the current owner is still around and still short, let it keep them — this step
+              // is what keeps shards from moving
               if (kept && kept.length < (quota.get(holder as string) || 0)) kept.push(partition);
               else orphans.push(partition);
             }
@@ -6643,7 +6683,8 @@ const stage10 = {
           }
 
           function evict(memberId: string): void {
-            // Unprocessed messages in hand go back to the queue rather than waiting out the visibility timeout
+            // Unprocessed messages in hand go back to the queue rather than waiting out the
+            // visibility timeout
             for (const offset of claimed.get(memberId) || []) back.push(offset);
             claimed.delete(memberId);
             lastSeen.delete(memberId);
@@ -7303,7 +7344,8 @@ const stage11 = {
                 for (let step = 0; step < order.length && left > 0; step += 1) {
                   const clientId = order[(rotation + step) % order.length];
                   if (valueOf(demand, clientId) <= 0) continue;
-                  // Skip a client out of allowance, but keep handing capacity down the line rather than wasting it
+                  // Skip a client out of allowance, but keep handing capacity down the line rather
+                  // than wasting it
                   if (allowance(clientId) <= 0) continue;
 
                   granted[clientId] = (granted[clientId] || 0) + 1;
@@ -7315,7 +7357,8 @@ const stage11 = {
                 }
               }
 
-              // Advance the starting point so a different client leads the next round, which is how those at the back get a turn
+              // Advance the starting point so a different client leads the next round, which is how
+              // those at the back get a turn
               rotation = (rotation + handed) % order.length;
               return granted;
             },
@@ -8052,7 +8095,8 @@ const stage12 = {
 
             stats(): BrokerStats {
               const dead = queue.deadLetters().length;
-              // Completely done = acknowledged plus dead-lettered. Deliveries include redeliveries and cannot be used to subtract.
+              // Completely done = acknowledged plus dead-lettered. Deliveries include redeliveries
+              // and cannot be used to subtract.
               const finished = acked + dead;
 
               return {

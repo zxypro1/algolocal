@@ -305,7 +305,10 @@ const stage1 = {
         export interface Limiter {
           /** true when admitted, false when rate-limited */
           allow(): boolean;
-          /** How many state entries are retained, for comparing the memory cost of the three implementations */
+          /**
+           * How many state entries are retained, for comparing the memory cost of the three
+           * implementations
+           */
           size(): number;
         }
 
@@ -505,7 +508,8 @@ const stage1 = {
           return {
             allow(): boolean {
               // Derive the window number from the timestamp rather than using a timer: timers and request
-              // handling are two independent timelines, and a timer leaks one never-ending handle per instance
+              // handling are two independent timelines, and a timer leaks one never-ending handle
+              // per instance
               const current = Math.floor(now() / options.windowMs);
               if (current !== windowId) {
                 windowId = current;
@@ -568,7 +572,8 @@ const stage1 = {
               roll(at);
 
               const elapsed = (at % options.windowMs) / options.windowMs;
-              // The weight is how much of the previous window has not slid out yet, i.e. 1 - the elapsed fraction.
+              // The weight is how much of the previous window has not slid out yet, i.e. 1 - the
+              // elapsed fraction.
               // Writing elapsed instead inverts the behaviour completely
               const estimated = previous * (1 - elapsed) + current;
               if (estimated >= options.limit) return false;
@@ -1503,7 +1508,8 @@ const stage3 = {
               const matched = applicable(dimensions);
 
               // First pass checks only, and returns on the first failure without decrementing anything.
-              // Decrementing while checking burns the earlier dimensions' quota for a request a later rule rejects
+              // Decrementing while checking burns the earlier dimensions' quota for a request a
+              // later rule rejects
               for (const rule of matched) {
                 const counter = counterFor(rule, dimensions[rule.dimension]);
                 if (counter.used >= rule.limit) {
@@ -2097,7 +2103,8 @@ const stage4 = {
             allow(): boolean {
               if (balance <= 0) {
                 // Asking once per request after the global quota is gone piles a second full load onto
-                // the central store exactly when the system is already overloaded. Reject outright during the cooldown
+                // the central store exactly when the system is already overloaded. Reject outright
+                // during the cooldown
                 if (now() < nextAttemptAt) return false;
 
                 const granted = store.take(options.key, options.leaseSize);
@@ -3139,7 +3146,7 @@ const stage6 = {
             expect(balancer.pick()).toBeNull();
           });
 
-          it('pulling one node remaps only that node\u2019s share of the keys [gate:remap]', () => {
+          it("pulling one node remaps only that node's share of the keys [gate:remap]", () => {
             const before = createBalancer(NODES, { strategy: 'consistent-hash', ...HEALTH });
             const sample = keys(1000);
             const original = sample.map((key) => before.pick(key)!.id);
@@ -4876,7 +4883,7 @@ const stage9 = {
             expect(settled).toBe('fast');
 
             // Push the clock past the timeout point: the result must not be overturned
-            // (note: a leaked timer is not itself observable in this sandbox — see \u2018Common pitfalls\u2019)
+            // (note: a leaked timer is not itself observable in this sandbox — see 'Common pitfalls')
             await sleep(2000);
             expect(settled).toBe('fast');
           });
@@ -5066,7 +5073,8 @@ const stage9 = {
 
           return {
             async call(url: string): Promise<GatewayResult> {
-              // Order matters: the limiter is outermost, and a throttled request should not consume breaker budget
+              // Order matters: the limiter is outermost, and a throttled request should not consume
+              // breaker budget
               await bucket.acquire();
 
               try {
@@ -5584,7 +5592,8 @@ const stage10 = {
           function degraded(key: string, at: number): DegradeResult {
             const entry = cache.get(key);
             // Real data that has expired but is still inside the usable window, and a hardcoded default,
-            // carry completely different confidence for the caller, so they are returned as two distinct levels
+            // carry completely different confidence for the caller, so they are returned as two
+            // distinct levels
             if (entry && at - entry.storedAt < options.staleWhileErrorMs) {
               return { value: entry.value, freshness: 'stale' };
             }
@@ -5601,7 +5610,8 @@ const stage10 = {
 
               // During the cooldown for a known failure, load is not even called:
               // there is a perfectly usable stale value in the cache, so there is no reason to keep
-              // pressing downstream at its weakest, and waiting for each timeout makes degradation itself a source of latency
+              // pressing downstream at its weakest, and waiting for each timeout makes degradation
+              // itself a source of latency
               const cooldownUntil = nextAttemptAt.get(key) ?? 0;
               if (at < cooldownUntil) return degraded(key, at);
 
@@ -6155,7 +6165,8 @@ const stage11 = {
                     () => {
                       // Both callbacks are required. With then but no rejection handler,
                       // a canary error becomes an unhandled rejection and,
-                      // under some configurations, exits the process outright — an observe-only side path killing production
+                      // under some configurations, exits the process outright — an observe-only
+                      // side path killing production
                       counters.canaryFailures += 1;
                     }
                   );

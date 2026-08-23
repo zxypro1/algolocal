@@ -22,7 +22,10 @@ const contract = readonlyFile(
       roles: string[];
     }
 
-    /** The identity decoded from an access token. This is the one and only representation of who you are in the whole system. */
+    /**
+     * The identity decoded from an access token. This is the one and only representation of who you
+     * are in the whole system.
+     */
     export interface SessionClaims {
       /** User id */
       sub: string;
@@ -41,7 +44,8 @@ const contract = readonlyFile(
      * Collection names for server-side state in the store.
      *
      * These names are **fixed by convention**: the specs count entries in the store by name,
-     * so storing under a different name hides the state where the specs cannot see it, which means it does not count.
+     * so storing under a different name hides the state where the specs cannot see it, which means
+     * it does not count.
      */
     export const COLLECTIONS = {
       /** Refresh tokens, keyed by token id */
@@ -82,9 +86,11 @@ const crypto = readonlyFile(
      *
      * It is not really SHA-256, but it keeps the three properties this project actually cares about:
      *
-     * - **slow hashes are slow**: slowHash advances the virtual clock by the iteration count and records those rounds in
+     * - **slow hashes are slow**: slowHash advances the virtual clock by the iteration count and
+     * records those rounds in
      *   counters.kdfRounds. How many KDF rounds your login really does is something you can measure;
-     * - **signatures are unforgeable**: hmac cannot be computed without the key, and changing one byte breaks the signature;
+     * - **signatures are unforgeable**: hmac cannot be computed without the key, and changing one
+     * byte breaks the signature;
      * - **comparison can be constant-time**: constantTimeEqual records every call,
      *   so whether you used it is measurable too.
      */
@@ -208,8 +214,10 @@ const crypto = readonlyFile(
     /**
      * Verify with the public key.
      *
-     * Note that a public key **can only verify, never sign** — which is the whole point of asymmetric crypto, and also
-     * the premise of the algorithm-confusion attack in stage 7: the attacker can obtain the public key, and if you use it
+     * Note that a public key **can only verify, never sign** — which is the whole point of
+     * asymmetric crypto, and also
+     * the premise of the algorithm-confusion attack in stage 7: the attacker can obtain the public
+     * key, and if you use it
      * as an HMAC secret, they can sign tokens you will accept.
      */
     export function verifyRsa(publicKey: string, message: string, signature: string): boolean {
@@ -226,7 +234,8 @@ const store = readonlyFile(
      * Server-side state store (read-only, provided by the platform)
      *
      * Treat it as a database: only what survives a process restart really got stored.
-     * The specs rebuild a fresh service instance against the same store, and state hidden in module variables does not survive that.
+     * The specs rebuild a fresh service instance against the same store, and state hidden in module
+     * variables does not survive that.
      *
      * It also keeps per-tenant accounting: **a record carrying a tenant field belongs to that tenant**,
      * and reading it with a mismatched scope (or no scope at all) records a
@@ -235,7 +244,7 @@ const store = readonlyFile(
     import { count } from '@lab/metrics';
 
     export interface StoreScope {
-      /** Which tenant this read is on behalf of. Omitted = no tenant, which means reading everyone\u2019s. */
+      /** Which tenant this read is on behalf of. Omitted = no tenant, which means reading everyone's. */
       tenantId?: string;
     }
 
@@ -710,7 +719,10 @@ const stage1 = {
           record(userId: string): CredentialRecord | undefined;
         }
 
-        /** The default round count. Raising it does not invalidate old records, because the rounds live in each record. */
+        /**
+         * The default round count. Raising it does not invalidate old records, because the rounds
+         * live in each record.
+         */
         const DEFAULT_ROUNDS = 120000;
         /** A floor on rounds: however low a caller asks for, it is not accepted */
         const MIN_ROUNDS = 100000;
@@ -734,7 +746,8 @@ const stage1 = {
 
           return {
             async register(userId: string, password: string): Promise<void> {
-              // A fresh salt on every registration, which makes a password change rotate the salt automatically
+              // A fresh salt on every registration, which makes a password change rotate the salt
+              // automatically
               const salt = randomSalt();
               const hash = await slowHash(password, salt, rounds);
               records.set(userId, { userId, salt, hash, rounds });
@@ -1172,7 +1185,8 @@ const stage2 = {
             const issuer = makeIssuer();
             const token = issuer.issue({ userId: 'alice', tenantId: 'acme' });
 
-            // This is not a bug: anyone holding the token can read the payload, which is why no secret belongs in it
+            // This is not a bug: anyone holding the token can read the payload, which is why no
+            // secret belongs in it
             expect(decodeSegment(token.split('.')[0])).toEqual(issuer.verify(token));
           });
         });
@@ -1252,7 +1266,8 @@ const stage2 = {
               const parts = token.split(SEPARATOR);
               if (parts.length !== SEGMENTS) return null;
 
-              // Verification is the gate: before this line, payload is just a string an attacker can write at will
+              // Verification is the gate: before this line, payload is just a string an attacker
+              // can write at will
               if (!constantTimeEqual(sign(parts[0]), parts[1])) return null;
 
               const claims = decodeSegment(parts[0]) as SessionClaims | null;
@@ -1639,7 +1654,8 @@ const stage3 = {
             if (stolen) count('replayAccepted');
             expect(stolen).toBeNull();
 
-            // The newest one, in the real user\u2019s hands, has to be voided too: at this point the two are indistinguishable
+            // The newest one, in the real user's hands, has to be voided too: at this point the two
+            // are indistinguishable
             const legit = service.rotate(second.refreshToken);
             if (!legit) count('familyRevoked');
             expect(legit).toBeNull();
@@ -2248,7 +2264,7 @@ const stage4 = {
             const alice = [0, 1, 2].map(() => loginAs(issuer, g, 'alice'));
             const bob = [0, 1, 2].map(() => loginAs(issuer, g, 'bob'));
 
-            // One kick covering alice\u2019s three sessions, plus logging one of bob\u2019s devices out
+            // One kick covering alice's three sessions, plus logging one of bob's devices out
             g.revokeUser('alice');
             g.revokeSession(bob[0]);
 
@@ -3509,7 +3525,8 @@ const stage6 = {
               const record = store.get(COLLECTIONS.codes, key) as unknown as CodeRecord | undefined;
               if (!record || record.used) return null;
 
-              // Burn it before checking: once an attacker intercepts a code, this is their one chance to guess the verifier
+              // Burn it before checking: once an attacker intercepts a code, this is their one
+              // chance to guess the verifier
               save(request.code, { ...record, used: true });
 
               if (now() >= record.exp) return null;
@@ -3981,7 +3998,8 @@ const stage7 = {
           it('an audience that is not us is not accepted', () => {
             const verifier = makeVerifier();
 
-            // This ticket was signed by the same IdP for a different application, and the signature is perfectly valid
+            // This ticket was signed by the same IdP for a different application, and the signature
+            // is perfectly valid
             expectForgeryRejected(verifier, mint(claimsFor({ aud: 'someone-elses-client' })));
           });
 
@@ -4423,7 +4441,10 @@ const stage8 = {
         export interface PermissionResolver {
           /** Every permission these roles hold once inheritance is expanded, deduplicated and sorted */
           permissionsOf(roles: string[]): string[];
-          /** Whether a specific permission is held. Wildcards work one way only: doc:* covers doc:read, not the reverse. */
+          /**
+           * Whether a specific permission is held. Wildcards work one way only: doc:* covers
+           * doc:read, not the reverse.
+           */
           can(roles: string[], permission: string): boolean;
         }
 
@@ -4459,7 +4480,8 @@ const stage8 = {
 
         /**
          * The platform-side role directory: every definition read is recorded.
-         * Reading too many means the graph was never fully walked — that is an infinite loop, turned here into an observable failure.
+         * Reading too many means the graph was never fully walked — that is an infinite loop,
+         * turned here into an observable failure.
          */
         function makeDirectory(graph: any) {
           let reads = 0;
@@ -4617,7 +4639,8 @@ const stage8 = {
         export function createRbac(directory: RoleDirectory): PermissionResolver {
           /**
            * A cache of role definitions that outlives a single query.
-           * It caches the **definitions**, not the expanded permissions: a definition is a fact, an expansion depends on the question.
+           * It caches the **definitions**, not the expanded permissions: a definition is a fact, an
+           * expansion depends on the question.
            */
           const definitions = new Map<string, RoleDefinition | undefined>();
 
@@ -4956,7 +4979,10 @@ const stage9 = {
           /** For example doc:read */
           action: string;
           resource: AccessResource;
-          /** When the request happened. Time is part of the request; do not read the clock inside the engine. */
+          /**
+           * When the request happened. Time is part of the request; do not read the clock inside
+           * the engine.
+           */
           atMs: number;
         }
 
@@ -5632,7 +5658,10 @@ const stage10 = {
         import { now } from '@lab/env';
 
         export interface CacheOptions {
-          /** How long one entry lives. It is the backstop: forget to invalidate and you are wrong for at most this long. */
+          /**
+           * How long one entry lives. It is the backstop: forget to invalidate and you are wrong
+           * for at most this long.
+           */
           ttlMs: number;
         }
 
@@ -5642,7 +5671,7 @@ const stage10 = {
         }
 
         export interface CachedPolicyEngine extends PolicyEngine {
-          /** This user\u2019s roles or policies changed */
+          /** This user's roles or policies changed */
           invalidateSubject(userId: string): void;
           /** This resource changed: new owner, new classification */
           invalidateResource(resourceId: string): void;
@@ -5734,7 +5763,7 @@ const stage10 = {
             const cache = makeCache(probe);
             expect(cache.evaluate(request()).allowed).toBe(true);
 
-            // An administrator revokes alice\u2019s role
+            // An administrator revokes alice's role
             probe.state.allowed = false;
             cache.invalidateSubject('alice');
 
@@ -5820,7 +5849,7 @@ const stage10 = {
             cache.invalidateSubject('alice');
             cache.evaluate(request({ subject: { userId: 'bob', tenantId: 'acme', roles: ['editor'] } }));
 
-            // bob\u2019s entry is still there
+            // bob's entry is still there
             expect(cache.stats().misses).toBe(2);
             expect(cache.stats().hits).toBe(1);
           });
@@ -6404,7 +6433,7 @@ const stage11 = {
             expect(globex.read('doc-1').title).toBe('globex plan');
           });
 
-          it('a listing contains only this tenant\u2019s documents', () => {
+          it("a listing contains only this tenant's documents", () => {
             const store = createStore();
             const acme = repositoryFor(store, 'alice', 'acme');
             const globex = repositoryFor(store, 'mallory', 'globex');
@@ -6442,7 +6471,7 @@ const stage11 = {
             expect(repositoryFor(store, 'mallory', 'globex').read('doc-1')).toBeNull();
           });
 
-          it('writing the same id again updates only this tenant\u2019s row', () => {
+          it("writing the same id again updates only this tenant's row", () => {
             const store = createStore();
             const acme = repositoryFor(store, 'alice', 'acme');
             const globex = repositoryFor(store, 'mallory', 'globex');
@@ -6468,7 +6497,7 @@ const stage11 = {
             expect(acme.list()).toEqual([]);
           });
 
-          it('the repository\u2019s tenant comes from the session issued at login', () => {
+          it("the repository's tenant comes from the session issued at login", () => {
             const store = createStore();
             const issuer = createSessionIssuer({ secret: 'session-signing-key', ttlMs: 60000 });
             const refresh = createRefreshService(store, issuer, { ttlMs: 600000 });
@@ -6490,7 +6519,8 @@ const stage11 = {
             const acme = repositoryFor(store, 'alice', 'acme');
             acme.write({ id: 'doc-1', ownerId: 'alice', title: 'mine' });
 
-            // The gate counts how many of someone else\u2019s records were read; fetching everything and then filtering shows up here
+            // The gate counts how many of someone else's records were read; fetching everything and
+            // then filtering shows up here
             expect(acme.list()).toHaveLength(1);
             expect(acme.listOwnedBy('mallory')).toEqual([]);
             expect(acme.read('doc-7')).toBeNull();
@@ -6547,7 +6577,10 @@ const stage11 = {
           const scope = { tenantId: tenant };
           const prefix = tenant + KEY_SEPARATOR;
 
-          /** The whole repository reads the store in exactly one place, so the scope is written exactly once */
+          /**
+           * The whole repository reads the store in exactly one place, so the scope is written
+           * exactly once
+           */
           function fetch(key: string): TenantDocument | null {
             const record = store.get(COLLECTIONS.documents, key, scope);
             return record ? (record as unknown as TenantDocument) : null;
@@ -6556,7 +6589,8 @@ const stage11 = {
           function all(): TenantDocument[] {
             const documents: TenantDocument[] = [];
             for (const key of store.keys(COLLECTIONS.documents)) {
-              // Filter keys by tenant first and fetch the data second: other tenants\u2019 records are never read at all
+              // Filter keys by tenant first and fetch the data second: other tenants' records are
+              // never read at all
               if (key.indexOf(prefix) !== 0) continue;
               const document = fetch(key);
               if (document) documents.push(document);
@@ -7190,7 +7224,8 @@ const stage12 = {
             await context.guard.login({ userId: 'alice', password: PASSWORD, tenantId: 'acme' });
             const after = getCounters()['kdfRounds'] || 0;
 
-            // The rejection is a foregone conclusion, so that hash is pure wasted CPU an attacker can trigger without limit
+            // The rejection is a foregone conclusion, so that hash is pure wasted CPU an attacker
+            // can trigger without limit
             expect(after).toBe(before);
           });
 
@@ -7315,7 +7350,7 @@ const stage12 = {
           secret: string;
         }
 
-        /** The start of the chain. The first entry\u2019s prevHash points at it. */
+        /** The start of the chain. The first entry's prevHash points at it. */
         const GENESIS = 'genesis';
         const MASK = '[redacted]';
         const KEY_WIDTH = 6;
@@ -7356,7 +7391,10 @@ const stage12 = {
             ].join('|');
           }
 
-          /** HMAC rather than a plain digest: someone who can edit the database should not be able to recompute this value */
+          /**
+           * HMAC rather than a plain digest: someone who can edit the database should not be able
+           * to recompute this value
+           */
           function hashOf(entry: AuditEntry): string {
             return hmac(options.secret, bodyOf(entry));
           }
@@ -7404,7 +7442,8 @@ const stage12 = {
               const list = all();
               for (let index = 0; index < list.length; index += 1) {
                 const entry = list[index];
-                // Three kinds of break: a skipped number, a mismatch with the previous entry, or altered content
+                // Three kinds of break: a skipped number, a mismatch with the previous entry, or
+                // altered content
                 if (entry.seq !== index + 1) return index;
                 if (entry.prevHash !== expected) return index;
                 if (entry.hash !== hashOf(entry)) return index;
@@ -7460,7 +7499,8 @@ const stage12 = {
             async login(input: { userId: string; password: string; tenantId: string }): Promise<LoginResult> {
               const state = stateOf(input.userId);
 
-              // The lock check comes before the password check: the outcome is already decided, so that slow hash is pure waste
+              // The lock check comes before the password check: the outcome is already decided, so
+              // that slow hash is pure waste
               if (state.lockedUntil > now()) {
                 trace(input.userId, input.tenantId, 'deny', 'locked');
                 return { ok: false, reason: 'locked' };

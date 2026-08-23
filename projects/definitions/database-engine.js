@@ -14,7 +14,10 @@ const contract = readonlyFile(
   code`
     /** Contract provided by the platform (read-only) */
 
-    /** One row of data. A fixed schema, which spares you the schema-parsing work this project is not about. */
+    /**
+     * One row of data. A fixed schema, which spares you the schema-parsing work this project is not
+     * about.
+     */
     export interface Row {
       id: number;
       name: string;
@@ -56,7 +59,7 @@ const contract = readonlyFile(
       type: 'begin' | 'write' | 'commit';
       /** Present only when type is write */
       pageId?: number;
-      /** Present only when type is write; the page\u2019s new content */
+      /** Present only when type is write; the page's new content */
       after?: number[];
     }
   `
@@ -68,17 +71,22 @@ const disk = readonlyFile(
     /**
      * Simulated block device (read-only, provided by the platform)
      *
-     * It is deliberately made to behave like a real disk, because every stage of this project wrestles with its properties:
+     * It is deliberately made to behave like a real disk, because every stage of this project
+     * wrestles with its properties:
      *
      * - reads and writes work in whole pages; half a page cannot be read;
      * - writes land in the operating system page cache first, and **only fsync makes them durable**;
      * - crash() drops every write not yet fsynced — the crash recovery stage rests entirely on this;
-     * - every read, write and fsync is counted and advances the virtual clock, so one fewer disk read is measurable.
+     * - every read, write and fsync is counted and advances the virtual clock, so one fewer disk
+     * read is measurable.
      */
     import { sleep } from '@lab/env';
     import { count } from '@lab/metrics';
 
-    /** Page size. Real databases usually use 4KB or 8KB; a small value here keeps the arithmetic doable by hand. */
+    /**
+     * Page size. Real databases usually use 4KB or 8KB; a small value here keeps the arithmetic
+     * doable by hand.
+     */
     export const PAGE_SIZE = 128;
 
     const READ_MS = 1;
@@ -121,7 +129,7 @@ const disk = readonlyFile(
         return this.nextPageId;
       }
 
-      /** Flush the page cache and the log buffer together to \u2018disk\u2019 */
+      /** Flush the page cache and the log buffer together to 'disk' */
       async fsync(): Promise<void> {
         count('diskFsync');
         await sleep(FSYNC_MS);
@@ -615,7 +623,8 @@ const stage1 = {
               const pageId = oldest.value as number;
               const frame = frames.get(pageId) as Frame;
               frames.delete(pageId);
-              // A dirty page has to be written back first, or data the user wrote disappears along with the eviction
+              // A dirty page has to be written back first, or data the user wrote disappears along
+              // with the eviction
               if (frame.dirty) await disk.writePage(pageId, frame.data);
               stats.evictions += 1;
             }
@@ -1206,7 +1215,7 @@ const stage2 = {
          * Layout:
          *   [0..3]  id            uint32 BE
          *   [4]     active        uint8
-         *   [5]     nameLength    uint8   <- a variable-length field carries its own length
+         *   [5]     nameLength    uint8   ← a variable-length field carries its own length
          *   [6..]   name          UTF-8
          */
         const ID_OFFSET = 0;
@@ -1269,9 +1278,11 @@ const stage2 = {
          *   [0..1]   slotCount   uint16 BE
          *   [2..3]   freeStart   uint16 BE, the end of the record area
          *   [4..]    record data, piling up from the front
-         *   [..128]  the slot directory, growing from the back, 4 bytes per slot (offset uint16, length uint16)
+         *   [..128]  the slot directory, growing from the back, 4 bytes per slot (offset uint16,
+         * length uint16)
          *
-         * Records and directory grow towards each other, and the free space is what lies between. A length of 0 marks a tombstone.
+         * Records and directory grow towards each other, and the free space is what lies between. A
+         * length of 0 marks a tombstone.
          */
         const HEADER_BYTES = 4;
         const SLOT_BYTES = 4;
@@ -1314,7 +1325,8 @@ const stage2 = {
             remove(slotId: number): boolean {
               const slot = slots[slotId];
               if (!slot || slot.length === 0) return false;
-              // Leave a tombstone rather than compacting: compacting would invalidate the other records\u2019 slotIds,
+              // Leave a tombstone rather than compacting: compacting would invalidate the other
+              // records' slotIds,
               // and slotIds are exactly what the index stores
               slot.length = 0;
               return true;
@@ -1745,7 +1757,8 @@ const stage3 = {
             for (let index = 0; index < 12; index += 1) {
               slots.push(await heap.insert(row(index, 'u' + index)));
             }
-            // Delete the first and the last: an implementation using liveCount as the loop bound misses the tail
+            // Delete the first and the last: an implementation using liveCount as the loop bound
+            // misses the tail
             await heap.remove(slots[0]);
             await heap.remove(slots[slots.length - 1]);
 
@@ -1886,7 +1899,8 @@ const stage3 = {
             async insert(row: Row): Promise<Slot> {
               const bytes = encodeRow(row);
 
-              // Only append to the last page. A real engine consults a free-space map to reuse holes in earlier pages,
+              // Only append to the last page. A real engine consults a free-space map to reuse
+              // holes in earlier pages,
               // which is a separate topic; the point here is that a table is a chain of pages.
               let pageId = pageList[pageList.length - 1];
               let page = await loadPage(pageId);
@@ -1902,7 +1916,8 @@ const stage3 = {
                 }
               }
 
-              // What was modified is a copy, so it has to be written back, or this row lives only in that temporary object
+              // What was modified is a copy, so it has to be written back, or this row lives only
+              // in that temporary object
               await pager.writePage(pageId, page.toBytes());
               return { pageId, slotId };
             },
@@ -1930,7 +1945,8 @@ const stage3 = {
               return {
                 async next(): Promise<HeapEntry | null> {
                   while (pageIndex < pageList.length) {
-                    // Read the disk once per page boundary and take every row on the page from that one object
+                    // Read the disk once per page boundary and take every row on the page from that
+                    // one object
                     if (!page) page = await loadPage(pageList[pageIndex]);
 
                     // The bound has to be slotCount: tombstones still occupy ids,
@@ -2002,12 +2018,16 @@ const btreeNode = readonlyFile(
      * B+Tree node encoding (read-only, provided by the platform)
      *
      * Turning a node into bytes was already practised in stage 2 and is not repeated here.
-     * What you write is the **tree algorithm**: the search path, splitting, and the linked list between leaves.
+     * What you write is the **tree algorithm**: the search path, splitting, and the linked list
+     * between leaves.
      */
     import type { Slot } from './contract';
     import { PAGE_SIZE } from './disk';
 
-    /** How many keys one node holds at most. A small value makes splits happen early, which is easier to observe. */
+    /**
+     * How many keys one node holds at most. A small value makes splits happen early, which is
+     * easier to observe.
+     */
     export const MAX_KEYS = 4;
 
     export interface LeafNode {
@@ -2528,7 +2548,8 @@ const stage4 = {
             count('searchPageReads', reads);
 
             expect(found).toEqual(slotFor(37));
-            // 60 keys means at least 15 leaves; a scan costs a dozen or more reads, while the index costs only the tree height
+            // 60 keys means at least 15 leaves; a scan costs a dozen or more reads, while the index
+            // costs only the tree height
             expect(reads).toBeLessThanOrEqual(treeHeight + 1);
             expect(reads).toBeLessThanOrEqual(6);
           });
@@ -2594,7 +2615,8 @@ const stage4 = {
 
           /**
            * The separator key is the minimum of the right subtree, so a key equal to it goes right.
-           * Written as key > keys[index], a key equal to the separator falls into the left subtree, where it can be inserted but never found.
+           * Written as key > keys[index], a key equal to the separator falls into the left subtree,
+           * where it can be inserted but never found.
            */
           function childIndexFor(node: InternalNode, key: number): number {
             let index = 0;
@@ -2616,7 +2638,8 @@ const stage4 = {
             const rightSlots = node.slots.splice(mid);
 
             const rightPageId = await pager.allocatePage();
-            // The new leaf takes over the old one\u2019s successor, and only then does the old leaf point at it — reverse the order and range walks off a broken chain
+            // The new leaf takes over the old one's successor, and only then does the old leaf
+            // point at it — reverse the order and range walks off a broken chain
             const rightNode: LeafNode = {
               kind: 'leaf',
               keys: rightKeys,
@@ -2633,7 +2656,8 @@ const stage4 = {
 
           async function splitInternal(pageId: number, node: InternalNode): Promise<Split> {
             const mid = Math.floor(node.keys.length / 2);
-            // An internal split **moves** the separator key up: it is only a signpost, and leaving it below adds a separator pointing at no data
+            // An internal split **moves** the separator key up: it is only a signpost, and leaving
+            // it below adds a separator pointing at no data
             const promoted = node.keys[mid];
             const rightNode: InternalNode = {
               kind: 'internal',
@@ -2689,7 +2713,8 @@ const stage4 = {
               const split = await insertInto(root, key, slot);
               if (!split) return;
 
-              // A root split has to allocate a fresh page for the new root rather than turning the old root into an internal node in place
+              // A root split has to allocate a fresh page for the new root rather than turning the
+              // old root into an internal node in place
               const newRoot = await pager.allocatePage();
               await writeNode(newRoot, {
                 kind: 'internal',
@@ -2716,7 +2741,8 @@ const stage4 = {
                 }
 
                 const largest = leaf.keys[leaf.keys.length - 1];
-                // A leaf chain is ordered, so once the largest key exceeds hi there can be no more matches further along
+                // A leaf chain is ordered, so once the largest key exceeds hi there can be no more
+                // matches further along
                 if (leaf.next === -1 || (largest !== undefined && largest > hi)) break;
                 leaf = (await readNode(leaf.next)) as LeafNode;
               }
@@ -2793,7 +2819,8 @@ const walCodec = readonlyFile(
      *
      * JSON is used here because the byte format of the log is not what this stage teaches.
      * A real WAL is compact binary, and every record also carries an LSN and a checksum —
-     * the checksum is what identifies a last record that was only half written, which is the normal state after a crash.
+     * the checksum is what identifies a last record that was only half written, which is the normal
+     * state after a crash.
      */
     import type { LogRecord } from './contract';
 
@@ -3168,7 +3195,8 @@ const stage5 = {
             const inFlight = store.begin();
             await inFlight.write(pages[2], bytes(66));
 
-            // Another transaction fsyncs when it commits; if the in-flight pages have already been written to the page cache,
+            // Another transaction fsyncs when it commits; if the in-flight pages have already been
+            // written to the page cache,
             // that fsync makes them durable along with everything else
             const later = store.begin();
             await later.write(pages[1], bytes(3));
@@ -3306,7 +3334,7 @@ const stage5 = {
               nextTxId += 1;
 
               // Changes accumulate here first, and not a byte goes to disk before commit (no-steal).
-              // That way another transaction\u2019s fsync cannot flush them out, and recovery needs redo only.
+              // That way another transaction's fsync cannot flush them out, and recovery needs redo only.
               const buffered: BufferedWrite[] = [];
               let settled = false;
 
@@ -3329,11 +3357,14 @@ const stage5 = {
                   settled = true;
 
                   disk.appendLog(encodeLogRecord({ txId: id, type: 'commit' }));
-                  // Write-ahead: the log goes to disk first, and the whole transaction costs just this one fsync.
-                  // Once this line returns the transaction has committed, even with not a single data page written.
+                  // Write-ahead: the log goes to disk first, and the whole transaction costs just
+                  // this one fsync.
+                  // Once this line returns the transaction has committed, even with not a single
+                  // data page written.
                   await disk.fsync();
 
-                  // The data pages can take their time: even if they are lost, the log still records what they should become
+                  // The data pages can take their time: even if they are lost, the log still
+                  // records what they should become
                   for (const entry of buffered) {
                     await disk.writePage(entry.pageId, entry.data);
                   }
@@ -3355,14 +3386,16 @@ const stage5 = {
             async recover(): Promise<number> {
               const records: LogRecord[] = disk.readLog().map(decodeLogRecord);
 
-              // First pass: which transactions actually committed. A transaction running at the moment of the crash left write records too,
+              // First pass: which transactions actually committed. A transaction running at the
+              // moment of the crash left write records too,
               // and without filtering first you would replay its uncommitted changes along with the rest.
               const committed = new Set<number>();
               for (const record of records) {
                 if (record.type === 'commit') committed.add(record.txId);
               }
 
-              // Second pass: replay in log order. The order matters — when one page was modified twice, the later write has to win.
+              // Second pass: replay in log order. The order matters — when one page was modified
+              // twice, the later write has to win.
               let replayed = 0;
               for (const record of records) {
                 if (!committed.has(record.txId)) continue;
@@ -3374,7 +3407,8 @@ const stage5 = {
               }
 
               await disk.fsync();
-              // Replayed log entries are no longer needed. A real system takes a checkpoint here rather than simply discarding them.
+              // Replayed log entries are no longer needed. A real system takes a checkpoint here
+              // rather than simply discarding them.
               disk.truncateLog();
               return replayed;
             },
@@ -3789,7 +3823,8 @@ const stage6 = {
             const order: string[] = [];
             const writer = locks.acquire(2, 'users', 'exclusive').then(() => order.push('writer'));
             await sleep(1);
-            // This read request is compatible with the current holder, but it is queued behind a writer and may not jump ahead
+            // This read request is compatible with the current holder, but it is queued behind a
+            // writer and may not jump ahead
             const reader = locks.acquire(3, 'users', 'shared').then(() => order.push('reader'));
 
             await sleep(5);
@@ -3994,7 +4029,8 @@ const stage6 = {
 
           function drain(resource: string): void {
             const queue = queueOf(resource);
-            // Admit from the head only: even a compatible request may not jump the queue, or a stream of readers starves the writers
+            // Admit from the head only: even a compatible request may not jump the queue, or a
+            // stream of readers starves the writers
             while (queue.length > 0 && compatible(resource, queue[0].txId, queue[0].mode)) {
               const waiter = queue.shift() as Waiter;
               grant(resource, waiter.txId, waiter.mode);
@@ -4004,8 +4040,10 @@ const stage6 = {
           }
 
           /**
-           * The wait-for graph: every waiting transaction has an edge to each holder of the resource it waits on.
-           * Add the new request as an edge too; if you can walk from the requester back to itself, that is a cycle.
+           * The wait-for graph: every waiting transaction has an edge to each holder of the
+           * resource it waits on.
+           * Add the new request as an edge too; if you can walk from the requester back to itself,
+           * that is a cycle.
            */
           function wouldCycle(txId: number, resource: string): boolean {
             const waitsFor = new Map<number, Set<number>>();
@@ -4378,7 +4416,7 @@ const stage7 = {
           begin(): MvccTransaction;
           /** The latest committed value, for tests and operations */
           current(key: string): Row | null;
-          /** How long this key\u2019s version chain is */
+          /** How long this key's version chain is */
           chainLength(key: string): number;
           /** Purge old versions nobody can see any more, returning how many were removed */
           vacuum(): number;
@@ -4564,7 +4602,7 @@ const stage7 = {
             writer.commit();
 
             store.vacuum();
-            // reader\u2019s snapshot still needs v1
+            // reader's snapshot still needs v1
             expect(reader.read('u1')).toEqual(row(1, 'v1'));
           });
 
@@ -4674,7 +4712,8 @@ const stage7 = {
 
         export function createMvccStore(): MvccStore {
           let nextTxId = 1;
-          // The global commit sequence number. Visibility and conflict checks are just comparisons of two integers
+          // The global commit sequence number. Visibility and conflict checks are just comparisons
+          // of two integers
           let commitSeq = 0;
           const chains = new Map<string, Version[]>();
           const active = new Map<number, number>();
@@ -4878,7 +4917,10 @@ const stage7 = {
 const ast = readonlyFile(
   'src/ast.ts',
   code`
-    /** The shape of the syntax tree (read-only, provided by the platform) — the parser output has to look like this */
+    /**
+     * The shape of the syntax tree (read-only, provided by the platform) — the parser output has to
+     * look like this
+     */
 
     export type TokenType = 'keyword' | 'identifier' | 'number' | 'string' | 'operator' | 'punctuation' | 'eof';
 
@@ -5752,7 +5794,7 @@ const planTypes = readonlyFile(
     export interface TableSchema {
       name: string;
       columns: ColumnDef[];
-      /** The pages this table\u2019s heap file occupies */
+      /** The pages this table's heap file occupies */
       pages: number[];
     }
 
@@ -6322,7 +6364,8 @@ const stage9 = {
 
           if (expr.op === 'AND' || expr.op === 'OR') return;
 
-          // When a column is compared against a literal, check the literal\u2019s actual type against the column definition
+          // When a column is compared against a literal, check the literal's actual type against
+          // the column definition
           const sides: Array<[Expr, Expr]> = [
             [expr.left, expr.right],
             [expr.right, expr.left],
@@ -6360,7 +6403,8 @@ const stage9 = {
             };
           }
 
-          // '*' is expanded right here: a bound plan should hold nothing that needs a catalog lookup to understand
+          // '*' is expanded right here: a bound plan should hold nothing that needs a catalog
+          // lookup to understand
           const columns =
             statement.columns.length === 1 && statement.columns[0] === '*'
               ? schema.columns.map((column) => column.name)
@@ -6835,7 +6879,8 @@ const stage10 = {
           it('projection does not corrupt the rows handed up from below', async () => {
             const ctx = await seed(6);
             const projected = await run('SELECT id FROM users ORDER BY name', ctx);
-            // sort holds the whole batch in an array, and a project that deletes keys in place would modify them too
+            // sort holds the whole batch in an array, and a project that deletes keys in place
+            // would modify them too
             expect(projected).toHaveLength(6);
             expect(Object.keys(projected[0])).toEqual(['id']);
           });
@@ -6969,7 +7014,8 @@ const stage10 = {
           if (expr.kind === 'column') return tuple[expr.name];
           if (expr.kind === 'literal') return expr.value;
 
-          // Short-circuit: the moment an expression contains a function call or a division, this stops being merely a performance question
+          // Short-circuit: the moment an expression contains a function call or a division, this
+          // stops being merely a performance question
           if (expr.op === 'AND') {
             return Boolean(evaluate(expr.left, tuple)) && Boolean(evaluate(expr.right, tuple));
           }
@@ -7001,7 +7047,8 @@ const stage10 = {
                 cursor = heap.scan();
               }
               const entry = await cursor.next();
-              // Rows are read-only between operators: hand up a copy so an in-place edit above cannot hurt what is below
+              // Rows are read-only between operators: hand up a copy so an in-place edit above
+              // cannot hurt what is below
               return entry ? ({ ...(entry.row as object) } as Tuple) : null;
             },
           };
@@ -7010,7 +7057,8 @@ const stage10 = {
         function filterOperator(input: Operator, predicate: Expr): Operator {
           return {
             async next(): Promise<Tuple | null> {
-              // Pull one row at a time and keep pulling while it does not match. Draining the input first makes the whole tree blocking
+              // Pull one row at a time and keep pulling while it does not match. Draining the input
+              // first makes the whole tree blocking
               for (;;) {
                 const tuple = await input.next();
                 if (!tuple) return null;
@@ -7025,7 +7073,8 @@ const stage10 = {
             async next(): Promise<Tuple | null> {
               const tuple = await input.next();
               if (!tuple) return null;
-              // Build a new object rather than deleting keys from the original: sort may still be holding the same reference
+              // Build a new object rather than deleting keys from the original: sort may still be
+              // holding the same reference
               const projected: Tuple = {};
               for (const column of columns) projected[column] = tuple[column];
               return projected;
@@ -7093,7 +7142,8 @@ const stage10 = {
 
               const heap = await createHeapFile(ctx.pager, schema.pages);
               await heap.insert(row as unknown as Row);
-              // An insert may have opened a new page, and the catalog has to keep up or the next scan will not see the new rows
+              // An insert may have opened a new page, and the catalog has to keep up or the next
+              // scan will not see the new rows
               ctx.catalog.setPages(table, heap.pages());
 
               return { inserted: 1 };
@@ -7590,7 +7640,7 @@ const stage11 = {
             expect(joined).toEqual([{ id: 7, name: 'a', o_userId: 7, o_note: 'n' }]);
           });
 
-          it('it runs on top of real scan operators too', async () => {
+          it('the join runs on top of real scan operators too', async () => {
             const disk = new Disk();
             const pager = createPager(disk, { capacity: 64 });
             const users = await createHeapFile(pager);
@@ -7711,7 +7761,10 @@ const stage11 = {
           right: string;
         }
 
-        /** Build a new object: the left row may still match other right rows and must not be modified in place */
+        /**
+         * Build a new object: the left row may still match other right rows and must not be
+         * modified in place
+         */
         function merge(left: Tuple, right: Tuple, prefix: string): Tuple {
           const merged: Tuple = { ...left };
           for (const key of Object.keys(right)) {
@@ -8335,7 +8388,8 @@ const stage12 = {
           });
 
           it('a poorly selective predicate uses a full scan', () => {
-            // id > 10 matches about 90 rows: the index costs 3 + 90 = 93, far more than the 20 pages of the whole table
+            // id > 10 matches about 90 rows: the index costs 3 + 90 = 93, far more than the 20
+            // pages of the whole table
             const path = chooseAccessPath(whereOf('SELECT * FROM t WHERE id > 10'), STATS, options);
             expect(path.kind).toBe('seq-scan');
             expect(path.estimatedCost).toBe(20);
@@ -8478,11 +8532,15 @@ const stage12 = {
 
         function clamp(value: number): number {
           if (!isFinite(value)) return DEFAULT_SELECTIVITY;
-          // Clamping is not optional: a negative selectivity makes the estimated row count negative and the cost model falls apart
+          // Clamping is not optional: a negative selectivity makes the estimated row count negative
+          // and the cost model falls apart
           return Math.min(1, Math.max(0, value));
         }
 
-        /** When the column sits on the right of a comparison, flip the operator so only one direction needs handling below */
+        /**
+         * When the column sits on the right of a comparison, flip the operator so only one
+         * direction needs handling below
+         */
         function flip(op: CompareOp): CompareOp {
           if (op === '<') return '>';
           if (op === '<=') return '>=';
@@ -8495,7 +8553,8 @@ const stage12 = {
           if (expr.kind !== 'binary') return DEFAULT_SELECTIVITY;
 
           if (expr.op === 'AND') {
-            // The independence assumption: correlated columns in the real world make this product badly underestimate
+            // The independence assumption: correlated columns in the real world make this product
+            // badly underestimate
             return clamp(estimateSelectivity(expr.left, stats) * estimateSelectivity(expr.right, stats));
           }
           if (expr.op === 'OR') {
@@ -8538,7 +8597,7 @@ const stage12 = {
         }
 
         /**
-         * A single-column index is useless under an OR: neither side\u2019s matching rows contain the other\u2019s,
+         * A single-column index is useless under an OR: neither side's matching rows contain the other's,
          * so both have to be looked up. Real systems handle this with a bitmap index scan.
          */
         function indexUsable(expr: Expr, indexedColumns: string[]): boolean {
@@ -8573,7 +8632,8 @@ const stage12 = {
           }
 
           // Index scan: walk the tree once, then read one page per matching row to fetch it.
-          // With many matches this exceeds the whole table\u2019s page count — which is the arithmetic behind not using an index even when one exists
+          // With many matches this exceeds the whole table's page count — which is the arithmetic
+          // behind not using an index even when one exists
           const indexCost = options.indexHeight + estimatedRows;
 
           return indexCost < seqCost

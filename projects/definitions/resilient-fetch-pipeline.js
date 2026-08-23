@@ -1196,7 +1196,8 @@ const stage3 = {
             const results = await fetchWithDeadline(urls, { concurrency: 2, timeoutMs: 200 });
 
             expect(results.filter((result) => result.ok)).toHaveLength(3);
-            // Three hung requests at 200ms each and three normal ones at 100ms, over two slots -> around 450ms.
+            // Three hung requests at 200ms each and three normal ones at 100ms, over two slots ->
+            // around 450ms.
             // An implementation that waits for the hung request to really return takes over 5000ms
             expect(now() - startedAt).toBeLessThanOrEqual(600);
           });
@@ -1318,7 +1319,10 @@ const stage3 = {
           signal?: CancelToken;
         }
 
-        /** The timeout branch returns a sentinel instead of throwing, so one check after the race separates the two paths */
+        /**
+         * The timeout branch returns a sentinel instead of throwing, so one check after the race
+         * separates the two paths
+         */
         const TIMED_OUT = Symbol('timed-out');
 
         export async function fetchWithDeadline(
@@ -1328,7 +1332,8 @@ const stage3 = {
           const results: PageResult[] = new Array(urls.length);
           if (urls.length === 0) return results;
 
-          // Record the budget as an absolute instant: simpler than tracking how much is left, and correct under concurrency
+          // Record the budget as an absolute instant: simpler than tracking how much is left, and
+          // correct under concurrency
           const deadline =
             options.totalBudgetMs === undefined ? Infinity : now() + options.totalBudgetMs;
 
@@ -2333,7 +2338,8 @@ const stage5 = {
             await fetchWithPolicy('/api/flaky', OPTIONS);
             const elapsed = now() - startedAt;
 
-            // 300ms of requests plus 50 + 100 of backoff, around 450ms, clearly shorter than the throttled path
+            // 300ms of requests plus 50 + 100 of backoff, around 450ms, clearly shorter than the
+            // throttled path
             expect(elapsed).toBeLessThan(700);
           });
 
@@ -2382,12 +2388,16 @@ const stage5 = {
           throttleDelayMs: number;
         }
 
-        /** For these particular 4xx codes the meaning is really \u2018try again and it might work\u2019, so the range cannot be treated uniformly */
+        /**
+         * For these particular 4xx codes the meaning is really 'try again and it might work', so
+         * the range cannot be treated uniformly
+         */
         const RETRYABLE_4XX = [408, 425];
 
         export function classify(error: unknown): FailureKind {
           // An error with no status is a network-layer error (connection refused, DNS failure),
-          // which is exactly the kind most worth retrying — do not call it permanent just because there is no status
+          // which is exactly the kind most worth retrying — do not call it permanent just because
+          // there is no status
           if (!(error instanceof LabHttpError)) return 'retryable';
 
           const status = error.status;
@@ -2778,11 +2788,12 @@ const stage6 = {
 
             expect(result.ok).toBe(true);
             expect(result.url).toBe('/api/quick-primary');
-            // It came back at 150ms, so the 200ms hedge timer must find a result already waiting when it wakes
+            // It came back at 150ms, so the 200ms hedge timer must find a result already waiting
+            // when it wakes
             expect(getMetrics().requests.total).toBe(1);
           });
 
-          it('hedges when the primary is slow and uses the replica\u2019s result [gate:tail]', async () => {
+          it("hedges when the primary is slow and uses the replica's result [gate:tail]", async () => {
             const startedAt = now();
             const result = await hedgedFetch(['/api/slow-primary', '/api/fast-replica'], {
               hedgeAfterMs: 200,
@@ -2791,7 +2802,7 @@ const stage6 = {
 
             expect(result.ok).toBe(true);
             expect(result.url).toBe('/api/fast-replica');
-            // 200ms of waiting plus a 120ms replica = 320ms, rather than the primary\u2019s 900ms
+            // 200ms of waiting plus a 120ms replica = 320ms, rather than the primary's 900ms
             expect(elapsed).toBeLessThanOrEqual(400);
           });
 
@@ -2924,12 +2935,14 @@ const stage6 = {
                 (error) => {
                   failures += 1;
                   lastError = error instanceof Error ? error.message : String(error);
-                  // Only \u2018everything already sent has failed and nothing more will be sent\u2019 counts as a real failure.
+                  // Only 'everything already sent has failed and nothing more will be sent' counts
+                  // as a real failure.
                   // A Promise.race implementation calls it a day on the first failure
                   if (failures === launched && launched >= limit) {
                     finish({ url, ok: false, data: null, error: lastError });
                   } else if (failures === launched) {
-                    // Nothing is in flight any more, so send the next one now rather than waiting out hedgeAfterMs
+                    // Nothing is in flight any more, so send the next one now rather than waiting
+                    // out hedgeAfterMs
                     launch(launched);
                   }
                 }
@@ -3475,7 +3488,8 @@ const stage7 = {
                 entries.delete(key);
                 return undefined;
               }
-              // A Map preserves insertion order, so delete-then-reinsert is exactly \u2018move to most recently used\u2019
+              // A Map preserves insertion order, so delete-then-reinsert is exactly 'move to most
+              // recently used'
               entries.delete(key);
               entries.set(key, entry);
               return entry.value;
@@ -4736,7 +4750,8 @@ const stage9 = {
           return {
             submit(url: string): Promise<PageResult> {
               // The limit counts queued work only: what is running is about to finish, so it neither occupies
-              // queue memory nor grows latency without bound, and counting it makes the setting's meaning drift with concurrency
+              // queue memory nor grows latency without bound, and counting it makes the setting's
+              // meaning drift with concurrency
               if (queue.length >= options.maxQueueDepth && running >= limit) {
                 refused += 1;
                 // Return an already-rejected promise synchronously, so the elapsed time is naturally 0.
@@ -5159,7 +5174,8 @@ const stage10 = {
           it('pagination is serial, taking page count times per-page latency', async () => {
             const startedAt = now();
             await fetchAllPages('/api/list/1', { maxPages: 10 });
-            // Three pages at 100ms each: without page N you do not know where page N+1 is, so it cannot be compressed
+            // Three pages at 100ms each: without page N you do not know where page N+1 is, so it
+            // cannot be compressed
             expect(now() - startedAt).toBe(300);
           });
 
@@ -5242,7 +5258,8 @@ const stage10 = {
             const page = (response.data || {}) as PageEnvelope;
             // Do not let a malformed server response crash the whole walk
             if (Array.isArray(page.items)) {
-              // push rather than rebuilding the array: the latter is O(n\u00b2) copies once there are many pages
+              // push rather than rebuilding the array: the latter is O(n\u00b2) copies once there
+              // are many pages
               for (const item of page.items) items.push(item);
             }
 
@@ -5760,7 +5777,8 @@ const stage11 = {
         }
 
         export function createPipeline(options: PipelineOptions = {}): Pipeline {
-          // Each instance holds its own cache and single-flight registry, so two of them can be created safely
+          // Each instance holds its own cache and single-flight registry, so two of them can be
+          // created safely
           const cache = createCache<PageResult>({ ttlMs: options.ttlMs, maxSize: 500 });
           const singleFlight = createSingleFlight();
           const stats: PipelineStats = { completed: 0, failed: 0, cacheHits: 0 };
@@ -6359,8 +6377,10 @@ const stage12 = {
 
         export function createHistogram(boundaries: number[]): Histogram {
           const bounds = boundaries.slice().sort((left, right) => left - right);
-          // The bucket count is fixed: however many observations arrive, they only increment these few counters,
-          // so memory is independent of the observation count. Keeping every sample is the implementation that blows the process up
+          // The bucket count is fixed: however many observations arrive, they only increment these
+          // few counters,
+          // so memory is independent of the observation count. Keeping every sample is the
+          // implementation that blows the process up
           const counts: number[] = [];
           for (let index = 0; index <= bounds.length; index += 1) counts.push(0);
           let total = 0;
@@ -6403,7 +6423,8 @@ const stage12 = {
                   continue;
                 }
                 if (counts[index] === 0) return last;
-                // The +Inf bucket has no upper bound and cannot be interpolated, so fall back to the last finite boundary
+                // The +Inf bucket has no upper bound and cannot be interpolated, so fall back to
+                // the last finite boundary
                 if (index === bounds.length) return last;
 
                 const lower = index === 0 ? 0 : bounds[index - 1];
@@ -6439,7 +6460,8 @@ const stage12 = {
 
           return {
             span(name: string) {
-              // Both timestamps live in this closure, so parallel spans each get their own and cannot overwrite each other
+              // Both timestamps live in this closure, so parallel spans each get their own and
+              // cannot overwrite each other
               const startedAt = now();
               let ended = false;
               return {
