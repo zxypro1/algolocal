@@ -23,6 +23,7 @@ import { AppHeader, HEADER_HEIGHT } from '../../src/components/AppHeader';
 import { useAiConfig } from '../../src/hooks/useAiConfig';
 import { useProjectRunner } from '../../src/hooks/useProjectRunner';
 import { describeVerification, verifyProject } from '../../src/lib/engineering/validateProject';
+import { requestStructuredStream } from '../../src/lib/streamRequest';
 import type { EngineeringProject } from '../../src/lib/engineering/types';
 
 interface VerificationSummary {
@@ -51,6 +52,8 @@ export default function ProjectGeneratorPage() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<GenerateResult | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  /** 模型正在写的原文 */
+  const [draft, setDraft] = useState('');
   const { run } = useProjectRunner();
 
   const suggestions =
@@ -79,17 +82,13 @@ export default function ProjectGeneratorPage() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setDraft('');
 
-    const ask = async (body: Record<string, unknown>) => {
-      const response = await fetch('/api/generate-project', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+    // 一份工程题几万字，边写边显示，而不是让人对着转圈等到最后
+    const ask = async (body: Record<string, unknown>) =>
+      requestStructuredStream<GenerateResult>('/api/generate-project', body, {
+        onDelta: (_chunk, full) => setDraft(full),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to generate project');
-      return data as GenerateResult;
-    };
 
     const check = async (candidate: EngineeringProject) => {
       setStatus(t('engineering.generator.verifying'));
@@ -244,6 +243,25 @@ export default function ProjectGeneratorPage() {
                 {/* 生成 / 验证 / 修复 是三个阶段，验证阶段会跑好几关，得让人知道进行到哪儿了 */}
                 {status || t('engineering.generator.loadingHint')}
               </Alert>
+            )}
+
+            {/* 模型写到哪儿了。生成一份工程题要几分钟，光转圈没法让人判断它是不是卡住了。 */}
+            {loading && draft && (
+              <Card withBorder radius="md" padding="sm">
+                <Text
+                  size="xs"
+                  c="dimmed"
+                  style={{
+                    maxHeight: 200,
+                    overflow: 'auto',
+                    fontFamily: 'monospace',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  {draft.slice(-4000)}
+                </Text>
+              </Card>
             )}
 
             {error && (

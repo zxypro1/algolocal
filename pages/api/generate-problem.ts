@@ -2,11 +2,13 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
+  abortSignalFor,
   AIProviderConfig,
-  callAI,
   ChatMessage,
   extractJson,
   NoProviderError,
+  streamStructured,
+  StructuredStreamError,
 } from '../../src/lib/server/aiProvider';
 
 interface Problem {
@@ -163,70 +165,85 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       { role: 'user', content: generatePrompt(request) },
     ];
 
-    const generatedContent = await callAI(messages, config, { temperature: 0.7, maxTokens: 8000 });
+    /**
+     * 边生成边发：模型写的原文实时进 delta，落库之后的结果走 result。
+     *
+     * 以前这里是 callAI 一次性等完，用户对着转圈等一分钟，什么都看不到。
+     * 生成的结果需要完整 JSON 才能用，但那是**解析**的要求，不是**展示**的要求。
+     */
+    await streamStructured(res, messages, config, {
+      temperature: 0.7,
+      maxTokens: 8000,
+      signal: abortSignalFor(res),
+      onComplete: (generatedContent) => {
+        let problemData: Problem;
+        try {
+          // 模型经常会加 ```json 围栏，extractJson 会容错处理
+          problemData = extractJson<Problem>(generatedContent);
+        } catch (parseError) {
+          console.error('Failed to parse generated JSON:', generatedContent, parseError);
+          // 原文一起发回去：前端的 JSON 编辑器靠它让用户手动修
+          throw new StructuredStreamError('Failed to parse generated problem data', generatedContent);
+        }
 
-    let problemData: Problem;
-    try {
-      // 模型经常会加 ```json 围栏，extractJson 会容错处理
-      problemData = extractJson<Problem>(generatedContent);
-    } catch (parseError) {
-      console.error('Failed to parse generated JSON:', generatedContent, parseError);
-      return res.status(500).json({
-        error: 'Failed to parse generated problem data',
-        details: generatedContent,
-        rawContent: generatedContent,
-      });
-    }
+        const requiredFields = ['id', 'title', 'difficulty', 'tags', 'description', 'examples', 'template', 'solutions', 'tests'];
+        for (const field of requiredFields) {
+          if (!problemData[field as keyof Problem]) {
+            throw new StructuredStreamError(
+              `Generated problem is missing required field: ${field}`,
+              generatedContent
+            );
+          }
+        }
 
-    const requiredFields = ['id', 'title', 'difficulty', 'tags', 'description', 'examples', 'template', 'solutions', 'tests'];
-    for (const field of requiredFields) {
-      if (!problemData[field as keyof Problem]) {
-        return res.status(500).json({
-          error: `Generated problem is missing required field: ${field}`,
-          problemData,
-        });
-      }
-    }
+        const appRoot = process.env.APP_ROOT || process.cwd();
+        const problemsPath = path.join(appRoot, 'public', 'problems.json');
+        let existingProblems: Problem[] = [];
 
-    const appRoot = process.env.APP_ROOT || process.cwd();
-    const problemsPath = path.join(appRoot, 'public', 'problems.json');
-    let existingProblems: Problem[] = [];
+        try {
+          existingProblems = JSON.parse(fs.readFileSync(problemsPath, 'utf8'));
+        } catch (error) {
+          console.error('Error reading problems.json:', error);
+          throw new StructuredStreamError('Failed to read existing problems');
+        }
 
-    try {
-      existingProblems = JSON.parse(fs.readFileSync(problemsPath, 'utf8'));
-    } catch (error) {
-      console.error('Error reading problems.json:', error);
-      return res.status(500).json({ error: 'Failed to read existing problems' });
-    }
+        if (existingProblems.find((problem) => problem.id === problemData.id)) {
+          let counter = 1;
+          let newId = `${problemData.id}-${counter}`;
+          while (existingProblems.find((problem) => problem.id === newId)) {
+            counter += 1;
+            newId = `${problemData.id}-${counter}`;
+          }
+          problemData.id = newId;
+        }
 
-    if (existingProblems.find((problem) => problem.id === problemData.id)) {
-      let counter = 1;
-      let newId = `${problemData.id}-${counter}`;
-      while (existingProblems.find((problem) => problem.id === newId)) {
-        counter += 1;
-        newId = `${problemData.id}-${counter}`;
-      }
-      problemData.id = newId;
-    }
+        existingProblems.push(problemData);
 
-    existingProblems.push(problemData);
+        try {
+          fs.writeFileSync(problemsPath, JSON.stringify(existingProblems, null, 2), 'utf8');
+        } catch (error) {
+          console.error('Error writing problems.json:', error);
+          throw new StructuredStreamError('Failed to save new problem');
+        }
 
-    try {
-      fs.writeFileSync(problemsPath, JSON.stringify(existingProblems, null, 2), 'utf8');
-    } catch (error) {
-      console.error('Error writing problems.json:', error);
-      return res.status(500).json({ error: 'Failed to save new problem' });
-    }
-
-    return res.status(200).json({
-      success: true,
-      problem: problemData,
-      message: `Successfully generated and added problem: ${problemData.title.en}`,
+        return {
+          success: true,
+          problem: problemData,
+          message: `Successfully generated and added problem: ${problemData.title.en}`,
+        };
+      },
     });
   } catch (error) {
     console.error('Error generating problem:', error);
     const message =
       error instanceof NoProviderError ? error.message : (error as Error).message || 'Unknown error';
+    // 流已经开始的话状态码就改不动了，错误只能作为流里的事件发出去
+    if (res.headersSent) {
+      res.write(`data: ${JSON.stringify({ type: 'error', message })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+      res.end();
+      return;
+    }
     return res.status(500).json({ error: 'Failed to generate problem', details: message });
   }
 }

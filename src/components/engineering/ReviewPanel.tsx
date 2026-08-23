@@ -17,9 +17,11 @@ interface ReviewPanelProps {
   loading: boolean;
   error: string | null;
   onRequest: () => void;
+  /** 评审生成中的原文。有它就不用对着一个转圈猜进度。 */
+  draft?: string;
 }
 
-export default function ReviewPanel({ review, loading, error, onRequest }: ReviewPanelProps) {
+export default function ReviewPanel({ review, loading, error, onRequest, draft }: ReviewPanelProps) {
   const { t } = useTranslation();
 
   return (
@@ -51,6 +53,24 @@ export default function ReviewPanel({ review, loading, error, onRequest }: Revie
         <Alert color="red" title={t('common.error')}>
           {error}
         </Alert>
+      )}
+
+      {loading && draft && (
+        <Card withBorder radius="md" padding="sm">
+          <Text
+            size="xs"
+            c="dimmed"
+            style={{
+              maxHeight: 240,
+              overflow: 'auto',
+              fontFamily: 'monospace',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+            }}
+          >
+            {draft.slice(-4000)}
+          </Text>
+        </Card>
       )}
 
       {!review && !loading && !error && (

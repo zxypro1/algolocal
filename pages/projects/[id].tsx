@@ -45,6 +45,7 @@ import TracePlayer from '../../src/components/TracePlayer';
 import { useProjectRunner } from '../../src/hooks/useProjectRunner';
 import { useAiConfig } from '../../src/hooks/useAiConfig';
 import { analyzeWorkspace } from '../../src/lib/engineering/analysis';
+import { requestStructuredStream } from '../../src/lib/streamRequest';
 import { computeScoreCard } from '../../src/lib/engineering/scoring';
 import {
   applyDrafts,
@@ -97,6 +98,8 @@ export default function ProjectWorkspacePage() {
   const [review, setReview] = useState<AiReview | null>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  /** 评审正在写的原文，边收边显示 */
+  const [reviewDraft, setReviewDraft] = useState('');
 
   const { run, report, isRunning, error: runError, reset: resetReport } = useProjectRunner();
 
@@ -400,11 +403,13 @@ export default function ProjectWorkspacePage() {
     setReviewError(null);
     setBottomTab('review');
 
+    setReviewDraft('');
+
     try {
-      const response = await fetch('/api/engineering-review', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      // 评审是一整篇给人读的文字，边写边显示；结构化结果在流末尾拿
+      const data = await requestStructuredStream<{ review: AiReview }>(
+        '/api/engineering-review',
+        {
           language: locale,
           config: aiConfig,
           quality: quality ?? analyzeWorkspace(toFileMap(editableFiles(files))),
@@ -422,11 +427,10 @@ export default function ProjectWorkspacePage() {
             })),
             report,
           },
-        }),
-      });
+        },
+        { onDelta: (_chunk, full) => setReviewDraft(full) }
+      );
 
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to review');
       setReview(data.review);
     } catch (error) {
       setReviewError((error as Error).message);
@@ -855,6 +859,7 @@ export default function ProjectWorkspacePage() {
                         loading={reviewLoading}
                         error={reviewError}
                         onRequest={handleReview}
+                        draft={reviewDraft}
                       />
                     </Tabs.Panel>
                   </ScrollArea>
