@@ -18,6 +18,8 @@ type AnyNode = any;
 export interface InstrumentOptions {
   /** 注入的记录器在代码里的变量名 */
   recorderName?: string;
+  /** 多文件场景下把文件名一起写进每一步，否则行号定位不到具体文件 */
+  filePath?: string;
 }
 
 /** 收集一个函数作用域里「到这一句为止已经声明」的变量名 */
@@ -163,7 +165,11 @@ export function instrumentSource(
             'step'
           ),
           undefined,
-          [factory.createNumericLiteral(line), factory.createObjectLiteralExpression(props, false)]
+          [
+            factory.createNumericLiteral(line),
+            factory.createObjectLiteralExpression(props, false),
+            ...(options.filePath ? [factory.createStringLiteral(options.filePath)] : []),
+          ]
         )
       );
     };

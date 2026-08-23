@@ -8,7 +8,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RunStageOptions } from '../lib/engineering/runner';
 import type { StageRunReport } from '../lib/engineering/types';
 
-export type RunPayload = Omit<RunStageOptions, 'transpile'>;
+export type RunPayload = Omit<RunStageOptions, 'transpile' | 'trace'> & {
+  trace?: boolean;
+  /** 可编辑文件的路径，只给它们插桩 */
+  traceFiles?: string[];
+};
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -37,12 +41,34 @@ function createWorker(): Worker | null {
 }
 
 async function runInline(payload: RunPayload): Promise<StageRunReport> {
-  const [{ runStage }, { resolveTranspiler, sourcesOf }] = await Promise.all([
-    import('../lib/engineering/runner'),
-    import('../lib/engineering/transpile'),
-  ]);
+  const [{ runStage }, { resolveTranspiler, sourcesOf }, { instrumentSource }, { createTraceRecorder }] =
+    await Promise.all([
+      import('../lib/engineering/runner'),
+      import('../lib/engineering/transpile'),
+      import('../lib/trace/instrument'),
+      import('../lib/trace/recorder'),
+    ]);
   const transpile = await resolveTranspiler(sourcesOf(payload));
-  return runStage({ ...payload, transpile });
+  const { trace: wantsTrace, traceFiles, ...rest } = payload;
+  const recorder = wantsTrace ? createTraceRecorder() : null;
+  // 主线程回退路径也要能录，否则「Worker 不可用」的环境等于没有调试
+  const ts = (globalThis as any).ts || (await import('typescript'));
+  const report = await runStage({
+    ...rest,
+    transpile,
+    trace: recorder
+      ? {
+          api: recorder.api,
+          onlyFiles: traceFiles ? new Set(traceFiles) : undefined,
+          instrument: (code: string, filePath: string) => instrumentSource(ts, code, { filePath }),
+        }
+      : undefined,
+  });
+  if (recorder) {
+    recorder.trace.completed = true;
+    report.trace = recorder.trace;
+  }
+  return report;
 }
 
 export function useProjectRunner() {

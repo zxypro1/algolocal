@@ -18,7 +18,7 @@ export interface TraceRecorder {
   api: {
     enter(fn: string): void;
     exit(): void;
-    step(line: number, vars: Record<string, unknown>): void;
+    step(line: number, vars: Record<string, unknown>, file?: string): void;
   };
   trace: ExecutionTrace;
 }
@@ -104,7 +104,7 @@ export function createTraceRecorder(
         // 保底：栈底那一层不弹，插桩配对出问题时也不至于把栈掏空
         if (stack.length > 1) stack.pop();
       },
-      step(line: number, vars: Record<string, unknown>) {
+      step(line: number, vars: Record<string, unknown>, file?: string) {
         // 先算断点，再考虑是否要记录：命中的步永远值得留下
         const active = byLine.get(line);
         let hit = false;
@@ -167,6 +167,7 @@ export function createTraceRecorder(
 
         steps.push({
           line,
+          ...(file ? { file } : {}),
           depth: stack.length - 1,
           fn: stack[stack.length - 1],
           vars: snapshot,

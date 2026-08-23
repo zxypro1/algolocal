@@ -15,6 +15,40 @@ import type {
   StageRunReport,
 } from './types';
 
+/** 没开轨迹时插桩调用的空落点 */
+const NOOP_TRACE = {
+  enter: () => undefined,
+  exit: () => undefined,
+  step: () => undefined,
+};
+
+/**
+ * 把插桩挂到转译链路上。
+ *
+ * 只插用户的工作区文件：spec 文件插了会把断言和 describe/it 也录进轨迹，
+ * @lab/* 是内建模块根本不过 transpile。
+ */
+function wrapTranspile(
+  transpile: TranspileFn | undefined,
+  trace: RunStageOptions['trace'],
+  specPath: string
+): TranspileFn | undefined {
+  if (!transpile || !trace) return transpile;
+  return (code: string, filePath: string) => {
+    const normalized = filePath.replace(/^\.\//, '');
+    if (normalized === specPath) return transpile(code, filePath);
+    if (trace.onlyFiles && !trace.onlyFiles.has(normalized)) return transpile(code, filePath);
+    let instrumented: string;
+    try {
+      instrumented = trace.instrument(code, normalized);
+    } catch {
+      // 插桩失败不该让这一关跑不起来 —— 退回原样，最多是这个文件没有轨迹
+      return transpile(code, filePath);
+    }
+    return transpile(instrumented, filePath);
+  };
+}
+
 export interface RunStageOptions {
   /** 工作区文件：路径 -> 源码 */
   files: Record<string, string>;
@@ -24,6 +58,24 @@ export interface RunStageOptions {
   transpile?: TranspileFn;
   /** 单个用例的真实时间预算 */
   caseWallClockMs?: number;
+  /**
+   * 开启轨迹录制。
+   *
+   * 只对工作区里的用户源码插桩，spec 和 @lab/* 内建模块一律不碰 ——
+   * 插桩测试代码只会录出一堆断言噪音，而且会让「用例本身」出现在调用栈里。
+   */
+  trace?: {
+    instrument: (code: string, filePath: string) => string;
+    api: unknown;
+    /**
+     * 只给这些文件插桩。传空集合表示全插。
+     *
+     * 平台提供的只读基础设施（disk.ts、contract.ts 之类）不该进轨迹：
+     * 学员调的是自己的代码，把库的内部一步步录进去既是噪音，
+     * 又会把 5000 步的额度花在别人的代码上，自己的反而被截断。
+     */
+    onlyFiles?: Set<string>;
+  };
 }
 
 /**
@@ -195,15 +247,30 @@ export async function runStage(options: RunStageOptions): Promise<StageRunReport
       const runtime = createModuleRuntime({
         files: { ...options.files, [spec.path]: spec.content },
         builtins: labModules,
-        globals: { ...labGlobals, ...collector.globals },
-        transpile: options.transpile,
+        globals: {
+          ...labGlobals,
+          ...collector.globals,
+          // 没开轨迹时也要有个落点：插桩后的代码里有 __trace.step()，
+          // 而模块是按文件缓存的，同一进程里可能混着插过桩和没插桩的。
+          __trace: options.trace?.api ?? NOOP_TRACE,
+        },
+        transpile: wrapTranspile(options.transpile, options.trace, spec.path),
       });
 
-      // 收集阶段：spec 文件同步注册用例
+      // 收集阶段：spec 文件同步注册用例。
+      // 用户模块的顶层代码也在这一步执行，它打的日志同样要留下 ——
+      // 之前这些日志会被下面每条用例前的 lab.reset() 直接抹掉，
+      // 于是「在模块顶层 console.log」看起来像是完全没生效。
       lab.reset(labConfig);
       runtime.require(`./${spec.path}`);
+      const loadTimeConsole = [...lab.console];
       // 顶层的 afterAll 要等整个文件求值完，才知道该挂到哪个用例后面
       collector.finalize();
+
+      // 归到「模块加载」这个来源下，和某一条用例的输出区分开
+      consoleEntries.push(
+        ...loadTimeConsole.map((entry) => ({ ...entry, source: 'system' as const }))
+      );
 
       for (const testCase of collector.cases) {
         if (testCase.skipped) {

@@ -181,11 +181,18 @@ export function RunReportPanel({ report }: { report: StageRunReport | null }) {
 
       {report.console.length > 0 && (
         <Card withBorder radius="md" padding="sm">
+          {/*
+            带上条数：之前这块没有任何计数，用户跑完一轮看不出「到底有没有输出」，
+            要一条条展开用例才发现。
+          */}
           <Group gap={6} mb={8}>
             <IconTerminal2 size={15} />
             <Text size="sm" fw={600}>
               {t('engineering.results.console')}
             </Text>
+            <Badge size="xs" variant="light" color="gray">
+              {report.console.length}
+            </Badge>
           </Group>
           <ScrollArea.Autosize mah={180}>
             <Stack gap={2}>

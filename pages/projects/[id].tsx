@@ -22,6 +22,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import {
+  IconBug,
   IconChartBar,
   IconChecklist,
   IconCircleCheckFilled,
@@ -40,6 +41,7 @@ import MarkdownRenderer from '../../src/components/MarkdownRenderer';
 import StagePanel from '../../src/components/engineering/StagePanel';
 import ReviewPanel from '../../src/components/engineering/ReviewPanel';
 import { MetricsPanel, RunReportPanel, ScoreCardPanel } from '../../src/components/engineering/ResultPanels';
+import TracePlayer from '../../src/components/TracePlayer';
 import { useProjectRunner } from '../../src/hooks/useProjectRunner';
 import { useAiConfig } from '../../src/hooks/useAiConfig';
 import { analyzeWorkspace } from '../../src/lib/engineering/analysis';
@@ -328,16 +330,19 @@ export default function ProjectWorkspacePage() {
 
   /* ---------------- 运行 ---------------- */
 
-  const handleRun = useCallback(async () => {
+  const handleRun = useCallback(async (options?: { trace?: boolean }) => {
     if (!project || !stage || !progress) return;
 
-    setBottomTab('tests');
+    setBottomTab(options?.trace ? 'trace' : 'tests');
     flushSave();
     const result = await run({
       files: toFileMap(files),
       specs: stage.specs,
       lab: stage.lab,
       gates: stage.gates,
+      // 录制会给每条语句插桩，明显更慢，所以只有点「调试」时才开
+      trace: options?.trace === true,
+      traceFiles: editableFiles(files).map((file) => file.path),
     });
 
     if (!result) return;
@@ -593,7 +598,7 @@ export default function ProjectWorkspacePage() {
             <Button
               size="xs"
               leftSection={isRunning ? <Loader size={12} color="white" /> : <IconPlayerPlay size={14} />}
-              onClick={handleRun}
+              onClick={() => handleRun()}
               disabled={isRunning}
             >
               {isRunning ? t('engineering.workspace.running') : t('engineering.workspace.run')}
@@ -825,6 +830,9 @@ export default function ProjectWorkspacePage() {
                     <Tabs.Tab value="score" leftSection={<IconChecklist size={14} />}>
                       {t('engineering.tabs.score')}
                     </Tabs.Tab>
+                    <Tabs.Tab value="trace" leftSection={<IconBug size={14} />}>
+                      {t('engineering.tabs.trace')}
+                    </Tabs.Tab>
                     <Tabs.Tab value="review" leftSection={<IconSparkles size={14} />}>
                       {t('engineering.tabs.review')}
                     </Tabs.Tab>
@@ -854,6 +862,30 @@ export default function ProjectWorkspacePage() {
                     <Tabs.Panel value="score">
                       <ScoreCardPanel scoreCard={scoreCard} quality={quality} />
                     </Tabs.Panel>
+                    <Tabs.Panel value="trace">
+                      {report?.trace && report.trace.steps.length > 0 ? (
+                        <TracePlayer
+                          trace={report.trace}
+                          // 轨迹里的每一步都带文件名，播放器按当前步所在文件取源码
+                          sourceOf={(file: string) => files.find((f) => f.path === file)?.content || ''}
+                          note={t('engineering.trace.note')}
+                        />
+                      ) : (
+                        <Stack gap="sm" align="flex-start" p="md">
+                          <Text size="sm" c="dimmed">{t('engineering.trace.empty')}</Text>
+                          <Button
+                            size="compact-sm"
+                            variant="light"
+                            leftSection={<IconBug size={14} />}
+                            loading={isRunning}
+                            onClick={() => handleRun({ trace: true })}
+                          >
+                            {t('engineering.trace.record')}
+                          </Button>
+                        </Stack>
+                      )}
+                    </Tabs.Panel>
+
                     <Tabs.Panel value="review">
                       <ReviewPanel
                         review={review}
