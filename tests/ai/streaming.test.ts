@@ -152,13 +152,16 @@ function timedStreamResponse(chunks: string[], delayMs: number): any {
   };
 }
 
-/** 一次性返回整段 JSON 的上游：无视了 stream:true */
+/**
+ * 一次性返回整段 JSON 的上游：无视了 stream:true。
+ *
+ * 真实的 fetch 响应永远有 body（哪怕内容是一整个 JSON），所以这里也给一个 ——
+ * 服务端不按 content-type 分派，一律按流读，靠读完之后的兜底解析发现真相。
+ */
 function nonStreamingResponse(body: unknown): any {
   return {
-    ok: true,
+    ...fakeStreamResponse([JSON.stringify(body)]),
     headers: { get: (name: string) => (name.toLowerCase() === 'content-type' ? 'application/json' : null) },
-    json: async () => body,
-    body: null,
   };
 }
 
@@ -470,6 +473,27 @@ describe('server streaming', () => {
       const body = JSON.parse(fetchMock.mock.calls[0][1].body);
       expect([kind, body.stream]).toEqual([kind, true]);
     }
+  });
+
+  it('reads a real stream even when a proxy mislabels it as json', async () => {
+    // content-type 说 application/json，实际是逐块的 SSE。
+    // 按 content-type 分派的实现会在这里整段读不出来。
+    const response = fakeStreamResponse([
+      'data: {"choices":[{"delta":{"content":"real"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":" stream"}}]}\n\n',
+    ]);
+    response.headers = { get: () => 'application/json' };
+    global.fetch = jest.fn().mockResolvedValue(response) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      openAI: { apiKey: 'k', model: 'gpt-4.1' },
+      selectedProvider: 'openai',
+    });
+
+    expect(collectText(res)).toBe('real stream');
+    // 它确实是流，所以不该被标成 non-incremental
+    expect(collectEvents(res)).not.toContainEqual({ type: 'meta', incremental: false });
   });
 
   it('streams raw text when format is text', async () => {

@@ -369,15 +369,13 @@ function parseChunk(kind: ProviderKind, payload: string): string {
   }
 }
 
-/** 上游给的到底是不是流。不是流的话我们只能一次性交付，并且要说明白。 */
-function looksStreaming(upstream: Response): boolean {
-  const type = (upstream.headers.get('content-type') || '').toLowerCase();
-  if (!type) return true; // 没给类型就先按流处理，末尾还有兜底
-  return !type.includes('application/json') || type.includes('ndjson');
-}
-
 /**
  * 把上游的流转成一次次 onChunk。
+ *
+ * 无论上游自称什么 content-type，这里一律**按流读**：一个真的流被代理标成
+ * application/json 是常有的事，而按 content-type 分派会让那种情况彻底读不出内容。
+ * 「上游其实没给流」由收尾时的兜底解析发现 —— 那时一条 delta 都还没发出去，
+ * 所以事件顺序（meta 先于正文）依然成立。
  *
  * @returns 是否真的是逐块到达的。false 表示上游无视了 stream:true，
  *          整段内容是一次性拿到的 —— 调用方要如实告诉前端。
@@ -389,16 +387,6 @@ async function pipeUpstream(
   /** 确认上游不是流时先回调一次，永远早于第一次 onChunk */
   onNotIncremental: () => void = () => undefined
 ): Promise<boolean> {
-  // 上游明说这是一整个 JSON：直接按非流式解析。
-  // 不这么做的话下面按 SSE 切出来的东西一行 data: 都没有，
-  // 用户会收到一个完全空的回答，而且没有任何报错。
-  if (!looksStreaming(upstream)) {
-    onNotIncremental();
-    const text = extractContent(kind, await upstream.json());
-    if (text) onChunk(text);
-    return false;
-  }
-
   const reader = upstream.body?.getReader();
   if (!reader) return false;
 
@@ -454,7 +442,7 @@ async function pipeUpstream(
 
   /**
    * 走到这里说明整条流读完了，一个 delta 都没解析出来。
-   * 常见原因：上游没按 content-type 说实话，其实回的是一整个 JSON。
+   * 常见原因：上游无视了 stream:true，回的其实是一整个 JSON。
    * 与其交出一个空回答，不如把内容捞出来 —— 但要如实报告它不是流。
    */
   const tail = rawSoFar + decoder.decode();
