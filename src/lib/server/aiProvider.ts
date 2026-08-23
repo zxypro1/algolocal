@@ -9,6 +9,7 @@
  *    并且客户端断开时把上游请求一起 abort 掉，不再白烧 token。
  */
 import type { NextApiResponse } from 'next';
+import { checkEndpoint, isPrivateHostname } from './endpointPolicy';
 import {
   capabilitiesFor,
   DEFAULT_MODELS,
@@ -71,11 +72,15 @@ export function normalizeCompatibleEndpoint(raw: string): string {
   let trimmed = (raw || '').trim().replace(/\/+$/, '');
   if (!trimmed) return trimmed;
 
-  // 少了协议头就补 http://。注意不能直接丢给 new URL：
+  // 少了协议头就补一个。注意不能直接丢给 new URL：
   // 'localhost:1234' 会被解析成协议 "localhost:"、路径 "1234"，
   // 于是既补不上 /v1，最后 fetch 还会因为未知协议报一个看不懂的错。
+  //
+  // 补什么取决于地址指向哪：本地服务基本都是明文 http，而远程主机补 http
+  // 等于把 API Key 明文发出去，所以默认 https。写全了协议的一律照原样。
   if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
-    trimmed = `http://${trimmed}`;
+    const hostPart = trimmed.split('/')[0].replace(/:\d+$/, '');
+    trimmed = `${isPrivateHostname(hostPart) ? 'http' : 'https'}://${trimmed}`;
   }
 
   try {
@@ -279,6 +284,13 @@ function buildRequest(
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 async function fetchUpstream(request: UpstreamRequest, signal?: AbortSignal): Promise<Response> {
+  // 聊天请求本身也会打到用户填的地址上，所以 SSRF 面不只是「列模型」那个路由。
+  // 公网部署开了拦截时，这里同样要挡。
+  const verdict = checkEndpoint(request.url);
+  if (!verdict.ok) {
+    throw new Error(verdict.reason || 'This endpoint is not allowed.');
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
   // 客户端断开 -> 连带取消上游，不再为没人看的回答付费

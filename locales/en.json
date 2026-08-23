@@ -379,20 +379,22 @@
       "modelPlaceholder": "Enter model name (e.g., llama3)"
     },
     "compatible": {
-      "title": "OpenAI-compatible endpoint (Local)",
-      "intro": "Connect any server that speaks the OpenAI API. Running LM Studio? Start its server and paste http://localhost:1234/v1 below. vLLM, LocalAI and llama.cpp's server work the same way.",
+      "title": "OpenAI-compatible endpoint",
+      "intro": "Connect any server that speaks the OpenAI API — local or remote. Running LM Studio? Start its server and paste http://localhost:1234/v1. For a hosted gateway, or a provider offering an OpenAI-compatible API, paste its https base URL instead. vLLM, LocalAI and llama.cpp's server work the same way.",
       "endpoint": "Base URL",
-      "endpointHint": "For LM Studio use http://localhost:1234/v1. A bare host and port gets /v1 appended automatically.",
-      "apiKey": "API key (optional)",
-      "apiKeyPlaceholder": "Usually not needed for a local server",
-      "apiKeyHint": "Local servers normally ignore this. Fill it in only if your endpoint requires a key.",
+      "endpointHint": "LM Studio uses http://localhost:1234/v1. A bare host and port gets /v1 appended, and defaults to https unless it is a local address.",
+      "apiKey": "API key",
+      "apiKeyPlaceholder": "Required by most remote endpoints",
+      "apiKeyHint": "Local servers usually ignore this and it can be left empty. Remote endpoints almost always require it.",
       "model": "Model",
       "modelPlaceholder": "Click Fetch models, or type the id",
       "modelHint": "The model id comes from the server, so there is no default to fall back on.",
       "fetchModels": "Fetch models",
       "fetchFailed": "Could not reach that endpoint.",
       "noModels": "The endpoint replied, but listed no models. Load a model in the server first.",
-      "foundModels": "Found {count} model(s)."
+      "foundModels": "Found {count} model(s).",
+      "remoteNeedsKey": "This looks like a remote endpoint but no API key is set — most remote endpoints will reject the request.",
+      "insecureRemote": "This remote endpoint uses plain http, so the API key and your code travel unencrypted. Prefer https."
     },
     "modelHint": "Leave empty to use the default. Any model id works."
   },

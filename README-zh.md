@@ -139,7 +139,7 @@ npm start
 | 聊天助手 | 基于编辑器中当前的代码答疑，不直接给出完整答案 |
 | 工程评审 | 从并发安全、失败行为、模块边界与风格评审已完成的关卡 |
 
-支持的服务商：DeepSeek、OpenAI、Claude、Qwen，以及通过 Ollama 或任意 OpenAI 兼容端点（LM Studio、vLLM、LocalAI、llama.cpp）运行的本地模型。详见 [AI_PROVIDER_GUIDE.md](./AI_PROVIDER_GUIDE.md)。
+支持的服务商：DeepSeek、OpenAI、Claude、Qwen，以及任意 OpenAI 兼容端点，本地远程均可（Ollama、LM Studio、vLLM、LocalAI、llama.cpp，或自建/托管网关）。详见 [AI_PROVIDER_GUIDE.md](./AI_PROVIDER_GUIDE.md)。
 
 ## 使用
 

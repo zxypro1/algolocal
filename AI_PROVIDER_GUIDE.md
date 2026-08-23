@@ -49,18 +49,35 @@ OLLAMA_ENDPOINT=http://localhost:11434   # optional
 OLLAMA_MODEL=llama3.1                    # optional
 ```
 
-Any OpenAI-compatible server, local or self-hosted. This is the one to pick for **LM Studio**: open its Developer/Server tab, start the server, and paste the address below. The same setting also covers vLLM, LocalAI, llama.cpp's `llama-server`, text-generation-webui and any gateway that speaks the OpenAI API.
+Any OpenAI-compatible server — **on this machine or across the internet**. This is the one to pick for **LM Studio**: open its Developer/Server tab, start the server, and paste the address below. The same setting covers vLLM, LocalAI, llama.cpp's `llama-server`, text-generation-webui, a gateway on your own network, and any hosted provider that exposes an OpenAI-compatible API.
+
+Local:
 
 ```bash
 OPENAI_COMPATIBLE_ENDPOINT=http://localhost:1234/v1   # LM Studio's default
 OPENAI_COMPATIBLE_MODEL=qwen2.5-coder-7b-instruct     # required, ask the server what it has
-OPENAI_COMPATIBLE_API_KEY=                            # optional, local servers rarely check it
+OPENAI_COMPATIBLE_API_KEY=                            # local servers rarely check it
+```
+
+Remote:
+
+```bash
+OPENAI_COMPATIBLE_ENDPOINT=https://gateway.example.com/v1
+OPENAI_COMPATIBLE_MODEL=llama-3.1-70b-instruct
+OPENAI_COMPATIBLE_API_KEY=your_key                    # remote endpoints almost always require one
 ```
 
 Two things differ from the other providers:
 
 - **The model id is required.** It is decided by whichever server you run, so there is no sensible default to fall back on. In Settings, fill in the address and press **Fetch models** — the app asks the endpoint's `/models` and fills the dropdown for you.
 - **The address is a base URL, not a host.** If you give it just a host and port, `/v1` is appended (`http://localhost:1234` becomes `http://localhost:1234/v1`). If you write any path yourself it is left alone, because not every server mounts its API at `/v1`.
+
+A few things worth knowing about remote endpoints:
+
+- **The scheme defaults by address.** A bare host and port gets `https://` unless it is a local address (`localhost`, `127.x`, `10.x`, `192.168.x`, and so on), which gets `http://`. Writing the scheme yourself always wins. This is so that pasting `gateway.example.com` never quietly sends your API key in plaintext.
+- **TLS must actually validate.** A self-signed certificate is rejected, and the error says so rather than reporting a generic failure. Put the gateway behind a trusted certificate.
+- **Requests go out from the server, not the browser**, so CORS on the remote endpoint is irrelevant. In the desktop app that server is on your own machine.
+- **SSRF, if you host this publicly.** The endpoint is a user-supplied address that the server then fetches. On the desktop app and a self-hosted instance that is harmless — you could reach those addresses yourself anyway. If you serve AlgoLocal to people you do not trust, set `AI_ENDPOINT_BLOCK_PRIVATE_NETWORK=1`, which refuses loopback, private ranges and link-local addresses (including cloud metadata at `169.254.169.254`) and stops following redirects.
 
 Note that LM Studio and LM Studio Bionic are two different apps. Bionic is an agent app and does not expose a server for other programs to call; it is LM Studio that provides the OpenAI-compatible endpoint above.
 

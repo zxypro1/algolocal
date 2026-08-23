@@ -180,8 +180,9 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
   useEffect(() => {
     const provider = getCurrentAIProvider();
     setCurrentAIProvider(provider);
-    // 兼容端点绝大多数场景也是本地服务
-    setIsUsingLocalAI(provider === 'ollama' || provider === 'compatible');
+    // 兼容端点既可能是本地服务也可能是远程网关，这里不替它下结论，
+    // 横幅本来也有自己那句「使用 OpenAI 兼容端点」的中性文案。
+    setIsUsingLocalAI(provider === 'ollama');
 
     const providers = [];
     if (isDeepSeekConfigured) providers.push('deepseek');
