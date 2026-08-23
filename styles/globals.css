@@ -370,3 +370,22 @@ a {
   max-width: 100%;
   overflow-x: auto;
 }
+
+/* 编辑器左侧栏的断点标记。条件断点/日志断点用空心圆区分开。 */
+.algolocal-bp::before {
+  content: '';
+  display: block;
+  width: 10px;
+  height: 10px;
+  margin: 5px 0 0 5px;
+  border-radius: 50%;
+  background: #e5484d;
+}
+/* 整条左栏都可点，命中面积别只有那个小圆点 */
+.algolocal-bp {
+  cursor: pointer;
+}
+.algolocal-bp-conditional::before {
+  background: transparent;
+  border: 2px solid #e5484d;
+}

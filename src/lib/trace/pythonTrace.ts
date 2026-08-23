@@ -7,7 +7,7 @@
  * 代价是 settrace 会让代码明显变慢，所以只在用户主动点「调试」时才挂上。
  */
 
-import { TRACE_LIMITS } from './types';
+import { TRACE_LIMITS, type Breakpoint } from './types';
 
 /**
  * 生成跑在 Pyodide 里的 Python 源码。
@@ -20,8 +20,11 @@ import { TRACE_LIMITS } from './types';
 export function buildPythonTraceProgram(
   userCode: string,
   functionName: string,
-  argsJson: string
+  argsJson: string,
+  breakpoints: Breakpoint[] = []
 ): string {
+  // 只把启用的断点传下去，Python 侧按行索引
+  const active = breakpoints.filter((breakpoint) => breakpoint.enabled);
   return `
 import json, sys
 from io import StringIO
@@ -31,9 +34,15 @@ sys.stdout, sys.stderr = StringIO(), StringIO()
 
 _trace = []
 _dropped = [0]
+_breakpoints = json.loads(${JSON.stringify(JSON.stringify(active))})
+_by_line = {}
+for _bp in _breakpoints:
+    _by_line.setdefault(_bp['line'], []).append(_bp)
 _MAX_STEPS = ${TRACE_LIMITS.maxSteps}
 _MAX_VALUE = ${TRACE_LIMITS.maxValueChars}
 _MAX_VARS = ${TRACE_LIMITS.maxVarsPerStep}
+_MAX_HITS_AFTER_CAP = ${TRACE_LIMITS.maxHitStepsAfterCap}
+_hits_after_cap = [0]
 _stack = []
 
 def _fmt(value):
@@ -44,6 +53,17 @@ def _fmt(value):
     if len(text) > _MAX_VALUE:
         text = text[:_MAX_VALUE] + '\\u2026'
     return text
+
+import re as _re
+
+def _render_log(template, frame):
+    # {expr} 求值，和 VS Code 的 logpoint 一致
+    def _sub(match):
+        try:
+            return _fmt(eval(match.group(1), frame.f_globals, frame.f_locals))
+        except Exception:
+            return match.group(0)
+    return _re.sub(r'\{([^{}]+)\}', _sub, template)
 
 def _tracer(frame, event, arg):
     name = frame.f_code.co_name
@@ -61,9 +81,35 @@ def _tracer(frame, event, arg):
         return None
 
     if event == 'line':
+        # 断点在录制时求值：这里能拿到活的 f_locals，
+        # 轨迹里存的是 repr 之后的字符串，没法拿来判断条件。
+        _hit = False
+        _log = None
+        for _bp in _by_line.get(frame.f_lineno, []):
+            # 条件先算：既有条件又有日志时，两者都要受这个条件约束
+            _ok = True
+            _cond = _bp.get('condition')
+            if _cond:
+                _ok = False
+                try:
+                    _ok = bool(eval(_cond, frame.f_globals, frame.f_locals))
+                except Exception:
+                    # 条件在这一帧求值失败就当不成立，别把用户的运行搞崩
+                    _ok = False
+            if not _ok:
+                continue
+            if _bp.get('logMessage'):
+                _log = _render_log(_bp['logMessage'], frame)
+            else:
+                _hit = True
+
+        # 命中的步在超出上限后仍然保留一小部分：断点设在长循环后半段时，
+        # 「录不下」等于「永远命中 0 次」。
         if len(_trace) >= _MAX_STEPS:
-            _dropped[0] += 1
-            return _tracer
+            if not _hit or _hits_after_cap[0] >= _MAX_HITS_AFTER_CAP:
+                _dropped[0] += 1
+                return _tracer
+            _hits_after_cap[0] += 1
         variables = []
         for key, value in list(frame.f_locals.items()):
             if key.startswith('__'):
@@ -71,13 +117,18 @@ def _tracer(frame, event, arg):
             if len(variables) >= _MAX_VARS:
                 break
             variables.append({'name': key, 'value': _fmt(value)})
-        _trace.append({
+        _step = {
             'line': frame.f_lineno,
             'depth': max(len(_stack) - 1, 0),
             'fn': name,
             'vars': variables,
             'stack': list(_stack),
-        })
+        }
+        if _hit:
+            _step['hit'] = True
+        if _log is not None:
+            _step['log'] = _log
+        _trace.append(_step)
     return _tracer
 
 _result = None

@@ -32,6 +32,7 @@ import Editor from '@monaco-editor/react';
 import { IconBug } from '@tabler/icons-react';
 import { Modal as TraceModal } from '@mantine/core';
 import TracePlayer from './TracePlayer';
+import BreakpointList from './BreakpointList';
 import { useTranslation, useI18n } from '../contexts/I18nContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { useWasmExecutor } from '../hooks/useWasmExecutor';
@@ -222,11 +223,44 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
     }
   );
   
+  /**
+   * 断点。存成 line -> Breakpoint，因为一行最多一个断点，
+   * 而且编辑器改动后要按行做整体迁移。
+   */
+  const [breakpoints, setBreakpoints] = useState<Record<number, any>>({});
+  const breakpointsRef = useRef<Record<number, any>>({});
+  breakpointsRef.current = breakpoints;
+
+  const toggleBreakpoint = useCallback((line: number) => {
+    setBreakpoints((prev) => {
+      const next = { ...prev };
+      if (next[line]) delete next[line];
+      else next[line] = { line, enabled: true };
+      return next;
+    });
+  }, []);
+
+  /**
+   * 换语言就清空断点。
+   * 行号在不同语言的模板里对应的根本不是同一行，而条件和日志消息又是
+   * 语言相关的表达式 —— 把 JS 的 `seen.size` 原样带到 Python 上去，
+   * 结果是断点静默地永不命中，用户只会以为功能坏了。
+   */
+  useEffect(() => {
+    setBreakpoints({});
+  }, [selectedLanguage, problem.id]);
+
+  const updateBreakpoint = useCallback((line: number, patch: any) => {
+    setBreakpoints((prev) => (prev[line] ? { ...prev, [line]: { ...prev[line], ...patch } } : prev));
+  }, []);
+
   /** 轨迹回放：只跑第一条用例，录下每一步 */
   const [trace, setTrace] = useState<any>(null);
   const [tracing, setTracing] = useState(false);
   const [traceOpen, setTraceOpen] = useState(false);
   const [tracedSource, setTracedSource] = useState('');
+  const [tracedLanguage, setTracedLanguage] = useState('javascript');
+  const [tracedBreakpointCount, setTracedBreakpointCount] = useState(0);
 
   const runTrace = async () => {
     setTracing(true);
@@ -234,8 +268,12 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
     // 记下这次录制用的源码：录完之后编辑器里的代码还能继续改，
     // 高亮必须对着录制那一刻的版本，不然行号会对不上
     setTracedSource(code);
+    setTracedLanguage(selectedLanguage);
+    setTracedBreakpointCount(Object.keys(breakpointsRef.current).length);
     try {
-      const outcome = await traceExecution(problem, code, selectedLanguage, 0);
+      const outcome = await traceExecution(
+        problem, code, selectedLanguage, 0, Object.values(breakpointsRef.current)
+      );
       setTrace(outcome.trace);
     } catch (error: any) {
       setTrace({ steps: [], droppedSteps: 0, truncated: false, completed: false,
@@ -309,12 +347,24 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [flushDraft]);
 
+  const monacoRef = useRef<any>(null);
+
   const handleEditorMount = useCallback((editor: any, monaco: any) => {
+    monacoRef.current = monaco;
     editorRef.current = editor;
 
     disposablesRef.current.push(
       editor.onDidChangeCursorPosition((event: any) => {
         setCursor({ line: event.position.lineNumber, column: event.position.column });
+      })
+    );
+
+    // 点行号左边的空白栏设/取消断点，和常见 IDE 一致
+    disposablesRef.current.push(
+      editor.onMouseDown((event: any) => {
+        if (event.target?.type !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) return;
+        const line = event.target.position?.lineNumber;
+        if (line) toggleBreakpoint(line);
       })
     );
 
@@ -329,7 +379,83 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
     };
     disposablesRef.current.push(monaco.editor.onDidChangeMarkers(syncMarkers));
     syncMarkers();
-  }, []);
+  }, [toggleBreakpoint]);
+
+  // 断点在左侧栏画成红点
+  const breakpointCollectionRef = useRef<any>(null);
+  /** 上一次画上去的断点行号，顺序和 decoration collection 一一对应 */
+  const decoratedLinesRef = useRef<number[]>([]);
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const lines = Object.keys(breakpoints).map(Number).sort((a, b) => a - b);
+    const decorations = lines.map((line) => {
+      const breakpoint = breakpoints[line];
+      const conditional = Boolean(breakpoint.condition || breakpoint.logMessage);
+      return {
+        range: { startLineNumber: line, startColumn: 1, endLineNumber: line, endColumn: 1 },
+        options: {
+          isWholeLine: false,
+          // 放在 glyph margin（行号左边）而不是 linesDecorations：
+          // 后者的位置和折叠箭头重叠，点下去会折叠代码而不是设断点。
+          glyphMarginClassName: conditional
+            ? 'algolocal-bp algolocal-bp-conditional'
+            : 'algolocal-bp',
+          glyphMarginHoverMessage: {
+            value: breakpoint.logMessage
+              ? `Logpoint: ${breakpoint.logMessage}`
+              : breakpoint.condition
+                ? `Condition: ${breakpoint.condition}`
+                : 'Breakpoint',
+          },
+        },
+      };
+    });
+    // 没有断点、上一轮也没有的话什么都不用做：
+    // 否则每敲一个字符都会重建装饰并强制重绘一次。
+    if (lines.length === 0 && !breakpointCollectionRef.current) return;
+
+    if (!breakpointCollectionRef.current) {
+      breakpointCollectionRef.current = editor.createDecorationsCollection(decorations);
+    } else {
+      breakpointCollectionRef.current.set(decorations);
+    }
+    decoratedLinesRef.current = lines;
+    // 不主动 render 的话，新装饰要等到下一次交互才出现
+    editor.render(true);
+  }, [breakpoints, selectedLanguage]);
+
+  /**
+   * 编辑器里插入/删除行时，把断点跟着挪。
+   * Monaco 的 decoration 会自己随编辑移动，所以直接把移动后的行号读回来，
+   * 比自己解析 diff 靠谱得多。
+   */
+  useEffect(() => {
+    const editor = editorRef.current;
+    const collection = breakpointCollectionRef.current;
+    if (!editor || !collection) return;
+    const model = editor.getModel();
+    if (!model) return;
+
+    const disposable = model.onDidChangeContent(() => {
+      const before = decoratedLinesRef.current;
+      if (before.length === 0) return;
+      const moved: Record<number, any> = {};
+      let changed = false;
+      before.forEach((originalLine, index) => {
+        const range = collection.getRange(index);
+        const nextLine = range ? range.startLineNumber : originalLine;
+        if (nextLine !== originalLine) changed = true;
+        const existing = breakpointsRef.current[originalLine];
+        if (existing) moved[nextLine] = { ...existing, line: nextLine };
+      });
+      if (changed) {
+        decoratedLinesRef.current = Object.keys(moved).map(Number);
+        setBreakpoints(moved);
+      }
+    });
+    return () => disposable.dispose();
+  }, [breakpoints]);
 
   useEffect(
     () => () => {
@@ -761,6 +887,7 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
               fontLigatures: true,
               lineHeight: 1.6,
               lineNumbers: 'on',
+              glyphMargin: true,
               roundedSelection: false,
               scrollBeyondLastLine: false,
               automaticLayout: true,
@@ -838,11 +965,34 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
         title={t('trace.title')}
         size="xl"
       >
-        {tracing ? (
-          <Group gap="xs"><Loader size={16} /><Text size="sm">{t('trace.running')}</Text></Group>
-        ) : trace ? (
-          <TracePlayer trace={trace} source={tracedSource} />
-        ) : null}
+        <Stack gap="sm">
+          <div>
+            <Text size="xs" fw={600} mb={6}>{t('trace.breakpoints')}</Text>
+            <BreakpointList
+              breakpoints={Object.values(breakpoints)}
+              onUpdate={updateBreakpoint}
+              onRemove={(line) => toggleBreakpoint(line)}
+            />
+          </div>
+          <Group gap="xs">
+            <Button size="compact-xs" onClick={runTrace} loading={tracing}>
+              {t('trace.rerecord')}
+            </Button>
+            <Text size="xs" c="dimmed">{t('trace.rerecordHint')}</Text>
+          </Group>
+
+          {tracing ? (
+            <Group gap="xs"><Loader size={16} /><Text size="sm">{t('trace.running')}</Text></Group>
+          ) : trace ? (
+            <TracePlayer
+              trace={trace}
+              source={tracedSource}
+              breakpoints={Object.values(breakpoints)}
+              note={tracedLanguage === 'python' ? t('trace.pythonNote') : null}
+              staleBreakpoints={tracedBreakpointCount !== Object.keys(breakpoints).length}
+            />
+          ) : null}
+        </Stack>
       </TraceModal>
     </div>
   );
