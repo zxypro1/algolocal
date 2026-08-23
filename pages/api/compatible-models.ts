@@ -8,6 +8,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { normalizeCompatibleEndpoint } from '../../src/lib/server/aiProvider';
 import { checkEndpointSyntax, describeNetworkError, guardedFetch } from '../../src/lib/server/endpointPolicy';
+import { looksLikeMarkup, readableErrorBody } from '../../src/lib/errorBody';
 
 // 远程端点可能在地球另一端，10 秒对跨洋链路偏紧
 const TIMEOUT_MS = 20_000;
@@ -45,11 +46,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       const detail = await response.text();
       return res.status(502).json({
         error: `The endpoint answered ${response.status}.`,
-        detail: detail.slice(0, 300),
+        detail: readableErrorBody(detail) || undefined,
       });
     }
 
-    const data = await response.json();
+    // 不要直接 response.json()：它抛的 SyntaxError 会落进下面的 catch，
+    // 被报成「连不上」—— 但这个地址明明答话了，只是答的是一个网页。
+    const payload = await response.text();
+    let data: any;
+    try {
+      data = JSON.parse(payload);
+    } catch {
+      return res.status(502).json({
+        error: looksLikeMarkup(payload)
+          ? `${base} answered with a web page, not JSON. Check that the URL points at the API (it usually ends in /v1).`
+          : `${base} answered with something that is not JSON.`,
+        detail: readableErrorBody(payload) || undefined,
+      });
+    }
     // OpenAI 的形状是 { data: [{ id }] }；有些实现直接返回数组，两种都收
     const list = Array.isArray(data) ? data : data?.data;
     const models = Array.isArray(list)

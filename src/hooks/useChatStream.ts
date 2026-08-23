@@ -13,7 +13,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createSseParser } from '../lib/chatStreamProtocol';
-import { readableErrorBody } from '../lib/streamRequest';
+import { readableErrorBody } from '../lib/errorBody';
 
 export interface StreamMessage {
   id: string;

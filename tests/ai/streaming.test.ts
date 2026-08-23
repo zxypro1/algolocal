@@ -5,6 +5,7 @@
  * 客户端：SSE 事件 -> 文本，重点是任意位置切分的分块
  */
 import { createSseParser, parseSseLine } from '../../src/lib/chatStreamProtocol';
+import { EndpointPolicyError } from '../../src/lib/server/endpointPolicy';
 import {
   callAI,
   NoProviderError,
@@ -437,6 +438,12 @@ describe('server streaming', () => {
     expect((res.jsonBody as any).error).toBe('model is loading');
   });
 
+  it('classifies a blocked or malformed endpoint as 400, not 500', () => {
+    // 这句 message 本来就是写给用户看的（「不是合法的 URL」「指向了内网」），
+    // 包成 500 只会让人以为是应用坏了
+    expect(statusForError(new EndpointPolicyError('Not a valid URL: localhost;1234'))).toBe(400);
+  });
+
   it('classifies a missing provider as 400, not 500', () => {
     // 没配 provider 是「你还没设置」，不是「服务器坏了」。
     // resolveProvider 在写响应头之前就抛，由路由的 catch 统一映射状态码。
@@ -502,13 +509,17 @@ describe('server streaming', () => {
     ) as any;
 
     const res = createFakeRes();
-    const pending = streamAI(res as any, [{ role: 'user', content: 'hi' }], {
-      openAI: { apiKey: 'k', model: 'gpt-4.1' },
-      selectedProvider: 'openai',
-    });
-    jest.advanceTimersByTime(130_000);
-    await pending;
-    jest.useRealTimers();
+    try {
+      const pending = streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+        openAI: { apiKey: 'k', model: 'gpt-4.1' },
+        selectedProvider: 'openai',
+      });
+      jest.advanceTimersByTime(130_000);
+      await pending;
+    } finally {
+      // 不放 finally 的话，这个用例一失败，后面所有量时间的用例都会跟着挂
+      jest.useRealTimers();
+    }
 
     expect(res.statusCode).toBe(504);
     expect((res.jsonBody as any).error).toMatch(/No response from https:\/\/api\.openai\.com/);
@@ -518,9 +529,9 @@ describe('server streaming', () => {
     const controller = new AbortController();
     global.fetch = jest.fn(() => {
       controller.abort();
-      const error = new Error('The operation was aborted');
-      error.name = 'AbortError';
-      return Promise.reject(error);
+      // Node 真正抛的是 DOMException，它带着遗留的数字 code 20 ——
+      // 用 new Error 造一个假的，就测不出「有 code 就当成网络故障」这个错判
+      return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'));
     }) as any;
 
     const res = createFakeRes();
@@ -534,6 +545,68 @@ describe('server streaming', () => {
     expect(res.statusCode).toBeUndefined();
     expect(res.jsonBody).toBeFalsy();
     expect(res.ended).toBe(true);
+  });
+
+  /**
+   * 空回答不能算成功：界面上是一个空白气泡 —— 没内容、没报错，
+   * 连重试按钮都不亮，用户看不出发生了什么。
+   */
+  it('reports an empty upstream response instead of a blank answer', async () => {
+    global.fetch = jest.fn().mockResolvedValue(fakeStreamResponse(['data: [DONE]\n\n'])) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      openAI: { apiKey: 'k', model: 'gpt-4.1' },
+      selectedProvider: 'openai',
+    });
+
+    const events = collectEvents(res);
+    const failure = events.find((event: any) => event.type === 'error');
+    expect(failure).toBeTruthy();
+    expect((failure as any).message).toMatch(/empty response/i);
+  });
+
+  it('refuses a conversation with nothing in it, before calling upstream', async () => {
+    const fetchMock = jest.fn() as any;
+    global.fetch = fetchMock;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: '   ' }], {
+      openAI: { apiKey: 'k', model: 'gpt-4.1' },
+      selectedProvider: 'openai',
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(400);
+    expect((res.jsonBody as any).error).toMatch(/nothing to send/i);
+  });
+
+  /**
+   * 正文读到一半断了（本地模型被 OOM 杀掉是最常见的原因）。
+   * 头已经发出去了，状态码改不动，但至少不能只丢给用户一个词：terminated。
+   */
+  it('translates a mid-stream disconnect into something actionable', async () => {
+    const broken: any = new TypeError('terminated');
+    broken.cause = { code: 'UND_ERR_SOCKET' };
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            throw broken;
+          },
+        }),
+      },
+    }) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      compatible: { endpoint: 'http://127.0.0.1:1234/v1', model: 'qwen3-8b' },
+      selectedProvider: 'compatible',
+    });
+
+    const failure = collectEvents(res).find((event: any) => event.type === 'error');
+    expect((failure as any).message).toMatch(/closed the connection unexpectedly/);
   });
 
   it('does not paste an HTML error page into the message', async () => {

@@ -12,6 +12,7 @@
  * 它同时兼容「服务端直接回 JSON」的情况 —— 比如纯保存、或者还没进流就失败了。
  */
 import { createSseParser } from './chatStreamProtocol';
+import { readableErrorBody } from './errorBody';
 
 export interface StructuredStreamHandlers {
   /**
@@ -26,19 +27,6 @@ export interface StructuredStreamHandlers {
   onNotIncremental?: () => void;
   /** onDelta 的最小间隔，默认 60ms（约等于一帧） */
   flushMs?: number;
-}
-
-/**
- * 非 JSON 的错误体里，哪些还值得给用户看。
- *
- * 一律丢掉是过头了：Next 自己的 `Body exceeded 1mb limit`（工程对话把整个
- * 工作区发上去时会撞到）就是一句纯文本，丢了用户就只剩一个 413。
- * 真正要挡的是代理和框架的 HTML 错误页 —— 那是一屏标签。
- */
-export function readableErrorBody(body: string): string {
-  const text = (body || '').trim();
-  if (!text || text.startsWith('<') || text.length > 200) return '';
-  return text;
 }
 
 export class StreamRequestError extends Error {

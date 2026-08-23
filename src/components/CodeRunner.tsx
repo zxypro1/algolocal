@@ -46,7 +46,7 @@ import {
 } from '../lib/editorPrefs';
 import { clearDraft, loadDraft, saveDraft } from '../lib/problemDrafts';
 import { useAiConfig } from '../hooks/useAiConfig';
-import { readableErrorBody } from '../lib/streamRequest';
+import { readableErrorBody } from '../lib/errorBody';
 
 // WASM 支持的语言配置
 const WASM_SUPPORTED_LANGUAGES = [
@@ -552,6 +552,19 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
       }
 
       buffer += decoder.decode();
+
+      /*
+       * 这条路径是纯文本流，流开始之后出错只能作为正文里的一行 `[error] ...`
+       * 送过来（头已经发出去了，状态码改不动）。不认它的话，这行字会被当成
+       * 代码写进编辑器，800ms 后连草稿一起覆盖掉 —— 而且界面上不报错。
+       */
+      const failure = buffer.match(/\n\n\[error\] ([\s\S]*)$/);
+      if (failure) {
+        const partial = buffer.slice(0, failure.index);
+        if (partial.trim()) updateCode(cleanCodeFromResponse(partial));
+        throw new Error(failure[1].trim() || 'Failed to generate AI solution');
+      }
+
       updateCode(cleanCodeFromResponse(buffer));
     } catch (error: any) {
       setSolutionError(error.message || 'Failed to generate AI solution');

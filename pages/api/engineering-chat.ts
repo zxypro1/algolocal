@@ -9,6 +9,19 @@ import {
 } from '../../src/lib/server/aiProvider';
 import { buildWorkspaceContext, WorkspaceContext } from '../../src/lib/server/engineeringPrompt';
 
+/*
+ * 这个路由收的是整个工作区（每个文件的全文 + 最近一次运行报告），
+ * Next 默认的 1mb 一个中等项目就撞穿了，表现是一个 413 —— 功能直接不可用。
+ * 和 generate-project 保持同一个上限。responseLimit 关掉是因为回答是流式的。
+ */
+export const config = {
+  api: {
+    responseLimit: false,
+    bodyParser: { sizeLimit: '8mb' },
+  },
+};
+
+
 interface EngineeringChatRequest {
   messages: ChatMessage[];
   context: WorkspaceContext;

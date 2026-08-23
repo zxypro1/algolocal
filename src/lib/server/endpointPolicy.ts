@@ -97,13 +97,28 @@ export interface GuardedFetchInit extends RequestInit {
  * 重定向必须自己跟：交给 fetch 自动跟随的话，一个公网地址 302 到
  * 169.254.169.254 就把前面的检查整个绕过去了 —— 每一跳都要重新查。
  */
+/**
+ * 地址本身被策略拦下了（写错了、指向内网、绕太多跳）。
+ *
+ * 这属于「你填的配置不对」，和上游返回 4xx 是一类，不该以 500 的形式出现 ——
+ * 尤其它的 message 本来就是写给用户看的那一句。
+ */
+export class EndpointPolicyError extends Error {
+  status = 400;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'EndpointPolicyError';
+  }
+}
+
 export async function guardedFetch(url: string, init: GuardedFetchInit = {}): Promise<Response> {
   const { maxRedirects = 5, ...rest } = init;
   let current = url;
 
   for (let hop = 0; hop <= maxRedirects; hop += 1) {
     const verdict = await checkEndpoint(current);
-    if (!verdict.ok) throw new Error(verdict.reason || 'This endpoint is not allowed.');
+    if (!verdict.ok) throw new EndpointPolicyError(verdict.reason || 'This endpoint is not allowed.');
 
     const response = await fetch(current, {
       ...rest,
@@ -119,7 +134,7 @@ export async function guardedFetch(url: string, init: GuardedFetchInit = {}): Pr
     current = new URL(location, current).toString();
   }
 
-  throw new Error(`Too many redirects from ${url}.`);
+  throw new EndpointPolicyError(`Too many redirects from ${url}.`);
 }
 
 /**

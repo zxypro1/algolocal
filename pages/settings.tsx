@@ -24,6 +24,7 @@ import { useTranslation, useI18n } from '../src/contexts/I18nContext';
 import { AppHeader, HEADER_HEIGHT } from '../src/components/AppHeader';
 import { DEFAULT_MODELS, SUGGESTED_MODELS } from '../src/lib/aiModels';
 import { isInsecureRemote, looksRemote } from '../src/lib/endpointHosts';
+import { readableErrorBody } from '../src/lib/errorBody';
 
 export default function SettingsPage() {
   const { t } = useTranslation();
@@ -95,7 +96,20 @@ export default function SettingsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ endpoint: compatibleConfig.endpoint, apiKey: compatibleConfig.apiKey }),
       });
-      const data = await response.json();
+      // response.json() 直接抛的话，用户看到的是「Unexpected token '<'」——
+      // 而这正是配本地端点时最容易撞到的一种失败（地址指到了网页上）。
+      const payload = await response.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(payload);
+      } catch {
+        setCompatibleError(
+          readableErrorBody(payload) ||
+            `${t('settings.compatible.fetchFailed')} (HTTP ${response.status})`
+        );
+        setCompatibleModels([]);
+        return;
+      }
       if (!response.ok) {
         setCompatibleError(data?.error || t('settings.compatible.fetchFailed'));
         setCompatibleModels([]);
