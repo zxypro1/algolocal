@@ -13,6 +13,22 @@ export interface TraceVariable {
   value: string;
 }
 
+export interface Breakpoint {
+  /** 源码行号（1 起） */
+  line: number;
+  enabled: boolean;
+  /**
+   * 条件断点：一个在该行作用域里求值的表达式，为真才算命中。
+   * 在**录制时**用活的变量求值 —— 轨迹里存的是字符串快照，拿快照没法求值。
+   */
+  condition?: string;
+  /**
+   * 日志断点：不算命中，只在经过这行时记一条消息。
+   * `{}` 里的部分当表达式求值，和 VS Code 的 logpoint 一致。
+   */
+  logMessage?: string;
+}
+
 export interface TraceStep {
   /** 原始源码的行号（1 起） */
   line: number;
@@ -24,6 +40,10 @@ export interface TraceStep {
   vars: TraceVariable[];
   /** 完整调用栈，栈底在前 */
   stack: string[];
+  /** 这一步命中了断点（含条件成立的条件断点） */
+  hit?: boolean;
+  /** 日志断点在这一步产生的消息 */
+  log?: string;
 }
 
 export interface ExecutionTrace {

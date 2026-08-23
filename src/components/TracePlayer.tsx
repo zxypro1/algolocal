@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActionIcon,
   Alert,
+  Button,
   Badge,
   Box,
   Code,
@@ -19,12 +20,17 @@ import {
   IconPlayerSkipForward,
 } from '@tabler/icons-react';
 import { useTranslation } from '../contexts/I18nContext';
-import type { ExecutionTrace } from '../lib/trace/types';
+import { continueRun, firstHit, stepInto, stepOut, stepOver } from '../lib/trace/navigate';
+import type { Breakpoint, ExecutionTrace, TraceStep } from '../lib/trace/types';
 
 interface TracePlayerProps {
   trace: ExecutionTrace;
   /** 用户源码，按行展示并高亮当前行 */
   source: string;
+  /** 设过的断点，用于在源码预览里标记 */
+  breakpoints?: Breakpoint[];
+  /** 语言不支持时的降级说明，null 表示完全支持 */
+  degraded?: string | null;
 }
 
 /**
@@ -34,16 +40,17 @@ interface TracePlayerProps {
  * 好处是可以往回拖 —— 断点调试器做不到这件事，而做题时
  * 「上一轮循环 seen 里是什么」恰恰是最常问的问题。
  */
-export default function TracePlayer({ trace, source }: TracePlayerProps) {
+export default function TracePlayer({ trace, source, breakpoints = [], degraded = null }: TracePlayerProps) {
   const { t } = useTranslation();
   const [index, setIndex] = useState(0);
 
   const steps = trace.steps;
   const total = steps.length;
 
-  // 换了一条轨迹就回到开头，否则会停在上一条轨迹的下标上
+  // 换了一条轨迹就跳到第一个命中的断点；没有断点就从头开始。
+  // 这和真调试器「跑起来直接停在断点上」的体感一致。
   useEffect(() => {
-    setIndex(0);
+    setIndex(firstHit(trace.steps));
   }, [trace]);
 
   const lines = useMemo(() => source.split('\n'), [source]);
@@ -62,8 +69,47 @@ export default function TracePlayer({ trace, source }: TracePlayerProps) {
   // 旧值，五次点击只前进一步。
   const stepBy = (delta: number) => setIndex((current) => clamp(current + delta));
 
+  const go = (
+    fn: (all: TraceStep[], from: number, direction: 1 | -1) => number,
+    direction: 1 | -1
+  ) => setIndex((current) => fn(steps, current, direction));
+
+  const hitCount = steps.filter((step) => step.hit).length;
+
   return (
     <Stack gap="sm">
+      {degraded && (
+        <Alert color="yellow" variant="light">
+          {degraded}
+        </Alert>
+      )}
+
+      {/* 调试器动作。断点没有真的停住代码 —— 代码已经跑完，这里是在录像上跳。
+          所以每个动作都有反向版本，按住 Shift 就是往回走。 */}
+      <Group gap={6} wrap="wrap">
+        <Button size="compact-xs" variant="light" onClick={(e) => go(continueRun, e.shiftKey ? -1 : 1)}>
+          {t('trace.continue')}
+        </Button>
+        <Button size="compact-xs" variant="default" onClick={(e) => go(stepOver, e.shiftKey ? -1 : 1)}>
+          {t('trace.stepOver')}
+        </Button>
+        <Button size="compact-xs" variant="default" onClick={(e) => go(stepInto, e.shiftKey ? -1 : 1)}>
+          {t('trace.stepInto')}
+        </Button>
+        <Button size="compact-xs" variant="default" onClick={(e) => go(stepOut, e.shiftKey ? -1 : 1)}>
+          {t('trace.stepOut')}
+        </Button>
+        <Text size="xs" c="dimmed">
+          {t('trace.reverseHint')}
+        </Text>
+      </Group>
+
+      {breakpoints.length > 0 && (
+        <Text size="xs" c="dimmed">
+          {t('trace.hitSummary', { hits: hitCount, breakpoints: breakpoints.length })}
+        </Text>
+      )}
+
       <Group gap="xs" wrap="nowrap">
         <ActionIcon variant="default" onClick={() => setIndex(0)} disabled={index === 0}
           aria-label={t('trace.first')}>
@@ -122,6 +168,7 @@ export default function TracePlayer({ trace, source }: TracePlayerProps) {
           {lines.map((text, i) => {
             const lineNumber = i + 1;
             const active = lineNumber === current.line;
+            const hasBreakpoint = breakpoints.some((bp) => bp.line === lineNumber && bp.enabled);
             return (
               <Box
                 key={lineNumber}
@@ -134,8 +181,9 @@ export default function TracePlayer({ trace, source }: TracePlayerProps) {
                   fontWeight: active ? 600 : 400,
                 }}
               >
-                <Text span size="xs" c="dimmed" ff="monospace" style={{ minWidth: 22, textAlign: 'right' }}>
-                  {lineNumber}
+                <Text span size="xs" c={hasBreakpoint ? 'red' : 'dimmed'} ff="monospace"
+                  style={{ minWidth: 30, textAlign: 'right' }}>
+                  {hasBreakpoint ? '● ' : ''}{lineNumber}
                 </Text>
                 <Text span size="xs" ff="monospace" style={{ whiteSpace: 'pre' }}>
                   {text || ' '}
@@ -145,6 +193,12 @@ export default function TracePlayer({ trace, source }: TracePlayerProps) {
           })}
         </Box>
       </ScrollArea.Autosize>
+
+      {current.log !== undefined && (
+        <Alert color="blue" variant="light" p="xs">
+          <Text size="xs" ff="monospace">{current.log}</Text>
+        </Alert>
+      )}
 
       {/* 当前这一步的变量 */}
       <Box>

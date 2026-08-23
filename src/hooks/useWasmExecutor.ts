@@ -18,9 +18,9 @@ import {
 import { instrumentSource } from '../lib/trace/instrument';
 import { createTraceRecorder } from '../lib/trace/recorder';
 import { buildPythonTraceProgram } from '../lib/trace/pythonTrace';
-import { emptyTrace, type ExecutionTrace } from '../lib/trace/types';
+import { emptyTrace, type Breakpoint, type ExecutionTrace } from '../lib/trace/types';
 
-export type { ExecutionTrace, TraceStep } from '../lib/trace/types';
+export type { Breakpoint, ExecutionTrace, TraceStep } from '../lib/trace/types';
 
 export type { ConsoleLogEntry };
 
@@ -966,7 +966,8 @@ export function useWasmExecutor() {
     problem: any,
     code: string,
     language: string,
-    testIndex: number = 0
+    testIndex: number = 0,
+    breakpoints: Breakpoint[] = []
   ): Promise<{ trace: ExecutionTrace; result: any; error: string | null; logs: ConsoleLogEntry[] }> => {
     const test = (problem.tests || [])[testIndex];
     if (!test) {
@@ -979,12 +980,12 @@ export function useWasmExecutor() {
     if (language === 'python') {
       const templateKey = 'python';
       const functionName = extractFunctionName(problem.template?.[templateKey] || '', 'python');
-      return await tracePython(code, args, functionName, collector);
+      return await tracePython(code, args, functionName, collector, breakpoints);
     }
 
     // JS / TS：先插桩，再按平常的方式跑
     const tsModule = await loadTypeScript();
-    const recorder = createTraceRecorder();
+    const recorder = createTraceRecorder('(top level)', breakpoints);
     let instrumented: string;
     try {
       instrumented = instrumentSource(tsModule, code);
@@ -1040,11 +1041,12 @@ async function tracePython(
   code: string,
   args: any[],
   functionName: string,
-  collector: ConsoleCollector
+  collector: ConsoleCollector,
+  breakpoints: Breakpoint[] = []
 ): Promise<{ trace: ExecutionTrace; result: any; error: string | null; logs: ConsoleLogEntry[] }> {
   try {
     const pyodide = await loadPyodide();
-    const program = buildPythonTraceProgram(code, functionName, JSON.stringify(args));
+    const program = buildPythonTraceProgram(code, functionName, JSON.stringify(args), breakpoints);
     const output = await pyodide.runPythonAsync(program);
     const js = output?.toJs ? output.toJs({ dict_converter: Object.fromEntries }) : output;
 
