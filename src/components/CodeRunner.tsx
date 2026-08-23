@@ -260,6 +260,7 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
   const [traceOpen, setTraceOpen] = useState(false);
   const [tracedSource, setTracedSource] = useState('');
   const [tracedLanguage, setTracedLanguage] = useState('javascript');
+  const [tracedBreakpointCount, setTracedBreakpointCount] = useState(0);
 
   const runTrace = async () => {
     setTracing(true);
@@ -268,6 +269,7 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
     // 高亮必须对着录制那一刻的版本，不然行号会对不上
     setTracedSource(code);
     setTracedLanguage(selectedLanguage);
+    setTracedBreakpointCount(Object.keys(breakpointsRef.current).length);
     try {
       const outcome = await traceExecution(
         problem, code, selectedLanguage, 0, Object.values(breakpointsRef.current)
@@ -381,6 +383,8 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
 
   // 断点在左侧栏画成红点
   const breakpointCollectionRef = useRef<any>(null);
+  /** 上一次画上去的断点行号，顺序和 decoration collection 一一对应 */
+  const decoratedLinesRef = useRef<number[]>([]);
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
@@ -407,14 +411,51 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
         },
       };
     });
+    // 没有断点、上一轮也没有的话什么都不用做：
+    // 否则每敲一个字符都会重建装饰并强制重绘一次。
+    if (lines.length === 0 && !breakpointCollectionRef.current) return;
+
     if (!breakpointCollectionRef.current) {
       breakpointCollectionRef.current = editor.createDecorationsCollection(decorations);
     } else {
       breakpointCollectionRef.current.set(decorations);
     }
+    decoratedLinesRef.current = lines;
     // 不主动 render 的话，新装饰要等到下一次交互才出现
     editor.render(true);
-  }, [breakpoints, selectedLanguage, code]);
+  }, [breakpoints, selectedLanguage]);
+
+  /**
+   * 编辑器里插入/删除行时，把断点跟着挪。
+   * Monaco 的 decoration 会自己随编辑移动，所以直接把移动后的行号读回来，
+   * 比自己解析 diff 靠谱得多。
+   */
+  useEffect(() => {
+    const editor = editorRef.current;
+    const collection = breakpointCollectionRef.current;
+    if (!editor || !collection) return;
+    const model = editor.getModel();
+    if (!model) return;
+
+    const disposable = model.onDidChangeContent(() => {
+      const before = decoratedLinesRef.current;
+      if (before.length === 0) return;
+      const moved: Record<number, any> = {};
+      let changed = false;
+      before.forEach((originalLine, index) => {
+        const range = collection.getRange(index);
+        const nextLine = range ? range.startLineNumber : originalLine;
+        if (nextLine !== originalLine) changed = true;
+        const existing = breakpointsRef.current[originalLine];
+        if (existing) moved[nextLine] = { ...existing, line: nextLine };
+      });
+      if (changed) {
+        decoratedLinesRef.current = Object.keys(moved).map(Number);
+        setBreakpoints(moved);
+      }
+    });
+    return () => disposable.dispose();
+  }, [breakpoints]);
 
   useEffect(
     () => () => {
@@ -933,6 +974,13 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
               onRemove={(line) => toggleBreakpoint(line)}
             />
           </div>
+          <Group gap="xs">
+            <Button size="compact-xs" onClick={runTrace} loading={tracing}>
+              {t('trace.rerecord')}
+            </Button>
+            <Text size="xs" c="dimmed">{t('trace.rerecordHint')}</Text>
+          </Group>
+
           {tracing ? (
             <Group gap="xs"><Loader size={16} /><Text size="sm">{t('trace.running')}</Text></Group>
           ) : trace ? (
@@ -940,7 +988,8 @@ export default function CodeRunner({ problem, onTestResult, showResults = true, 
               trace={trace}
               source={tracedSource}
               breakpoints={Object.values(breakpoints)}
-              degraded={tracedLanguage === 'python' ? t('trace.pythonNote') : null}
+              note={tracedLanguage === 'python' ? t('trace.pythonNote') : null}
+              staleBreakpoints={tracedBreakpointCount !== Object.keys(breakpoints).length}
             />
           ) : null}
         </Stack>

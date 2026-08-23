@@ -34,7 +34,18 @@ function clip(text: string): string {
  * 在录制时求值而不是回放时：轨迹里存的是格式化后的字符串快照，
  * 拿字符串没法判断 `i > 3` 这种条件。这里能拿到活的值。
  */
+const compiledCache = new Map<string, ((values: unknown[]) => unknown) | null>();
+
 function compileExpression(expression: string, names: string[]): ((values: unknown[]) => unknown) | null {
+  // 每一步都 new Function 一次的话，5000 步就是 5000 次编译
+  const key = `${names.join(',')}|${expression}`;
+  if (compiledCache.has(key)) return compiledCache.get(key)!;
+  const compiled = compileUncached(expression, names);
+  compiledCache.set(key, compiled);
+  return compiled;
+}
+
+function compileUncached(expression: string, names: string[]): ((values: unknown[]) => unknown) | null {
   try {
     // eslint-disable-next-line no-new-func
     const fn = new Function(...names, `return (${expression});`);
@@ -65,6 +76,7 @@ export function createTraceRecorder(
   const steps: TraceStep[] = [];
   const stack: string[] = [entryName];
   let dropped = 0;
+  let hitsAfterCap = 0;
 
   // 按行建索引：每一步都遍历一遍断点列表太浪费
   const byLine = new Map<number, Breakpoint[]>();
@@ -102,31 +114,41 @@ export function createTraceRecorder(
           const names = Object.keys(vars);
           const values = names.map((name) => vars[name]);
           for (const breakpoint of active) {
+            // 条件先算：既有条件又有日志时，两者都要受这个条件约束
+            let conditionMet = true;
+            if (breakpoint.condition) {
+              conditionMet = false;
+              const compiled = compileExpression(breakpoint.condition, names);
+              if (compiled) {
+                try {
+                  conditionMet = Boolean(compiled(values));
+                } catch {
+                  // 条件在这一帧求值失败（比如引用了还不存在的变量）就当不成立
+                }
+              }
+            }
+            if (!conditionMet) continue;
+
             if (breakpoint.logMessage) {
-              // 日志断点不暂停，只记一条
+              // 日志断点只记一条，不算命中，也就不会让「继续」停下来
               logText = renderLogMessage(breakpoint.logMessage, names, values);
-              continue;
-            }
-            if (!breakpoint.condition) {
+            } else {
               hit = true;
-              continue;
-            }
-            const compiled = compileExpression(breakpoint.condition, names);
-            if (!compiled) continue;
-            try {
-              if (compiled(values)) hit = true;
-            } catch {
-              // 条件在这一帧求值失败（比如引用了还不存在的变量）就当不命中
             }
           }
         }
 
-        // 到上限就只计数不再记录。代码继续跑完 —— 中途抛异常反而更难解释。
+        // 到上限就只计数不再记录，代码继续跑完 —— 中途抛异常反而更难解释。
+        // 但命中断点的步要例外：断点设在长循环的后半段时，
+        // 「录不下」等于「永远命中 0 次」，那正是最需要它的场景。
         if (steps.length >= TRACE_LIMITS.maxSteps) {
-          dropped += 1;
-          trace.droppedSteps = dropped;
           trace.truncated = true;
-          return;
+          if (!hit || hitsAfterCap >= TRACE_LIMITS.maxHitStepsAfterCap) {
+            dropped += 1;
+            trace.droppedSteps = dropped;
+            return;
+          }
+          hitsAfterCap += 1;
         }
 
         const snapshot: TraceVariable[] = [];

@@ -41,6 +41,8 @@ for _bp in _breakpoints:
 _MAX_STEPS = ${TRACE_LIMITS.maxSteps}
 _MAX_VALUE = ${TRACE_LIMITS.maxValueChars}
 _MAX_VARS = ${TRACE_LIMITS.maxVarsPerStep}
+_MAX_HITS_AFTER_CAP = ${TRACE_LIMITS.maxHitStepsAfterCap}
+_hits_after_cap = [0]
 _stack = []
 
 def _fmt(value):
@@ -84,23 +86,30 @@ def _tracer(frame, event, arg):
         _hit = False
         _log = None
         for _bp in _by_line.get(frame.f_lineno, []):
+            # 条件先算：既有条件又有日志时，两者都要受这个条件约束
+            _ok = True
+            _cond = _bp.get('condition')
+            if _cond:
+                _ok = False
+                try:
+                    _ok = bool(eval(_cond, frame.f_globals, frame.f_locals))
+                except Exception:
+                    # 条件在这一帧求值失败就当不成立，别把用户的运行搞崩
+                    _ok = False
+            if not _ok:
+                continue
             if _bp.get('logMessage'):
                 _log = _render_log(_bp['logMessage'], frame)
-                continue
-            _cond = _bp.get('condition')
-            if not _cond:
+            else:
                 _hit = True
-                continue
-            try:
-                if eval(_cond, frame.f_globals, frame.f_locals):
-                    _hit = True
-            except Exception:
-                # 条件在这一帧求值失败就当不命中，别把用户的运行搞崩
-                pass
 
+        # 命中的步在超出上限后仍然保留一小部分：断点设在长循环后半段时，
+        # 「录不下」等于「永远命中 0 次」。
         if len(_trace) >= _MAX_STEPS:
-            _dropped[0] += 1
-            return _tracer
+            if not _hit or _hits_after_cap[0] >= _MAX_HITS_AFTER_CAP:
+                _dropped[0] += 1
+                return _tracer
+            _hits_after_cap[0] += 1
         variables = []
         for key, value in list(frame.f_locals.items()):
             if key.startswith('__'):

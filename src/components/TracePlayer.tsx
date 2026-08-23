@@ -29,8 +29,10 @@ interface TracePlayerProps {
   source: string;
   /** 设过的断点，用于在源码预览里标记 */
   breakpoints?: Breakpoint[];
-  /** 语言不支持时的降级说明，null 表示完全支持 */
-  degraded?: string | null;
+  /** 关于这条轨迹是怎么录的说明（不是降级警告） */
+  note?: string | null;
+  /** 断点在录制之后被改过，当前显示的命中结果已经不对应了 */
+  staleBreakpoints?: boolean;
 }
 
 /**
@@ -40,7 +42,7 @@ interface TracePlayerProps {
  * 好处是可以往回拖 —— 断点调试器做不到这件事，而做题时
  * 「上一轮循环 seen 里是什么」恰恰是最常问的问题。
  */
-export default function TracePlayer({ trace, source, breakpoints = [], degraded = null }: TracePlayerProps) {
+export default function TracePlayer({ trace, source, breakpoints = [], note = null, staleBreakpoints = false }: TracePlayerProps) {
   const { t } = useTranslation();
   const [index, setIndex] = useState(0);
 
@@ -54,6 +56,13 @@ export default function TracePlayer({ trace, source, breakpoints = [], degraded 
   }, [trace]);
 
   const lines = useMemo(() => source.split('\n'), [source]);
+  const sourceViewportRef = React.useRef<HTMLDivElement>(null);
+  const activeLineRef = React.useRef<HTMLDivElement>(null);
+
+  // 当前行滚进视野。用 block:'nearest' 免得每一步都把整个面板弹一下。
+  useEffect(() => {
+    activeLineRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [index]);
   const current = steps[Math.min(index, total - 1)];
 
   if (total === 0) {
@@ -78,9 +87,16 @@ export default function TracePlayer({ trace, source, breakpoints = [], degraded 
 
   return (
     <Stack gap="sm">
-      {degraded && (
-        <Alert color="yellow" variant="light">
-          {degraded}
+      {note && (
+        <Text size="xs" c="dimmed">
+          {note}
+        </Text>
+      )}
+
+      {/* 断点改了但还没重录：命中结果对应的是上一次运行 */}
+      {staleBreakpoints && (
+        <Alert color="yellow" variant="light" p="xs">
+          <Text size="xs">{t('trace.staleBreakpoints')}</Text>
         </Alert>
       )}
 
@@ -162,8 +178,8 @@ export default function TracePlayer({ trace, source, breakpoints = [], degraded 
         </Text>
       )}
 
-      {/* 源码：当前行高亮 */}
-      <ScrollArea.Autosize mah={220}>
+      {/* 源码：当前行高亮。跳转可能跨几千步，不滚过去的话看着像没反应。 */}
+      <ScrollArea.Autosize mah={220} viewportRef={sourceViewportRef}>
         <Box component="pre" style={{ margin: 0, fontSize: 11, lineHeight: 1.6 }}>
           {lines.map((text, i) => {
             const lineNumber = i + 1;
@@ -172,6 +188,7 @@ export default function TracePlayer({ trace, source, breakpoints = [], degraded 
             return (
               <Box
                 key={lineNumber}
+                ref={active ? activeLineRef : undefined}
                 style={{
                   display: 'flex',
                   gap: 10,

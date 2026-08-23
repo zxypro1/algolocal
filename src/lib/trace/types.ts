@@ -64,6 +64,12 @@ export const TRACE_LIMITS = {
   maxValueChars: 200,
   /** 每一步最多记录多少个变量 */
   maxVarsPerStep: 24,
+  /**
+   * 到了 maxSteps 之后仍然给命中断点的步留的额外名额。
+   * 不留的话，断点设在一个很长的循环的后半段就永远「命中 0 次」——
+   * 而那恰恰是最需要断点的场景。
+   */
+  maxHitStepsAfterCap: 200,
 } as const;
 
 /**

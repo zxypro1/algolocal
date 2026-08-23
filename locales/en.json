@@ -27,6 +27,9 @@
     "logPlaceholder": "e.g. i={i} total={total}",
     "removeBreakpoint": "Remove",
     "pythonNote": "Python breakpoints are evaluated by sys.settrace while recording.",
+    "rerecord": "Re-record",
+    "rerecordHint": "Run again after changing a breakpoint",
+    "staleBreakpoints": "Breakpoints changed since this recording — re-record to apply them.",
     "aborted": "The run stopped early: {{error}}"
   },
   "common": {

@@ -27,6 +27,9 @@
     "logPlaceholder": "例如 i={i} total={total}",
     "removeBreakpoint": "删除",
     "pythonNote": "Python 断点在录制时由 sys.settrace 求值。",
+    "rerecord": "重新录制",
+    "rerecordHint": "改完断点后重新运行",
+    "staleBreakpoints": "断点在这次录制之后改过，重新录制才会生效。",
     "aborted": "这次运行中途停下了：{{error}}"
   },
   "common": {

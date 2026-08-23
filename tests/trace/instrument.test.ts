@@ -9,11 +9,12 @@
 import * as ts from 'typescript';
 import { instrumentSource } from '../../src/lib/trace/instrument';
 import { createTraceRecorder } from '../../src/lib/trace/recorder';
+import type { Breakpoint } from '../../src/lib/trace/types';
 import { TRACE_LIMITS } from '../../src/lib/trace/types';
 
-function runTraced(source: string, args: unknown[] = []) {
+function runTraced(source: string, args: unknown[] = [], breakpoints: Breakpoint[] = []) {
   const instrumented = instrumentSource(ts, source);
-  const recorder = createTraceRecorder();
+  const recorder = createTraceRecorder('(top level)', breakpoints);
   const fn = new Function(
     '__trace',
     'args',
@@ -281,5 +282,60 @@ describe('trace bounds', () => {
     // 存引用的话每一步都会显示最终的 [1, 2]
     expect(accStates).toContain('[]');
     expect(accStates.some((value) => value === '[1]')).toBe(true);
+  });
+});
+
+describe('breakpoints', () => {
+  // 循环体单独一行（第 4 行），这样断点行只对应循环体，
+  // 不会把 for 语句本身那一次也算进来
+  const loop = `function run() {
+      let total = 0;
+      for (let i = 0; i < 8; i++) {
+        total += i;
+      }
+      return total;
+    }
+    module.exports = run;`;
+
+  it('honours the condition even when a log message is also set', () => {
+    // 一度是这样：有 logMessage 就直接 continue，条件被整个跳过，
+    // 于是每一轮都打日志。
+    const { trace } = runTraced(loop, [], [
+      { line: 4, enabled: true, condition: 'i === 2', logMessage: 'i={i}' },
+    ]);
+    expect(trace.steps.filter((step) => step.log).map((step) => step.log)).toEqual(['i=2']);
+  });
+
+  it('logpoints never count as hits, so continue does not stop on them', () => {
+    const { trace } = runTraced(loop, [], [{ line: 4, enabled: true, logMessage: 'i={i}' }]);
+    expect(trace.steps.some((step) => step.hit)).toBe(false);
+    expect(trace.steps.filter((step) => step.log).length).toBe(8);
+  });
+
+  it('keeps a hit that happens past the step cap', () => {
+    // 断点设在长循环的后半段时，「录不下」等于「永远命中 0 次」,
+    // 而那正是最需要断点的场景。
+    const { trace } = runTraced(
+      `function run() {
+         let total = 0;
+         for (let i = 0; i < 6000; i++) {
+           total += i;
+         }
+         return total;
+       }
+       module.exports = run;`,
+      [],
+      [{ line: 4, enabled: true, condition: 'i === 5900' }]
+    );
+    expect(trace.steps.filter((step) => step.hit).length).toBe(1);
+    expect(trace.truncated).toBe(true);
+  });
+
+  it('a condition that throws or names something unknown just does not fire', () => {
+    const { result, trace } = runTraced(loop, [], [
+      { line: 4, enabled: true, condition: 'nope.missing > 1' },
+    ]);
+    expect(result).toBe(28);
+    expect(trace.steps.some((step) => step.hit)).toBe(false);
   });
 });
