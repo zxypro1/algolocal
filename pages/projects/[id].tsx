@@ -667,7 +667,7 @@ export default function ProjectWorkspacePage() {
                   <Tabs.Tab value="brief" leftSection={<IconFileText size={14} />}>
                     {t('engineering.tabs.brief')}
                   </Tabs.Tab>
-                  {project.architecture && (
+                  {(stage.architecture || project.architecture) && (
                     <Tabs.Tab value="architecture" leftSection={<IconSitemap size={14} />}>
                       {t('engineering.tabs.architecture')}
                     </Tabs.Tab>
@@ -741,15 +741,15 @@ export default function ProjectWorkspacePage() {
                       )}
 
                       <Paper withBorder radius="lg" p="lg">
-                        <MarkdownRenderer content={pick(project.brief)} />
+                        <MarkdownRenderer content={pick(stage.details || project.brief)} />
                       </Paper>
                     </Stack>
                   </Tabs.Panel>
 
-                  {project.architecture && (
+                  {(stage.architecture || project.architecture) && (
                     <Tabs.Panel value="architecture">
                       <Paper withBorder radius="lg" p="lg">
-                        <MarkdownRenderer content={pick(project.architecture)} />
+                        <MarkdownRenderer content={pick(stage.architecture || project.architecture)} />
                       </Paper>
                     </Tabs.Panel>
                   )}

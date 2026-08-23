@@ -516,9 +516,9 @@
       "languageHint": "Switching swaps the starter files and specs; each language keeps its own drafts"
     },
     "tabs": {
-      "stage": "Stage",
-      "brief": "Brief",
-      "architecture": "Architecture",
+      "stage": "Task overview",
+      "brief": "Task details",
+      "architecture": "Reference architecture",
       "tests": "Specs",
       "metrics": "Metrics",
       "score": "Score",

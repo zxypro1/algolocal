@@ -62,7 +62,8 @@ export default function StagePanel({
       </Group>
 
       <Card withBorder radius="lg" padding="lg">
-        <MarkdownRenderer content={pick(stage.goal)} />
+        {/* 任务概述：本关背景。没迁移的关卡回退到旧的 goal。 */}
+        <MarkdownRenderer content={pick(stage.overview || stage.goal)} />
       </Card>
 
       {stage.checklist && stage.checklist.length > 0 && (
