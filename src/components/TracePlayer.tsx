@@ -25,8 +25,13 @@ import type { Breakpoint, ExecutionTrace, TraceStep } from '../lib/trace/types';
 
 interface TracePlayerProps {
   trace: ExecutionTrace;
-  /** 用户源码，按行展示并高亮当前行 */
-  source: string;
+  /** 单文件场景（算法题）的源码 */
+  source?: string;
+  /**
+   * 多文件场景（工程题）：按当前步所在的文件取源码。
+   * 轨迹每一步都带 file，所以跨文件跳转时展示的始终是那一步真正所在的文件。
+   */
+  sourceOf?: (file: string) => string;
   /** 设过的断点，用于在源码预览里标记 */
   breakpoints?: Breakpoint[];
   /** 关于这条轨迹是怎么录的说明（不是降级警告） */
@@ -42,7 +47,7 @@ interface TracePlayerProps {
  * 好处是可以往回拖 —— 断点调试器做不到这件事，而做题时
  * 「上一轮循环 seen 里是什么」恰恰是最常问的问题。
  */
-export default function TracePlayer({ trace, source, breakpoints = [], note = null, staleBreakpoints = false }: TracePlayerProps) {
+export default function TracePlayer({ trace, source = '', sourceOf, breakpoints = [], note = null, staleBreakpoints = false }: TracePlayerProps) {
   const { t } = useTranslation();
   const [index, setIndex] = useState(0);
 
@@ -55,7 +60,11 @@ export default function TracePlayer({ trace, source, breakpoints = [], note = nu
     setIndex(firstHit(trace.steps));
   }, [trace]);
 
-  const lines = useMemo(() => source.split('\n'), [source]);
+  // 当前这一步属于哪个文件，就展示哪个文件；单文件场景退回 source
+  const currentStep = steps[Math.min(index, steps.length - 1)];
+  const activeFile = currentStep?.file;
+  const activeSource = activeFile && sourceOf ? sourceOf(activeFile) : source;
+  const lines = useMemo(() => activeSource.split('\n'), [activeSource]);
   const sourceViewportRef = React.useRef<HTMLDivElement>(null);
   const activeLineRef = React.useRef<HTMLDivElement>(null);
 
@@ -160,6 +169,11 @@ export default function TracePlayer({ trace, source, breakpoints = [], note = nu
         <Badge size="sm" variant="light" color="gray">
           {t('trace.line')} {current.line}
         </Badge>
+        {activeFile && (
+          <Badge size="sm" variant="light" color="gray" ff="monospace">
+            {activeFile}
+          </Badge>
+        )}
         <Text size="xs" c="dimmed" ff="monospace">
           {current.stack.join(' › ')}
         </Text>

@@ -526,7 +526,8 @@
       "tests": "Specs",
       "metrics": "Metrics",
       "score": "Score",
-      "review": "AI review"
+      "review": "AI review",
+      "trace": "Execution trace"
     },
     "results": {
       "empty": "Hit \"Run acceptance\" to see results",
@@ -613,7 +614,11 @@
       "repairing": "Verification failed, asking for a fix…",
       "saving": "Verified, saving…"
     },
-    "brief": {}
+    "trace": {
+      "empty": "No trace recorded yet. Recording instruments every statement, so it runs slower than a normal acceptance run — it is off by default.",
+      "record": "Run and record a trace",
+      "note": "Recorded across the whole acceptance run. Steps carry the file they came from, so the view follows execution across files."
+    }
   },
   "editor": {
     "toggleWrap": "Word wrap",

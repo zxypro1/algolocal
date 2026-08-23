@@ -32,6 +32,11 @@ export interface Breakpoint {
 export interface TraceStep {
   /** 原始源码的行号（1 起） */
   line: number;
+  /**
+   * 这一步属于哪个文件。工程题是多文件工作区，只有行号定位不到。
+   * 算法题是单文件，留空。
+   */
+  file?: string;
   /** 调用栈深度，用于 UI 缩进 */
   depth: number;
   /** 当前函数名，栈顶 */

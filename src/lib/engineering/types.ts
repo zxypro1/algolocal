@@ -258,6 +258,8 @@ export interface StageRunReport {
   gates: GateResult[];
   metrics: LabMetrics;
   console: ConsoleEntry[];
+  /** 开了「录制轨迹」时才有 */
+  trace?: import('../trace/types').ExecutionTrace;
   /** 真实墙钟耗时 */
   wallClockMs: number;
   error?: string;
