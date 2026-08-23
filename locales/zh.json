@@ -1,4 +1,21 @@
 {
+  "trace": {
+    "button": "调试",
+    "title": "执行轨迹",
+    "running": "录制中…",
+    "empty": "这次运行没有录到任何步骤。",
+    "step": "第",
+    "line": "行",
+    "variables": "这一步的变量",
+    "noVariables": "当前作用域还没有变量。",
+    "truncated": "步数达到上限后停止录制，后面 {count} 步没有保留。",
+    "first": "第一步",
+    "prev": "上一步",
+    "next": "下一步",
+    "last": "最后一步",
+    "caseLabel": "正在追踪测试用例 {n}",
+    "failed": "无法录制轨迹：{error}"
+  },
   "common": {
     "language": "语言",
     "theme": "主题",

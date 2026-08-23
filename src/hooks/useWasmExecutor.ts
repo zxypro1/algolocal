@@ -15,6 +15,12 @@ import {
   type ConsoleCollector,
   type ConsoleLogEntry,
 } from '../lib/consoleCapture';
+import { instrumentSource } from '../lib/trace/instrument';
+import { createTraceRecorder } from '../lib/trace/recorder';
+import { buildPythonTraceProgram } from '../lib/trace/pythonTrace';
+import { EMPTY_TRACE, type ExecutionTrace } from '../lib/trace/types';
+
+export type { ExecutionTrace, TraceStep } from '../lib/trace/types';
 
 export type { ConsoleLogEntry };
 
@@ -88,18 +94,24 @@ let globalRuntime: WasmRuntimeState = {
  * 使用 Function 构造函数安全执行 JavaScript 代码
  * 比 iframe 更可靠，适用于用户自己编写的代码
  */
-export function executeCode(code: string, sandboxConsole?: unknown): any {
+export function executeCode(code: string, sandboxConsole?: unknown, traceApi?: unknown): any {
   try {
     // 用 Function 构造函数创建一个新的函数作用域。
-    // 把 console 作为形参传进去，用户代码里的 console.* 就会命中我们的收集器，
-    // 而不是浏览器的全局 console —— 既能捕获，又不会污染全局或在并发运行时串台。
-    const fn = new Function('console', code);
-    const result = fn(sandboxConsole ?? console);
-    return result;
+    // console 和 __trace 都作为形参传进去：用户代码里的 console.* 命中我们的收集器，
+    // 插桩产生的 __trace.* 命中记录器 —— 既能捕获，又不会污染全局或在并发运行时串台。
+    const fn = new Function('console', '__trace', code);
+    return fn(sandboxConsole ?? console, traceApi ?? NOOP_TRACE);
   } catch (error) {
     throw error;
   }
 }
+
+/** 没开调试时，插桩调用要有个不做事的落点（正常路径下代码根本没被插桩） */
+const NOOP_TRACE = {
+  enter: () => undefined,
+  exit: () => undefined,
+  step: () => undefined,
+};
 
 /**
  * 加载 TypeScript 编译器
@@ -236,7 +248,8 @@ export async function executeJavaScript(
   code: string,
   args: any[],
   isLinkedListProblem: boolean = false,
-  collector?: ConsoleCollector
+  collector?: ConsoleCollector,
+  traceApi?: unknown
 ): Promise<{ result: any; error: string | null; executionTime: number }> {
   const startTime = performance.now();
 
@@ -297,7 +310,7 @@ export async function executeJavaScript(
       `}
     `;
 
-    const result = executeCode(jsCode, collector?.console);
+    const result = executeCode(jsCode, collector?.console, traceApi);
     const executionTime = performance.now() - startTime;
 
     return {
@@ -322,7 +335,8 @@ async function executeTypeScript(
   code: string,
   args: any[],
   isLinkedListProblem: boolean = false,
-  collector?: ConsoleCollector
+  collector?: ConsoleCollector,
+  traceApi?: unknown
 ): Promise<{ result: any; error: string | null; executionTime: number }> {
   const startTime = performance.now();
 
@@ -331,7 +345,7 @@ async function executeTypeScript(
     const jsCode = await transpileTypeScript(code);
     
     // 然后使用 JavaScript 执行逻辑
-    return await executeJavaScript(jsCode, args, isLinkedListProblem, collector);
+    return await executeJavaScript(jsCode, args, isLinkedListProblem, collector, traceApi);
   } catch (error: any) {
     const executionTime = performance.now() - startTime;
     return {
@@ -941,13 +955,106 @@ export function useWasmExecutor() {
     return ['javascript', 'typescript', 'python'];
   }, []);
 
+  /**
+   * 带轨迹地跑**一条**用例。
+   *
+   * 只跑一条是刻意的：轨迹是给「这一条为什么错」用的，
+   * 把所有用例都录一遍既慢又没人看。也不做基准测试的多次运行 ——
+   * 那样会录出四份一模一样的轨迹。
+   */
+  const traceExecution = useCallback(async (
+    problem: any,
+    code: string,
+    language: string,
+    testIndex: number = 0
+  ): Promise<{ trace: ExecutionTrace; result: any; error: string | null; logs: ConsoleLogEntry[] }> => {
+    const test = (problem.tests || [])[testIndex];
+    if (!test) {
+      return { trace: { ...EMPTY_TRACE, error: 'No such test case' }, result: null, error: 'No such test case', logs: [] };
+    }
+
+    const args = parseTestInput(test.input);
+    const collector = createConsoleCollector('user');
+
+    if (language === 'python') {
+      const templateKey = 'python';
+      const functionName = extractFunctionName(problem.template?.[templateKey] || '', 'python');
+      return await tracePython(code, args, functionName, collector);
+    }
+
+    // JS / TS：先插桩，再按平常的方式跑
+    const tsModule = await loadTypeScript();
+    const recorder = createTraceRecorder();
+    let instrumented: string;
+    try {
+      instrumented = instrumentSource(tsModule, code);
+    } catch (error: any) {
+      return {
+        trace: { ...EMPTY_TRACE, error: `Could not instrument the code: ${error?.message || error}` },
+        result: null,
+        error: error?.message || String(error),
+        logs: [],
+      };
+    }
+
+    const isLinkedListProblem = problem.tags?.includes('linked-list');
+    // instrumentSource 已经把 TS 转成 JS 了，所以这里统一走 JS 路径
+    const outcome = await executeJavaScript(instrumented, args, isLinkedListProblem, collector, recorder.api);
+
+    recorder.trace.completed = !outcome.error;
+    if (outcome.error) recorder.trace.error = outcome.error;
+
+    return {
+      trace: recorder.trace,
+      result: outcome.result,
+      error: outcome.error,
+      logs: collector.entries,
+    };
+  }, []);
+
   return {
     runTests,
+    traceExecution,
     isLoading,
     runtimeStatus,
     preloadRuntime,
     getSupportedLanguages
   };
+}
+
+/** Python 走 sys.settrace，不插桩 */
+async function tracePython(
+  code: string,
+  args: any[],
+  functionName: string,
+  collector: ConsoleCollector
+): Promise<{ trace: ExecutionTrace; result: any; error: string | null; logs: ConsoleLogEntry[] }> {
+  try {
+    const pyodide = await loadPyodide();
+    const program = buildPythonTraceProgram(code, functionName, JSON.stringify(args));
+    const output = await pyodide.runPythonAsync(program);
+    const js = output?.toJs ? output.toJs({ dict_converter: Object.fromEntries }) : output;
+
+    const { entries, truncated } = entriesFromPythonOutput(js.stdout || '', js.stderr || '');
+    collector.entries.push(...entries);
+    if (truncated) collector.truncated = true;
+
+    let trace: ExecutionTrace = { ...EMPTY_TRACE };
+    try {
+      trace = JSON.parse(js.trace);
+    } catch {
+      trace = { ...EMPTY_TRACE, error: 'Could not read the trace back from Python' };
+    }
+
+    return { trace, result: js.result ?? null, error: js.error || null, logs: collector.entries };
+  } catch (error: any) {
+    return {
+      trace: { ...EMPTY_TRACE, error: error?.message || String(error) },
+      result: null,
+      error: error?.message || String(error),
+      logs: collector.entries,
+    };
+  }
 }
 
 export default useWasmExecutor;
