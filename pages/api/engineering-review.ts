@@ -6,6 +6,7 @@ import {
   extractJson,
   NoProviderError,
   streamStructured,
+  statusForError,
 } from '../../src/lib/server/aiProvider';
 import { buildWorkspaceContext, WorkspaceContext } from '../../src/lib/server/engineeringPrompt';
 import { DIMENSION_KEYS } from '../../src/lib/engineering/types';
@@ -157,6 +158,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       res.end();
       return;
     }
-    return res.status(500).json({ error: message });
+    return res.status(statusForError(error)).json({ error: message });
   }
 }

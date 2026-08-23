@@ -5,7 +5,14 @@
  * 客户端：SSE 事件 -> 文本，重点是任意位置切分的分块
  */
 import { createSseParser, parseSseLine } from '../../src/lib/chatStreamProtocol';
-import { streamAI, streamStructured } from '../../src/lib/server/aiProvider';
+import {
+  NoProviderError,
+  normalizeMessages,
+  resolveProvider,
+  statusForError,
+  streamAI,
+  streamStructured,
+} from '../../src/lib/server/aiProvider';
 
 /* ------------------------------------------------------------------ */
 /* 客户端解析                                                          */
@@ -63,6 +70,62 @@ describe('client SSE parsing', () => {
 
   it('treats non-JSON payloads as plain text for legacy endpoints', () => {
     expect(parseSseLine('data: raw text')).toEqual({ text: 'raw text' });
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 消息规整                                                            */
+/* ------------------------------------------------------------------ */
+
+describe('message normalisation', () => {
+  /**
+   * 开放权重模型的 chat 模板（Qwen 等）在 Jinja 里写死了
+   * raise_exception('System message must be at the beginning.')，
+   * llama.cpp / LM Studio / Ollama 会把它变成一个 400。
+   * 托管 API 宽容，所以这个前提一直没被我们自己保证。
+   */
+  it('merges multiple system messages into one at the front', () => {
+    expect(
+      normalizeMessages([
+        { role: 'system', content: 'persona' },
+        { role: 'system', content: 'context' },
+        { role: 'user', content: 'hi' },
+      ])
+    ).toEqual([
+      { role: 'system', content: 'persona\n\ncontext' },
+      { role: 'user', content: 'hi' },
+    ]);
+  });
+
+  it('hoists a system message that arrived mid-conversation', () => {
+    expect(
+      normalizeMessages([
+        { role: 'user', content: 'hi' },
+        { role: 'system', content: 'late rule' },
+        { role: 'assistant', content: 'sure' },
+      ])
+    ).toEqual([
+      { role: 'system', content: 'late rule' },
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'sure' },
+    ]);
+  });
+
+  it('drops empty system messages instead of sending a blank one', () => {
+    expect(
+      normalizeMessages([
+        { role: 'system', content: '   ' },
+        { role: 'user', content: 'hi' },
+      ])
+    ).toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
+  it('leaves a conversation without a system message alone', () => {
+    const messages = [
+      { role: 'user' as const, content: 'hi' },
+      { role: 'assistant' as const, content: 'hello' },
+    ];
+    expect(normalizeMessages(messages)).toEqual(messages);
   });
 });
 
@@ -286,7 +349,12 @@ describe('server streaming', () => {
     expect(body.temperature).toBeUndefined();
   });
 
-  it('reports upstream failure as JSON before headers are sent', async () => {
+  /**
+   * 上游拒绝了请求，是「这次请求不对」而不是「我们挂了」——
+   * 状态码要照传，消息要是人能读的那一句，否则用户只看到一个 500，
+   * 无从知道该去改 key、改模型名还是改端点。
+   */
+  it('passes an upstream 401 through as 401, with its message', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: false,
       status: 401,
@@ -299,9 +367,53 @@ describe('server streaming', () => {
       selectedProvider: 'openai',
     });
 
-    expect(res.statusCode).toBe(500);
-    expect((res.jsonBody as any).error).toMatch(/401/);
+    expect(res.statusCode).toBe(401);
+    expect((res.jsonBody as any).error).toBe('invalid api key');
     expect(res.written).toHaveLength(0);
+  });
+
+  it('unwraps an OpenAI-style error body instead of quoting the raw JSON', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () =>
+        JSON.stringify({
+          error: { message: 'system message must be at the beginning', code: 'template_error' },
+        }),
+    }) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      compatible: { endpoint: 'http://localhost:1234/v1', model: 'qwen3-8b' },
+      selectedProvider: 'compatible',
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect((res.jsonBody as any).error).toBe('system message must be at the beginning');
+  });
+
+  it('reports an upstream 5xx as 502, not as our own 500', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      text: async () => 'model is loading',
+    }) as any;
+
+    const res = createFakeRes();
+    await streamAI(res as any, [{ role: 'user', content: 'hi' }], {
+      openAI: { apiKey: 'k', model: 'gpt-4.1' },
+      selectedProvider: 'openai',
+    });
+
+    expect(res.statusCode).toBe(502);
+    expect((res.jsonBody as any).error).toBe('model is loading');
+  });
+
+  it('classifies a missing provider as 400, not 500', () => {
+    // 没配 provider 是「你还没设置」，不是「服务器坏了」。
+    // resolveProvider 在写响应头之前就抛，由路由的 catch 统一映射状态码。
+    expect(() => resolveProvider({}, 4000)).toThrow(NoProviderError);
+    expect(statusForError(new NoProviderError())).toBe(400);
   });
 
   it('reports a mid-stream failure as an error event, not a broken body', async () => {
@@ -494,6 +606,58 @@ describe('server streaming', () => {
     expect(collectText(res)).toBe('real stream');
     // 它确实是流，所以不该被标成 non-incremental
     expect(collectEvents(res)).not.toContainEqual({ type: 'meta', incremental: false });
+  });
+
+  it('never sends more than one system message, and always first', async () => {
+    const configs: Array<[string, any]> = [
+      ['deepseek', { deepSeek: { apiKey: 'k', model: 'deepseek-chat' }, selectedProvider: 'deepseek' }],
+      ['openai', { openAI: { apiKey: 'k', model: 'gpt-4.1' }, selectedProvider: 'openai' }],
+      ['qwen', { qwen: { apiKey: 'k', model: 'qwen-plus' }, selectedProvider: 'qwen' }],
+      ['ollama', { ollama: { endpoint: 'http://localhost:11434', model: 'llama3.1' }, selectedProvider: 'ollama' }],
+      [
+        'compatible',
+        { compatible: { endpoint: 'http://localhost:1234/v1', model: 'qwen3-8b' }, selectedProvider: 'compatible' },
+      ],
+    ];
+
+    // 这正是 ai-chat / engineering-chat 以前发出去的形状：两条 system
+    const messages: any = [
+      { role: 'system', content: 'persona' },
+      { role: 'system', content: 'workspace context' },
+      { role: 'user', content: 'hi' },
+    ];
+
+    for (const [kind, config] of configs) {
+      const fetchMock = jest.fn().mockResolvedValue(fakeStreamResponse([])) as any;
+      global.fetch = fetchMock;
+
+      await streamAI(createFakeRes() as any, messages, config);
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      const roles = body.messages.map((message: any) => message.role);
+      expect([kind, roles.filter((role: string) => role === 'system').length]).toEqual([kind, 1]);
+      expect([kind, roles[0]]).toEqual([kind, 'system']);
+      expect([kind, body.messages[0].content]).toEqual([kind, 'persona\n\nworkspace context']);
+    }
+  });
+
+  it('keeps Claude on its separate system field', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(fakeStreamResponse([])) as any;
+    global.fetch = fetchMock;
+
+    await streamAI(
+      createFakeRes() as any,
+      [
+        { role: 'system', content: 'persona' },
+        { role: 'system', content: 'context' },
+        { role: 'user', content: 'hi' },
+      ],
+      { claude: { apiKey: 'k', model: 'claude-sonnet-5' }, selectedProvider: 'claude' }
+    );
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.system).toBe('persona\n\ncontext');
+    expect(body.messages.every((message: any) => message.role !== 'system')).toBe(true);
   });
 
   it('streams raw text when format is text', async () => {

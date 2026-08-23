@@ -6,6 +6,7 @@ import {
   extractJson,
   NoProviderError,
   streamStructured,
+  statusForError,
 } from '../../src/lib/server/aiProvider';
 import { coerceProject, validateProjectShape } from '../../src/lib/engineering/validateProject';
 import { addUserProject } from '../../src/lib/server/projectStore';
@@ -243,6 +244,6 @@ Remember: reference implementations must actually pass the specs, latency number
       res.end();
       return;
     }
-    return res.status(500).json({ error: message });
+    return res.status(statusForError(error)).json({ error: message });
   }
 }

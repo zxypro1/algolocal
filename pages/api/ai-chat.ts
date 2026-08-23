@@ -6,6 +6,7 @@ import {
   ChatMessage,
   NoProviderError,
   streamAI,
+  statusForError,
 } from '../../src/lib/server/aiProvider';
 
 /**
@@ -128,7 +129,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     console.error('AI Chat error:', error);
     const message =
       error instanceof NoProviderError ? error.message : (error as Error).message || 'Failed to get AI response';
-    if (!res.headersSent) return res.status(500).json({ error: message });
+    if (!res.headersSent) return res.status(statusForError(error)).json({ error: message });
     res.write(`data: ${JSON.stringify({ type: 'error', message })}\n\n`);
     res.end();
   }

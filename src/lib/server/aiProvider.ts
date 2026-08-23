@@ -188,6 +188,38 @@ interface UpstreamRequest {
   body: Record<string, unknown>;
 }
 
+/**
+ * 把消息规整成「至多一条 system，而且在最前面」。
+ *
+ * 这不是给某个后端打的补丁，是**开放权重模型的 chat 模板普遍要求**：
+ * Qwen 等模型的 Jinja 模板里写着 `raise_exception('System message must be at
+ * the beginning.')`，llama.cpp / LM Studio / Ollama 走模板渲染时会原样抛出来，
+ * 变成一个 400。llama.cpp 把这视为模板的既定行为而不是 bug（#20733 closed as
+ * not planned），也就是说客户端本来就该保证这个前提。
+ *
+ * 托管 API（OpenAI、DeepSeek）接受多条 system、也接受它出现在中间，所以同一份
+ * 代码在它们那里一直是好的 —— 这正是这个 bug 只在本地模型上暴露的原因。
+ *
+ * 我们自己的路由从来只在开头放 system（只是放了两条：一条人设、一条上下文），
+ * 所以这里把它们按顺序拼成一条，语义不变。
+ */
+export function normalizeMessages(messages: ChatMessage[]): ChatMessage[] {
+  const systemParts: string[] = [];
+  const rest: ChatMessage[] = [];
+
+  for (const message of messages) {
+    if (message.role === 'system') {
+      const content = (message.content || '').trim();
+      if (content) systemParts.push(content);
+    } else {
+      rest.push(message);
+    }
+  }
+
+  if (systemParts.length === 0) return rest;
+  return [{ role: 'system', content: systemParts.join('\n\n') }, ...rest];
+}
+
 /** OpenAI 兼容格式：DeepSeek、Qwen（compatible-mode）、OpenAI 自己都走这套 */
 function openAiCompatibleBody(
   provider: ResolvedProvider,
@@ -207,9 +239,12 @@ function openAiCompatibleBody(
 
 function buildRequest(
   provider: ResolvedProvider,
-  messages: ChatMessage[],
+  rawMessages: ChatMessage[],
   options: { stream: boolean; temperature: number }
 ): UpstreamRequest {
+  // 所有 provider 共用同一份规整：system 合成一条、放最前
+  const messages = normalizeMessages(rawMessages);
+
   switch (provider.kind) {
     case 'deepseek':
       return {
@@ -284,6 +319,61 @@ function buildRequest(
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
+/**
+ * 上游明确拒绝了这次请求。
+ *
+ * 它和「我们自己挂了」是两件事，所以要带着上游的状态码往外传：
+ * 端点填错、key 过期、模型名不存在、超出上下文长度，用户看到 400/401/404
+ * 才知道该去改什么；一律报 500 只会让人以为是应用坏了。
+ */
+export class AIUpstreamError extends Error {
+  /** 上游返回的状态码 */
+  upstreamStatus: number;
+  /** 转给客户端用的状态码：上游的 4xx 照传，5xx 归一成 502 */
+  status: number;
+
+  constructor(message: string, upstreamStatus: number) {
+    super(message);
+    this.name = 'AIUpstreamError';
+    this.upstreamStatus = upstreamStatus;
+    this.status = upstreamStatus >= 400 && upstreamStatus < 500 ? upstreamStatus : 502;
+  }
+}
+
+/** 该用哪个状态码回给客户端 */
+export function statusForError(error: unknown): number {
+  if (error instanceof AIUpstreamError) return error.status;
+  // 没配 provider 属于「请求缺前提」，不是服务端故障
+  if (error instanceof NoProviderError) return 400;
+  return 500;
+}
+
+/**
+ * 从上游的错误响应体里抠出一句人能读的话。
+ *
+ * 各家的形状不一样：OpenAI 兼容端点是 { error: { message } }，
+ * Ollama 是 { error: "..." }，还有直接回一段文本的。
+ * 抠不出来就退回截断后的原文 —— 那也比一个纯粹的 500 强。
+ */
+function describeUpstreamError(status: number, body: string): string {
+  const text = (body || '').trim();
+  if (!text) return `The AI endpoint returned ${status} with an empty body.`;
+
+  try {
+    const parsed = JSON.parse(text);
+    const message =
+      (typeof parsed?.error === 'string' && parsed.error) ||
+      parsed?.error?.message ||
+      parsed?.message ||
+      parsed?.detail;
+    if (typeof message === 'string' && message.trim()) return message.trim();
+  } catch {
+    // 不是 JSON，按纯文本处理
+  }
+
+  return text.slice(0, 300);
+}
+
 async function fetchUpstream(
   request: UpstreamRequest,
   signal?: AbortSignal,
@@ -311,7 +401,7 @@ async function fetchUpstream(
 
     if (!response.ok) {
       const detail = await response.text();
-      throw new Error(`AI provider error ${response.status}: ${detail.slice(0, 500)}`);
+      throw new AIUpstreamError(describeUpstreamError(response.status, detail), response.status);
     }
 
     return response;
@@ -558,7 +648,8 @@ export async function streamAI(
 
     const message = (error as Error).message || 'AI request failed';
     if (!res.headersSent) {
-      res.status(500).json({ error: message });
+      // 上游拒绝了就把它的状态码传下去：400 是「请求不对」，不是「我们挂了」
+      res.status(statusForError(error)).json({ error: message });
       return;
     }
     if (format === 'sse') sseEvent(res, { type: 'error', message });
@@ -646,7 +737,7 @@ export async function streamStructured<T>(
 
     // 头还没发出去时仍然用 HTTP 状态码报错，保持老调用方的行为
     if (!res.headersSent) {
-      res.status(500).json({ error: message, details, rawContent: raw || undefined });
+      res.status(statusForError(error)).json({ error: message, details, rawContent: raw || undefined });
       return;
     }
     sseEvent(res, { type: 'error', message, details });

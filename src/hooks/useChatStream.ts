@@ -128,11 +128,12 @@ export function useChatStream({ url, body }: SendOptions) {
 
         if (!response.ok) {
           const detail = await response.text();
-          let message = detail;
+          let message = '';
           try {
-            message = JSON.parse(detail).error || detail;
+            message = JSON.parse(detail).error || '';
           } catch {
-            // 非 JSON 错误体，原样使用
+            // 不是 JSON 的错误体多半是代理或框架的 HTML 错误页。
+            // 把整页贴进对话框只会给用户一屏标签，状态码才是有用的那部分。
           }
           throw new Error(message || `Request failed with ${response.status}`);
         }
