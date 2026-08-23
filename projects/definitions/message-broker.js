@@ -13,62 +13,67 @@ const storage = readonlyFile(
   'src/support/storage.ts',
   code`
     /**
-     * 分段日志设备（只读，平台提供）
+     * Segmented log device (read-only, provided by the platform)
      *
-     * 它模拟的是一块真实的盘，而这道题的每一关都在和它的三个特性较劲：
+     * It stands in for a real disk, and every stage of this project wrestles with three of its properties:
      *
-     * - **顺序写便宜，随机写贵**：append 是唯一该走的路，overwrite 能用，
-     *   但每次都会记一笔 counters.randomWrites；
-     * - **fsync 才算持久**：append 之后、fsync 之前 crash()，那批数据就没了，
-     *   而 fsync 要 5ms，所以「攒一批只 fsync 一次」是能被量出来的；
-     * - **读一条记录就是一次 IO**：每次 readAt 记一笔 counters.recordsScanned，
-     *   「定位一条消息扫了多少条」因此不是估算，是读数。
+     * - **sequential writes are cheap, random writes are expensive**: append is the only path you
+     * should take; overwrite works,
+     *   but every call records a counters.randomWrites;
+     * - **only fsync makes it durable**: crash() after an append but before an fsync and that batch is gone,
+     *   and since fsync costs 5ms, batching many writes behind one fsync is something you can
+     * actually measure;
+     * - **reading one record is one IO**: every readAt records a counters.recordsScanned, so
+     *   how many records you scanned to locate one message is a reading, not an estimate.
      */
     import { sleep } from '@lab/env';
     import { count } from '@lab/metrics';
 
-    /** 每条记录的固定开销（长度、CRC 之类），算字节数时要带上 */
+    /** Fixed per-record overhead (length, CRC and so on) to include when counting bytes */
     export const RECORD_HEADER_BYTES = 8;
 
     const FSYNC_MS = 5;
 
-    /** 落在盘上的一条记录 */
+    /** One record as it sits on disk */
     export interface StoredRecord {
-      /** 全局单调递增的逻辑位置 */
+      /** Globally monotonic logical position */
       offset: number;
       key: string;
       value: string;
-      /** 这条记录占多少字节 */
+      /** How many bytes this record occupies */
       size: number;
     }
 
     export interface SegmentInfo {
       id: number;
-      /** 这个段里第一条记录的 offset */
+      /** The offset of the first record in this segment */
       baseOffset: number;
       bytes: number;
       count: number;
     }
 
     export interface StorageDevice {
-      /** 新建一个段。每次调用都会被计入 counters.segmentsCreated。 */
+      /** Create a segment. Every call counts towards counters.segmentsCreated. */
       createSegment(baseOffset: number): number;
-      /** 往段尾追加一条，返回它在段内的下标。计入 counters.storageAppends。 */
+      /**
+       * Append one record to the segment tail and return its index within it. Counts towards
+       * counters.storageAppends.
+       */
       append(segmentId: number, record: { offset: number; key: string; value: string }): number;
-      /** 覆盖写。能用，但它是随机写，计入 counters.randomWrites。 */
+      /** Overwrite. It works, but it is a random write and counts towards counters.randomWrites. */
       overwrite(segmentId: number, index: number, record: { offset: number; key: string; value: string }): void;
-      /** 读段内第 index 条。计入 counters.recordsScanned。 */
+      /** Read record index within the segment. Counts towards counters.recordsScanned. */
       readAt(segmentId: number, index: number): StoredRecord | null;
       segments(): SegmentInfo[];
-      /** 把所有已追加的数据落盘。计入 counters.storageFsyncs，耗时 5ms。 */
+      /** Flush everything appended to disk. Counts towards counters.storageFsyncs and takes 5ms. */
       fsync(): Promise<void>;
-      /** 掉电：没 fsync 的追加全部消失 */
+      /** Power loss: every append not yet fsynced disappears */
       crash(): void;
-      /** 删掉一个段，保留策略用 */
+      /** Delete a segment, for retention policies */
       deleteSegment(segmentId: number): void;
-      /** 当前保留的总字节数 */
+      /** Total bytes currently retained */
       bytes(): number;
-      /** 一条记录会占多少字节 */
+      /** How many bytes one record will occupy */
       sizeOf(key: string, value: string): number;
     }
 
@@ -76,14 +81,14 @@ const storage = readonlyFile(
       id: number;
       baseOffset: number;
       records: StoredRecord[];
-      /** 前多少条已经落盘了 */
+      /** How many leading records have been flushed */
       durable: number;
     }
 
     export function createStorage(): StorageDevice {
       const segments: Segment[] = [];
       let nextSegmentId = 0;
-      /** 已经落盘的段数，crash 时后面新建的段一起消失 */
+      /** How many segments have been flushed; those created afterwards disappear on crash */
       let durableSegments = 0;
 
       function segmentOf(segmentId: number): Segment | undefined {
@@ -117,7 +122,8 @@ const storage = readonlyFile(
           if (!segment || index < 0 || index >= segment.records.length) {
             throw new Error('cannot overwrite outside the segment');
           }
-          // 随机写：真实盘上它比顺序写贵一个数量级，这里把它记下来
+          // A random write: on a real disk it costs an order of magnitude more than a sequential
+          // one, so record it here
           count('randomWrites');
           const size = measure(record.key, record.value);
           segment.records[index] = { offset: record.offset, key: record.key, value: record.value, size };
@@ -131,7 +137,10 @@ const storage = readonlyFile(
           return record ? { ...record } : null;
         },
 
-        /** 按 baseOffset 排序返回：真实系统里段文件也是按名字（baseOffset）排的 */
+        /**
+         * Returned sorted by baseOffset: in a real system segment files are ordered by name
+         * (baseOffset) too
+         */
         segments(): SegmentInfo[] {
           return segments
             .map((segment) => ({
@@ -182,23 +191,25 @@ const replica = readonlyFile(
   'src/support/replica.ts',
   code`
     /**
-     * 从副本（只读，平台提供）
+     * Follower replica (read-only, provided by the platform)
      *
-     * 它只做一件事：**慢一点地确认**。send 过去的数据要等 lagMs 之后才算它收到，
-     * stall() 之后更久。第 8 关的高水位就是从这些确认位置里算出来的。
+     * It does exactly one thing: **acknowledge, but slowly**. Data sent to it counts as received
+     * only after lagMs,
+     * and longer still after stall(). The high watermark in stage 8 is computed from these
+     * acknowledged positions.
      */
     import { sleep } from '@lab/env';
     import type { StoredRecord } from './storage';
 
     export interface Replica {
       id: string;
-      /** 把一批记录推给它。返回的 Promise 在它确认之后 resolve。 */
+      /** Push a batch of records to it. The returned Promise resolves once it acknowledges them. */
       send(records: StoredRecord[]): Promise<void>;
-      /** 它已经确认到哪个 offset（含）。什么都没收到时是 -1。 */
+      /** The offset it has acknowledged, inclusive. -1 when it has received nothing. */
       ackedOffset(): number;
-      /** 让它掉队：之后每次确认额外慢这么多 */
+      /** Make it fall behind: every acknowledgement afterwards takes this much longer */
       stall(extraMs: number): void;
-      /** 恢复正常 */
+      /** Return to normal */
       resume(): void;
     }
 
@@ -480,30 +491,30 @@ const stage1 = {
         import type { SegmentInfo, StorageDevice, StoredRecord } from './support/storage';
 
         export interface AppendResult {
-          /** 这条记录的全局位置 */
+          /** The global position of this record */
           offset: number;
           segmentId: number;
-          /** 在这个段里的下标 */
+          /** Its index within this segment */
           index: number;
         }
 
         export interface LogOptions {
-          /** 一个段最多装多少字节 */
+          /** How many bytes one segment holds at most */
           segmentBytes: number;
         }
 
         export interface MessageLog {
           append(key: string, value: string): AppendResult;
-          /** 从 offset 开始顺序读，最多 max 条 */
+          /** Read sequentially from offset, at most max records */
           read(offset: number, max: number): StoredRecord[];
-          /** 下一条会拿到的 offset */
+          /** The offset the next record will get */
           endOffset(): number;
           segments(): SegmentInfo[];
           flush(): Promise<void>;
         }
 
         export function createLog(storage: StorageDevice, options: LogOptions): MessageLog {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -517,7 +528,7 @@ const stage1 = {
         import { createLog } from '../src/log';
         import { createStorage } from '../src/support/storage';
 
-        /** 8 字节头 + 4 字节 key + 12 字节 value = 24 字节一条 */
+        /** An 8-byte header + a 4-byte key + a 12-byte value = 24 bytes per record */
         const SEGMENT_BYTES = 240;
 
         function keyOf(index: number): string {
@@ -539,8 +550,8 @@ const stage1 = {
           }
         }
 
-        describe('阶段1 · 追加写日志', () => {
-          it('offset 从 0 开始逐条递增', () => {
+        describe('Stage 1 · Append-only log', () => {
+          it('offsets start at 0 and increase one per record', () => {
             const context = makeLog();
 
             expect(context.log.append('k000', valueOf(0)).offset).toBe(0);
@@ -548,7 +559,7 @@ const stage1 = {
             expect(context.log.endOffset()).toBe(2);
           });
 
-          it('读回来的顺序和内容与写进去的一致', () => {
+          it('what is read back matches what was written, in order', () => {
             const context = makeLog();
             fill(context.log, 5);
 
@@ -558,7 +569,7 @@ const stage1 = {
             expect(records[3].value).toBe(valueOf(3));
           });
 
-          it('同一个 key 写两次是两条记录，不是覆盖', () => {
+          it('writing one key twice makes two records, not an overwrite', () => {
             const context = makeLog();
 
             context.log.append('same-key', valueOf(1));
@@ -570,7 +581,7 @@ const stage1 = {
             expect(records[1].value).toBe(valueOf(2));
           });
 
-          it('段按字节滚动，谁也不超上限 [gate:segments]', () => {
+          it('segments roll by byte count and none exceeds the limit [gate:segments]', () => {
             const context = makeLog();
             fill(context.log, 100);
 
@@ -581,7 +592,7 @@ const stage1 = {
             }
           });
 
-          it('段的 baseOffset 首尾相接', () => {
+          it('segment baseOffsets join end to end', () => {
             const context = makeLog();
             fill(context.log, 100);
 
@@ -593,7 +604,7 @@ const stage1 = {
             expect(expected).toBe(100);
           });
 
-          it('从中间读，并且最多读 max 条', () => {
+          it('reads from the middle, and at most max records', () => {
             const context = makeLog();
             fill(context.log, 100);
 
@@ -603,7 +614,7 @@ const stage1 = {
             expect(records[2].offset).toBe(47);
           });
 
-          it('读到末尾之后返回空数组', () => {
+          it('returns an empty array once past the end', () => {
             const context = makeLog();
             fill(context.log, 5);
 
@@ -611,14 +622,14 @@ const stage1 = {
             expect(context.log.read(99, 10)).toEqual([]);
           });
 
-          it('空日志读出来是空的', () => {
+          it('an empty log reads as empty', () => {
             const context = makeLog();
 
             expect(context.log.read(0, 10)).toEqual([]);
             expect(context.log.endOffset()).toBe(0);
           });
 
-          it('比段上限还大的单条记录独占一个段', () => {
+          it('a single record larger than the segment limit gets a segment to itself', () => {
             const context = makeLog();
             const huge = 'x'.repeat(SEGMENT_BYTES * 2);
 
@@ -630,7 +641,7 @@ const stage1 = {
             expect(context.log.segments()).toHaveLength(2);
           });
 
-          it('flush 之后掉电，数据还在', async () => {
+          it('the data survives a power loss after flush', async () => {
             const context = makeLog();
             fill(context.log, 30);
             await context.log.flush();
@@ -640,7 +651,7 @@ const stage1 = {
             expect(context.log.read(0, 100)).toHaveLength(30);
           });
 
-          it('没 flush 就掉电，那批数据没了', async () => {
+          it('a power loss without a flush loses that batch', async () => {
             const context = makeLog();
             fill(context.log, 20);
             await context.log.flush();
@@ -648,11 +659,11 @@ const stage1 = {
 
             context.storage.crash();
 
-            // 内存里另存一份的实现会在这里报出 40 条
+            // An implementation keeping a second copy in memory would report 40 records here
             expect(context.log.read(0, 100)).toHaveLength(20);
           });
 
-          it('段内下标是连续的', () => {
+          it('indices within a segment are contiguous', () => {
             const context = makeLog();
 
             const first = context.log.append(keyOf(0), valueOf(0));
@@ -711,7 +722,7 @@ const stage1 = {
 
         export function createLog(storage: StorageDevice, options: LogOptions): MessageLog {
           let nextOffset = 0;
-          /** 活动段只需要这两个数 */
+          /** The active segment only needs these two numbers */
           let activeSegmentId = -1;
           let activeBytes = 0;
 
@@ -720,10 +731,14 @@ const stage1 = {
             activeBytes = 0;
           }
 
-          /** 判断在追加之前做：先追加再看超没超，每个段都会多出一条 */
+          /**
+           * Decide before appending: appending first and then checking leaves every segment one
+           * record over
+           */
           function segmentFor(size: number): number {
             if (activeSegmentId < 0) roll();
-            // 段是空的时候无条件接受：超大的单条记录也得有地方放
+            // Accept unconditionally while the segment is empty: an oversized single record still
+            // needs somewhere to go
             else if (activeBytes > 0 && activeBytes + size > options.segmentBytes) roll();
             return activeSegmentId;
           }
@@ -746,11 +761,11 @@ const stage1 = {
               if (max <= 0) return found;
 
               for (const segment of storage.segments()) {
-                // 整段都在 offset 之前，一条都不用读
+                // The whole segment sits before offset, so not one record needs reading
                 if (offset >= segment.baseOffset + segment.count) continue;
 
                 for (let index = 0; index < segment.count; index += 1) {
-                  // 数据来自设备：掉电丢掉的部分在这里自然读不到
+                  // The data comes from the device: whatever a power loss dropped simply is not readable here
                   const record = storage.readAt(segment.id, index);
                   if (!record) break;
                   if (record.offset < offset) continue;
@@ -1082,7 +1097,7 @@ const stage2 = {
         import type { AppendResult, LogOptions, MessageLog } from './log';
         import type { StorageDevice } from './support/storage';
 
-        /** 索引里的一个锚点：某条记录在哪个段的第几个位置 */
+        /** One anchor in the index: which segment and position a given record sits at */
         export interface IndexAnchor {
           offset: number;
           segmentId: number;
@@ -1091,13 +1106,13 @@ const stage2 = {
 
         export interface OffsetIndex {
           observe(result: AppendResult): void;
-          /** 不超过 offset 的最近一个锚点；一个都没有时返回 null */
+          /** The nearest anchor not past offset; null when there is none */
           locate(offset: number): IndexAnchor | null;
           size(): number;
         }
 
         export interface IndexOptions {
-          /** 每隔多少条记一个锚点 */
+          /** Record an anchor every this many records */
           indexInterval: number;
         }
 
@@ -1109,12 +1124,12 @@ const stage2 = {
         }
 
         export function createOffsetIndex(options: IndexOptions): OffsetIndex {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
 
         export function createIndexedLog(storage: StorageDevice, options: IndexedLogOptions): IndexedLog {
-          // TODO: 在这里实现，复用 createLog
+          // TODO: implement this, reusing createLog
           throw new Error('not implemented');
         }
       `,
@@ -1129,7 +1144,7 @@ const stage2 = {
         import { createStorage } from '../src/support/storage';
         import { getCounters } from '@lab/metrics';
 
-        /** 24 字节一条，一个段正好装 1000 条 */
+        /** 24 bytes per record, so one segment holds exactly 1000 */
         const SEGMENT_BYTES = 24000;
         const INTERVAL = 16;
         const TOTAL = 6000;
@@ -1163,8 +1178,8 @@ const stage2 = {
           return (getCounters()['recordsScanned'] || 0) - before;
         }
 
-        describe('阶段2 · 稀疏索引', () => {
-          it('索引是稀疏的，不是每条都记', () => {
+        describe('Stage 2 · Sparse index', () => {
+          it('the index is sparse rather than one entry per record', () => {
             const context = makeLog();
             fill(context.log, TOTAL);
 
@@ -1173,7 +1188,7 @@ const stage2 = {
             expect(anchors).toBeGreaterThanOrEqual(TOTAL / INTERVAL - 2);
           });
 
-          it('locate 返回不超过 offset 的最近一个锚点', () => {
+          it('locate returns the nearest anchor not past offset', () => {
             const context = makeLog();
             fill(context.log, 100);
 
@@ -1183,7 +1198,7 @@ const stage2 = {
             expect(anchor.offset).toBeGreaterThan(37 - INTERVAL);
           });
 
-          it('锚点指向的位置确实是那条记录', () => {
+          it('the position an anchor points at really is that record', () => {
             const context = makeLog();
             fill(context.log, 100);
 
@@ -1192,14 +1207,14 @@ const stage2 = {
             expect(record.offset).toBe(anchor.offset);
           });
 
-          it('offset 正好落在锚点上时直接命中', () => {
+          it('an offset landing exactly on an anchor hits it directly', () => {
             const context = makeLog();
             fill(context.log, 100);
 
             expect(context.log.locate(INTERVAL * 3).offset).toBe(INTERVAL * 3);
           });
 
-          it('读到的内容和不带索引时完全一致', () => {
+          it('what is read matches reading without an index exactly', () => {
             const context = makeLog();
             fill(context.log, 100);
 
@@ -1208,7 +1223,7 @@ const stage2 = {
             expect(records[0].value).toBe(valueOf(45));
           });
 
-          it('定位第 5500 条只扫十几条 [gate:locate]', () => {
+          it('locating record 5500 scans only a dozen or so [gate:locate]', () => {
             const context = makeLog();
             fill(context.log, TOTAL);
 
@@ -1217,7 +1232,7 @@ const stage2 = {
             expect(records[0].offset).toBe(5500);
           });
 
-          it('顺序读 10 条不会扫掉几十条', () => {
+          it('reading 10 records sequentially does not scan dozens', () => {
             const context = makeLog();
             fill(context.log, TOTAL);
 
@@ -1231,18 +1246,18 @@ const stage2 = {
             expect(scanned).toBeLessThanOrEqual(INTERVAL + 16);
           });
 
-          it('跨段读取正常', () => {
+          it('reads across a segment boundary work', () => {
             const context = makeLog();
             fill(context.log, 2500);
 
-            // 995 到 1004 横跨第一个段的段尾和第二个段的段头
+            // 995 to 1004 straddles the tail of the first segment and the head of the second
             const records = context.log.read(995, 10);
             expect(records.map((record: any) => record.offset)).toEqual([
               995, 996, 997, 998, 999, 1000, 1001, 1002, 1003, 1004,
             ]);
           });
 
-          it('超出末尾的 offset 返回空数组', () => {
+          it('an offset past the end returns an empty array', () => {
             const context = makeLog();
             fill(context.log, 100);
 
@@ -1250,14 +1265,14 @@ const stage2 = {
             expect(context.log.read(99999, 5)).toEqual([]);
           });
 
-          it('空日志上 locate 返回 null，read 返回空', () => {
+          it('on an empty log locate returns null and read returns empty', () => {
             const context = makeLog();
 
             expect(context.log.locate(0)).toBeNull();
             expect(context.log.read(0, 10)).toEqual([]);
           });
 
-          it('索引本身可以单独用', () => {
+          it('the index works standalone', () => {
             const index = createOffsetIndex({ indexInterval: 4 });
 
             index.observe({ offset: 0, segmentId: 0, index: 0 });
@@ -1269,7 +1284,7 @@ const stage2 = {
             expect(index.locate(5).offset).toBe(4);
           });
 
-          it('追加与段滚动的行为和第 1 关一致', () => {
+          it('appending and segment rolling behave as in stage 1', () => {
             const context = makeLog();
             fill(context.log, 2500);
 
@@ -1326,7 +1341,7 @@ const stage2 = {
         }
 
         export function createOffsetIndex(options: IndexOptions): OffsetIndex {
-          /** 天然按 offset 递增，因为 append 就是递增的 */
+          /** Naturally ascending by offset, because append is ascending */
           const anchors: IndexAnchor[] = [];
           const interval = Math.max(1, options.indexInterval);
 
@@ -1337,7 +1352,7 @@ const stage2 = {
             },
 
             locate(offset: number): IndexAnchor | null {
-              // 二分找「最后一个不超过 offset 的」，而不是「最接近的」
+              // Binary search for the last anchor not past offset, not the closest one
               let low = 0;
               let high = anchors.length - 1;
               let found: IndexAnchor | null = null;
@@ -1362,11 +1377,11 @@ const stage2 = {
         }
 
         export function createIndexedLog(storage: StorageDevice, options: IndexedLogOptions): IndexedLog {
-          // 段滚动那套逻辑只有一份，在第 1 关
+          // The segment-rolling logic exists in exactly one place, back in stage 1
           const log = createLog(storage, { segmentBytes: options.segmentBytes });
           const index = createOffsetIndex({ indexInterval: options.indexInterval });
 
-          /** 从某个段的某个下标开始往后扫，跨段继续 */
+          /** Scan forward from a given index in a given segment, continuing across segments */
           function scan(anchor: IndexAnchor | null, offset: number, max: number): StoredRecord[] {
             const segments = storage.segments();
             const found: StoredRecord[] = [];
@@ -1711,9 +1726,9 @@ const stage3 = {
         import type { MessageLog } from './log';
 
         export interface ProducerOptions {
-          /** 攒够多少条立刻发 */
+          /** Send immediately once this many have accumulated */
           batchSize: number;
-          /** 距这一批第一条最多等多久 */
+          /** How long to wait at most from the first record of this batch */
           lingerMs: number;
         }
 
@@ -1723,16 +1738,16 @@ const stage3 = {
         }
 
         export interface Producer {
-          /** 交一条消息；Promise 在它落盘之后 resolve，值是它的 offset */
+          /** Submit one message; the Promise resolves once it is on disk, with its offset as the value */
           send(key: string, value: string): Promise<number>;
-          /** 立刻把当前缓冲刷出去 */
+          /** Flush the current buffer immediately */
           flush(): Promise<void>;
           buffered(): number;
           stats(): ProducerStats;
         }
 
         export function createProducer(log: MessageLog, options: ProducerOptions): Producer {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -1770,8 +1785,8 @@ const stage3 = {
           return Promise.all(pending);
         }
 
-        describe('阶段3 · 攒批与 linger', () => {
-          it('send 在落盘之后才 resolve，offset 与调用顺序一致', async () => {
+        describe('Stage 3 · Batching and linger', () => {
+          it('send resolves only after the write lands, with offsets matching call order', async () => {
             const context = makeProducer();
 
             const offsets = await sendMany(context.producer, BATCH);
@@ -1780,7 +1795,7 @@ const stage3 = {
             expect(context.log.read(0, BATCH)).toHaveLength(BATCH);
           });
 
-          it('50 条只 fsync 5 次，也不白等 linger [gate:batch]', async () => {
+          it('50 records take only 5 fsyncs and do not wait out linger for nothing [gate:batch]', async () => {
             const context = makeProducer();
 
             const started = now();
@@ -1789,11 +1804,11 @@ const stage3 = {
 
             expect(context.producer.stats().batches).toBe(5);
             expect(context.producer.stats().records).toBe(50);
-            // 攒满就发，一次 linger 都不该等
+            // A full batch is sent right away, so linger should never be waited out
             expect(elapsed).toBeLessThan(LINGER);
           });
 
-          it('攒不满时，到了 linger 自动发', async () => {
+          it('a partial batch is sent automatically once linger elapses', async () => {
             const context = makeProducer();
 
             const started = now();
@@ -1805,7 +1820,7 @@ const stage3 = {
             expect(now() - started).toBeGreaterThanOrEqual(LINGER);
           });
 
-          it('linger 从这一批的第一条算起，不因为新消息顺延', async () => {
+          it('linger counts from the first record of the batch and is not pushed back by new messages', async () => {
             const context = makeProducer();
 
             const started = now();
@@ -1814,24 +1829,24 @@ const stage3 = {
             const second = context.producer.send('k001', valueOf(1));
 
             await Promise.all([first, second]);
-            // 顺延的话这里会是 150ms 而不是 100ms
+            // Pushing it back would make this 150ms rather than 100ms
             expect(now() - started).toBeLessThan(LINGER * 1.4);
           });
 
-          it('攒满立刻发，剩下的零头才等 linger', async () => {
+          it('a full batch goes immediately and only the remainder waits out linger', async () => {
             const context = makeProducer();
 
             const started = now();
             const pending = sendMany(context.producer, BATCH + 2);
 
-            // 满的那一批已经走了，缓冲里只剩零头
+            // The full batch has already gone and only the remainder is left in the buffer
             expect(context.producer.buffered()).toBe(2);
             await pending;
             expect(context.producer.stats().batches).toBe(2);
             expect(now() - started).toBeGreaterThanOrEqual(LINGER);
           });
 
-          it('flush 立刻把缓冲刷出去', async () => {
+          it('flush pushes the buffer out immediately', async () => {
             const context = makeProducer();
 
             const started = now();
@@ -1843,7 +1858,7 @@ const stage3 = {
             expect(context.producer.buffered()).toBe(0);
           });
 
-          it('空缓冲上 flush 不产生 fsync', async () => {
+          it('flush on an empty buffer produces no fsync', async () => {
             const context = makeProducer();
 
             const before = getCounters()['storageFsyncs'] || 0;
@@ -1852,7 +1867,7 @@ const stage3 = {
             expect(getCounters()['storageFsyncs'] || 0).toBe(before);
           });
 
-          it('落盘之前日志里读不到', async () => {
+          it('nothing is readable from the log before it lands', async () => {
             const context = makeProducer();
 
             const pending = sendMany(context.producer, 3);
@@ -1862,7 +1877,7 @@ const stage3 = {
             expect(context.log.read(0, 10)).toHaveLength(3);
           });
 
-          it('一整批只 fsync 一次', async () => {
+          it('a whole batch takes exactly one fsync', async () => {
             const context = makeProducer();
 
             const before = getCounters()['storageFsyncs'] || 0;
@@ -1871,7 +1886,7 @@ const stage3 = {
             expect((getCounters()['storageFsyncs'] || 0) - before).toBe(1);
           });
 
-          it('批与批之间保持顺序', async () => {
+          it('order is preserved between batches', async () => {
             const context = makeProducer(2, LINGER);
 
             await sendMany(context.producer, 6);
@@ -1880,7 +1895,7 @@ const stage3 = {
             expect(records.map((record: any) => record.value)).toEqual([0, 1, 2, 3, 4, 5].map(valueOf));
           });
 
-          it('内容原样落进日志', async () => {
+          it('content lands in the log unchanged', async () => {
             const context = makeProducer();
 
             await context.producer.send('order-1', 'created');
@@ -1891,7 +1906,7 @@ const stage3 = {
             expect(record.value).toBe('created');
           });
 
-          it('批量大小为 1 时退化成逐条发送', async () => {
+          it('a batch size of 1 degenerates to sending one at a time', async () => {
             const context = makeProducer(1, LINGER);
 
             const started = now();
@@ -1948,7 +1963,7 @@ const stage3 = {
           stats(): ProducerStats;
         }
 
-        /** 缓冲里的一条：内容加上它自己的 resolve */
+        /** One buffered entry: the content plus its own resolve */
         interface Pending {
           key: string;
           value: string;
@@ -1958,7 +1973,7 @@ const stage3 = {
         export function createProducer(log: MessageLog, options: ProducerOptions): Producer {
           let buffer: Pending[] = [];
           let timer: number | null = null;
-          /** 批与批之间靠这条链保持有序 */
+          /** This chain is what keeps batches in order relative to one another */
           let chain: Promise<void> = Promise.resolve();
           const counters: ProducerStats = { batches: 0, records: 0 };
 
@@ -1970,8 +1985,9 @@ const stage3 = {
 
           function flushNow(): Promise<void> {
             cancelTimer();
-            // 先把缓冲整个换掉，再去做异步落盘：
-            // 反过来的话，落盘期间新来的消息会掉进一个已经分发过 resolve 的批次里
+            // Swap the whole buffer out first, then do the async write:
+            // the other way round, messages arriving during the write fall into a batch whose
+            // resolves have already been handed out
             const batch = buffer;
             buffer = [];
             if (batch.length === 0) return chain;
@@ -1981,7 +1997,7 @@ const stage3 = {
 
             chain = chain.then(async () => {
               const offsets = batch.map((entry) => log.append(entry.key, entry.value).offset);
-              // 一整批只 fsync 一次，固定成本被摊薄
+              // One fsync for a whole batch, which amortises the fixed cost
               await log.flush();
               batch.forEach((entry, index) => entry.settle(offsets[index]));
             });
@@ -1994,11 +2010,11 @@ const stage3 = {
                 buffer.push({ key, value, settle: resolve });
 
                 if (buffer.length >= options.batchSize) {
-                  // 攒满了就走，linger 是给攒不满的情况准备的
+                  // A full batch goes now; linger is there for the batches that never fill
                   void flushNow();
                   return;
                 }
-                // 只有这一批的第一条会起定时器，后来的不顺延
+                // Only the first record of a batch starts the timer, and later ones do not push it back
                 if (buffer.length === 1) {
                   timer = setTimeout(() => {
                     void flushNow();
@@ -2318,26 +2334,26 @@ const stage4 = {
         import { now } from '@lab/env';
 
         export interface DeliveryOptions {
-          /** 投出去多久没 ack 就重新可投 */
+          /** How long after delivery without an ack before it becomes deliverable again */
           visibilityMs: number;
         }
 
         export interface Delivery {
           record: StoredRecord;
-          /** 这一次投递的凭据，ack 时要带上 */
+          /** The receipt for this delivery, to be presented on ack */
           receipt: string;
         }
 
         export interface DeliveryQueue {
           poll(max: number): Delivery[];
-          /** 确认处理完；receipt 无效时返回 false */
+          /** Acknowledge completion; returns false when the receipt is invalid */
           ack(receipt: string): boolean;
           inflight(): number;
           pendingOffsets(): number[];
         }
 
         export function createDeliveryQueue(log: MessageLog, options: DeliveryOptions): DeliveryQueue {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -2369,14 +2385,14 @@ const stage4 = {
           return deliveries.map((delivery) => delivery.record.offset);
         }
 
-        describe('阶段4 · 至少一次投递', () => {
-          it('poll 从头开始取消息', () => {
+        describe('Stage 4 · At-least-once delivery', () => {
+          it('poll takes messages from the beginning', () => {
             const context = makeQueue(5);
 
             expect(offsetsOf(context.queue.poll(3))).toEqual([0, 1, 2]);
           });
 
-          it('在飞的消息不会被再投一次', () => {
+          it('a message in flight is not delivered a second time', () => {
             const context = makeQueue(4);
 
             const first = context.queue.poll(2);
@@ -2390,7 +2406,7 @@ const stage4 = {
             expect(offsetsOf(second)).toEqual([2, 3]);
           });
 
-          it('超时之后重新可投，并且换了新 receipt', async () => {
+          it('a message becomes deliverable again after the timeout, with a new receipt', async () => {
             const context = makeQueue(2);
             const first = context.queue.poll(1)[0];
 
@@ -2401,7 +2417,7 @@ const stage4 = {
             expect(again.receipt).not.toBe(first.receipt);
           });
 
-          it('超时之前不会重新可投', async () => {
+          it('a message does not become deliverable before the timeout', async () => {
             const context = makeQueue(1);
             const first = context.queue.poll(1)[0];
 
@@ -2414,7 +2430,7 @@ const stage4 = {
             expect(again).toEqual([]);
           });
 
-          it('ack 之后不再出现', async () => {
+          it('a message stops appearing after an ack', async () => {
             const context = makeQueue(2);
             const first = context.queue.poll(1)[0];
 
@@ -2424,7 +2440,7 @@ const stage4 = {
             expect(offsetsOf(context.queue.poll(5))).toEqual([1]);
           });
 
-          it('过期的 receipt ack 不掉东西', async () => {
+          it('an expired receipt cannot ack anything', async () => {
             const context = makeQueue(1);
             const stale = context.queue.poll(1)[0];
 
@@ -2436,7 +2452,7 @@ const stage4 = {
             expect(context.queue.ack(fresh.receipt)).toBe(true);
           });
 
-          it('伪造的 receipt ack 不掉东西', () => {
+          it('a forged receipt cannot ack anything', () => {
             const context = makeQueue(1);
             context.queue.poll(1);
 
@@ -2444,7 +2460,7 @@ const stage4 = {
             expect(context.queue.inflight()).toBe(1);
           });
 
-          it('inflight 与 pendingOffsets 反映在飞的消息', () => {
+          it('inflight and pendingOffsets reflect the messages in flight', () => {
             const context = makeQueue(5);
             const batch = context.queue.poll(3);
 
@@ -2456,16 +2472,16 @@ const stage4 = {
             expect(context.queue.pendingOffsets()).toEqual([0, 2]);
           });
 
-          it('消费者宕机也不会丢消息 [gate:no-loss]', async () => {
+          it('no message is lost even when a consumer dies [gate:no-loss]', async () => {
             const context = makeQueue(6);
             const seen = new Set<number>();
 
-            // 前两条正常处理
+            // The first two are handled normally
             for (const delivery of context.queue.poll(2)) {
               seen.add(delivery.record.offset);
               context.queue.ack(delivery.receipt);
             }
-            // 接着这两条投出去之后消费者就没了
+            // Then the consumer disappears right after these two are delivered
             context.queue.poll(2);
 
             await sleep(VISIBILITY);
@@ -2485,18 +2501,18 @@ const stage4 = {
             expect(seen.size).toBe(6);
           });
 
-          it('重投优先于新消息', async () => {
+          it('redeliveries take precedence over new messages', async () => {
             const context = makeQueue(1);
             context.queue.poll(1);
             context.log.append('k100', 'newer');
 
             await sleep(VISIBILITY);
 
-            // 队列里有一条超时回来的和一条新的，先给老的
+            // The queue holds one timed-out redelivery and one new message; the old one goes first
             expect(context.queue.poll(1)[0].record.offset).toBe(0);
           });
 
-          it('全部处理完之后 poll 返回空', () => {
+          it('poll returns empty once everything is handled', () => {
             const context = makeQueue(3);
 
             for (const delivery of context.queue.poll(10)) {
@@ -2507,7 +2523,7 @@ const stage4 = {
             expect(context.queue.inflight()).toBe(0);
           });
 
-          it('后写入的消息也投得出去', () => {
+          it('messages appended later are deliverable too', () => {
             const context = makeQueue(1);
             for (const delivery of context.queue.poll(10)) context.queue.ack(delivery.receipt);
 
@@ -2516,7 +2532,7 @@ const stage4 = {
             expect(offsetsOf(context.queue.poll(10))).toEqual([1]);
           });
 
-          it('max 为 0 时什么都不取', () => {
+          it('a max of 0 takes nothing', () => {
             const context = makeQueue(3);
 
             expect(context.queue.poll(0)).toEqual([]);
@@ -2571,12 +2587,12 @@ const stage4 = {
         interface InflightEntry {
           record: StoredRecord;
           receipt: string;
-          /** 到这个时刻还没 ack 就重新可投 */
+          /** Becomes deliverable again if it is still unacked at this instant */
           deadline: number;
         }
 
         export function createDeliveryQueue(log: MessageLog, options: DeliveryOptions): DeliveryQueue {
-          /** 日志读到哪儿了。它只前进，和 ack 无关。 */
+          /** How far the log has been read. It only moves forward, independently of acks. */
           let cursor = 0;
           let nextReceipt = 0;
           const inflight = new Map<string, InflightEntry>();
@@ -2584,7 +2600,7 @@ const stage4 = {
           function handOut(record: StoredRecord): Delivery {
             const receipt = 'r-' + nextReceipt;
             nextReceipt += 1;
-            // 每一次投递都是一次新的授权，所以换新凭据
+            // Every delivery is a fresh authorisation, hence a fresh receipt
             inflight.set(receipt, { record, receipt, deadline: now() + options.visibilityMs });
             return { record, receipt };
           }
@@ -2598,7 +2614,8 @@ const stage4 = {
               const batch: Delivery[] = [];
               if (max <= 0) return batch;
 
-              // 超时回来的先发：积压时新消息源源不断，老消息否则永远排不上
+              // Timed-out redeliveries go first: under backlog, new messages keep arriving and the
+              // old ones would otherwise never get a turn
               for (const entry of expired()) {
                 if (batch.length >= max) return batch;
                 inflight.delete(entry.receipt);
@@ -2618,7 +2635,7 @@ const stage4 = {
             },
 
             ack(receipt: string): boolean {
-              // 过期的凭据已经不在表里了，它 ack 不掉任何东西
+              // An expired receipt is no longer in the table, so it cannot ack anything
               return inflight.delete(receipt);
             },
 
@@ -2949,18 +2966,18 @@ const stage5 = {
         import { now } from '@lab/env';
 
         export interface RetryOptions {
-          /** 投出去多久没回音就算一次失败 */
+          /** How long without a response counts as one failed delivery */
           visibilityMs: number;
-          /** 最多投几次 */
+          /** How many deliveries at most */
           maxAttempts: number;
-          /** 第 n 次失败之后等 baseBackoffMs 乘以 2 的 n-1 次方 */
+          /** After failure n, wait baseBackoffMs times 2 to the power of n-1 */
           baseBackoffMs: number;
         }
 
         export interface RetryDelivery {
           record: StoredRecord;
           receipt: string;
-          /** 这是第几次投递，从 1 开始 */
+          /** Which delivery attempt this is, starting at 1 */
           attempt: number;
         }
 
@@ -2973,14 +2990,14 @@ const stage5 = {
         export interface RetryingQueue {
           poll(max: number): RetryDelivery[];
           ack(receipt: string): boolean;
-          /** 明确的处理失败 */
+          /** An explicit processing failure */
           nack(receipt: string, reason: string): void;
           deadLetters(): DeadLetter[];
           inflight(): number;
         }
 
         export function createRetryingQueue(source: DeliveryQueue, options: RetryOptions): RetryingQueue {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -3021,8 +3038,8 @@ const stage5 = {
           return deliveries.map((delivery) => delivery.record.offset);
         }
 
-        describe('阶段5 · 重投退避与死信', () => {
-          it('处理成功之后不再投递', async () => {
+        describe('Stage 5 · Redelivery backoff and dead letters', () => {
+          it('stops delivering after successful processing', async () => {
             const context = makeQueue(2);
             const first = context.queue.poll(1)[0];
 
@@ -3033,12 +3050,12 @@ const stage5 = {
             expect(offsetsOf(context.queue.poll(5))).toEqual([1]);
           });
 
-          it('nack 之后按退避重投，attempt 递增', async () => {
+          it('redelivers with backoff after a nack, incrementing attempt', async () => {
             const context = makeQueue(1);
             const first = context.queue.poll(1)[0];
             context.queue.nack(first.receipt, 'boom');
 
-            // 退避还没到，取不到
+            // The backoff has not elapsed, so nothing is available
             expect(context.queue.poll(1)).toEqual([]);
 
             await sleep(BASE_BACKOFF);
@@ -3047,7 +3064,7 @@ const stage5 = {
             expect(second.record.offset).toBe(0);
           });
 
-          it('退避时间是指数增长的', async () => {
+          it('backoff grows exponentially', async () => {
             const context = makeQueue(1);
 
             const first = context.queue.poll(1)[0];
@@ -3057,14 +3074,14 @@ const stage5 = {
             const second = context.queue.poll(1)[0];
             context.queue.nack(second.receipt, 'boom');
 
-            // 第二次失败之后要等两倍
+            // After the second failure the wait doubles
             await sleep(BASE_BACKOFF);
             expect(context.queue.poll(1)).toEqual([]);
             await sleep(BASE_BACKOFF);
             expect(context.queue.poll(1)[0].attempt).toBe(3);
           });
 
-          it('投满次数之后进死信，不再投 [gate:retry]', async () => {
+          it('goes to the dead-letter queue after the attempt limit and is not delivered again [gate:retry]', async () => {
             const context = makeQueue(1);
             let handed = 0;
 
@@ -3081,7 +3098,7 @@ const stage5 = {
             expect(context.queue.deadLetters()).toHaveLength(1);
           });
 
-          it('死信条目带着次数和原因', async () => {
+          it('a dead-letter entry carries the attempt count and the reason', async () => {
             const context = makeQueue(1);
 
             for (let round = 0; round < MAX_ATTEMPTS; round += 1) {
@@ -3097,7 +3114,7 @@ const stage5 = {
             expect(dead.reason).toBe('missing field');
           });
 
-          it('毒消息退避期间，别的消息照常投递', () => {
+          it('other messages are delivered as usual while a poison message backs off', () => {
             const context = makeQueue(3);
 
             const poison = context.queue.poll(1)[0];
@@ -3108,7 +3125,7 @@ const stage5 = {
             expect(offsetsOf(others)).toEqual([1, 2]);
           });
 
-          it('毒消息进死信之后，后面的消息一条不落', async () => {
+          it('not one later message is missed once the poison message is dead-lettered', async () => {
             const context = makeQueue(4);
             const seen = new Set<number>();
 
@@ -3129,7 +3146,7 @@ const stage5 = {
             expect(context.queue.deadLetters()).toHaveLength(1);
           });
 
-          it('超时重投之后，上一张凭据就作废了', async () => {
+          it('the previous receipt is void after a timeout redelivery', async () => {
             const context = makeQueue(1);
             const stale = context.queue.poll(1)[0];
 
@@ -3137,7 +3154,7 @@ const stage5 = {
             const fresh = context.queue.poll(1)[0];
 
             expect(fresh.receipt).not.toBe(stale.receipt);
-            // 旧凭据既 ack 不掉，也不该把别人手里的消息 nack 进死信
+            // The old receipt can neither ack, nor nack someone else's message into the dead-letter queue
             expect(context.queue.ack(stale.receipt)).toBe(false);
             context.queue.nack(stale.receipt, 'from a zombie consumer');
             expect(context.queue.deadLetters()).toEqual([]);
@@ -3146,7 +3163,7 @@ const stage5 = {
             expect(context.queue.ack(fresh.receipt)).toBe(true);
           });
 
-          it('inflight 不会被重投次数撑大', async () => {
+          it('inflight is not inflated by redelivery attempts', async () => {
             const context = makeQueue(1);
             context.queue.poll(1);
 
@@ -3158,7 +3175,7 @@ const stage5 = {
             expect(context.queue.inflight()).toBe(1);
           });
 
-          it('不 ack 也不 nack 同样算一次尝试', async () => {
+          it('neither acking nor nacking still counts as one attempt', async () => {
             const context = makeQueue(1);
 
             expect(context.queue.poll(1)[0].attempt).toBe(1);
@@ -3167,7 +3184,7 @@ const stage5 = {
             expect(context.queue.poll(1)[0].attempt).toBe(2);
           });
 
-          it('反复超时最终也会进死信', async () => {
+          it('repeated timeouts eventually lead to the dead-letter queue too', async () => {
             const context = makeQueue(1);
 
             for (let round = 0; round < MAX_ATTEMPTS + 2; round += 1) {
@@ -3177,11 +3194,11 @@ const stage5 = {
 
             expect(context.queue.deadLetters()).toHaveLength(1);
             expect(context.queue.poll(1)).toEqual([]);
-            // 进了死信就不该再算在飞
+            // Once dead-lettered it should no longer count as in flight
             expect(context.queue.inflight()).toBe(0);
           });
 
-          it('死信之后 ack 旧凭据不再生效', async () => {
+          it('acking an old receipt has no effect after dead-lettering', async () => {
             const context = makeQueue(1);
             let last: any = null;
 
@@ -3195,7 +3212,7 @@ const stage5 = {
             expect(context.queue.deadLetters()).toHaveLength(1);
           });
 
-          it('刚开始时没有死信，inflight 为 0', () => {
+          it('there are no dead letters and inflight is 0 at the start', () => {
             const context = makeQueue(2);
 
             expect(context.queue.deadLetters()).toEqual([]);
@@ -3205,7 +3222,7 @@ const stage5 = {
             expect(context.queue.inflight()).toBe(2);
           });
 
-          it('ack 掉的消息不会进死信', async () => {
+          it('an acked message never reaches the dead-letter queue', async () => {
             const context = makeQueue(2);
 
             for (const delivery of context.queue.poll(2)) {
@@ -3273,25 +3290,29 @@ const stage5 = {
           inflight(): number;
         }
 
-        /** 一条还没完成的消息 */
+        /** One message not yet completed */
         interface PendingEntry {
           record: StoredRecord;
           attempts: number;
-          /** 早于这个时刻不参与投递：退避和可见性超时都写在这里 */
+          /**
+           * Not eligible for delivery before this instant: both backoff and visibility timeout are
+           * recorded here
+           */
           notBefore: number;
-          /** 当前唯一有效的凭据；重投时上一张就作废 */
+          /** The only currently valid receipt; the previous one is voided on redelivery */
           receipt: string;
         }
 
         export function createRetryingQueue(source: DeliveryQueue, options: RetryOptions): RetryingQueue {
           const pending = new Map<number, PendingEntry>();
-          /** receipt -> offset，只指路，不存状态 */
+          /** receipt -> offset; it points the way and holds no state */
           const outstanding = new Map<string, number>();
           const dead: DeadLetter[] = [];
           let nextReceipt = 0;
 
           function retire(entry: PendingEntry, reason: string): void {
-            // 连同凭据一起收掉：超时进死信的那条路径上，旧凭据还挂在 outstanding 里
+            // Collect the receipt along with it: on the timeout-to-dead-letter path the old receipt
+            // is still sitting in outstanding
             outstanding.delete(entry.receipt);
             pending.delete(entry.record.offset);
             dead.push({ record: entry.record, attempts: entry.attempts, reason });
@@ -3299,9 +3320,10 @@ const stage5 = {
 
           function handOut(entry: PendingEntry): RetryDelivery {
             entry.attempts += 1;
-            // 发出去之后就按可见性超时算，没回音就当失败
+            // Once sent, the visibility timeout applies; no response counts as a failure
             entry.notBefore = now() + options.visibilityMs;
-            // 上一次投递的凭据就此作废：一条消息在任一时刻只能有一个持有者
+            // The previous delivery's receipt is void from here: a message may have exactly one
+            // holder at any instant
             outstanding.delete(entry.receipt);
 
             const receipt = 'r-' + nextReceipt;
@@ -3311,7 +3333,7 @@ const stage5 = {
             return { record: entry.record, receipt, attempt: entry.attempts };
           }
 
-          /** 退避到期、当前不在飞的那些 */
+          /** Those whose backoff has elapsed and that are not currently in flight */
           function ready(): PendingEntry[] {
             return Array.from(pending.values())
               .filter((entry) => entry.notBefore <= now())
@@ -3323,7 +3345,8 @@ const stage5 = {
               const fetched = source.poll(max - batch.length);
               if (fetched.length === 0) return;
               for (const delivery of fetched) {
-                // 立刻 ack 源队列：这条消息的生命周期从这里起归本层管
+                // Ack the source queue immediately: this message's lifecycle belongs to this layer
+                // from here on
                 source.ack(delivery.receipt);
                 const entry: PendingEntry = {
                   record: delivery.record,
@@ -3344,7 +3367,7 @@ const stage5 = {
 
               for (const entry of ready()) {
                 if (batch.length >= max) return batch;
-                // 超时回来的也算用掉了一次机会
+                // A timeout redelivery uses up a chance too
                 if (entry.attempts >= options.maxAttempts) {
                   retire(entry, 'max attempts exceeded');
                   continue;
@@ -3374,7 +3397,7 @@ const stage5 = {
                 retire(entry, reason);
                 return;
               }
-              // 指数退避：第 n 次失败之后等 base 乘以 2 的 n-1 次方
+              // Exponential backoff: after failure n, wait base times 2 to the power of n-1
               entry.notBefore = now() + options.baseBackoffMs * Math.pow(2, entry.attempts - 1);
             },
 
@@ -3709,17 +3732,17 @@ const stage6 = {
         import type { StoredRecord } from './support/storage';
 
         export interface SubscribeOptions {
-          /** beginning：从头读（默认）；end：只看订阅之后的新消息 */
+          /** beginning: read from the start (default); end: only messages published after subscribing */
           from?: 'beginning' | 'end';
         }
 
         export interface Subscription {
           name: string;
-          /** 从自己的位置往后读，不推进游标 */
+          /** Read forward from your own position without advancing the cursor */
           poll(max: number): StoredRecord[];
-          /** 确认处理到 offset（含） */
+          /** Acknowledge processing up to and including offset */
           commit(offset: number): void;
-          /** 跳到任意位置，用来回放 */
+          /** Jump to an arbitrary position, for replay */
           seek(offset: number): void;
           position(): number;
           lag(): number;
@@ -3733,7 +3756,7 @@ const stage6 = {
         }
 
         export function createTopic(log: MessageLog): Topic {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -3758,8 +3781,8 @@ const stage6 = {
           return records.map((record) => record.value);
         }
 
-        describe('阶段6 · 一份数据，多个订阅', () => {
-          it('一条消息三个订阅都能读到，而存储只写了一次 [gate:fanout]', () => {
+        describe('Stage 6 · One copy of the data, many subscriptions', () => {
+          it('three subscriptions all read one message while storage was written once [gate:fanout]', () => {
             const context = makeTopic();
             const shipping = context.topic.subscribe('shipping');
             const billing = context.topic.subscribe('billing');
@@ -3772,7 +3795,7 @@ const stage6 = {
             expect(valuesOf(warehouse.poll(10))).toEqual(['paid']);
           });
 
-          it('各自的游标互不影响', () => {
+          it('the cursors are independent of one another', () => {
             const context = makeTopic();
             const fast = context.topic.subscribe('fast');
             const slow = context.topic.subscribe('slow');
@@ -3786,7 +3809,7 @@ const stage6 = {
             expect(slow.poll(10)).toHaveLength(5);
           });
 
-          it('poll 不推进游标', () => {
+          it('poll does not advance the cursor', () => {
             const context = makeTopic();
             const subscription = context.topic.subscribe('one');
             context.topic.publish('k', 'v0');
@@ -3796,7 +3819,7 @@ const stage6 = {
             expect(subscription.position()).toBe(0);
           });
 
-          it('commit 之后从下一条开始', () => {
+          it('reading resumes from the next record after commit', () => {
             const context = makeTopic();
             const subscription = context.topic.subscribe('one');
             for (let index = 0; index < 4; index += 1) context.topic.publish('k', 'v' + index);
@@ -3807,19 +3830,19 @@ const stage6 = {
             expect(subscription.position()).toBe(2);
           });
 
-          it('commit 不会倒退', () => {
+          it('commit never moves backwards', () => {
             const context = makeTopic();
             const subscription = context.topic.subscribe('one');
             for (let index = 0; index < 4; index += 1) context.topic.publish('k', 'v' + index);
 
             subscription.commit(2);
-            // 乱序到达的旧确认
+            // An old acknowledgement arriving out of order
             subscription.commit(0);
 
             expect(subscription.position()).toBe(3);
           });
 
-          it('新订阅默认能读到历史消息', () => {
+          it('a new subscription reads historical messages by default', () => {
             const context = makeTopic();
             context.topic.publish('k', 'old-1');
             context.topic.publish('k', 'old-2');
@@ -3829,7 +3852,7 @@ const stage6 = {
             expect(valuesOf(late.poll(10))).toEqual(['old-1', 'old-2']);
           });
 
-          it('from 为 end 的订阅只看新消息', () => {
+          it('a subscription with from set to end sees only new messages', () => {
             const context = makeTopic();
             context.topic.publish('k', 'old');
 
@@ -3839,7 +3862,7 @@ const stage6 = {
             expect(valuesOf(tail.poll(10))).toEqual(['new']);
           });
 
-          it('同名订阅共享同一个游标', () => {
+          it('subscriptions with the same name share one cursor', () => {
             const context = makeTopic();
             for (let index = 0; index < 3; index += 1) context.topic.publish('k', 'v' + index);
 
@@ -3849,7 +3872,7 @@ const stage6 = {
             expect(context.topic.subscriptions()).toEqual(['shared']);
           });
 
-          it('seek 可以回放已经处理过的消息', () => {
+          it('seek can replay messages already processed', () => {
             const context = makeTopic();
             const subscription = context.topic.subscribe('one');
             for (let index = 0; index < 4; index += 1) context.topic.publish('k', 'v' + index);
@@ -3861,7 +3884,7 @@ const stage6 = {
             expect(valuesOf(subscription.poll(10))).toEqual(['v1', 'v2', 'v3']);
           });
 
-          it('lag 反映落后多少条', () => {
+          it('lag reflects how many records behind it is', () => {
             const context = makeTopic();
             const subscription = context.topic.subscribe('one');
             for (let index = 0; index < 5; index += 1) context.topic.publish('k', 'v' + index);
@@ -3873,7 +3896,7 @@ const stage6 = {
             expect(subscription.lag()).toBe(0);
           });
 
-          it('没有任何订阅时也能正常发布', () => {
+          it('publishing works fine with no subscriptions at all', () => {
             const context = makeTopic();
 
             expect(context.topic.publish('k', 'v0')).toBe(0);
@@ -3881,7 +3904,7 @@ const stage6 = {
             expect(context.topic.subscriptions()).toEqual([]);
           });
 
-          it('订阅数变多不影响已经发布的消息', () => {
+          it('adding subscriptions does not affect messages already published', () => {
             const context = makeTopic();
             const first = context.topic.subscribe('first');
             context.topic.publish('k', 'v0');
@@ -3934,7 +3957,7 @@ const stage6 = {
         }
 
         export function createTopic(log: MessageLog): Topic {
-          /** 一个订阅的全部状态就是这里的一个整数 */
+          /** A subscription's entire state is one integer here */
           const cursors = new Map<string, number>();
 
           function positionOf(name: string): number {
@@ -3947,13 +3970,13 @@ const stage6 = {
               name,
 
               poll(max: number): StoredRecord[] {
-                // 只读，不推进：读到不等于处理完
+                // Read only, without advancing: having read is not the same as having processed
                 return log.read(positionOf(name), max);
               },
 
               commit(offset: number): void {
                 const next = offset + 1;
-                // 单调前进：乱序到达的旧确认不能把它拽回去
+                // Monotonic: an old acknowledgement arriving out of order must not drag it back
                 if (next > positionOf(name)) cursors.set(name, next);
               },
 
@@ -3973,7 +3996,8 @@ const stage6 = {
 
           return {
             publish(key: string, value: string): number {
-              // 整个文件里唯一一处写存储，和订阅数无关
+              // The only place in this whole file that writes storage, independently of the
+              // subscription count
               return log.append(key, value).offset;
             },
 
@@ -4295,24 +4319,24 @@ const stage7 = {
 
         export interface ConsumerSink {
           id: string;
-          /** broker 把消息推给它；Promise 完成时才算处理完 */
+          /** The broker pushes messages to it; processing counts as done when the Promise settles */
           deliver(record: StoredRecord): Promise<void>;
         }
 
         export interface FlowOptions {
-          /** 每个消费者最多同时持有多少条没处理完的消息 */
+          /** How many unprocessed messages a consumer may hold at once */
           prefetch: number;
         }
 
         export interface PushEngine {
           attach(sink: ConsumerSink): void;
-          /** 把从 from 开始的消息全部推完，返回推了多少条 */
+          /** Push every message from the given from offset onwards and return how many were pushed */
           run(from: number): Promise<number>;
           credits(consumerId: string): number;
         }
 
         export function createPushEngine(log: MessageLog, options: FlowOptions): PushEngine {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -4341,7 +4365,7 @@ const stage7 = {
           return { log, engine: createPushEngine(log, { prefetch }) };
         }
 
-        /** 消费者自己数手里有多少条没处理完 —— 门槛量的就是它 */
+        /** The consumer counts its own unprocessed messages — that is exactly what the gate measures */
         function makeSink(id: string, prefetch: number, workMs = WORK_MS) {
           const seen: number[] = [];
           let holding = 0;
@@ -4362,8 +4386,8 @@ const stage7 = {
           };
         }
 
-        describe('阶段7 · 按 credit 推送', () => {
-          it('所有消息都推完，一条不漏不重', async () => {
+        describe('Stage 7 · Credit-based push', () => {
+          it('every message is pushed, none missed and none twice', async () => {
             const context = makeEngine(6);
             const sink = makeSink('c1', PREFETCH);
             context.engine.attach(sink);
@@ -4374,7 +4398,7 @@ const stage7 = {
             expect(sink.seen.slice().sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5]);
           });
 
-          it('消费者手里不会超过 prefetch 条', async () => {
+          it('a consumer never holds more than prefetch messages', async () => {
             const context = makeEngine(10);
             const sink = makeSink('c1', PREFETCH);
             context.engine.attach(sink);
@@ -4384,7 +4408,7 @@ const stage7 = {
             expect(sink.peak()).toBeLessThanOrEqual(PREFETCH);
           });
 
-          it('两个消费者四路并行，12 条 300ms [gate:flow]', async () => {
+          it('two consumers give four-way parallelism, 12 messages in 300ms [gate:flow]', async () => {
             const context = makeEngine(12);
             const first = makeSink('c1', PREFETCH);
             const second = makeSink('c2', PREFETCH);
@@ -4401,7 +4425,7 @@ const stage7 = {
             expect(elapsed).toBeGreaterThanOrEqual(WORK_MS * 3);
           });
 
-          it('两个消费者都分到了活', async () => {
+          it('both consumers get work', async () => {
             const context = makeEngine(12);
             const first = makeSink('c1', PREFETCH);
             const second = makeSink('c2', PREFETCH);
@@ -4414,7 +4438,7 @@ const stage7 = {
             expect(second.seen.length).toBeGreaterThan(0);
           });
 
-          it('prefetch 为 1 时每人手里只有一条', async () => {
+          it('a prefetch of 1 means one message each at a time', async () => {
             const context = makeEngine(4, 1);
             const sink = makeSink('c1', 1);
             context.engine.attach(sink);
@@ -4426,7 +4450,7 @@ const stage7 = {
             expect(now() - started).toBe(WORK_MS * 4);
           });
 
-          it('慢消费者不拖住快消费者', async () => {
+          it('a slow consumer does not hold up a fast one', async () => {
             const context = makeEngine(10);
             const fast = makeSink('fast', PREFETCH, 10);
             const slow = makeSink('slow', PREFETCH, 500);
@@ -4435,11 +4459,11 @@ const stage7 = {
 
             await context.engine.run(0);
 
-            // 快的那个应该干掉大部分活
+            // The fast one should get through most of the work
             expect(fast.seen.length).toBeGreaterThan(slow.seen.length);
           });
 
-          it('run 在全部处理完之后才 resolve', async () => {
+          it('run resolves only once everything has been processed', async () => {
             const context = makeEngine(4);
             let finished = 0;
             context.engine.attach({
@@ -4455,7 +4479,7 @@ const stage7 = {
             expect(finished).toBe(4);
           });
 
-          it('deliver 抛错也要归还额度', async () => {
+          it('credit is returned even when deliver throws', async () => {
             const context = makeEngine(6);
             let attempts = 0;
             context.engine.attach({
@@ -4469,13 +4493,13 @@ const stage7 = {
 
             const pushed = await context.engine.run(0);
 
-            // 额度泄漏的实现会在推完前 prefetch 条之后永远卡住
+            // An implementation that leaks credit wedges forever after pushing the first prefetch messages
             expect(pushed).toBe(6);
             expect(attempts).toBe(6);
             expect(context.engine.credits('flaky')).toBe(PREFETCH);
           });
 
-          it('处理完之后额度回到初始值', async () => {
+          it('credit returns to its initial value once processing finishes', async () => {
             const context = makeEngine(5);
             const sink = makeSink('c1', PREFETCH);
             context.engine.attach(sink);
@@ -4485,7 +4509,7 @@ const stage7 = {
             expect(context.engine.credits('c1')).toBe(PREFETCH);
           });
 
-          it('可以从中间的 offset 开始推', async () => {
+          it('pushing can start from an offset in the middle', async () => {
             const context = makeEngine(6);
             const sink = makeSink('c1', PREFETCH);
             context.engine.attach(sink);
@@ -4496,13 +4520,13 @@ const stage7 = {
             expect(sink.seen.slice().sort((a, b) => a - b)).toEqual([4, 5]);
           });
 
-          it('没有消费者时不推也不卡', async () => {
+          it('with no consumers it neither pushes nor hangs', async () => {
             const context = makeEngine(3);
 
             expect(await context.engine.run(0)).toBe(0);
           });
 
-          it('日志为空时立刻结束', async () => {
+          it('finishes immediately when the log is empty', async () => {
             const context = makeEngine(0);
             context.engine.attach(makeSink('c1', PREFETCH));
 
@@ -4556,9 +4580,9 @@ const stage7 = {
 
         export function createPushEngine(log: MessageLog, options: FlowOptions): PushEngine {
           const sinks: ConsumerSink[] = [];
-          /** 每个消费者一份额度，不是全局一份 */
+          /** Credit is per consumer, not one global pool */
           const credit = new Map<string, number>();
-          /** 没额度时挂在这里的推送循环 */
+          /** The push loop parks here when there is no credit */
           const waiting: Array<() => void> = [];
 
           function creditOf(id: string): number {
@@ -4612,11 +4636,11 @@ const stage7 = {
                 pushed += 1;
 
                 const target = sink;
-                // 不等 deliver 完成就继续推下一条：并行度由额度决定，不由 await 决定
+                // Push the next one without waiting for deliver: parallelism is set by credit, not by await
                 inFlight.push(
                   Promise.resolve()
                     .then(() => target.deliver(record))
-                    // 处理失败也要还额度，否则这个消费者的额度会慢慢漏光
+                    // Credit has to be returned on failure too, or this consumer slowly leaks all of it away
                     .catch(() => undefined)
                     .then(() => giveBack(target.id))
                 );
@@ -4931,21 +4955,21 @@ const stage8 = {
         import type { Replica } from './support/replica';
 
         export interface ReplicationOptions {
-          /** 落后超过这么多条就移出 ISR */
+          /** Falling this many records behind removes a replica from the ISR */
           maxLagRecords: number;
-          /** 至少要有几个副本确认才算提交 */
+          /** How many replicas must acknowledge before a write counts as committed */
           minInSync: number;
         }
 
         export interface ReplicatedLog {
-          /** 写 leader 并复制；等够 minInSync 个确认才 resolve */
+          /** Write to the leader and replicate; resolves once minInSync acknowledgements arrive */
           produce(key: string, value: string): Promise<number>;
-          /** 只返回高水位以下的记录 */
+          /** Returns only records below the high watermark */
           read(offset: number, max: number): StoredRecord[];
-          /** 已提交的边界：这个位置本身还不可见 */
+          /** The committed boundary: this position itself is not yet visible */
           highWatermark(): number;
           inSyncReplicas(): string[];
-          /** leader 的末尾，可能高于高水位 */
+          /** The leader's end, which may be above the high watermark */
           endOffset(): number;
         }
 
@@ -4954,7 +4978,7 @@ const stage8 = {
           replicas: Replica[],
           options: ReplicationOptions
         ): ReplicatedLog {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -4992,7 +5016,10 @@ const stage8 = {
           return { log, replicas, replicated };
         }
 
-        /** 直接从副本对象上算：至少 minInSync 个副本确认到了哪儿 */
+        /**
+         * Computed straight off the replica objects: the position at least minInSync replicas have
+         * acknowledged
+         */
         function quorumBound(replicas: any[], minInSync: number): number {
           const acked = replicas
             .map((replica) => replica.ackedOffset())
@@ -5000,8 +5027,8 @@ const stage8 = {
           return acked[minInSync - 1] + 1;
         }
 
-        describe('阶段8 · 副本同步与高水位', () => {
-          it('写进去并被确认之后就可以读到', async () => {
+        describe('Stage 8 · Replication and the high watermark', () => {
+          it('a write becomes readable once it is acknowledged', async () => {
             const context = makeCluster();
 
             expect(await context.replicated.produce('k0', 'v0')).toBe(0);
@@ -5010,7 +5037,7 @@ const stage8 = {
             expect(context.replicated.read(0, 10)).toHaveLength(1);
           });
 
-          it('消费者读不到高水位之上的数据', async () => {
+          it('consumers cannot read above the high watermark', async () => {
             const context = makeCluster();
             context.replicas[2].stall(10000);
 
@@ -5026,7 +5053,7 @@ const stage8 = {
             expect(context.replicated.endOffset()).toBe(2);
           });
 
-          it('掉队的副本不拖慢写入 [gate:isr]', async () => {
+          it('a lagging replica does not slow writes down [gate:isr]', async () => {
             const context = makeCluster();
 
             const started = now();
@@ -5035,12 +5062,12 @@ const stage8 = {
             }
             const elapsed = now() - started;
 
-            // 只等两个快副本：5 条 50ms，而不是 250ms
+            // Waiting for the two fast replicas only: 5 records at 50ms, not 250ms
             expect(elapsed).toBeLessThanOrEqual(FAST_LAG * 5 + 10);
             expect(context.replicated.endOffset()).toBe(5);
           });
 
-          it('落后太多的副本被移出 ISR', async () => {
+          it('a replica too far behind is removed from the ISR', async () => {
             const context = makeCluster();
             context.replicas[2].stall(10000);
 
@@ -5051,7 +5078,7 @@ const stage8 = {
             expect(context.replicated.inSyncReplicas()).toEqual(['r1', 'r2']);
           });
 
-          it('副本追上之后重新进 ISR', async () => {
+          it('a replica that catches up rejoins the ISR', async () => {
             const context = makeCluster();
             context.replicas[2].stall(400);
             for (let index = 0; index < 5; index += 1) {
@@ -5062,32 +5089,34 @@ const stage8 = {
             context.replicas[2].resume();
             await context.replicated.produce('k9', 'v9');
             await context.replicated.produce('k10', 'v10');
-            // 给它一点时间把新的确认送回来
+            // Give it a moment to send the new acknowledgements back
             await sleep(SLOW_LAG * 4);
 
             expect(context.replicated.inSyncReplicas()).toHaveLength(3);
           });
 
-          it('高水位只前进不后退', async () => {
+          it('the high watermark only moves forward', async () => {
             const context = makeCluster();
             for (let index = 0; index < 3; index += 1) {
               await context.replicated.produce('k' + index, 'v' + index);
             }
             const before = context.replicated.highWatermark();
 
-            // 一个副本掉队，ISR 变小，但已经提交过的位置不能反悔
+            // One replica falls behind and the ISR shrinks, but an already committed position
+            // cannot be taken back
             context.replicas[1].stall(10000);
             await context.replicated.produce('k3', 'v3');
 
             expect(context.replicated.highWatermark()).toBeGreaterThanOrEqual(before);
           });
 
-          it('endOffset 可以高于高水位', async () => {
+          it('endOffset may be above the high watermark', async () => {
             const context = makeCluster();
             context.replicas[1].stall(200);
             context.replicas[2].stall(200);
 
-            // 只有一个快副本确认，达不到 minInSync 之前这条就是「写下了但没提交」
+            // Only one fast replica has acknowledged, so until minInSync is met this record is
+            // written but not committed
             const pending = context.replicated.produce('k0', 'v0');
             expect(context.replicated.endOffset()).toBe(1);
             expect(context.replicated.highWatermark()).toBe(0);
@@ -5096,7 +5125,7 @@ const stage8 = {
             expect(context.replicated.highWatermark()).toBe(1);
           });
 
-          it('读的内容正确，并且受高水位限制', async () => {
+          it('reads return the right content and respect the high watermark', async () => {
             const context = makeCluster();
             for (let index = 0; index < 4; index += 1) {
               await context.replicated.produce('k' + index, 'v' + index);
@@ -5106,7 +5135,7 @@ const stage8 = {
             expect(records.map((record: any) => record.value)).toEqual(['v1', 'v2']);
           });
 
-          it('从高水位之上开始读返回空数组', async () => {
+          it('reading from above the high watermark returns an empty array', async () => {
             const context = makeCluster();
             await context.replicated.produce('k0', 'v0');
 
@@ -5118,19 +5147,19 @@ const stage8 = {
             expect(records).toEqual([]);
           });
 
-          it('每个副本都收到了数据', async () => {
+          it('every replica received the data', async () => {
             const context = makeCluster();
             for (let index = 0; index < 3; index += 1) {
               await context.replicated.produce('k' + index, 'v' + index);
             }
 
-            // 慢副本也在收，只是晚一点
+            // The slow replica is receiving too, just later
             expect(context.replicas[0].ackedOffset()).toBe(2);
             await sleep(SLOW_LAG * 2);
             expect(context.replicas[2].ackedOffset()).toBe(2);
           });
 
-          it('刚开始时高水位是 0，读不到任何东西', () => {
+          it('the high watermark starts at 0 and nothing is readable', () => {
             const context = makeCluster();
 
             expect(context.replicated.highWatermark()).toBe(0);
@@ -5138,7 +5167,7 @@ const stage8 = {
             expect(context.replicated.inSyncReplicas()).toHaveLength(3);
           });
 
-          it('minInSync 为 1 时只等最快的那个', async () => {
+          it('a minInSync of 1 waits only for the fastest', async () => {
             const storage = createStorage();
             const log = createIndexedLog(storage, { segmentBytes: 24000, indexInterval: 16 });
             const replicas = [createReplica('a', { lagMs: FAST_LAG }), createReplica('b', { lagMs: SLOW_LAG })];
@@ -5198,7 +5227,7 @@ const stage8 = {
           endOffset(): number;
         }
 
-        /** 等够 needed 个 Promise 完成就返回，不等剩下的 */
+        /** Return as soon as needed Promises have settled, without waiting for the rest */
         function waitForQuorum(tasks: Array<Promise<void>>, needed: number): Promise<void> {
           const target = Math.min(needed, tasks.length);
           if (target <= 0) return Promise.resolve();
@@ -5228,17 +5257,17 @@ const stage8 = {
 
           function recompute(): void {
             const members = inSync();
-            // ISR 成员不够，就没有「被足够多副本持有」的新位置可言
+            // Without enough ISR members there is no new position held by enough replicas to speak of
             if (members.length < options.minInSync) return;
 
-            // 从大到小排，第 minInSync 个就是「至少这么多份拷贝都有」的位置
+            // Sorted descending, the minInSync-th entry is the position at least that many copies hold
             const acked = members
               .map((replica) => replica.ackedOffset())
               .sort((left, right) => right - left);
             const committed = acked[options.minInSync - 1];
             const candidate = Math.min(log.endOffset(), committed + 1);
 
-            // 只前进：ISR 收缩不能让已经提交过的位置反悔
+            // Forward only: a shrinking ISR must not take back an already committed position
             watermark = Math.max(watermark, candidate);
           }
 
@@ -5252,7 +5281,8 @@ const stage8 = {
                 size: RECORD_HEADER_BYTES + key.length + value.length,
               };
 
-              // 并行发出去，副本数不影响延迟；晚到的确认同样推进高水位
+              // Sent in parallel, so the replica count does not affect latency; late
+              // acknowledgements advance the watermark just the same
               const sends = replicas.map((replica) =>
                 replica.send([record]).then(() => {
                   recompute();
@@ -5265,7 +5295,8 @@ const stage8 = {
             },
 
             read(offset: number, max: number): StoredRecord[] {
-              // 可见性在入口处限制，高水位之上的数据不会离开这个模块
+              // Visibility is enforced at the entry point, so data above the high watermark never
+              // leaves this module
               const room = Math.min(max, watermark - offset);
               if (room <= 0) return [];
               return log.read(offset, room);
@@ -5614,26 +5645,26 @@ const stage9 = {
         import { now } from '@lab/env';
 
         export interface RetentionOptions {
-          /** 超过这么多字节就从最老的段开始删 */
+          /** Delete from the oldest segment once this many bytes are exceeded */
           maxBytes: number;
-          /** 段活过这么久就删 */
+          /** Delete a segment once it is older than this */
           maxAgeMs: number;
         }
 
         export interface CompactionResult {
-          /** 删掉了多少条被覆盖的旧版本 */
+          /** How many superseded old versions were deleted */
           removed: number;
-          /** 留下了多少条 */
+          /** How many were kept */
           kept: number;
         }
 
         export interface LogKeeper {
           append(key: string, value: string): AppendResult;
-          /** 按大小与时间清理旧段，返回删掉几个 */
+          /** Clean old segments by size and age, returning how many were deleted */
           enforce(): number;
-          /** 每个 key 只留最后一条 */
+          /** Keep only the last record per key */
           compact(): CompactionResult;
-          /** 每个 key 的最后一条，按 offset 升序 */
+          /** The last record per key, ascending by offset */
           live(): StoredRecord[];
           latest(key: string): StoredRecord | null;
           bytes(): number;
@@ -5644,7 +5675,7 @@ const stage9 = {
           storage: StorageDevice,
           options: RetentionOptions
         ): LogKeeper {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -5661,7 +5692,7 @@ const stage9 = {
         import { sleep } from '@lab/env';
         import { count } from '@lab/metrics';
 
-        /** 24 字节一条，一个段正好装 10 条 */
+        /** 24 bytes per record, so one segment holds exactly 10 */
         const SEGMENT_BYTES = 240;
         const HUGE = 1000000;
 
@@ -5685,10 +5716,11 @@ const stage9 = {
           }
         }
 
-        describe('阶段9 · 保留与压缩', () => {
-          it('压缩之后同一个 key 只剩最后一条', () => {
+        describe('Stage 9 · Retention and compaction', () => {
+          it('after compaction only the last record per key remains', () => {
             const context = makeKeeper();
-            // 5 个 key、循环写 30 条，再多写一条让最后一段成为活动段
+            // 5 keys written round-robin for 30 records, plus one more so the last segment becomes
+            // the active one
             fill(context.keeper, 30, 5);
 
             const result = context.keeper.compact();
@@ -5697,7 +5729,7 @@ const stage9 = {
             expect(context.keeper.latest(keyOf(0)).value).toBe(valueOf(25));
           });
 
-          it('压缩不丢任何活着的 key', () => {
+          it('compaction loses no live key', () => {
             const context = makeKeeper();
             fill(context.keeper, 40, 6);
             const before = context.keeper.live();
@@ -5712,7 +5744,7 @@ const stage9 = {
             expect(after).toHaveLength(before.length);
           });
 
-          it('压缩之后占用字节数下降', () => {
+          it('bytes used go down after compaction', () => {
             const context = makeKeeper();
             fill(context.keeper, 40, 4);
             const before = context.keeper.bytes();
@@ -5722,7 +5754,7 @@ const stage9 = {
             expect(context.keeper.bytes()).toBeLessThan(before);
           });
 
-          it('重复压缩是幂等的', () => {
+          it('compaction is idempotent', () => {
             const context = makeKeeper();
             fill(context.keeper, 40, 4);
             context.keeper.compact();
@@ -5734,7 +5766,7 @@ const stage9 = {
             expect(context.keeper.bytes()).toBe(bytes);
           });
 
-          it('压缩之后 offset 保持原样，只是有了空洞', () => {
+          it('offsets are unchanged by compaction, just with gaps', () => {
             const context = makeKeeper();
             fill(context.keeper, 30, 3);
             const before = context.keeper.live().map((record: any) => record.offset);
@@ -5744,10 +5776,10 @@ const stage9 = {
             expect(context.keeper.live().map((record: any) => record.offset)).toEqual(before);
           });
 
-          it('活动段里的最新值不会被旧版本盖住', () => {
+          it('the newest value in the active segment is not shadowed by an older one', () => {
             const context = makeKeeper();
             fill(context.keeper, 25, 5);
-            // 这一条落在活动段里
+            // This record lands in the active segment
             context.keeper.append(keyOf(0), 'freshest');
 
             context.keeper.compact();
@@ -5758,7 +5790,7 @@ const stage9 = {
             expect(survivors[0].value).toBe('freshest');
           });
 
-          it('超出容量时从最老的段开始删 [gate:bytes]', () => {
+          it('over capacity, deletion starts from the oldest segment [gate:bytes]', () => {
             const context = makeKeeper(500, HUGE);
             fill(context.keeper, 100, 100);
             expect(context.keeper.bytes()).toBe(2400);
@@ -5770,18 +5802,18 @@ const stage9 = {
             expect(context.keeper.bytes()).toBeLessThanOrEqual(500);
           });
 
-          it('超过保留时长的段会被删掉', async () => {
+          it('segments past the retention period are deleted', async () => {
             const context = makeKeeper(HUGE, 1000);
             fill(context.keeper, 30, 30);
 
             await sleep(1000);
-            // 再写一条，让前面三个段都变成封存段
+            // Write one more so the first three segments all become sealed
             context.keeper.append('later', valueOf(99));
 
             expect(context.keeper.enforce()).toBe(3);
           });
 
-          it('还没到期也没超容量时什么都不删', () => {
+          it('nothing is deleted while under both the age and size limits', () => {
             const context = makeKeeper(HUGE, HUGE);
             fill(context.keeper, 30, 30);
 
@@ -5789,31 +5821,32 @@ const stage9 = {
             expect(context.keeper.bytes()).toBe(720);
           });
 
-          it('活动段永远不会被删', () => {
+          it('the active segment is never deleted', () => {
             const context = makeKeeper(1, HUGE);
             fill(context.keeper, 25, 25);
 
             context.keeper.enforce();
 
-            // 至少留下活动段
+            // The active segment at least survives
             expect(context.storage.segments().length).toBeGreaterThanOrEqual(1);
             expect(context.keeper.bytes()).toBeGreaterThan(0);
           });
 
-          it('保留策略删掉的段里的 key 确实找不到了', () => {
+          it('keys in segments deleted by retention really are gone', () => {
             const context = makeKeeper(500, HUGE);
             fill(context.keeper, 100, 100);
 
             context.keeper.enforce();
 
-            // 这正是它和压缩的区别：保留会连活着的 key 一起删
+            // This is exactly what separates it from compaction: retention deletes live keys along
+            // with the rest
             expect(context.keeper.latest(keyOf(0))).toBeNull();
             expect(context.keeper.latest(keyOf(99))).toBeTruthy();
           });
 
-          it('压缩出来的段不会被当成老段立刻删掉', async () => {
+          it('segments produced by compaction are not treated as old and deleted at once', async () => {
             const context = makeKeeper(HUGE, 1000);
-            // 时钟先走一段，段是之后才出生的：它们并不老
+            // The clock runs first and the segments are born afterwards: they are not old
             await sleep(3000);
             fill(context.keeper, 40, 25);
             const live = context.keeper.live();
@@ -5821,27 +5854,27 @@ const stage9 = {
             context.keeper.compact();
             context.keeper.enforce();
 
-            // 新段要是没有生日，年龄就会被算成「从开机到现在」，一清就没
+            // Without a birthday, a new segment's age counts from boot, and the first clean wipes it out
             for (const record of live) {
               if (!context.keeper.latest(record.key)) count('liveKeysLost');
             }
             expect(context.keeper.live()).toHaveLength(live.length);
           });
 
-          it('压缩不会重置保留时钟', async () => {
+          it('compaction does not reset the retention clock', async () => {
             const context = makeKeeper(HUGE, 1000);
-            // 25 个 key 循环写 40 条，压缩才有活可干
+            // 25 keys written round-robin for 40 records, so compaction has something to do
             fill(context.keeper, 40, 25);
 
             await sleep(1000);
             context.keeper.append('later', valueOf(99));
             context.keeper.compact();
 
-            // 这些段本来就该到期了，压缩过一手也一样
+            // These segments were due to expire anyway, and passing through compaction changes nothing
             expect(context.keeper.enforce()).toBeGreaterThan(0);
           });
 
-          it('live 按 offset 升序返回', () => {
+          it('live returns entries ascending by offset', () => {
             const context = makeKeeper();
             fill(context.keeper, 20, 7);
 
@@ -5850,7 +5883,7 @@ const stage9 = {
             expect(offsets).toEqual(sorted);
           });
 
-          it('空日志上压缩与清理都不炸', () => {
+          it('neither compaction nor cleaning blows up on an empty log', () => {
             const context = makeKeeper();
 
             expect(context.keeper.compact()).toEqual({ removed: 0, kept: 0 });
@@ -5909,7 +5942,7 @@ const stage9 = {
           bytes(): number;
         }
 
-        /** 扫出来的一条记录，连同它躺在哪个段里 */
+        /** One scanned record, along with the segment it lies in */
         interface Located {
           record: StoredRecord;
           segmentId: number;
@@ -5920,7 +5953,7 @@ const stage9 = {
           storage: StorageDevice,
           options: RetentionOptions
         ): LogKeeper {
-          /** 段 id -> 创建时刻，保留策略按它算年龄 */
+          /** segment id -> creation instant, which is how retention computes age */
           const bornAt = new Map<number, number>();
 
           function scan(): Located[] {
@@ -5934,7 +5967,7 @@ const stage9 = {
             return found;
           }
 
-          /** 每个 key 最后一次出现的 offset。范围是**全部**段。 */
+          /** The last offset each key appears at. The range is **every** segment. */
           function latestOffsets(entries: Located[]): Map<string, number> {
             const last = new Map<string, number>();
             for (const entry of entries) last.set(entry.record.key, entry.record.offset);
@@ -5955,7 +5988,7 @@ const stage9 = {
 
             enforce(): number {
               const segments = storage.segments();
-              // 活动段还在被写，永远不参与清理
+              // The active segment is still being written and never takes part in cleaning
               const sealed = segments.slice(0, segments.length - 1);
               let total = storage.bytes();
               let removed = 0;
@@ -5964,7 +5997,8 @@ const stage9 = {
                 const age = now() - (bornAt.get(segment.id) || 0);
                 const tooOld = age >= options.maxAgeMs;
                 const tooBig = total > options.maxBytes;
-                // 段按 baseOffset 排序，后面的更新更小，第一个留下的之后都留下
+                // Segments are sorted by baseOffset, so later ones are newer; everything after the
+                // first keeper is kept too
                 if (!tooOld && !tooBig) break;
 
                 storage.deleteSegment(segment.id);
@@ -5982,7 +6016,8 @@ const stage9 = {
               const active = activeSegmentId();
 
               const sealed = entries.filter((entry) => entry.segmentId !== active);
-              // 「谁是最新」看全局，「能动谁」只限封存段
+              // Which record is newest is decided globally; which ones may be touched is limited to
+              // sealed segments
               const survivors = sealed.filter(
                 (entry) => last.get(entry.record.key) === entry.record.offset
               );
@@ -5993,12 +6028,13 @@ const stage9 = {
 
               if (survivors.length > 0) {
                 const target = storage.createSegment(survivors[0].record.offset);
-                // 新段继承被它替换掉的那些段里最早的生日：
-                // 压缩是整理，不是「让这批数据重新变年轻」，保留时钟不该被它重置
+                // A new segment inherits the earliest birthday among the segments it replaces:
+                // compaction is tidying, not a way to make this data young again, and it must not
+                // reset the retention clock
                 const ages = replaced.map((segmentId) => bornAt.get(segmentId));
                 const known = ages.filter((age) => typeof age === 'number') as number[];
                 bornAt.set(target, known.length > 0 ? Math.min.apply(null, known) : now());
-                // offset 原样搬过去：消费者记住的位置不能被重排
+                // Offsets are carried across unchanged: positions consumers remember must not be reshuffled
                 for (const entry of survivors) storage.append(target, entry.record);
               }
 
@@ -6324,9 +6360,9 @@ const stage10 = {
         import { now } from '@lab/env';
 
         export interface MembershipOptions {
-          /** 多久没心跳就算它死了 */
+          /** How long without a heartbeat before a member counts as dead */
           sessionTimeoutMs: number;
-          /** 一共有多少个分片要分 */
+          /** How many shards there are to hand out in total */
           partitions: number;
         }
 
@@ -6334,20 +6370,20 @@ const stage10 = {
           join(memberId: string): void;
           heartbeat(memberId: string): void;
           leave(memberId: string): void;
-          /** 剔除超时成员并再平衡，返回移动了多少个分片 */
+          /** Evict timed-out members and rebalance, returning how many shards moved */
           tick(): number;
-          /** 认领一批消息（正在处理） */
+          /** Claim a batch of messages (currently being processed) */
           claim(memberId: string, offsets: number[]): void;
-          /** 处理完了，交还一条 */
+          /** Finished processing; hand one back */
           release(memberId: string, offset: number): void;
-          /** 因为成员消失而回到队列的消息 */
+          /** Messages returned to the queue because a member vanished */
           requeued(): number[];
           members(): string[];
           assignmentOf(memberId: string): number[];
         }
 
         export function createCoordinator(options: MembershipOptions): MembershipCoordinator {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -6374,7 +6410,7 @@ const stage10 = {
           return coordinator;
         }
 
-        /** 当前每个分片归谁 */
+        /** Who owns each shard right now */
         function ownership(coordinator: any): Map<number, string> {
           const owner = new Map<number, string>();
           for (const member of coordinator.members()) {
@@ -6391,8 +6427,8 @@ const stage10 = {
           return moved;
         }
 
-        describe('阶段10 · 心跳与再平衡', () => {
-          it('分片不重不漏', () => {
+        describe('Stage 10 · Heartbeats and rebalancing', () => {
+          it('shards are neither duplicated nor missed', () => {
             const coordinator = makeCoordinator(['a', 'b', 'c']);
 
             const owner = ownership(coordinator);
@@ -6402,7 +6438,7 @@ const stage10 = {
             }
           });
 
-          it('分配是均衡的', () => {
+          it('the assignment is balanced', () => {
             const coordinator = makeCoordinator(['a', 'b', 'c']);
 
             for (const member of ['a', 'b', 'c']) {
@@ -6410,14 +6446,14 @@ const stage10 = {
             }
           });
 
-          it('人数除不尽时，余数分给前几个', () => {
+          it('when it does not divide evenly the remainder goes to the first few', () => {
             const coordinator = makeCoordinator(['a', 'b', 'c', 'd']);
 
             const sizes = coordinator.members().map((member: string) => coordinator.assignmentOf(member).length);
             expect(sizes.slice().sort()).toEqual([1, 1, 2, 2]);
           });
 
-          it('心跳之内不会被剔除', async () => {
+          it('a member within its heartbeat is not evicted', async () => {
             const coordinator = makeCoordinator(['a', 'b']);
 
             await sleep(TIMEOUT / 2);
@@ -6429,7 +6465,7 @@ const stage10 = {
             expect(coordinator.members().slice().sort()).toEqual(['a', 'b']);
           });
 
-          it('超时的成员被剔除', async () => {
+          it('a timed-out member is evicted', async () => {
             const coordinator = makeCoordinator(['a', 'b']);
 
             await sleep(TIMEOUT / 2);
@@ -6441,7 +6477,7 @@ const stage10 = {
             expect(ownership(coordinator).size).toBe(PARTITIONS);
           });
 
-          it('成员消失时它手里的消息全部回到队列', async () => {
+          it('every message a vanished member held returns to the queue', async () => {
             const coordinator = makeCoordinator(['a', 'b']);
             coordinator.claim('b', [10, 11, 12]);
 
@@ -6456,7 +6492,7 @@ const stage10 = {
             expect(back).toEqual([10, 11, 12]);
           });
 
-          it('已经交还的消息不会再回队列', async () => {
+          it('messages already handed back do not return to the queue again', async () => {
             const coordinator = makeCoordinator(['a', 'b']);
             coordinator.claim('b', [10, 11]);
             coordinator.release('b', 10);
@@ -6468,7 +6504,7 @@ const stage10 = {
             expect(coordinator.requeued()).toEqual([11]);
           });
 
-          it('主动退出同样会把消息还回来', () => {
+          it('leaving voluntarily hands the messages back too', () => {
             const coordinator = makeCoordinator(['a', 'b']);
             coordinator.claim('b', [7]);
 
@@ -6479,7 +6515,7 @@ const stage10 = {
             expect(coordinator.members()).toEqual(['a']);
           });
 
-          it('一个成员挂掉时只移动它的分片 [gate:rebalance]', async () => {
+          it("only the failed member's shards move when one dies [gate:rebalance]", async () => {
             const coordinator = makeCoordinator(['a', 'b', 'c']);
             const before = ownership(coordinator);
 
@@ -6494,18 +6530,18 @@ const stage10 = {
             expect(coordinator.members().slice().sort()).toEqual(['a', 'b']);
           });
 
-          it('新成员加入时也只移动必要的分片', () => {
+          it('a joining member moves only the shards it has to', () => {
             const coordinator = makeCoordinator(['a', 'b']);
             const before = ownership(coordinator);
 
             coordinator.join('c');
 
             const after = ownership(coordinator);
-            // 6 个分片从两人分到三人，只需要移交 2 个
+            // Six shards going from two owners to three only need two handed over
             expect(movedBetween(before, after)).toBeLessThanOrEqual(2);
           });
 
-          it('两个成员同时超时都会被剔除', async () => {
+          it('two members timing out together are both evicted', async () => {
             const coordinator = makeCoordinator(['a', 'b', 'c']);
 
             await sleep(TIMEOUT);
@@ -6516,7 +6552,7 @@ const stage10 = {
             expect(coordinator.assignmentOf('a')).toHaveLength(PARTITIONS);
           });
 
-          it('没有成员时分片无人认领', () => {
+          it('with no members the shards are unclaimed', () => {
             const coordinator = makeCoordinator(['a']);
 
             coordinator.leave('a');
@@ -6526,7 +6562,7 @@ const stage10 = {
             expect(coordinator.tick()).toBe(0);
           });
 
-          it('重复 join 不会把分片分成两份', () => {
+          it('joining twice does not split a shard in two', () => {
             const coordinator = makeCoordinator(['a', 'b']);
 
             coordinator.join('a');
@@ -6594,7 +6630,10 @@ const stage10 = {
             return owner;
           }
 
-          /** 每个成员该拿几个：整除的部分平分，余数给排在前面的 */
+          /**
+           * How many each member should get: the quotient shared evenly, the remainder to those
+           * earlier in the list
+           */
           function targets(members: string[]): Map<string, number> {
             const quota = new Map<string, number>();
             if (members.length === 0) return quota;
@@ -6616,7 +6655,8 @@ const stage10 = {
             for (let partition = 0; partition < options.partitions; partition += 1) {
               const holder = owner.get(partition);
               const kept = holder ? next.get(holder) : undefined;
-              // 原主还在、而且还没拿够，就让他继续拿着 —— 这一步就是「少动分片」
+              // If the current owner is still around and still short, let it keep them — this step
+              // is what keeps shards from moving
               if (kept && kept.length < (quota.get(holder as string) || 0)) kept.push(partition);
               else orphans.push(partition);
             }
@@ -6643,7 +6683,8 @@ const stage10 = {
           }
 
           function evict(memberId: string): void {
-            // 手里没处理完的消息回队列，别等可见性超时
+            // Unprocessed messages in hand go back to the queue rather than waiting out the
+            // visibility timeout
             for (const offset of claimed.get(memberId) || []) back.push(offset);
             claimed.delete(memberId);
             lastSeen.delete(memberId);
@@ -6666,7 +6707,7 @@ const stage10 = {
             },
 
             tick(): number {
-              // 先收集再删除：边遍历边删会安静地跳过下一个
+              // Collect first, delete second: deleting while iterating quietly skips the next entry
               const expired = Array.from(lastSeen.entries())
                 .filter((pair) => now() - pair[1] >= options.sessionTimeoutMs)
                 .map((pair) => pair[0]);
@@ -7008,25 +7049,25 @@ const stage11 = {
         import { now } from '@lab/env';
 
         export interface QuotaOptions {
-          /** 每个客户端一个窗口内最多拿多少条 */
+          /** How many one client may take per window at most */
           perWindow: number;
-          /** 窗口有多长 */
+          /** How long the window is */
           windowMs: number;
         }
 
         export interface FairScheduler {
-          /** 某个客户端想要 want 条，累加到它的待办上 */
+          /** A client wants want messages; add it to its outstanding demand */
           submit(clientId: string, want: number): void;
-          /** 分一轮，总共最多 capacity 条，返回每人分到多少 */
+          /** Run one round handing out at most capacity in total, returning how many each got */
           dispatch(capacity: number): Record<string, number>;
-          /** 当前窗口还剩多少额度 */
+          /** How much allowance is left in the current window */
           remaining(clientId: string): number;
-          /** 还有多少需求没被满足 */
+          /** How much demand is still unmet */
           pending(clientId: string): number;
         }
 
         export function createFairScheduler(options: QuotaOptions): FairScheduler {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -7058,22 +7099,22 @@ const stage11 = {
           }
         }
 
-        /** 一个窗口里拿超了就是违规 —— 门槛数的就是它 */
+        /** Taking more than the quota within one window is a violation — that is what the gate counts */
         function checkQuota(totals: Record<string, number>, perWindow: number): void {
           for (const client of Object.keys(totals)) {
             if (totals[client] > perWindow) count('quotaViolations');
           }
         }
 
-        /** 有需求却一条都没拿到 = 被饿死 */
+        /** Demand but not a single message handed out = starved */
         function checkStarvation(scheduler: any, clients: string[], totals: Record<string, number>): void {
           for (const client of clients) {
             if (scheduler.pending(client) > 0 && !(totals[client] > 0)) count('starvedClients');
           }
         }
 
-        describe('阶段11 · 配额与公平调度', () => {
-          it('拿不到超过自己需求的量', () => {
+        describe('Stage 11 · Quotas and fair scheduling', () => {
+          it('nobody gets more than they asked for', () => {
             const scheduler = makeScheduler();
             scheduler.submit('a', 3);
 
@@ -7083,7 +7124,7 @@ const stage11 = {
             expect(scheduler.pending('a')).toBe(0);
           });
 
-          it('一个窗口里拿不到超过配额的量', () => {
+          it('nobody gets more than their quota within a window', () => {
             const scheduler = makeScheduler();
             scheduler.submit('a', 100);
             const totals: Record<string, number> = {};
@@ -7096,7 +7137,7 @@ const stage11 = {
             expect(scheduler.remaining('a')).toBe(0);
           });
 
-          it('窗口滚动之后额度恢复', async () => {
+          it('allowance recovers once the window rolls over', async () => {
             const scheduler = makeScheduler();
             scheduler.submit('a', 100);
             scheduler.dispatch(50);
@@ -7109,7 +7150,7 @@ const stage11 = {
             expect(totals['a']).toBe(PER_WINDOW);
           });
 
-          it('多个客户端轮流分，谁都不会空手', () => {
+          it('several clients take turns and none goes empty-handed', () => {
             const scheduler = makeScheduler();
             const clients = ['a', 'b', 'c'];
             for (const client of clients) scheduler.submit(client, 100);
@@ -7122,13 +7163,13 @@ const stage11 = {
             expect(totals).toEqual({ a: 2, b: 2, c: 2 });
           });
 
-          it('容量比客户端还少时，轮几次也要轮到 [gate:fair]', () => {
+          it('with less capacity than clients, everyone gets a turn over several rounds [gate:fair]', () => {
             const scheduler = makeScheduler();
             const clients = ['a', 'b', 'c'];
             for (const client of clients) scheduler.submit(client, 100);
             const totals: Record<string, number> = {};
 
-            // 每轮只发 2 条，三轮下来每人都该拿到
+            // Only 2 are handed out per round, so after three rounds everyone should have got some
             merge(totals, scheduler.dispatch(2));
             merge(totals, scheduler.dispatch(2));
             merge(totals, scheduler.dispatch(2));
@@ -7138,7 +7179,7 @@ const stage11 = {
             expect(Object.keys(totals).slice().sort()).toEqual(['a', 'b', 'c']);
           });
 
-          it('一轮发出去的总数不超过 capacity', () => {
+          it('one round hands out no more than capacity in total', () => {
             const scheduler = makeScheduler();
             for (const client of ['a', 'b', 'c']) scheduler.submit(client, 100);
 
@@ -7146,7 +7187,7 @@ const stage11 = {
             expect(totalOf(scheduler.dispatch(1))).toBe(1);
           });
 
-          it('额度用完的客户端让出容量，不浪费', () => {
+          it('a client out of allowance yields its capacity rather than wasting it', () => {
             const scheduler = makeScheduler();
             scheduler.submit('greedy', 100);
             scheduler.submit('quiet', 5);
@@ -7155,12 +7196,12 @@ const stage11 = {
             merge(totals, scheduler.dispatch(50));
 
             checkQuota(totals, PER_WINDOW);
-            // greedy 只能拿到配额，剩下的容量给了 quiet
+            // greedy can only take its quota and the remaining capacity goes to quiet
             expect(totals['greedy']).toBe(PER_WINDOW);
             expect(totals['quiet']).toBe(5);
           });
 
-          it('没有需求的客户端不占名额', () => {
+          it('a client with no demand does not take up a slot', () => {
             const scheduler = makeScheduler();
             scheduler.submit('idle', 0);
             scheduler.submit('busy', 4);
@@ -7171,7 +7212,7 @@ const stage11 = {
             expect(granted['idle']).toBeUndefined();
           });
 
-          it('需求会累加', () => {
+          it('demand accumulates', () => {
             const scheduler = makeScheduler();
             scheduler.submit('a', 2);
             scheduler.submit('a', 3);
@@ -7180,7 +7221,7 @@ const stage11 = {
             expect(scheduler.dispatch(100)['a']).toBe(5);
           });
 
-          it('remaining 反映本窗口剩余额度', () => {
+          it('remaining reflects the allowance left in this window', () => {
             const scheduler = makeScheduler();
             scheduler.submit('a', 4);
 
@@ -7189,14 +7230,14 @@ const stage11 = {
             expect(scheduler.remaining('a')).toBe(PER_WINDOW - 4);
           });
 
-          it('没有任何需求时分不出东西', () => {
+          it('nothing is handed out when there is no demand', () => {
             const scheduler = makeScheduler();
 
             expect(scheduler.dispatch(10)).toEqual({});
             expect(scheduler.pending('nobody')).toBe(0);
           });
 
-          it('容量为 0 时什么都不发', () => {
+          it('a capacity of 0 hands out nothing', () => {
             const scheduler = makeScheduler();
             scheduler.submit('a', 5);
 
@@ -7204,7 +7245,7 @@ const stage11 = {
             expect(scheduler.pending('a')).toBe(5);
           });
 
-          it('大家一起来的时候，长期下来分得均匀 [gate:fair]', () => {
+          it('when everyone arrives together the long-run split is even [gate:fair]', () => {
             const scheduler = makeScheduler(100);
             const clients = ['a', 'b', 'c', 'd'];
             for (const client of clients) scheduler.submit(client, 50);
@@ -7259,12 +7300,12 @@ const stage11 = {
 
         export function createFairScheduler(options: QuotaOptions): FairScheduler {
           const demand = new Map<string, number>();
-          /** 本窗口已经拿了多少 */
+          /** How much has been taken in this window */
           const used = new Map<string, number>();
-          /** 客户端的轮转顺序，第一次 submit 时入列 */
+          /** The client rotation order, joined on the first submit */
           const order: string[] = [];
           let windowStart = now();
-          /** 下一轮从第几个开始发 —— 公平的全部秘密 */
+          /** Which position the next round starts from — the whole secret of the fairness */
           let rotation = 0;
 
           function rollWindow(): void {
@@ -7297,13 +7338,14 @@ const stage11 = {
               let handed = 0;
               let servedSomeone = true;
 
-              // 一次发一条、循环着发：边界情况全都自然消失
+              // Hand out one at a time, going round and round: every edge case disappears on its own
               while (left > 0 && servedSomeone) {
                 servedSomeone = false;
                 for (let step = 0; step < order.length && left > 0; step += 1) {
                   const clientId = order[(rotation + step) % order.length];
                   if (valueOf(demand, clientId) <= 0) continue;
-                  // 额度用完的跳过，但容量继续往下发，不浪费
+                  // Skip a client out of allowance, but keep handing capacity down the line rather
+                  // than wasting it
                   if (allowance(clientId) <= 0) continue;
 
                   granted[clientId] = (granted[clientId] || 0) + 1;
@@ -7315,7 +7357,8 @@ const stage11 = {
                 }
               }
 
-              // 起点往前推，下一轮换个人打头，排在后面的才轮得到
+              // Advance the starting point so a different client leads the next round, which is how
+              // those at the back get a turn
               rotation = (rotation + handed) % order.length;
               return granted;
             },
@@ -7657,30 +7700,30 @@ const stage12 = {
         import type { Replica } from './support/replica';
 
         export interface BrokerOptions {
-          /** 至少几个副本确认才算提交 */
+          /** How many replicas must acknowledge before a write is committed */
           minInSync: number;
-          /** 落后多少条就移出 ISR */
+          /** How many records behind removes a replica from the ISR */
           maxLagRecords: number;
-          /** 投出去多久没回音算失败 */
+          /** How long without a response counts as a failed delivery */
           visibilityMs: number;
-          /** 最多投几次 */
+          /** How many deliveries at most */
           maxAttempts: number;
-          /** 退避基数 */
+          /** Backoff base */
           baseBackoffMs: number;
         }
 
         export interface BrokerStats {
           produced: number;
-          /** 高水位 */
+          /** High watermark */
           committed: number;
-          /** 投递次数，含重投 */
+          /** Deliveries, redeliveries included */
           delivered: number;
           acked: number;
           inflight: number;
           deadLetters: number;
-          /** 已提交但还没处理完 */
+          /** Committed but not yet fully processed */
           backlog: number;
-          /** 日志末尾与「彻底处理完」之间的差 */
+          /** The gap between the log end and what is completely processed */
           lag: number;
         }
 
@@ -7697,7 +7740,7 @@ const stage12 = {
           replicas: Replica[],
           options: BrokerOptions
         ): Broker {
-          // TODO: 在这里实现，直接复用前面几关的模块
+          // TODO: implement this, reusing the modules from the earlier stages directly
           throw new Error('not implemented');
         }
       `,
@@ -7743,14 +7786,14 @@ const stage12 = {
           }
         }
 
-        /** 用例自己算一遍真实的 lag：发出去的减去彻底完成的 */
+        /** The spec computes the real lag itself: what went out minus what is completely done */
         function checkLag(broker: any, published: number): void {
           const stats = broker.stats();
           const truth = published - stats.acked - stats.deadLetters;
           count('lagError', Math.abs(stats.lag - truth));
         }
 
-        /** 一直消费到没东西可消费为止，返回处理过的 key */
+        /** Consume until there is nothing left, returning the keys processed */
         async function drain(broker: any, rounds: number): Promise<Set<string>> {
           const seen = new Set<string>();
           for (let round = 0; round < rounds; round += 1) {
@@ -7763,8 +7806,8 @@ const stage12 = {
           return seen;
         }
 
-        describe('阶段12 · 组装成一个 broker', () => {
-          it('端到端跑得通', async () => {
+        describe('Stage 12 · Assembling a broker', () => {
+          it('works end to end', async () => {
             const context = makeBroker();
             await publishMany(context.broker, 3);
 
@@ -7775,7 +7818,7 @@ const stage12 = {
             expect(batch[0].attempt).toBe(1);
           });
 
-          it('全部确认之后 lag 归零', async () => {
+          it('lag drops to zero once everything is acknowledged', async () => {
             const context = makeBroker();
             await publishMany(context.broker, 5);
 
@@ -7786,7 +7829,7 @@ const stage12 = {
             expect(context.broker.stats().backlog).toBe(0);
           });
 
-          it('还没确认时 lag 等于未完成条数', async () => {
+          it('lag equals the unfinished count while acknowledgements are outstanding', async () => {
             const context = makeBroker();
             await publishMany(context.broker, 5);
 
@@ -7797,11 +7840,11 @@ const stage12 = {
             expect(context.broker.stats().lag).toBe(4);
           });
 
-          it('消费者崩溃也不丢消息', async () => {
+          it('no message is lost when a consumer crashes', async () => {
             const context = makeBroker();
             await publishMany(context.broker, 6);
 
-            // 前两条正常处理，接着两条投出去就没人管了
+            // The first two are handled normally, then two go out and nobody looks after them
             const first = context.broker.poll(2);
             for (const delivery of first) context.broker.ack(delivery.receipt);
             context.broker.poll(2);
@@ -7816,7 +7859,7 @@ const stage12 = {
             expect(context.broker.stats().lag).toBe(0);
           });
 
-          it('毒消息进死信之后 lag 照样归零', async () => {
+          it('lag still drops to zero after a poison message is dead-lettered', async () => {
             const context = makeBroker();
             await publishMany(context.broker, 3);
 
@@ -7838,14 +7881,14 @@ const stage12 = {
             expect(stats.lag).toBe(0);
           });
 
-          it('高水位之上的消息不会被投递', async () => {
+          it('messages above the high watermark are not delivered', async () => {
             const context = makeBroker();
             context.replicas[1].stall(200);
             context.replicas[2].stall(200);
 
             const pending = context.broker.publish('k000', 'v0');
 
-            // 只有一个副本确认，达不到 minInSync：写下了，但还没提交
+            // Only one replica has acknowledged, short of minInSync: written, but not yet committed
             expect(context.broker.poll(10)).toEqual([]);
             expect(context.broker.stats().committed).toBe(0);
 
@@ -7854,7 +7897,7 @@ const stage12 = {
             expect(context.broker.poll(10)).toHaveLength(1);
           });
 
-          it('backlog 反映已提交但没处理完的部分', async () => {
+          it('backlog reflects what is committed but not yet processed', async () => {
             const context = makeBroker();
             await publishMany(context.broker, 4);
 
@@ -7867,7 +7910,7 @@ const stage12 = {
             expect(stats.backlog).toBe(2);
           });
 
-          it('inflight 反映在飞的条数', async () => {
+          it('inflight reflects how many are in flight', async () => {
             const context = makeBroker();
             await publishMany(context.broker, 4);
 
@@ -7878,7 +7921,7 @@ const stage12 = {
             expect(context.broker.stats().inflight).toBe(2);
           });
 
-          it('重投不会让 backlog 变成负数', async () => {
+          it('redelivery does not drive backlog negative', async () => {
             const context = makeBroker();
             await publishMany(context.broker, 2);
 
@@ -7896,7 +7939,7 @@ const stage12 = {
             checkLag(context.broker, 2);
           });
 
-          it('无效的 receipt 不会让 acked 变大', async () => {
+          it('an invalid receipt does not increase acked', async () => {
             const context = makeBroker();
             await publishMany(context.broker, 1);
             context.broker.poll(1);
@@ -7905,7 +7948,7 @@ const stage12 = {
             expect(context.broker.stats().acked).toBe(0);
           });
 
-          it('五十条消息全流程走完，一条不丢', async () => {
+          it('fifty messages go through the whole pipeline without losing one', async () => {
             const context = makeBroker();
             await publishMany(context.broker, 50);
 
@@ -7919,7 +7962,7 @@ const stage12 = {
             expect(context.broker.stats().lag).toBe(0);
           });
 
-          it('空 broker 的统计全是零', () => {
+          it('an empty broker reports zeros throughout', () => {
             const context = makeBroker();
 
             expect(context.broker.stats()).toEqual({
@@ -8004,8 +8047,8 @@ const stage12 = {
           });
 
           /**
-           * 给投递侧看的日志视图：读只到高水位为止。
-           * 除了 read，其余方法原样转发 —— 这一层不含任何逻辑。
+           * The log view the delivery side sees: reads stop at the high watermark.
+           * Every method other than read forwards straight through — this layer holds no logic.
            */
           const visible: MessageLog = {
             append: (key: string, value: string) => log.append(key, value),
@@ -8041,7 +8084,7 @@ const stage12 = {
 
             ack(receipt: string): boolean {
               const done = queue.ack(receipt);
-              // 无效的 receipt 什么都没完成，不该让计数变大
+              // An invalid receipt completed nothing and must not increase the count
               if (done) acked += 1;
               return done;
             },
@@ -8052,7 +8095,8 @@ const stage12 = {
 
             stats(): BrokerStats {
               const dead = queue.deadLetters().length;
-              // 「彻底完成」= 确认掉的 + 进了死信的。投递次数含重投，不能用来减。
+              // Completely done = acknowledged plus dead-lettered. Deliveries include redeliveries
+              // and cannot be used to subtract.
               const finished = acked + dead;
 
               return {

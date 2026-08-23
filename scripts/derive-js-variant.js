@@ -103,9 +103,9 @@ const LABELS = {
   en: 'Type contract for this file (TypeScript syntax, for reference):',
 };
 
-function deriveFiles(files, locale = 'zh') {
+function deriveFiles(files, locale = 'en') {
   return (files || [])
-    .map((file) => deriveFile(file, { commentLabel: LABELS[locale] || LABELS.zh }))
+    .map((file) => deriveFile(file, { commentLabel: LABELS[locale] || LABELS.en }))
     .filter(Boolean);
 }
 

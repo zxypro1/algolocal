@@ -10,31 +10,31 @@ const contract = readonlyFile(
   'src/contract.ts',
   code`
     /**
-     * 平台提供的契约文件（只读）
-     * 你的实现必须满足这里的类型约定，隐藏用例会按此校验。
+     * Contract file provided by the platform (read-only)
+     * Your implementation has to satisfy the types here; the hidden specs check against them.
      */
 
     export interface PageResult {
-      /** 请求的地址 */
+      /** The URL requested */
       url: string;
-      /** 是否成功拿到数据 */
+      /** Whether the data was fetched successfully */
       ok: boolean;
-      /** 成功时的响应体，失败时为 null */
+      /** The response body on success, null on failure */
       data: unknown;
-      /** 失败原因，成功时可以省略 */
+      /** Failure reason; may be omitted on success */
       error?: string;
     }
 
     export interface FetchOptions {
-      /** 并发上限，不传表示串行 */
+      /** Concurrency ceiling; serial when omitted */
       concurrency?: number;
-      /** 单个地址的最大重试次数 */
+      /** Maximum retries for a single URL */
       retries?: number;
-      /** 重试的基础退避时间 */
+      /** Base backoff delay for retries */
       baseDelayMs?: number;
-      /** 缓存有效期 */
+      /** Cache lifetime */
       ttlMs?: number;
-      /** 取消信号 */
+      /** Cancellation signal */
       signal?: CancelToken;
     }
 
@@ -49,7 +49,7 @@ const contract = readonlyFile(
 const cancelSupport = readonlyFile(
   'src/support/cancel.ts',
   code`
-    /** 平台提供的取消令牌实现（只读），用法类似 AbortController */
+    /** Cancellation token provided by the platform (read-only), used much like AbortController */
     import type { CancelToken } from '../contract';
 
     export class CancelledError extends Error {
@@ -299,20 +299,20 @@ const stage1 = {
         import type { FetchOptions, PageResult } from './contract';
 
         /**
-         * 抓取单个地址，把成功/失败统一成 PageResult。
-         * 提示：request 失败时会抛出 LabHttpError。
+         * Fetch a single URL, normalising success and failure into a PageResult.
+         * Hint: request throws LabHttpError when it fails.
          */
         export async function fetchPage(url: string): Promise<PageResult> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
 
         /**
-         * 批量抓取，返回顺序必须与 urls 一致。
-         * 第 1 关串行实现即可，后面几关会逐步加上并发、重试和缓存。
+         * Fetch in bulk; the result order must match urls.
+         * A serial implementation is fine for stage 1 — later stages add concurrency, retries and caching.
          */
         export async function fetchAll(urls: string[], options: FetchOptions = {}): Promise<PageResult[]> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -328,15 +328,15 @@ const stage1 = {
 
         const urls = ['/api/pages/1', '/api/pages/2', '/api/pages/3'];
 
-        describe('阶段1 · 契约与错误边界', () => {
-          it('fetchPage 返回规范化的成功结果', async () => {
+        describe('Stage 1 · Contract and error boundaries', () => {
+          it('fetchPage returns a normalised success result', async () => {
             const result = await fetchPage('/api/pages/1');
             expect(result.url).toBe('/api/pages/1');
             expect(result.ok).toBe(true);
             expect(result.data).toBeDefined();
           });
 
-          it('fetchPage 把失败收敛成结果而不是异常', async () => {
+          it('fetchPage collapses failure into a result rather than an exception', async () => {
             const result = await fetchPage('/api/pages/broken');
             expect(result.ok).toBe(false);
             expect(result.data).toBeNull();
@@ -344,39 +344,39 @@ const stage1 = {
             expect(result.error.length).toBeGreaterThan(0);
           });
 
-          it('fetchAll 保持输入顺序', async () => {
+          it('fetchAll preserves input order', async () => {
             const results = await fetchAll(urls);
             expect(results).toHaveLength(3);
             expect(results.map((item) => item.url)).toEqual(urls);
             expect(results.every((item) => item.ok)).toBe(true);
           });
 
-          it('一个坏地址不会拖垮整批 [gate:dedup]', async () => {
+          it('one bad URL does not sink the whole batch [gate:dedup]', async () => {
             const results = await fetchAll(['/api/pages/1', '/api/pages/broken', '/api/pages/3']);
             expect(results.map((item) => item.ok)).toEqual([true, false, true]);
             expect(getMetrics().requests.duplicated).toBe(0);
           });
 
-          it('全部失败时也返回完整的结果数组', async () => {
+          it('returns a complete result array even when everything fails', async () => {
             const results = await fetchAll(['/api/pages/broken', '/api/pages/gone']);
             expect(results).toHaveLength(2);
             expect(results.map((item) => item.ok)).toEqual([false, false]);
             expect(results.map((item) => item.url)).toEqual(['/api/pages/broken', '/api/pages/gone']);
           });
 
-          it('空数组直接返回空结果，不发请求', async () => {
+          it('an empty array returns empty results without issuing requests', async () => {
             const results = await fetchAll([]);
             expect(results).toEqual([]);
             expect(getMetrics().requests.total).toBe(0);
           });
 
-          it('单个地址也能正常工作', async () => {
+          it('a single URL works fine too', async () => {
             const results = await fetchAll(['/api/pages/only']);
             expect(results).toHaveLength(1);
             expect(results[0].ok).toBe(true);
           });
 
-          it('error 是字符串，能被 JSON 序列化', async () => {
+          it('error is a string and survives JSON serialisation', async () => {
             const result = await fetchPage('/api/pages/broken');
             const roundTripped = JSON.parse(JSON.stringify(result));
             expect(roundTripped.error).toBe(result.error);
@@ -664,19 +664,19 @@ const stage2 = {
       'src/pool.ts',
       code`
         /**
-         * 通用的并发映射原语。
+         * A general-purpose bounded-concurrency map primitive.
          *
-         * 要求：
-         * - 返回值顺序与 items 一致
-         * - 任意时刻最多有 limit 个 worker 在执行
-         * - 某个 worker 抛错时，整体 reject（不要静默吞掉）
+         * Requirements:
+         * - result order matches items
+         * - at most limit workers are running at any moment
+         * - if a worker throws, the whole thing rejects (do not swallow it)
          */
         export async function mapWithConcurrency<T, R>(
           items: T[],
           limit: number,
           worker: (item: T, index: number) => Promise<R>
         ): Promise<R[]> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -694,8 +694,8 @@ const stage2 = {
 
         const urls = Array.from({ length: 12 }, (_, index) => '/api/pages/' + index);
 
-        describe('阶段2 · 有上限的并发', () => {
-          it('mapWithConcurrency 保持结果顺序', async () => {
+        describe('Stage 2 · Bounded concurrency', () => {
+          it('mapWithConcurrency preserves result order', async () => {
             const result = await mapWithConcurrency([1, 2, 3, 4, 5], 2, async (value) => {
               await sleep(10 * (6 - value));
               return value * 2;
@@ -703,7 +703,7 @@ const stage2 = {
             expect(result).toEqual([2, 4, 6, 8, 10]);
           });
 
-          it('mapWithConcurrency 不会超过并发上限', async () => {
+          it('mapWithConcurrency never exceeds the concurrency ceiling', async () => {
             let inFlight = 0;
             let peak = 0;
             await mapWithConcurrency(Array.from({ length: 9 }, (_, i) => i), 3, async (value) => {
@@ -716,7 +716,7 @@ const stage2 = {
             expect(peak).toBe(3);
           });
 
-          it('worker 抛出的错误会向上传播', async () => {
+          it('an error thrown by a worker propagates', async () => {
             await expect(async () =>
               mapWithConcurrency([1, 2, 3], 2, async (value) => {
                 if (value === 2) throw new Error('boom');
@@ -725,7 +725,7 @@ const stage2 = {
             ).rejects.toThrow('boom');
           });
 
-          it('fetchAll 支持并发且顺序不变 [gate:concurrency]', async () => {
+          it('fetchAll runs concurrently with order preserved [gate:concurrency]', async () => {
             const results = await fetchAll(urls, { concurrency: 4 });
             expect(results.map((item) => item.url)).toEqual(urls);
             const metrics = getMetrics();
@@ -733,20 +733,20 @@ const stage2 = {
             expect(metrics.requests.throttled).toBe(0);
           });
 
-          it('12 个 100ms 的请求在并发 4 下 300ms 跑完 [gate:latency]', async () => {
+          it('twelve 100ms requests finish in 300ms at concurrency 4 [gate:latency]', async () => {
             await fetchAll(urls, { concurrency: 4 });
             const metrics = getMetrics();
             expect(metrics.requests.total).toBe(12);
             expect(metrics.virtualElapsedMs).toBe(300);
           });
 
-          it('并发确实跑满上限，而不是保守地少跑', async () => {
+          it('concurrency really is saturated rather than conservatively under-used', async () => {
             await fetchAll(urls, { concurrency: 4 });
-            // 峰值必须正好是 4：小于 4 说明白白浪费了配额
+            // The peak has to be exactly 4: below that is wasted allowance
             expect(getMetrics().maxConcurrency).toBe(4);
           });
 
-          it('limit 大于任务数时不会创建多余的 worker', async () => {
+          it('a limit above the task count does not create surplus workers', async () => {
             let peak = 0;
             let inFlight = 0;
             await mapWithConcurrency([1, 2, 3], 50, async (value) => {
@@ -759,19 +759,19 @@ const stage2 = {
             expect(peak).toBe(3);
           });
 
-          it('limit 为 1 时退化成串行', async () => {
+          it('a limit of 1 degenerates to serial', async () => {
             await fetchAll(['/api/a', '/api/b', '/api/c'], { concurrency: 1 });
             const metrics = getMetrics();
             expect(metrics.maxConcurrency).toBe(1);
             expect(metrics.virtualElapsedMs).toBe(300);
           });
 
-          it('不传 concurrency 时保持串行，不偷偷放大并发', async () => {
+          it('stays serial when concurrency is omitted, without quietly ramping up', async () => {
             await fetchAll(['/api/a', '/api/b'], {});
             expect(getMetrics().maxConcurrency).toBe(1);
           });
 
-          it('空任务列表不会挂住', async () => {
+          it('an empty task list does not hang', async () => {
             const result = await mapWithConcurrency([], 4, async (value) => value);
             expect(result).toEqual([]);
           });
@@ -1119,11 +1119,11 @@ const stage3 = {
         import type { CancelToken, PageResult } from './contract';
 
         export interface DeadlineOptions {
-          /** 并发上限 */
+          /** Concurrency ceiling */
           concurrency?: number;
-          /** 单个请求的超时 */
+          /** Timeout for a single request */
           timeoutMs: number;
-          /** 整批的总预算，用完之后剩下的 URL 不再发请求 */
+          /** Total budget for the batch; once spent, the remaining URLs are not requested */
           totalBudgetMs?: number;
           signal?: CancelToken;
         }
@@ -1132,7 +1132,7 @@ const stage3 = {
           urls: string[],
           options: DeadlineOptions
         ): Promise<PageResult[]> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -1148,8 +1148,8 @@ const stage3 = {
         import { now } from '@lab/env';
         import { getMetrics } from '@lab/net';
 
-        describe('阶段3 · 超时与预算', () => {
-          it('正常请求不受影响', async () => {
+        describe('Stage 3 · Timeouts and budgets', () => {
+          it('a normal request is unaffected', async () => {
             const results = await fetchWithDeadline(['/api/a', '/api/b'], {
               concurrency: 2,
               timeoutMs: 500,
@@ -1159,7 +1159,7 @@ const stage3 = {
             expect(results[0].url).toBe('/api/a');
           });
 
-          it('超时产出失败结果而不是抛异常', async () => {
+          it('a timeout produces a failed result rather than an exception', async () => {
             const results = await fetchWithDeadline(['/api/hang'], {
               concurrency: 1,
               timeoutMs: 200,
@@ -1170,7 +1170,7 @@ const stage3 = {
             expect(results[0].data).toBeNull();
           });
 
-          it('结果顺序与输入一致', async () => {
+          it('result order matches the input', async () => {
             const results = await fetchWithDeadline(['/api/hang', '/api/b', '/api/hang'], {
               concurrency: 3,
               timeoutMs: 200,
@@ -1179,29 +1179,30 @@ const stage3 = {
             expect(results.map((result) => result.ok)).toEqual([false, true, false]);
           });
 
-          it('被放弃的请求晚到之后不会覆盖已有结果', async () => {
+          it('an abandoned request arriving late does not overwrite the existing result', async () => {
             const results = await fetchWithDeadline(['/api/hang'], {
               concurrency: 1,
               timeoutMs: 200,
             });
-            // 那个请求会在 5000ms 时才真正返回；再等一会儿结果不能变
+            // That request only really returns at 5000ms; waiting longer must not change the result
             await new Promise((resolve) => setTimeout(resolve, 6000));
             expect(results[0].ok).toBe(false);
             expect(results[0].error).toBe('timeout');
           });
 
-          it('超时立刻释放并发槽 [gate:slot]', async () => {
+          it('a timeout releases its concurrency slot immediately [gate:slot]', async () => {
             const startedAt = now();
             const urls = ['/api/hang', '/api/hang', '/api/hang', '/api/a', '/api/b', '/api/c'];
             const results = await fetchWithDeadline(urls, { concurrency: 2, timeoutMs: 200 });
 
             expect(results.filter((result) => result.ok)).toHaveLength(3);
-            // 三个僵死请求各占 200ms、三个正常请求各 100ms，两个槽 -> 450ms 左右。
-            // 等僵死请求真正返回才放槽的实现要 5000ms 以上
+            // Three hung requests at 200ms each and three normal ones at 100ms, over two slots ->
+            // around 450ms.
+            // An implementation that waits for the hung request to really return takes over 5000ms
             expect(now() - startedAt).toBeLessThanOrEqual(600);
           });
 
-          it('总预算用完之后剩下的 URL 不发请求 [gate:budget]', async () => {
+          it('once the total budget is spent the remaining URLs are not requested [gate:budget]', async () => {
             const urls: string[] = [];
             for (let index = 0; index < 10; index += 1) urls.push('/api/page-' + index);
 
@@ -1215,11 +1216,11 @@ const stage3 = {
             const succeeded = results.filter((result) => result.ok).length;
             expect(succeeded).toBeGreaterThanOrEqual(2);
             expect(succeeded).toBeLessThanOrEqual(4);
-            // 关键：没跑到的 URL 一个请求都没发出去
+            // The key point: not a single request went out for the URLs never reached
             expect(getMetrics().requests.total).toBe(succeeded);
           });
 
-          it('预算用完的 URL 标成失败而不是被丢掉', async () => {
+          it('URLs cut off by the budget are marked failed rather than dropped', async () => {
             const urls: string[] = [];
             for (let index = 0; index < 8; index += 1) urls.push('/api/page-' + index);
 
@@ -1235,7 +1236,7 @@ const stage3 = {
             expect(failed[failed.length - 1].error).toBeTruthy();
           });
 
-          it('外部取消会停下后续请求', async () => {
+          it('an external cancellation stops the requests that follow', async () => {
             const source = createCancelSource();
             const urls: string[] = [];
             for (let index = 0; index < 10; index += 1) urls.push('/api/page-' + index);
@@ -1251,7 +1252,7 @@ const stage3 = {
             expect(getMetrics().requests.total).toBeLessThan(10);
           });
 
-          it('取消发生在开始之前则一个都不发', async () => {
+          it('cancelling before the start issues nothing at all', async () => {
             const source = createCancelSource();
             source.cancel();
 
@@ -1266,7 +1267,7 @@ const stage3 = {
             expect(getMetrics().requests.total).toBe(0);
           });
 
-          it('预算充足时不影响正常完成', async () => {
+          it('an ample budget does not disturb normal completion', async () => {
             const results = await fetchWithDeadline(['/api/a', '/api/b', '/api/c'], {
               concurrency: 3,
               timeoutMs: 500,
@@ -1275,7 +1276,7 @@ const stage3 = {
             expect(results.every((result) => result.ok)).toBe(true);
           });
 
-          it('空输入返回空数组', async () => {
+          it('empty input returns an empty array', async () => {
             expect(await fetchWithDeadline([], { concurrency: 2, timeoutMs: 100 })).toEqual([]);
           });
         });
@@ -1318,7 +1319,10 @@ const stage3 = {
           signal?: CancelToken;
         }
 
-        /** 超时分支返回哨兵而不是抛错，race 之后一次判断就能分开两条路 */
+        /**
+         * The timeout branch returns a sentinel instead of throwing, so one check after the race
+         * separates the two paths
+         */
         const TIMED_OUT = Symbol('timed-out');
 
         export async function fetchWithDeadline(
@@ -1328,7 +1332,8 @@ const stage3 = {
           const results: PageResult[] = new Array(urls.length);
           if (urls.length === 0) return results;
 
-          // 预算记成一个绝对时刻：比维护「还剩多少」简单，并发下也不会算错
+          // Record the budget as an absolute instant: simpler than tracking how much is left, and
+          // correct under concurrency
           const deadline =
             options.totalBudgetMs === undefined ? Infinity : now() + options.totalBudgetMs;
 
@@ -1347,8 +1352,8 @@ const stage3 = {
               sleep(options.timeoutMs).then(() => TIMED_OUT),
             ]);
 
-            // race 一结束就返回，槽位跟着这个函数的返回释放。
-            // 在这里 await 那个被放弃的请求，等于超时白做
+            // Return as soon as the race settles; the slot is released when this function returns.
+            // Awaiting the abandoned request here would make the timeout pointless
             if (outcome === TIMED_OUT) {
               results[index] = { url, ok: false, data: null, error: 'timeout' };
               return;
@@ -1358,7 +1363,7 @@ const stage3 = {
 
           async function worker(): Promise<void> {
             for (;;) {
-              // 每取一个都要重新判断：并发启动的那批可能在中途把预算耗光
+              // Re-check on every take: the batch started concurrently may exhaust the budget part-way
               if (cursor >= urls.length) return;
               const index = cursor;
               cursor += 1;
@@ -1687,25 +1692,25 @@ const stage4 = {
       'src/retry.ts',
       code`
         export interface RetryOptions {
-          /** 最多额外重试几次（不含第一次调用） */
+          /** How many extra retries at most (the first call excluded) */
           retries: number;
-          /** 第一次退避的等待时间 */
+          /** How long the first backoff waits */
           baseDelayMs: number;
-          /** 退避倍数，默认 2 */
+          /** Backoff multiplier, defaults to 2 */
           factor?: number;
-          /** 判断错误是否值得重试，默认全部重试 */
+          /** Decide whether an error is worth retrying; retries everything by default */
           isRetryable?: (error: unknown) => boolean;
         }
 
         /**
-         * 带指数退避的重试。
-         * task 接收当前是第几次尝试（从 1 开始）。
+         * Retry with exponential backoff.
+         * task receives the current attempt number, starting at 1.
          */
         export async function withRetry<T>(
           task: (attempt: number) => Promise<T>,
           options: RetryOptions
         ): Promise<T> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -1721,8 +1726,8 @@ const stage4 = {
         import { getMetrics } from '@lab/net';
         import { now } from '@lab/env';
 
-        describe('阶段4 · 重试与退避', () => {
-          it('失败两次后第三次成功 [gate:retry]', async () => {
+        describe('Stage 4 · Retries and backoff', () => {
+          it('succeeds on the third try after failing twice [gate:retry]', async () => {
             const result = await fetchPage('/api/pages/flaky', { retries: 3, baseDelayMs: 50 });
             expect(result.ok).toBe(true);
             const metrics = getMetrics();
@@ -1730,13 +1735,13 @@ const stage4 = {
             expect(metrics.requests.retries).toBe(2);
           });
 
-          it('退避是指数增长的 [gate:backoff]', async () => {
+          it('backoff grows exponentially [gate:backoff]', async () => {
             await fetchPage('/api/pages/flaky', { retries: 3, baseDelayMs: 50 });
-            // 3 次请求各 100ms，退避 50ms + 100ms
+            // Three requests at 100ms each, plus 50ms + 100ms of backoff
             expect(getMetrics().virtualElapsedMs).toBe(450);
           });
 
-          it('固定间隔的退避会被识别出来', async () => {
+          it('a fixed-interval backoff is detected', async () => {
             let attempts = 0;
             const startedAt = now();
             await withRetry(
@@ -1752,7 +1757,7 @@ const stage4 = {
             expect(now() - startedAt).toBe(700);
           });
 
-          it('重试用尽后抛出最后一次错误', async () => {
+          it('throws the last error once retries are exhausted', async () => {
             await expect(async () =>
               withRetry(
                 async (attempt) => {
@@ -1763,22 +1768,22 @@ const stage4 = {
             ).rejects.toThrow('attempt 3 failed');
           });
 
-          it('不重试 404 这类不可恢复的错误', async () => {
+          it('does not retry unrecoverable errors such as 404', async () => {
             const result = await fetchPage('/api/pages/missing', { retries: 3, baseDelayMs: 10 });
             expect(result.ok).toBe(false);
             expect(getMetrics().requests.total).toBe(1);
           });
 
-          it('第一次就成功时不产生任何等待', async () => {
+          it('succeeding on the first try produces no waiting at all', async () => {
             const startedAt = now();
             const result = await fetchPage('/api/pages/1', { retries: 3, baseDelayMs: 100 });
             expect(result.ok).toBe(true);
-            // 只有一次请求的 100ms，没有额外退避
+            // Just the 100ms of a single request, with no extra backoff
             expect(now() - startedAt).toBe(100);
             expect(getMetrics().requests.total).toBe(1);
           });
 
-          it('retries 为 0 时只尝试一次', async () => {
+          it('retries set to 0 means a single attempt', async () => {
             let attempts = 0;
             await expect(async () =>
               withRetry(
@@ -1792,7 +1797,7 @@ const stage4 = {
             expect(attempts).toBe(1);
           });
 
-          it('factor 可以自定义', async () => {
+          it('factor is configurable', async () => {
             const startedAt = now();
             let attempts = 0;
             await withRetry(
@@ -1807,7 +1812,7 @@ const stage4 = {
             expect(now() - startedAt).toBe(400);
           });
 
-          it('task 能拿到当前是第几次尝试', async () => {
+          it('task can see which attempt it is on', async () => {
             const seen: number[] = [];
             await withRetry(
               async (attempt) => {
@@ -1820,7 +1825,7 @@ const stage4 = {
             expect(seen).toEqual([1, 2, 3]);
           });
 
-          it('isRetryable 返回 false 时立刻放弃', async () => {
+          it('gives up immediately when isRetryable returns false', async () => {
             let attempts = 0;
             await expect(async () =>
               withRetry(
@@ -2222,21 +2227,21 @@ const stage5 = {
         export type FailureKind = 'permanent' | 'throttled' | 'retryable';
 
         export interface PolicyOptions {
-          /** 最多重试几次（不含第一次） */
+          /** How many retries at most (the first attempt excluded) */
           retries: number;
-          /** retryable 的指数退避基数 */
+          /** Exponential backoff base for retryable errors */
           baseDelayMs: number;
-          /** throttled 的固定退避，通常远大于 baseDelayMs */
+          /** Fixed backoff for throttled errors, usually far larger than baseDelayMs */
           throttleDelayMs: number;
         }
 
         export function classify(error: unknown): FailureKind {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
 
         export function fetchWithPolicy(url: string, options: PolicyOptions): Promise<PageResult> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -2253,45 +2258,45 @@ const stage5 = {
 
         const OPTIONS = { retries: 3, baseDelayMs: 50, throttleDelayMs: 400 };
 
-        describe('阶段5 · 错误分类', () => {
-          it('404 是永久失败', () => {
+        describe('Stage 5 · Error classification', () => {
+          it('404 is a permanent failure', () => {
             expect(classify(new LabHttpError('nope', 404, '/api/missing'))).toBe('permanent');
           });
 
-          it('410 也是永久失败', () => {
+          it('410 is a permanent failure too', () => {
             expect(classify(new LabHttpError('gone', 410, '/api/gone'))).toBe('permanent');
           });
 
-          it('429 是被限流', () => {
+          it('429 means throttled', () => {
             expect(classify(new LabHttpError('slow down', 429, '/api/throttled'))).toBe('throttled');
           });
 
-          it('5xx 可以重试', () => {
+          it('5xx is retryable', () => {
             expect(classify(new LabHttpError('boom', 500, '/api/flaky'))).toBe('retryable');
             expect(classify(new LabHttpError('unavailable', 503, '/api/broken'))).toBe('retryable');
           });
 
-          it('没有 status 的错误当作可重试', () => {
-            // 连接被拒、DNS 失败都属于这一类，恰恰是最该重试的
+          it('an error with no status is treated as retryable', () => {
+            // Connection refused and DNS failures land here, and they are exactly the ones worth retrying
             expect(classify(new Error('connection refused'))).toBe('retryable');
           });
         });
 
-        describe('阶段5 · 按分类执行', () => {
-          it('正常请求直接成功', async () => {
+        describe('Stage 5 · Acting on the classification', () => {
+          it('a normal request just succeeds', async () => {
             const result = await fetchWithPolicy('/api/ok', OPTIONS);
             expect(result.ok).toBe(true);
             expect(result.url).toBe('/api/ok');
           });
 
-          it('5xx 重试之后成功', async () => {
+          it('a 5xx succeeds after retrying', async () => {
             const result = await fetchWithPolicy('/api/flaky', OPTIONS);
             expect(result.ok).toBe(true);
-            // 前两次失败，第三次成功
+            // The first two fail and the third succeeds
             expect(getMetrics().requests.total).toBe(3);
           });
 
-          it('一直 5xx 时重试用尽，返回失败结果而不是抛异常', async () => {
+          it('a persistent 5xx exhausts retries and returns a failed result rather than throwing', async () => {
             const result = await fetchWithPolicy('/api/broken', OPTIONS);
             expect(result.ok).toBe(false);
             expect(result.data).toBeNull();
@@ -2299,45 +2304,46 @@ const stage5 = {
             expect(getMetrics().requests.total).toBe(OPTIONS.retries + 1);
           });
 
-          it('429 最终会成功', async () => {
+          it('a 429 eventually succeeds', async () => {
             const result = await fetchWithPolicy('/api/throttled', OPTIONS);
             expect(result.ok).toBe(true);
             expect(getMetrics().requests.total).toBe(3);
           });
 
-          it('4xx 一次都不重试 [gate:permanent]', async () => {
+          it('a 4xx is never retried [gate:permanent]', async () => {
             const result = await fetchWithPolicy('/api/missing', OPTIONS);
             expect(result.ok).toBe(false);
-            // 重试一个 404 只是在给已知会失败的接口加压
+            // Retrying a 404 only piles pressure on an endpoint already known to fail
             expect(getMetrics().requests.total).toBe(1);
           });
 
-          it('410 同样不重试', async () => {
+          it('a 410 is not retried either', async () => {
             await fetchWithPolicy('/api/gone', OPTIONS);
             expect(getMetrics().requests.total).toBe(1);
           });
 
-          it('被限流时真的按 throttleDelayMs 退避 [gate:throttle]', async () => {
+          it('being throttled really does back off by throttleDelayMs [gate:throttle]', async () => {
             const startedAt = now();
             const result = await fetchWithPolicy('/api/throttled', OPTIONS);
             const elapsed = now() - startedAt;
 
             expect(result.ok).toBe(true);
-            // 三次请求 300ms + 两次限流退避 800ms。
-            // 用 50ms 指数退避应付限流的实现在这里只有 450ms 左右
+            // Three requests at 300ms plus two throttle backoffs at 800ms.
+            // An implementation using the 50ms exponential backoff for throttling lands around 450ms here
             expect(elapsed).toBeGreaterThanOrEqual(900);
           });
 
-          it('5xx 用的是指数退避，不是限流的长退避', async () => {
+          it('a 5xx uses exponential backoff, not the long throttle backoff', async () => {
             const startedAt = now();
             await fetchWithPolicy('/api/flaky', OPTIONS);
             const elapsed = now() - startedAt;
 
-            // 300ms 请求 + 50 + 100 退避 = 450ms 上下，明显短于限流那条路
+            // 300ms of requests plus 50 + 100 of backoff, around 450ms, clearly shorter than the
+            // throttled path
             expect(elapsed).toBeLessThan(700);
           });
 
-          it('retries 为 0 时任何失败都只发一次', async () => {
+          it('with retries at 0 any failure is sent exactly once', async () => {
             await fetchWithPolicy('/api/flaky', { retries: 0, baseDelayMs: 50, throttleDelayMs: 400 });
             expect(getMetrics().requests.total).toBe(1);
           });
@@ -2382,12 +2388,16 @@ const stage5 = {
           throttleDelayMs: number;
         }
 
-        /** 4xx 里这几个的语义是「再试一次可能就好了」，不能跟着区间一刀切 */
+        /**
+         * For these particular 4xx codes the meaning is really 'try again and it might work', so
+         * the range cannot be treated uniformly
+         */
         const RETRYABLE_4XX = [408, 425];
 
         export function classify(error: unknown): FailureKind {
-          // 没有 status 的是网络层错误（连接被拒、DNS 失败），
-          // 它恰恰是最该重试的一类，不能因为「拿不到 status」就判永久失败
+          // An error with no status is a network-layer error (connection refused, DNS failure),
+          // which is exactly the kind most worth retrying — do not call it permanent just because
+          // there is no status
           if (!(error instanceof LabHttpError)) return 'retryable';
 
           const status = error.status;
@@ -2409,21 +2419,21 @@ const stage5 = {
               lastError = error;
               const kind = classify(error);
 
-              // 一条循环服务三种策略，区别只是这两个决定
+              // One loop serves all three policies; only these two decisions differ
               if (kind === 'permanent') break;
               if (attempt === options.retries) break;
 
               const delay =
                 kind === 'throttled'
-                  ? // 限流窗口是秒级的，指数退避的初始值根本等不到窗口重置
+                  ? // Throttling windows are measured in seconds, and an exponential backoff starts far too small to outlast one
                     options.throttleDelayMs
                   : options.baseDelayMs * Math.pow(2, attempt);
               await sleep(delay);
             }
           }
 
-          // 契约是「失败也要产出 PageResult」：抛出去会让批量调用里的
-          // 一个失败炸掉整个 Promise.all
+          // The contract says a failure still produces a PageResult: throwing lets one failure
+          // blow up the entire Promise.all in a bulk call
           return {
             url,
             ok: false,
@@ -2740,15 +2750,15 @@ const stage6 = {
         import type { PageResult } from './contract';
 
         export interface HedgeOptions {
-          /** 等这么久还没结果就追发下一个副本 */
+          /** Send the next replica if there is still no result after this long */
           hedgeAfterMs: number;
-          /** 最多同时在飞多少个，默认等于副本数 */
+          /** How many may be in flight at once; defaults to the replica count */
           maxAttempts?: number;
         }
 
-        /** 依次向副本发起请求，返回第一个成功的结果 */
+        /** Request the replicas in turn and return the first successful result */
         export function hedgedFetch(replicas: string[], options: HedgeOptions): Promise<PageResult> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -2763,14 +2773,14 @@ const stage6 = {
         import { now, sleep } from '@lab/env';
         import { getMetrics } from '@lab/net';
 
-        describe('阶段6 · 对冲请求', () => {
-          it('单个副本时就是普通请求', async () => {
+        describe('Stage 6 · Hedged requests', () => {
+          it('a single replica is just an ordinary request', async () => {
             const result = await hedgedFetch(['/api/quick-primary'], { hedgeAfterMs: 200 });
             expect(result.ok).toBe(true);
             expect(getMetrics().requests.total).toBe(1);
           });
 
-          it('主副本够快时不追发 [gate:cheap]', async () => {
+          it('does not hedge when the primary replica is fast enough [gate:cheap]', async () => {
             const result = await hedgedFetch(
               ['/api/quick-primary', '/api/fast-replica', '/api/second-replica'],
               { hedgeAfterMs: 200 }
@@ -2778,11 +2788,12 @@ const stage6 = {
 
             expect(result.ok).toBe(true);
             expect(result.url).toBe('/api/quick-primary');
-            // 150ms 就回来了，200ms 的追发定时器醒来时必须发现「已经有结果了」
+            // It came back at 150ms, so the 200ms hedge timer must find a result already waiting
+            // when it wakes
             expect(getMetrics().requests.total).toBe(1);
           });
 
-          it('主副本慢时追发副本并用它的结果 [gate:tail]', async () => {
+          it("hedges when the primary is slow and uses the replica's result [gate:tail]", async () => {
             const startedAt = now();
             const result = await hedgedFetch(['/api/slow-primary', '/api/fast-replica'], {
               hedgeAfterMs: 200,
@@ -2791,29 +2802,29 @@ const stage6 = {
 
             expect(result.ok).toBe(true);
             expect(result.url).toBe('/api/fast-replica');
-            // 200ms 等待 + 120ms 副本 = 320ms，而不是主副本的 900ms
+            // 200ms of waiting plus a 120ms replica = 320ms, rather than the primary's 900ms
             expect(elapsed).toBeLessThanOrEqual(400);
           });
 
-          it('追发之后总共只发了两个请求', async () => {
+          it('only two requests are sent in total after hedging', async () => {
             await hedgedFetch(['/api/slow-primary', '/api/fast-replica'], { hedgeAfterMs: 200 });
             expect(getMetrics().requests.total).toBe(2);
           });
 
-          it('成功之后不再追发后续副本', async () => {
+          it('stops hedging further replicas once one succeeds', async () => {
             await hedgedFetch(
               ['/api/slow-primary', '/api/fast-replica', '/api/second-replica'],
               { hedgeAfterMs: 200 }
             );
             const afterResolve = getMetrics().requests.total;
 
-            // 再等很久，那些还没到时间的追发定时器不能醒来发请求
+            // Wait a long time: the hedge timers not yet due must not wake up and issue requests
             await sleep(2000);
             expect(getMetrics().requests.total).toBe(afterResolve);
             expect(afterResolve).toBe(2);
           });
 
-          it('maxAttempts 限制在飞数量', async () => {
+          it('maxAttempts bounds how many are in flight', async () => {
             await hedgedFetch(
               ['/api/slow-primary', '/api/slow-primary', '/api/slow-primary', '/api/fast-replica'],
               { hedgeAfterMs: 100, maxAttempts: 2 }
@@ -2821,16 +2832,16 @@ const stage6 = {
             expect(getMetrics().requests.total).toBeLessThanOrEqual(2);
           });
 
-          it('第一个副本失败时不会提前收工', async () => {
+          it('does not finish early when the first replica fails', async () => {
             const result = await hedgedFetch(['/api/broken-primary', '/api/fast-replica'], {
               hedgeAfterMs: 100,
             });
-            // Promise.race 取「第一个 settle」的实现会在 50ms 时以失败结束
+            // A Promise.race implementation taking the first settle would end in failure at 50ms
             expect(result.ok).toBe(true);
             expect(result.url).toBe('/api/fast-replica');
           });
 
-          it('全部失败才返回失败', async () => {
+          it('only reports failure once every replica has failed', async () => {
             const result = await hedgedFetch(['/api/broken-primary', '/api/broken-primary'], {
               hedgeAfterMs: 100,
             });
@@ -2839,14 +2850,14 @@ const stage6 = {
             expect(result.error).toBeTruthy();
           });
 
-          it('返回的 url 是真正胜出的那个副本', async () => {
+          it('the returned url is the replica that actually won', async () => {
             const result = await hedgedFetch(['/api/slow-primary', '/api/fast-replica'], {
               hedgeAfterMs: 200,
             });
             expect(result.url).toBe('/api/fast-replica');
           });
 
-          it('副本列表为空时返回失败而不是挂住', async () => {
+          it('an empty replica list fails rather than hanging', async () => {
             const result = await hedgedFetch([], { hedgeAfterMs: 100 });
             expect(result.ok).toBe(false);
           });
@@ -2913,8 +2924,8 @@ const stage6 = {
             }
 
             function launch(index: number): void {
-              // 定时器醒来时先看这个：主副本可能已经在它之前返回了。
-              // 少了这一句，健康状态下也会持续产生一倍的无效流量
+              // Check this first when the timer fires: the primary may have returned before it.
+              // Without this line, a healthy system keeps generating double the traffic for nothing
               if (settled || index >= limit) return;
               launched += 1;
               const url = replicas[index];
@@ -2924,12 +2935,14 @@ const stage6 = {
                 (error) => {
                   failures += 1;
                   lastError = error instanceof Error ? error.message : String(error);
-                  // 只有「已经发出的全失败了，而且不会再发」才算彻底失败。
-                  // 用 Promise.race 的实现会在第一个失败时就收工
+                  // Only 'everything already sent has failed and nothing more will be sent' counts
+                  // as a real failure.
+                  // A Promise.race implementation calls it a day on the first failure
                   if (failures === launched && launched >= limit) {
                     finish({ url, ok: false, data: null, error: lastError });
                   } else if (failures === launched) {
-                    // 手上没有在飞的请求了，立刻追发下一个，不必等满 hedgeAfterMs
+                    // Nothing is in flight any more, so send the next one now rather than waiting
+                    // out hedgeAfterMs
                     launch(launched);
                   }
                 }
@@ -3261,9 +3274,9 @@ const stage7 = {
       'src/cache.ts',
       code`
         export interface CacheOptions {
-          /** 条目存活时间，不传表示永不过期 */
+          /** Entry lifetime; never expires when omitted */
           ttlMs?: number;
-          /** 最大条目数，超出后按 LRU 淘汰 */
+          /** Maximum entries; evicted by LRU beyond that */
           maxSize?: number;
         }
 
@@ -3273,15 +3286,15 @@ const stage7 = {
           readonly size: number;
         }
 
-        /** 带 TTL 的 LRU 缓存 */
+        /** An LRU cache with TTL */
         export function createCache<T>(options: CacheOptions = {}): Cache<T> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
 
-        /** 并发去重：同一个 key 同时到来的调用共享一次执行 */
+        /** Single-flight: concurrent calls for one key share a single execution */
         export function createSingleFlight() {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -3297,20 +3310,20 @@ const stage7 = {
         import { getMetrics } from '@lab/net';
         import { sleep } from '@lab/env';
 
-        describe('阶段7 · 缓存与并发去重', () => {
-          it('LRU 按最近使用淘汰', () => {
+        describe('Stage 7 · Caching and single-flight', () => {
+          it('the LRU evicts by least recent use', () => {
             const cache = createCache<number>({ maxSize: 2 });
             cache.set('a', 1);
             cache.set('b', 2);
-            expect(cache.get('a')).toBe(1); // a 变成最近使用
-            cache.set('c', 3);              // 淘汰 b
+            expect(cache.get('a')).toBe(1); // a becomes the most recently used
+            cache.set('c', 3);              // evicts b
             expect(cache.get('b')).toBeUndefined();
             expect(cache.get('a')).toBe(1);
             expect(cache.get('c')).toBe(3);
             expect(cache.size).toBe(2);
           });
 
-          it('TTL 过期后不再命中', async () => {
+          it('an expired TTL no longer hits', async () => {
             const cache = createCache<string>({ ttlMs: 100 });
             cache.set('k', 'v');
             expect(cache.get('k')).toBe('v');
@@ -3318,7 +3331,7 @@ const stage7 = {
             expect(cache.get('k')).toBeUndefined();
           });
 
-          it('单飞让并发调用只执行一次 loader', async () => {
+          it('single-flight runs the loader once for concurrent calls', async () => {
             const singleFlight = createSingleFlight();
             let calls = 0;
             const loader = async () => {
@@ -3335,7 +3348,7 @@ const stage7 = {
             expect(calls).toBe(1);
           });
 
-          it('单飞结束后不会一直占着 key', async () => {
+          it('single-flight does not hold onto the key after it finishes', async () => {
             const singleFlight = createSingleFlight();
             let calls = 0;
             const loader = async () => {
@@ -3347,7 +3360,7 @@ const stage7 = {
             expect(calls).toBe(2);
           });
 
-          it('并发抓同一个地址只打一次下游 [gate:dedup]', async () => {
+          it('fetching one URL concurrently hits downstream once [gate:dedup]', async () => {
             const urls = ['/api/hot', '/api/hot', '/api/hot', '/api/hot', '/api/hot'];
             const results = await fetchAll(urls, { concurrency: 5, ttlMs: 1000 });
             expect(results.every((item) => item.ok)).toBe(true);
@@ -3356,13 +3369,13 @@ const stage7 = {
             expect(metrics.virtualElapsedMs).toBe(100);
           });
 
-          it('缓存命中不再产生请求', async () => {
+          it('a cache hit produces no request', async () => {
             await fetchPage('/api/warm', { ttlMs: 1000 });
             await fetchPage('/api/warm', { ttlMs: 1000 });
             expect(getMetrics().requests.total).toBe(1);
           });
 
-          it('容量为 1 的 LRU 每次都只留最新的一个', () => {
+          it('an LRU of capacity 1 keeps only the newest entry', () => {
             const cache = createCache<number>({ maxSize: 1 });
             cache.set('a', 1);
             cache.set('b', 2);
@@ -3371,7 +3384,7 @@ const stage7 = {
             expect(cache.size).toBe(1);
           });
 
-          it('重复 set 同一个 key 不会撑大容量', () => {
+          it('setting the same key repeatedly does not inflate the size', () => {
             const cache = createCache<number>({ maxSize: 2 });
             cache.set('a', 1);
             cache.set('a', 2);
@@ -3380,7 +3393,7 @@ const stage7 = {
             expect(cache.get('a')).toBe(3);
           });
 
-          it('不缓存失败的结果，下次仍然会回源', async () => {
+          it('failures are not cached and the next call still goes to the origin', async () => {
             const first = await fetchPage('/api/flaky-cache', { ttlMs: 1000 });
             expect(first.ok).toBe(false);
 
@@ -3389,7 +3402,7 @@ const stage7 = {
             expect(getMetrics().requests.total).toBe(2);
           });
 
-          it('loader 抛错时单飞也要清理登记表', async () => {
+          it('single-flight clears its registry when the loader throws', async () => {
             const singleFlight = createSingleFlight();
             let calls = 0;
             const failing = async () => {
@@ -3399,11 +3412,11 @@ const stage7 = {
 
             await expect(async () => singleFlight('k', failing)).rejects.toThrow('loader failed');
             await expect(async () => singleFlight('k', failing)).rejects.toThrow('loader failed');
-            // 没清理的话第二次会复用那个已经 reject 的旧 promise，calls 会停在 1
+            // Without cleanup the second call reuses the already-rejected promise and calls stays at 1
             expect(calls).toBe(2);
           });
 
-          it('不同 key 之间互不影响', async () => {
+          it('separate keys do not interfere', async () => {
             const singleFlight = createSingleFlight();
             let calls = 0;
             const loader = async () => {
@@ -3475,7 +3488,8 @@ const stage7 = {
                 entries.delete(key);
                 return undefined;
               }
-              // Map 保持插入顺序，删掉再塞回去就是「移到最近使用」
+              // A Map preserves insertion order, so delete-then-reinsert is exactly 'move to most
+              // recently used'
               entries.delete(key);
               entries.set(key, entry);
               return entry.value;
@@ -3850,26 +3864,26 @@ const stage8 = {
 
         export interface ScheduledTask {
           url: string;
-          /** 越大越优先 */
+          /** Higher means higher priority */
           priority: number;
         }
 
         export interface SchedulerOptions {
           concurrency: number;
-          /** 每等待这么久，有效优先级提升一档；不传表示不做老化 */
+          /** Effective priority rises one step per this much waiting; omit to disable ageing */
           agingMs?: number;
-          /** 每一档提升多少，默认 10 */
+          /** How much each step raises it; defaults to 10 */
           agingBoost?: number;
         }
 
         export interface Scheduler {
           submit(task: ScheduledTask): Promise<PageResult>;
-          /** 还在排队（尚未开始）的数量 */
+          /** How many are still queued (not yet started) */
           pending(): number;
         }
 
         export function createScheduler(options: SchedulerOptions): Scheduler {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -3884,15 +3898,15 @@ const stage8 = {
         import { now, sleep } from '@lab/env';
         import { count } from '@lab/metrics';
 
-        describe('阶段8 · 优先级调度', () => {
-          it('单个任务直接执行', async () => {
+        describe('Stage 8 · Priority scheduling', () => {
+          it('a single task runs straight away', async () => {
             const scheduler = createScheduler({ concurrency: 1 });
             const result = await scheduler.submit({ url: '/api/a', priority: 0 });
             expect(result.ok).toBe(true);
             expect(result.url).toBe('/api/a');
           });
 
-          it('高优先级先跑', async () => {
+          it('higher priority runs first', async () => {
             const scheduler = createScheduler({ concurrency: 1 });
             const order: string[] = [];
 
@@ -3905,7 +3919,7 @@ const stage8 = {
             expect(order).toEqual(['high', 'low']);
           });
 
-          it('同优先级按提交顺序', async () => {
+          it('equal priorities run in submission order', async () => {
             const scheduler = createScheduler({ concurrency: 1 });
             const order: string[] = [];
 
@@ -3918,7 +3932,7 @@ const stage8 = {
             expect(order).toEqual(['first', 'second']);
           });
 
-          it('pending 反映排队数', async () => {
+          it('pending reflects the queue length', async () => {
             const scheduler = createScheduler({ concurrency: 1 });
             const running = scheduler.submit({ url: '/api/a', priority: 0 });
             await sleep(1);
@@ -3932,7 +3946,7 @@ const stage8 = {
             expect(scheduler.pending()).toBe(0);
           });
 
-          it('并发上限被遵守', async () => {
+          it('the concurrency ceiling is respected', async () => {
             const scheduler = createScheduler({ concurrency: 2 });
             const tasks: Array<Promise<unknown>> = [];
             for (let index = 0; index < 6; index += 1) {
@@ -3940,11 +3954,11 @@ const stage8 = {
             }
             const startedAt = now();
             await Promise.all(tasks);
-            // 6 个 100ms 的请求、两个槽 = 300ms
+            // Six 100ms requests over two slots = 300ms
             expect(now() - startedAt).toBe(300);
           });
 
-          it('正在执行的请求不会被高优先级抢占', async () => {
+          it('a running request is not preempted by higher priority', async () => {
             const scheduler = createScheduler({ concurrency: 1 });
             const order: string[] = [];
 
@@ -3957,11 +3971,11 @@ const stage8 = {
               .then(() => order.push('urgent'));
 
             await Promise.all([running, urgent]);
-            // 已经在飞的那个先完成，高优先级只能排下一个
+            // The one already in flight finishes first; higher priority only gets to be next in line
             expect(order).toEqual(['running', 'urgent']);
           });
 
-          it('不配 agingMs 时纯按优先级', async () => {
+          it('without agingMs it is purely by priority', async () => {
             const scheduler = createScheduler({ concurrency: 1 });
             const order: string[] = [];
 
@@ -3979,7 +3993,7 @@ const stage8 = {
             expect(order[order.length - 1]).toBe('low');
           });
 
-          it('老化让久等的低优先级被提上来 [gate:aging]', async () => {
+          it('ageing promotes a long-waiting low-priority task [gate:aging]', async () => {
             const scheduler = createScheduler({ concurrency: 1, agingMs: 300, agingBoost: 10 });
             let lowFinishedAt = -1;
 
@@ -3996,11 +4010,11 @@ const stage8 = {
             await Promise.all([low, ...highs]);
             count('lowPriorityWaitMs', lowFinishedAt);
 
-            // 不做老化的实现要排在 10 个高优先级之后，1100ms
+            // An implementation without ageing queues it behind all ten high-priority tasks, at 1100ms
             expect(lowFinishedAt).toBeLessThanOrEqual(600);
           });
 
-          it('老化不会把低优先级提到比刚来的高优先级还前面', async () => {
+          it('ageing does not promote low priority ahead of a freshly arrived high-priority task', async () => {
             const scheduler = createScheduler({ concurrency: 1, agingMs: 10000, agingBoost: 10 });
             const order: string[] = [];
 
@@ -4010,11 +4024,11 @@ const stage8 = {
             const high = scheduler.submit({ url: '/api/high', priority: 5 }).then(() => order.push('high'));
 
             await Promise.all([blocker, low, high]);
-            // agingMs 很大，还没到提升的时候
+            // agingMs is large, so no promotion is due yet
             expect(order).toEqual(['high', 'low']);
           });
 
-          it('失败的请求也会把槽位还回去', async () => {
+          it('a failed request returns its slot too', async () => {
             const scheduler = createScheduler({ concurrency: 1 });
             const results = await Promise.all([
               scheduler.submit({ url: '/api/a', priority: 0 }),
@@ -4065,7 +4079,7 @@ const stage8 = {
 
         interface QueuedTask extends ScheduledTask {
           enqueuedAt: number;
-          /** 显式的入队序号：不去赌 Array.sort 的稳定性 */
+          /** An explicit enqueue sequence number: do not bet on Array.sort being stable */
           seq: number;
           settle(result: PageResult): void;
         }
@@ -4077,7 +4091,7 @@ const stage8 = {
           let running = 0;
           let nextSeq = 0;
 
-          /** 每次挑选都要重算：算一次然后固定下来，等于没有老化 */
+          /** Recomputed on every pick: computing it once and freezing it is the same as no ageing at all */
           function effectivePriority(task: QueuedTask): number {
             if (!options.agingMs) return task.priority;
             const waited = now() - task.enqueuedAt;
@@ -4091,7 +4105,7 @@ const stage8 = {
             let bestPriority = effectivePriority(queue[0]);
             for (let index = 1; index < queue.length; index += 1) {
               const candidate = effectivePriority(queue[index]);
-              // 同分时比 seq，保证同优先级 FIFO
+              // Compare seq on ties, which keeps equal priorities FIFO
               if (candidate > bestPriority || (candidate === bestPriority && queue[index].seq < queue[bestIndex].seq)) {
                 bestIndex = index;
                 bestPriority = candidate;
@@ -4113,7 +4127,7 @@ const stage8 = {
                   pump();
                 },
                 (error) => {
-                  // 失败也要还槽位，否则一次错误就永久缩小并发度
+                  // A failure has to return the slot too, or one error permanently shrinks the concurrency
                   running -= 1;
                   task.settle({
                     url: task.url,
@@ -4461,12 +4475,12 @@ const stage9 = {
 
         export interface BoundedOptions {
           concurrency: number;
-          /** 最多允许多少个在排队（不含正在执行的） */
+          /** How many may be queued at most (those running excluded) */
           maxQueueDepth: number;
         }
 
         export interface BoundedQueue {
-          /** 队列满时立刻 reject 一个 QueueFullError */
+          /** Rejects immediately with QueueFullError when the queue is full */
           submit(url: string): Promise<PageResult>;
           depth(): number;
           highWaterMark(): number;
@@ -4474,7 +4488,7 @@ const stage9 = {
         }
 
         export function createBoundedQueue(options: BoundedOptions): BoundedQueue {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -4489,8 +4503,8 @@ const stage9 = {
         import { now, sleep } from '@lab/env';
         import { count } from '@lab/metrics';
 
-        describe('阶段9 · 背压与队列上限', () => {
-          it('未满时正常执行', async () => {
+        describe('Stage 9 · Backpressure and queue limits', () => {
+          it('runs normally while there is room', async () => {
             const queue = createBoundedQueue({ concurrency: 2, maxQueueDepth: 4 });
             const results = await Promise.all([
               queue.submit('/api/a'),
@@ -4500,10 +4514,10 @@ const stage9 = {
             expect(queue.rejected()).toBe(0);
           });
 
-          it('满了立刻拒绝', async () => {
+          it('rejects immediately once full', async () => {
             const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 2 });
             const accepted: Array<Promise<unknown>> = [];
-            // 1 个在跑 + 2 个排队 = 满
+            // 1 running + 2 queued = full
             accepted.push(queue.submit('/api/running'));
             await sleep(1);
             accepted.push(queue.submit('/api/queued-1'));
@@ -4521,7 +4535,7 @@ const stage9 = {
             await Promise.all(accepted);
           });
 
-          it('拒绝是立刻发生的，不让调用方等 [gate:fast-reject]', async () => {
+          it('rejection happens immediately and does not make the caller wait [gate:fast-reject]', async () => {
             const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 1 });
             const accepted = [queue.submit('/api/running')];
             await sleep(1);
@@ -4536,12 +4550,12 @@ const stage9 = {
             }
             count('rejectLatencyMs', rejectedAt);
 
-            // 等有位置了再拒绝的实现在这里要等 100ms 以上
+            // An implementation that waits for a free slot before rejecting takes over 100ms here
             expect(rejectedAt).toBe(0);
             await Promise.all(accepted);
           });
 
-          it('排队数从不超过上限 [gate:depth]', async () => {
+          it('the queue length never exceeds the limit [gate:depth]', async () => {
             const queue = createBoundedQueue({ concurrency: 2, maxQueueDepth: 3 });
             const inFlight: Array<Promise<unknown>> = [];
 
@@ -4557,7 +4571,7 @@ const stage9 = {
             expect(queue.rejected()).toBeGreaterThan(0);
           });
 
-          it('有位置空出来之后恢复接收', async () => {
+          it('starts accepting again once a slot frees up', async () => {
             const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 1 });
             const first = queue.submit('/api/first');
             await sleep(1);
@@ -4572,19 +4586,19 @@ const stage9 = {
             expect(rejected).toBe(true);
 
             await Promise.all([first, second]);
-            // 都跑完了，队列空了
+            // Everything has finished and the queue is empty
             expect(queue.depth()).toBe(0);
             const later = await queue.submit('/api/later');
             expect(later.ok).toBe(true);
           });
 
-          it('正在执行的请求不占队列名额', async () => {
+          it('running requests do not take up queue slots', async () => {
             const queue = createBoundedQueue({ concurrency: 3, maxQueueDepth: 2 });
             const running: Array<Promise<unknown>> = [];
             for (let index = 0; index < 3; index += 1) running.push(queue.submit('/api/run-' + index));
             await sleep(1);
 
-            // 3 个在跑，队列还是空的，应该还能收 2 个
+            // 3 running with an empty queue, so it should still accept 2 more
             expect(queue.depth()).toBe(0);
             running.push(queue.submit('/api/q1'));
             running.push(queue.submit('/api/q2'));
@@ -4593,7 +4607,7 @@ const stage9 = {
             await Promise.all(running);
           });
 
-          it('depth 在执行开始后回落', async () => {
+          it('depth falls back once execution starts', async () => {
             const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 3 });
             const tasks = [queue.submit('/api/a')];
             await sleep(1);
@@ -4604,7 +4618,7 @@ const stage9 = {
             expect(queue.depth()).toBe(0);
           });
 
-          it('highWaterMark 记住峰值，不随回落而下降', async () => {
+          it('highWaterMark remembers the peak and does not fall back with it', async () => {
             const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 5 });
             const tasks = [queue.submit('/api/a')];
             await sleep(1);
@@ -4617,7 +4631,7 @@ const stage9 = {
             expect(queue.highWaterMark()).toBe(peak);
           });
 
-          it('拒绝的是新来的，已排队的照常执行', async () => {
+          it('newcomers are rejected while those already queued run as usual', async () => {
             const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 1 });
             const running = queue.submit('/api/running');
             await sleep(1);
@@ -4629,7 +4643,7 @@ const stage9 = {
             expect(results.every((result) => result.ok)).toBe(true);
           });
 
-          it('maxQueueDepth 为 0 时只接受正在执行的', async () => {
+          it('a maxQueueDepth of 0 accepts only what is running', async () => {
             const queue = createBoundedQueue({ concurrency: 1, maxQueueDepth: 0 });
             const running = queue.submit('/api/running');
             await sleep(1);
@@ -4735,19 +4749,20 @@ const stage9 = {
 
           return {
             submit(url: string): Promise<PageResult> {
-              // 上限只算排队的：正在执行的马上就结束，既不占队列内存
-              // 也不会让延迟无限增长，把它们算进来会让配置值的含义随并发度漂移
+              // The limit counts queued work only: what is running is about to finish, so it neither occupies
+              // queue memory nor grows latency without bound, and counting it makes the setting's
+              // meaning drift with concurrency
               if (queue.length >= options.maxQueueDepth && running >= limit) {
                 refused += 1;
-                // 同步返回一个已 reject 的 promise：耗时天然是 0。
-                // 等有位置了再拒绝，等于把背压变回了延迟
+                // Return an already-rejected promise synchronously, so the elapsed time is naturally 0.
+                // Waiting for a free slot before rejecting turns backpressure back into latency
                 return Promise.reject(new QueueFullError(url));
               }
 
               return new Promise<PageResult>((resolve) => {
                 queue.push({ url, settle: resolve });
-                // push 之后立刻记峰值：pump 可能马上就把它取走，
-                // 漏了这一次更新，压测出来的峰值会比真实值低
+                // Record the peak right after the push: pump may take it away immediately,
+                // and missing this update makes the measured peak lower than the real one
                 peak = Math.max(peak, queue.length);
                 pump();
               });
@@ -5062,22 +5077,22 @@ const stage10 = {
       'src/paginate.ts',
       code`
         export interface PaginateOptions {
-          /** 最多翻多少页 */
+          /** How many pages to fetch at most */
           maxPages: number;
         }
 
         export interface PaginateResult {
           items: unknown[];
-          /** 实际请求了多少页 */
+          /** How many pages were actually requested */
           pages: number;
-          /** 因为 maxPages 而提前停下 */
+          /** Stopped early because of maxPages */
           truncated: boolean;
-          /** 因为游标成环而提前停下 */
+          /** Stopped early because the cursor formed a loop */
           looped: boolean;
         }
 
         export function fetchAllPages(startUrl: string, options: PaginateOptions): Promise<PaginateResult> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -5092,31 +5107,31 @@ const stage10 = {
         import { now } from '@lab/env';
         import { getMetrics } from '@lab/net';
 
-        describe('阶段10 · 游标分页', () => {
-          it('走到底并拼接所有 items [gate:pages]', async () => {
+        describe('Stage 10 · Cursor pagination', () => {
+          it('walks to the end and concatenates every item [gate:pages]', async () => {
             const result = await fetchAllPages('/api/list/1', { maxPages: 10 });
 
             expect(result.items).toEqual(['a', 'b', 'c', 'd', 'e']);
             expect(result.pages).toBe(3);
             expect(result.truncated).toBe(false);
             expect(result.looped).toBe(false);
-            // 三页正好三个请求，没有重复抓
+            // Three pages take exactly three requests, with nothing fetched twice
             expect(getMetrics().requests.total).toBe(3);
           });
 
-          it('只有一页时也正常', async () => {
+          it('works with a single page too', async () => {
             const result = await fetchAllPages('/api/single', { maxPages: 10 });
             expect(result.items).toEqual(['solo']);
             expect(result.pages).toBe(1);
           });
 
-          it('空列表不会炸', async () => {
+          it('an empty list does not blow up', async () => {
             const result = await fetchAllPages('/api/empty', { maxPages: 10 });
             expect(result.items).toEqual([]);
             expect(result.pages).toBe(1);
           });
 
-          it('maxPages 生效并标记 truncated', async () => {
+          it('maxPages takes effect and marks truncated', async () => {
             const result = await fetchAllPages('/api/list/1', { maxPages: 2 });
             expect(result.items).toEqual(['a', 'b', 'c', 'd']);
             expect(result.pages).toBe(2);
@@ -5124,23 +5139,23 @@ const stage10 = {
             expect(result.looped).toBe(false);
           });
 
-          it('maxPages 为 1 时只取第一页', async () => {
+          it('a maxPages of 1 fetches only the first page', async () => {
             const result = await fetchAllPages('/api/list/1', { maxPages: 1 });
             expect(result.items).toEqual(['a', 'b']);
             expect(result.pages).toBe(1);
             expect(result.truncated).toBe(true);
           });
 
-          it('环形游标会停下并标记 looped [gate:loop]', async () => {
+          it('a looping cursor stops and is marked looped [gate:loop]', async () => {
             const result = await fetchAllPages('/api/loop/1', { maxPages: 50 });
 
             expect(result.looped).toBe(true);
-            // 只靠 maxPages 兜底的实现会抓 50 次
+            // An implementation relying on maxPages alone would fetch 50 times
             expect(result.pages).toBe(1);
             expect(getMetrics().requests.total).toBe(1);
           });
 
-          it('环形停止和 maxPages 停止是两种不同的原因', async () => {
+          it('stopping on a loop and stopping on maxPages are two distinct reasons', async () => {
             const looped = await fetchAllPages('/api/loop/1', { maxPages: 50 });
             const truncated = await fetchAllPages('/api/list/1', { maxPages: 2 });
 
@@ -5150,20 +5165,21 @@ const stage10 = {
             expect(truncated.looped).toBe(false);
           });
 
-          it('items 缺失的畸形响应不会让整次遍历崩掉', async () => {
+          it('a malformed response missing items does not crash the whole walk', async () => {
             const result = await fetchAllPages('/api/malformed', { maxPages: 5 });
             expect(result.items).toEqual([]);
             expect(result.pages).toBe(1);
           });
 
-          it('分页是串行的，耗时等于页数乘以单页延迟', async () => {
+          it('pagination is serial, taking page count times per-page latency', async () => {
             const startedAt = now();
             await fetchAllPages('/api/list/1', { maxPages: 10 });
-            // 三页各 100ms：拿不到第 N 页就不知道第 N+1 页在哪，压不下去
+            // Three pages at 100ms each: without page N you do not know where page N+1 is, so it
+            // cannot be compressed
             expect(now() - startedAt).toBe(300);
           });
 
-          it('maxPages 为 0 时一个请求都不发', async () => {
+          it('a maxPages of 0 issues no requests at all', async () => {
             const result = await fetchAllPages('/api/list/1', { maxPages: 0 });
             expect(result.pages).toBe(0);
             expect(result.items).toEqual([]);
@@ -5227,9 +5243,9 @@ const stage10 = {
           let looped = false;
 
           while (cursor !== null && pages < options.maxPages) {
-            // 环检测独立于 maxPages：只靠页数兜底的话，
-            // 调用方拿到的是「一百页重复数据 + truncated: true」，
-            // 会以为后面还有更多
+            // Loop detection is independent of maxPages: relying on the page count alone leaves
+            // the caller with a hundred pages of duplicate data and truncated: true,
+            // which reads as if there were more still to come
             if (visited.has(cursor)) {
               looped = true;
               break;
@@ -5240,9 +5256,10 @@ const stage10 = {
             pages += 1;
 
             const page = (response.data || {}) as PageEnvelope;
-            // 服务端返回畸形数据时不要让整次遍历崩掉
+            // Do not let a malformed server response crash the whole walk
             if (Array.isArray(page.items)) {
-              // push 而不是重新构造数组：后者在页数多时是 O(n²) 次复制
+              // push rather than rebuilding the array: the latter is O(n\u00b2) copies once there
+              // are many pages
               for (const item of page.items) items.push(item);
             }
 
@@ -5252,7 +5269,7 @@ const stage10 = {
           return {
             items,
             pages,
-            // 还有下一页却停下来了，才算被截断
+            // It only counts as truncated if it stopped while a next page still existed
             truncated: cursor !== null && !looped,
             looped,
           };
@@ -5579,11 +5596,11 @@ const stage11 = {
         }
 
         /**
-         * 把前四关的能力组装成一个自带状态、可取消、可观测的组件。
-         * 每个实例必须有自己的缓存。
+         * Assemble the first four stages into one stateful, cancellable, observable component.
+         * Every instance must have its own cache.
          */
         export function createPipeline(options: PipelineOptions = {}): Pipeline {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -5602,8 +5619,8 @@ const stage11 = {
 
         const urls = Array.from({ length: 12 }, (_, index) => '/api/pages/' + index);
 
-        describe('阶段11 · 收敛为组件', () => {
-          it('组合能力：并发 + 重试 + 缓存 [gate:pipeline]', async () => {
+        describe('Stage 11 · Converging into a component', () => {
+          it('combines the capabilities: concurrency + retries + caching [gate:pipeline]', async () => {
             const pipeline = createPipeline({ concurrency: 4, retries: 2, baseDelayMs: 20, ttlMs: 1000 });
             const results = await pipeline.run(urls.concat(['/api/pages/flaky', '/api/pages/0']));
             expect(results).toHaveLength(14);
@@ -5615,7 +5632,7 @@ const stage11 = {
             expect(pipeline.stats().completed).toBe(14);
           });
 
-          it('实例之间缓存隔离', async () => {
+          it('caches are isolated between instances', async () => {
             const first = createPipeline({ ttlMs: 1000 });
             const second = createPipeline({ ttlMs: 1000 });
             await first.run(['/api/shared']);
@@ -5623,7 +5640,7 @@ const stage11 = {
             expect(getMetrics().requests.total).toBe(2);
           });
 
-          it('同一个实例内命中缓存', async () => {
+          it('the cache hits within one instance', async () => {
             const pipeline = createPipeline({ ttlMs: 1000 });
             await pipeline.run(['/api/shared']);
             await pipeline.run(['/api/shared']);
@@ -5631,7 +5648,7 @@ const stage11 = {
             expect(pipeline.stats().cacheHits).toBe(1);
           });
 
-          it('取消后不再发起新请求 [gate:cancel]', async () => {
+          it('no new requests are issued after cancelling [gate:cancel]', async () => {
             const source = createCancelSource();
             const pipeline = createPipeline({ concurrency: 2, signal: source.token });
             const running = pipeline.run(urls);
@@ -5645,14 +5662,14 @@ const stage11 = {
             expect(results.some((item) => !item.ok)).toBe(true);
           });
 
-          it('埋点写入了 metrics', async () => {
+          it('instrumentation is written to metrics', async () => {
             const pipeline = createPipeline({ concurrency: 4 });
             await pipeline.run(['/api/pages/1', '/api/pages/2']);
             const counters = getCounters();
             expect(counters['pipeline.completed']).toBe(2);
           });
 
-          it('stats() 返回的是副本，外部改不动内部计数', async () => {
+          it('stats() returns a copy that callers cannot use to change the internal counters', async () => {
             const pipeline = createPipeline({ concurrency: 2 });
             await pipeline.run(['/api/pages/1']);
 
@@ -5661,7 +5678,7 @@ const stage11 = {
             expect(pipeline.stats().completed).toBe(1);
           });
 
-          it('取消之后 run 仍然正常返回，而不是抛异常', async () => {
+          it('run still returns normally after cancellation rather than throwing', async () => {
             const source = createCancelSource();
             const pipeline = createPipeline({ concurrency: 2, signal: source.token });
             source.cancel();
@@ -5672,7 +5689,7 @@ const stage11 = {
             expect(getMetrics().requests.total).toBe(0);
           });
 
-          it('两个实例的统计互不干扰', async () => {
+          it('the stats of two instances do not interfere', async () => {
             const first = createPipeline({ concurrency: 2 });
             const second = createPipeline({ concurrency: 2 });
 
@@ -5683,11 +5700,11 @@ const stage11 = {
             expect(second.stats().completed).toBe(1);
           });
 
-          it('失败的地址计入 failed 而不是 completed', async () => {
+          it('a failed URL counts towards failed, not completed', async () => {
             const pipeline = createPipeline({ concurrency: 2 });
             const results = await pipeline.run(['/api/pages/1', '/api/pages/flaky']);
 
-            // flaky 第一次必失败，且这里没开重试
+            // flaky always fails the first time, and retries are off here
             expect(results.filter((item) => item.ok)).toHaveLength(1);
             expect(pipeline.stats().completed).toBe(1);
             expect(pipeline.stats().failed).toBe(1);
@@ -5760,7 +5777,8 @@ const stage11 = {
         }
 
         export function createPipeline(options: PipelineOptions = {}): Pipeline {
-          // 每个实例持有自己的缓存与单飞登记表：可以放心 new 两份
+          // Each instance holds its own cache and single-flight registry, so two of them can be
+          // created safely
           const cache = createCache<PageResult>({ ttlMs: options.ttlMs, maxSize: 500 });
           const singleFlight = createSingleFlight();
           const stats: PipelineStats = { completed: 0, failed: 0, cacheHits: 0 };
@@ -6117,15 +6135,15 @@ const stage12 = {
           observe(value: number): void;
           count(): number;
           sum(): number;
-          /** q 在 0~1 之间，桶内线性插值 */
+          /** q is between 0 and 1, interpolated linearly within the bucket */
           quantile(q: number): number;
-          /** 内部占用的统计槽数量，必须与观测次数无关 */
+          /** How many stat slots are held internally; must be independent of the observation count */
           size(): number;
         }
 
-        /** boundaries 是升序的桶上边界，超出最后一个边界的值进 +Inf 桶 */
+        /** boundaries are ascending bucket upper bounds; values past the last one go into the +Inf bucket */
         export function createHistogram(boundaries: number[]): Histogram {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
 
@@ -6137,12 +6155,12 @@ const stage12 = {
         export interface Tracer {
           span(name: string): { end(): void };
           spans(): SpanRecord[];
-          /** 耗时最长的那一段，没有记录时返回 null */
+          /** The longest span, or null when nothing was recorded */
           slowest(): SpanRecord | null;
         }
 
         export function createTracer(): Tracer {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -6160,8 +6178,8 @@ const stage12 = {
 
         const BOUNDARIES = [10, 50, 100, 500, 1000];
 
-        describe('阶段12 · 直方图', () => {
-          it('count 和 sum', () => {
+        describe('Stage 12 · Histograms', () => {
+          it('count and sum', () => {
             const histogram = createHistogram(BOUNDARIES);
             histogram.observe(5);
             histogram.observe(15);
@@ -6171,13 +6189,13 @@ const stage12 = {
             expect(histogram.sum()).toBe(45);
           });
 
-          it('空直方图的 count 是 0', () => {
+          it('an empty histogram has a count of 0', () => {
             const histogram = createHistogram(BOUNDARIES);
             expect(histogram.count()).toBe(0);
             expect(histogram.sum()).toBe(0);
           });
 
-          it('分位数落在正确的桶里', () => {
+          it('quantiles land in the right bucket', () => {
             const histogram = createHistogram(BOUNDARIES);
             for (let index = 0; index < 90; index += 1) histogram.observe(5);
             for (let index = 0; index < 10; index += 1) histogram.observe(800);
@@ -6187,7 +6205,7 @@ const stage12 = {
             expect(histogram.quantile(0.95)).toBeLessThanOrEqual(1000);
           });
 
-          it('桶内做插值，而不是直接返回桶上边界', () => {
+          it('interpolates within the bucket rather than returning its upper bound', () => {
             const histogram = createHistogram([100, 200]);
             for (let index = 0; index < 100; index += 1) histogram.observe(150);
 
@@ -6198,7 +6216,7 @@ const stage12 = {
             expect(high).toBeLessThanOrEqual(200);
           });
 
-          it('所有值相同时分位数就是那个值附近', () => {
+          it('when every value is the same the quantile is around that value', () => {
             const histogram = createHistogram(BOUNDARIES);
             for (let index = 0; index < 50; index += 1) histogram.observe(30);
             const median = histogram.quantile(0.5);
@@ -6206,7 +6224,7 @@ const stage12 = {
             expect(median).toBeLessThanOrEqual(50);
           });
 
-          it('超出所有边界的值进 +Inf 桶', () => {
+          it('values past every boundary go into the +Inf bucket', () => {
             const histogram = createHistogram([10, 50]);
             histogram.observe(9999);
             expect(histogram.count()).toBe(1);
@@ -6214,14 +6232,14 @@ const stage12 = {
             expect(histogram.quantile(0.99)).toBeGreaterThanOrEqual(50);
           });
 
-          it('q 为 0 和 1 的边界值', () => {
+          it('the boundary values of q = 0 and q = 1', () => {
             const histogram = createHistogram(BOUNDARIES);
             for (let index = 0; index < 10; index += 1) histogram.observe(30);
             expect(histogram.quantile(0)).toBeGreaterThanOrEqual(0);
             expect(histogram.quantile(1)).toBeLessThanOrEqual(1000);
           });
 
-          it('内存不随观测数增长 [gate:bounded-memory]', () => {
+          it('memory does not grow with the observation count [gate:bounded-memory]', () => {
             const histogram = createHistogram(BOUNDARIES);
             const before = histogram.size();
 
@@ -6236,8 +6254,8 @@ const stage12 = {
           });
         });
 
-        describe('阶段12 · 计时与归因', () => {
-          it('span 记录真实耗时', async () => {
+        describe('Stage 12 · Timing and attribution', () => {
+          it('a span records the real elapsed time', async () => {
             const tracer = createTracer();
             const span = tracer.span('sleep-120');
             await sleep(120);
@@ -6248,7 +6266,7 @@ const stage12 = {
             expect(tracer.spans()[0].durationMs).toBe(120);
           });
 
-          it('多个 span 各自计时', async () => {
+          it('several spans are timed independently', async () => {
             const tracer = createTracer();
             const first = tracer.span('a');
             await sleep(50);
@@ -6261,7 +6279,7 @@ const stage12 = {
             expect(tracer.spans().map((span) => span.durationMs)).toEqual([50, 200]);
           });
 
-          it('并行的 span 不会互相污染', async () => {
+          it('parallel spans do not contaminate each other', async () => {
             const tracer = createTracer();
             await Promise.all([
               (async () => {
@@ -6284,7 +6302,7 @@ const stage12 = {
             expect(byName.long).toBe(300);
           });
 
-          it('slowest 指出最慢的那一段', async () => {
+          it('slowest names the longest span', async () => {
             const tracer = createTracer();
             const plan: Array<[string, number]> = [['fast', 20], ['slower', 90], ['slowest', 240]];
             for (const entry of plan) {
@@ -6296,11 +6314,11 @@ const stage12 = {
             expect(tracer.slowest()).toEqual({ name: 'slowest', durationMs: 240 });
           });
 
-          it('没有记录时 slowest 返回 null', () => {
+          it('slowest returns null when nothing was recorded', () => {
             expect(createTracer().slowest()).toBeNull();
           });
 
-          it('把真实请求归因到最慢的那个 URL', async () => {
+          it('attributes a real request to the slowest URL', async () => {
             const tracer = createTracer();
             const histogram = createHistogram(BOUNDARIES);
 
@@ -6317,7 +6335,7 @@ const stage12 = {
             expect(histogram.quantile(0.99)).toBeGreaterThan(500);
           });
 
-          it('未结束的 span 不出现在结果里', async () => {
+          it('unfinished spans do not appear in the results', async () => {
             const tracer = createTracer();
             tracer.span('never-ended');
             const done = tracer.span('done');
@@ -6359,8 +6377,10 @@ const stage12 = {
 
         export function createHistogram(boundaries: number[]): Histogram {
           const bounds = boundaries.slice().sort((left, right) => left - right);
-          // 桶数固定：观测多少次都只是往这几个计数器上加，
-          // 内存与观测数无关。存全量样本才是那个会把进程撑爆的实现
+          // The bucket count is fixed: however many observations arrive, they only increment these
+          // few counters,
+          // so memory is independent of the observation count. Keeping every sample is the
+          // implementation that blows the process up
           const counts: number[] = [];
           for (let index = 0; index <= bounds.length; index += 1) counts.push(0);
           let total = 0;
@@ -6370,7 +6390,7 @@ const stage12 = {
             for (let index = 0; index < bounds.length; index += 1) {
               if (value <= bounds[index]) return index;
             }
-            // 超出所有边界的进 +Inf 桶
+            // Anything past every boundary goes into the +Inf bucket
             return bounds.length;
           }
 
@@ -6403,13 +6423,14 @@ const stage12 = {
                   continue;
                 }
                 if (counts[index] === 0) return last;
-                // +Inf 桶没有上边界，插不了值，只能退回最后一个有限边界
+                // The +Inf bucket has no upper bound and cannot be interpolated, so fall back to
+                // the last finite boundary
                 if (index === bounds.length) return last;
 
                 const lower = index === 0 ? 0 : bounds[index - 1];
                 const upper = bounds[index];
-                // 桶内线性插值：直接返回 upper 的话，
-                // 同一个桶里的 p10 和 p90 会是同一个数
+                // Linear interpolation within the bucket: returning upper directly would make
+                // p10 and p90 the same number for everything in one bucket
                 const withinBucket = (target - cumulative) / counts[index];
                 return lower + (upper - lower) * Math.min(1, Math.max(0, withinBucket));
               }
@@ -6439,12 +6460,13 @@ const stage12 = {
 
           return {
             span(name: string) {
-              // 起止时刻都存在这个闭包里，并行的 span 各有各的一份，不会互相覆盖
+              // Both timestamps live in this closure, so parallel spans each get their own and
+              // cannot overwrite each other
               const startedAt = now();
               let ended = false;
               return {
                 end(): void {
-                  // 结束两次不该记两条
+                  // Ending twice should not record two entries
                   if (ended) return;
                   ended = true;
                   records.push({ name, durationMs: now() - startedAt });

@@ -12,63 +12,67 @@ const { t, code, file, readonlyFile, spec, gate } = require('./_helpers');
 const contract = readonlyFile(
   'src/contract.ts',
   code`
-    /** 平台提供的契约（只读） */
+    /** Contract provided by the platform (read-only) */
 
-    /** 一个租户下的用户 */
+    /** A user within one tenant */
     export interface UserProfile {
       userId: string;
       tenantId: string;
-      /** 直接授予的角色名，角色之间的继承关系在第 8 关才出现 */
+      /** Directly granted role names; inheritance between roles only appears in stage 8 */
       roles: string[];
     }
 
-    /** 访问令牌解出来的身份。整套系统里「你是谁」只有这一种表示。 */
+    /**
+     * The identity decoded from an access token. This is the one and only representation of who you
+     * are in the whole system.
+     */
     export interface SessionClaims {
-      /** 用户 id */
+      /** User id */
       sub: string;
       tenantId: string;
-      /** 会话 id，登出与轮转都以它为单位 */
+      /** Session id; logout and rotation both work at this granularity */
       sid: string;
-      /** 签发时刻（虚拟时钟毫秒） */
+      /** Issued at (virtual clock milliseconds) */
       iat: number;
-      /** 过期时刻（虚拟时钟毫秒） */
+      /** Expires at (virtual clock milliseconds) */
       exp: number;
-      /** 撤销纪元，第 4 关开始有意义 */
+      /** Revocation epoch, meaningful from stage 4 on */
       epoch?: number;
     }
 
     /**
-     * 服务端状态在 store 里的集合名。
+     * Collection names for server-side state in the store.
      *
-     * 这些名字是**约定死的**：验收用例会直接按名字去 store 里数条目，
-     * 换个名字存等于把状态藏起来，验收看不到，也就不算数。
+     * These names are **fixed by convention**: the specs count entries in the store by name,
+     * so storing under a different name hides the state where the specs cannot see it, which means
+     * it does not count.
      */
     export const COLLECTIONS = {
-      /** 刷新令牌，key 是令牌 id */
+      /** Refresh tokens, keyed by token id */
       refresh: 'refresh',
-      /** 撤销记录，key 由你决定，但条目数会被数 */
+      /** Revocation records; the key is up to you, but the entries get counted */
       revocations: 'revocations',
-      /** 授权码 */
+      /** Authorization codes */
       codes: 'codes',
-      /** 业务数据，每条都带 tenant 字段，标明属于哪个租户 */
+      /** Business data; every row carries a tenant field naming the tenant it belongs to */
       documents: 'documents',
-      /** 审计日志 */
+      /** Audit log */
       audit: 'audit',
-      /** 登录失败计数与锁定状态 */
+      /** Failed-login counts and lockout state */
       lockouts: 'lockouts',
     };
 
-    /** 第 8 关：角色目录由平台注入，每次读取都会被计数 */
+    /** Stage 8: the role directory is injected by the platform and every read is counted */
     export interface RoleDefinition {
       name: string;
-      /** 这个角色直接持有的权限，支持 'doc:*' 这样的通配 */
+      /** Permissions this role holds directly; wildcards such as 'doc:*' are supported */
       permissions: string[];
-      /** 继承自哪些角色。图里可能有环。 */
+      /** Which roles it inherits from. The graph may contain cycles. */
       inherits: string[];
     }
 
     export interface RoleDirectory {
-      /** 读一个角色定义。不存在时返回 undefined。 */
+      /** Read one role definition. Returns undefined when it does not exist. */
       read(name: string): RoleDefinition | undefined;
     }
   `
@@ -78,20 +82,22 @@ const crypto = readonlyFile(
   'src/support/crypto.ts',
   code`
     /**
-     * 密码学工具箱（只读，平台提供）
+     * Cryptography toolkit (read-only, provided by the platform)
      *
-     * 它不是真的 SHA-256，但保留了这道题真正在乎的三个性质：
+     * It is not really SHA-256, but it keeps the three properties this project actually cares about:
      *
-     * - **慢哈希是慢的**：slowHash 按迭代轮数推进虚拟时钟，并把轮数记进
-     *   counters.kdfRounds。「你的登录到底做了多少轮 KDF」是能被量出来的；
-     * - **签名是不可伪造的**：不知道密钥就算不出 hmac，改一个字节签名就对不上；
-     * - **比较可以是常数时间的**：constantTimeEqual 每次调用都记一笔，
-     *   所以「有没有用它」也是能被量出来的。
+     * - **slow hashes are slow**: slowHash advances the virtual clock by the iteration count and
+     * records those rounds in
+     *   counters.kdfRounds. How many KDF rounds your login really does is something you can measure;
+     * - **signatures are unforgeable**: hmac cannot be computed without the key, and changing one
+     * byte breaks the signature;
+     * - **comparison can be constant-time**: constantTimeEqual records every call,
+     *   so whether you used it is measurable too.
      */
     import { random, sleep } from '@lab/env';
     import { count } from '@lab/metrics';
 
-    /** 多少轮迭代折算一毫秒虚拟耗时 */
+    /** How many iterations count as one millisecond of virtual time */
     const ROUNDS_PER_MS = 1000;
     const HEX = 16;
 
@@ -109,21 +115,21 @@ const crypto = readonlyFile(
       return head.toString(HEX).padStart(8, '0') + tail.toString(HEX).padStart(8, '0');
     }
 
-    /** 普通摘要：快，谁都能算，别拿它存密码 */
+    /** An ordinary digest: fast, computable by anyone — do not store passwords with it */
     export function sha256(text: string): string {
       return digest(text, 2166136261);
     }
 
-    /** 带密钥的摘要。密钥不对，签名就不对。 */
+    /** A keyed digest. Wrong key, wrong signature. */
     export function hmac(secret: string, message: string): string {
       return digest('k:' + secret + '|m:' + message, 40389);
     }
 
     /**
-     * 慢哈希（PBKDF2 / bcrypt / argon2 的角色）
+     * Slow hash (playing the part of PBKDF2 / bcrypt / argon2)
      *
-     * 轮数越高越慢，这正是它存在的意义：让离线爆破的成本跟着涨。
-     * 每次调用把轮数计进 counters.kdfRounds，并按轮数推进虚拟时钟。
+     * More rounds means slower, which is exactly the point: it makes offline cracking cost more too.
+     * Every call records the rounds in counters.kdfRounds and advances the virtual clock accordingly.
      */
     export async function slowHash(password: string, salt: string, rounds: number): Promise<string> {
       const total = Math.max(1, Math.floor(rounds));
@@ -142,31 +148,31 @@ const crypto = readonlyFile(
     }
 
     /**
-     * 常数时间比较：无论在第几个字符上不同，耗时都一样。
+     * Constant-time comparison: it takes the same time no matter which character differs first.
      *
-     * 每次调用记一笔 counters.constantTimeCompares，用例据此判断
-     * 你是真的用了它，还是写了个会提前返回的 === 。
+     * Every call records a counters.constantTimeCompares, which is how the specs tell
+     * whether you really used it or wrote an === that returns early.
      */
     export function constantTimeEqual(left: string, right: string): boolean {
       count('constantTimeCompares');
       return sameBytes(left, right);
     }
 
-    /** 可复现的随机盐。同一个用例里两次调用一定不同。 */
+    /** Reproducible random salt. Two calls within one spec are always different. */
     export function randomSalt(): string {
       return digest('salt:' + random() + ':' + random(), 4294967291).slice(0, 12);
     }
 
-    /** 可复现的随机 id，用来当会话 id、令牌 id、授权码 */
+    /** Reproducible random id, for session ids, token ids and authorization codes */
     export function randomId(prefix: string): string {
       return prefix + '_' + digest('id:' + random(), 1103515245).slice(0, 10);
     }
 
     /**
-     * 令牌分段的编解码：十六进制，**可逆、不加密**。
+     * Encoding for token segments: hexadecimal, **reversible and unencrypted**.
      *
-     * 真实 JWT 用的 base64url 也一样是可逆的。把秘密写进载荷，
-     * 等于把它明文发给了持有令牌的任何人。
+     * The base64url that real JWTs use is just as reversible. Putting a secret in the payload
+     * sends it in the clear to anyone holding the token.
      */
     export function encodeSegment(value: unknown): string {
       const text = JSON.stringify(value);
@@ -189,7 +195,7 @@ const crypto = readonlyFile(
       }
     }
 
-    /** 非对称密钥对。第 7 关验 ID Token 时用。 */
+    /** An asymmetric key pair, used to verify ID tokens in stage 7. */
     export interface KeyPair {
       kid: string;
       privateKey: string;
@@ -200,17 +206,19 @@ const crypto = readonlyFile(
       return { kid, privateKey: 'sk-' + kid, publicKey: 'pk-' + kid };
     }
 
-    /** 用私钥签名 */
+    /** Sign with the private key */
     export function signRsa(privateKey: string, message: string): string {
       return hmac(privateKey, message);
     }
 
     /**
-     * 用公钥验签。
+     * Verify with the public key.
      *
-     * 注意公钥**只能验、不能签** —— 这正是非对称的意义，也是第 7 关那个
-     * 「算法混淆」攻击的前提：攻击者拿得到公钥，如果你把它当 HMAC 密钥用，
-     * 他就能签出你认可的令牌。
+     * Note that a public key **can only verify, never sign** — which is the whole point of
+     * asymmetric crypto, and also
+     * the premise of the algorithm-confusion attack in stage 7: the attacker can obtain the public
+     * key, and if you use it
+     * as an HMAC secret, they can sign tokens you will accept.
      */
     export function verifyRsa(publicKey: string, message: string, signature: string): boolean {
       const derived = 'sk-' + publicKey.slice('pk-'.length);
@@ -223,32 +231,33 @@ const store = readonlyFile(
   'src/support/store.ts',
   code`
     /**
-     * 服务端状态存储（只读，平台提供）
+     * Server-side state store (read-only, provided by the platform)
      *
-     * 把它当成数据库：进程重启后还在的东西才算存进来了。
-     * 用例会用同一个 store 重建一个新的服务实例，藏在模块变量里的状态活不过那一步。
+     * Treat it as a database: only what survives a process restart really got stored.
+     * The specs rebuild a fresh service instance against the same store, and state hidden in module
+     * variables does not survive that.
      *
-     * 它还带一个租户维度的记账：**记录里带 tenant 字段就说明它属于那个租户**，
-     * 读它的时候作用域对不上（或者压根没带作用域），就计一笔
-     * counters.crossTenantReads。第 11 关的门槛量的就是它。
+     * It also keeps per-tenant accounting: **a record carrying a tenant field belongs to that tenant**,
+     * and reading it with a mismatched scope (or no scope at all) records a
+     * counters.crossTenantReads. That is exactly what the stage 11 gate measures.
      */
     import { count } from '@lab/metrics';
 
     export interface StoreScope {
-      /** 这次读取代表哪个租户。不传 = 没带租户，等同于「谁的都读」。 */
+      /** Which tenant this read is on behalf of. Omitted = no tenant, which means reading everyone's. */
       tenantId?: string;
     }
 
-    /** 存进去的东西都是普通对象；带 tenant 字段的会参与租户记账 */
+    /** Everything stored is a plain object; those with a tenant field take part in tenant accounting */
     export type StoreRecord = Record<string, unknown>;
 
     export interface Store {
       put(collection: string, key: string, value: StoreRecord): void;
       get(collection: string, key: string, scope?: StoreScope): StoreRecord | undefined;
-      /** 列出一个集合里的全部记录 */
+      /** List every record in a collection */
       list(collection: string, scope?: StoreScope): StoreRecord[];
       remove(collection: string, key: string): void;
-      /** 集合里有多少条。用例用它数「你留下了多少状态」。 */
+      /** How many records a collection holds. The specs use it to count the state you left behind. */
       size(collection: string): number;
       keys(collection: string): string[];
     }
@@ -264,7 +273,7 @@ const store = readonlyFile(
         return created;
       }
 
-      /** 记录带 tenant、而这次读取不是同一个租户 —— 这就是一次越权读 */
+      /** The record carries a tenant and this read is not for that tenant — that is a cross-tenant read */
       function audit(record: StoreRecord, scope?: StoreScope): void {
         const owner = record.tenant;
         if (typeof owner !== 'string') return;
@@ -516,17 +525,17 @@ const stage1 = {
       code`
         import { constantTimeEqual, randomSalt, slowHash } from './support/crypto';
 
-        /** 一条凭据记录。注意里面没有密码。 */
+        /** One credential record. Note that it holds no password. */
         export interface CredentialRecord {
           userId: string;
           salt: string;
           hash: string;
-          /** 这条记录是用多少轮算出来的，验的时候要用同一个数 */
+          /** How many rounds this record was computed with; verification has to use the same number */
           rounds: number;
         }
 
         export interface CredentialOptions {
-          /** 不传就用你自己的默认值 —— 那个默认值会被门槛量 */
+          /** Omit it to use your own default — and that default is what the gate measures */
           rounds?: number;
         }
 
@@ -537,7 +546,7 @@ const stage1 = {
         }
 
         export function createCredentialStore(options: CredentialOptions = {}): CredentialStore {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -552,22 +561,22 @@ const stage1 = {
         import { now } from '@lab/env';
         import { count, getCounters } from '@lab/metrics';
 
-        describe('阶段1 · 密码怎么存', () => {
-          it('注册之后正确的密码能通过', async () => {
+        describe('Stage 1 · How passwords are stored', () => {
+          it('the right password passes after registering', async () => {
             const store = createCredentialStore();
             await store.register('alice', 'correct horse battery');
 
             expect(await store.verify('alice', 'correct horse battery')).toBe(true);
           });
 
-          it('密码差一个字符就不通过', async () => {
+          it('a password one character off does not pass', async () => {
             const store = createCredentialStore();
             await store.register('alice', 'correct horse battery');
 
             expect(await store.verify('alice', 'correct horse batterY')).toBe(false);
           });
 
-          it('存下来的东西里没有明文密码', async () => {
+          it('nothing stored contains the plaintext password', async () => {
             const store = createCredentialStore();
             await store.register('alice', 'hunter2-secret');
 
@@ -576,7 +585,7 @@ const stage1 = {
             expect(JSON.stringify(record)).not.toContain('hunter2-secret');
           });
 
-          it('同一个密码，两个用户存下来的哈希不同', async () => {
+          it('the same password stores different hashes for two users', async () => {
             const store = createCredentialStore();
             await store.register('alice', 'same-password');
             await store.register('bob', 'same-password');
@@ -587,7 +596,7 @@ const stage1 = {
             expect(alice.hash).not.toBe(bob.hash);
           });
 
-          it('默认轮数足够慢 [gate:kdf]', async () => {
+          it('the default round count is slow enough [gate:kdf]', async () => {
             const store = createCredentialStore();
             await store.register('alice', 'correct horse battery');
 
@@ -595,7 +604,7 @@ const stage1 = {
             expect(record.rounds).toBeGreaterThanOrEqual(100000);
           });
 
-          it('用户不存在时也要付同样的代价 [gate:timing]', async () => {
+          it('a nonexistent user costs exactly the same [gate:timing]', async () => {
             const store = createCredentialStore();
             await store.register('alice', 'correct horse battery');
 
@@ -607,12 +616,12 @@ const stage1 = {
             expect(await store.verify('nobody-here', 'wrong-password')).toBe(false);
             const unknown = now() - beforeUnknown;
 
-            // 这个差值就是门槛量的东西：两条路径的耗时必须一模一样
+            // This difference is what the gate measures: the two paths must take identical time
             count('timingGapMs', Math.abs(known - unknown));
             expect(known).toBeGreaterThan(0);
           });
 
-          it('比较走的是常数时间比较', async () => {
+          it('the comparison goes through the constant-time comparison', async () => {
             const store = createCredentialStore();
             await store.register('alice', 'correct horse battery');
 
@@ -623,7 +632,7 @@ const stage1 = {
             expect(after).toBeGreaterThan(before);
           });
 
-          it('改密码之后旧密码失效，并且换了新盐', async () => {
+          it('the old password stops working after a change, and the salt is new', async () => {
             const store = createCredentialStore();
             await store.register('alice', 'old-password');
             const before = store.record('alice');
@@ -636,14 +645,14 @@ const stage1 = {
             expect(after.salt).not.toBe(before.salt);
           });
 
-          it('用户不存在返回 false，而不是抛错', async () => {
+          it('a nonexistent user returns false rather than throwing', async () => {
             const store = createCredentialStore();
 
             expect(await store.verify('ghost', 'anything')).toBe(false);
             expect(store.record('ghost')).toBeUndefined();
           });
 
-          it('重复验证不会改坏已经存好的记录', async () => {
+          it('verifying repeatedly does not corrupt the stored record', async () => {
             const store = createCredentialStore();
             await store.register('alice', 'correct horse battery');
             const before = store.record('alice');
@@ -656,7 +665,7 @@ const stage1 = {
             expect(after.hash).toBe(before.hash);
           });
 
-          it('空密码也照常处理，不会被当成「没设密码」', async () => {
+          it('an empty password is handled normally and not treated as no password set', async () => {
             const store = createCredentialStore();
             await store.register('alice', '');
 
@@ -710,9 +719,12 @@ const stage1 = {
           record(userId: string): CredentialRecord | undefined;
         }
 
-        /** 默认轮数。调高它不会让老记录失效，因为轮数存在每条记录里。 */
+        /**
+         * The default round count. Raising it does not invalidate old records, because the rounds
+         * live in each record.
+         */
         const DEFAULT_ROUNDS = 120000;
-        /** 轮数下限：调用方传得再低也不接受 */
+        /** A floor on rounds: however low a caller asks for, it is not accepted */
         const MIN_ROUNDS = 100000;
 
         export function createCredentialStore(options: CredentialOptions = {}): CredentialStore {
@@ -720,10 +732,10 @@ const stage1 = {
           const records = new Map<string, CredentialRecord>();
 
           /**
-           * 查无此人时顶上来的假记录。
+           * The dummy record that stands in when there is no such user.
            *
-           * 它的 salt 和 rounds 与真实记录同规格，所以哈希一样贵；
-           * hash 用一个真实摘要不可能取到的值，所以永远比不中。
+           * Its salt and rounds match a real record, so hashing costs the same;
+           * its hash is a value a real digest can never produce, so it never matches.
            */
           const decoy: CredentialRecord = {
             userId: '',
@@ -734,7 +746,8 @@ const stage1 = {
 
           return {
             async register(userId: string, password: string): Promise<void> {
-              // 每次注册都重新取盐，改密码于是自动换盐
+              // A fresh salt on every registration, which makes a password change rotate the salt
+              // automatically
               const salt = randomSalt();
               const hash = await slowHash(password, salt, rounds);
               records.set(userId, { userId, salt, hash, rounds });
@@ -742,7 +755,7 @@ const stage1 = {
 
             async verify(userId: string, password: string): Promise<boolean> {
               const known = records.get(userId);
-              // 两条路径在这里合流：下面的代码不知道用户到底存不存在
+              // The two paths converge here: nothing below knows whether the user exists
               const target = known || decoy;
               const attempt = await slowHash(password, target.salt, target.rounds);
               return constantTimeEqual(attempt, target.hash);
@@ -1012,29 +1025,29 @@ const stage2 = {
         import { now } from '@lab/env';
 
         export interface SessionIssuerOptions {
-          /** 签名密钥。换一把密钥，之前签的令牌就都验不过了。 */
+          /** Signing key. Change the key and every previously signed token stops verifying. */
           secret: string;
-          /** 访问令牌的存活时长（毫秒） */
+          /** Access token lifetime in milliseconds */
           ttlMs: number;
         }
 
         export interface SessionInput {
           userId: string;
           tenantId: string;
-          /** 不传就自己生成一个 */
+          /** Generated for you when omitted */
           sid?: string;
-          /** 撤销纪元，第 4 关才用得上。给了就原样带进 claims。 */
+          /** Revocation epoch, only needed from stage 4. When given, it is carried into the claims as-is. */
           epoch?: number;
         }
 
         export interface SessionIssuer {
           issue(input: SessionInput): string;
-          /** 验不过一律返回 null，不要抛异常 */
+          /** Anything that fails verification returns null; do not throw */
           verify(token: string): SessionClaims | null;
         }
 
         export function createSessionIssuer(options: SessionIssuerOptions): SessionIssuer {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -1057,15 +1070,15 @@ const stage2 = {
           return createSessionIssuer({ secret, ttlMs });
         }
 
-        /** 伪造的令牌只要被放行就记一笔，门槛数的就是它 */
+        /** Every forged token that gets through is recorded, and that is what the gate counts */
         function expectRejected(issuer: any, token: string): void {
           const claims = issuer.verify(token);
           if (claims) count('forgedAccepted');
           expect(claims).toBeNull();
         }
 
-        describe('阶段2 · 无状态会话令牌', () => {
-          it('签出来的令牌验得回原样的身份', () => {
+        describe('Stage 2 · Stateless session tokens', () => {
+          it('a signed token verifies back to the same identity', () => {
             const issuer = makeIssuer();
             const token = issuer.issue({ userId: 'alice', tenantId: 'acme' });
 
@@ -1076,7 +1089,7 @@ const stage2 = {
             expect(claims.exp).toBe(claims.iat + TTL);
           });
 
-          it('每次签发的会话 id 都不同', () => {
+          it('every issue produces a different session id', () => {
             const issuer = makeIssuer();
             const first = issuer.verify(issuer.issue({ userId: 'alice', tenantId: 'acme' }));
             const second = issuer.verify(issuer.issue({ userId: 'alice', tenantId: 'acme' }));
@@ -1085,21 +1098,21 @@ const stage2 = {
             expect(second.sid).not.toBe(first.sid);
           });
 
-          it('调用方指定的会话 id 会被带上', () => {
+          it('a session id specified by the caller is carried through', () => {
             const issuer = makeIssuer();
             const token = issuer.issue({ userId: 'alice', tenantId: 'acme', sid: 'sid-fixed' });
 
             expect(issuer.verify(token).sid).toBe('sid-fixed');
           });
 
-          it('调用方给了撤销纪元就原样带上', () => {
+          it('a revocation epoch given by the caller is carried through as-is', () => {
             const issuer = makeIssuer();
 
             expect(issuer.verify(issuer.issue({ userId: 'alice', tenantId: 'acme', epoch: 7 })).epoch).toBe(7);
             expect(issuer.verify(issuer.issue({ userId: 'alice', tenantId: 'acme' })).epoch).toBeUndefined();
           });
 
-          it('换个租户重新编码载荷，签名就对不上了', () => {
+          it('re-encoding the payload with a different tenant breaks the signature', () => {
             const issuer = makeIssuer();
             const token = issuer.issue({ userId: 'alice', tenantId: 'acme' });
             const signature = token.split('.')[1];
@@ -1115,7 +1128,7 @@ const stage2 = {
             expectRejected(issuer, stolen + '.' + signature);
           });
 
-          it('用别的密钥签的令牌不被接受', () => {
+          it('a token signed with a different key is not accepted', () => {
             const issuer = makeIssuer();
             const payload = encodeSegment({
               sub: 'mallory',
@@ -1128,23 +1141,23 @@ const stage2 = {
             expectRejected(issuer, payload + '.' + hmac('some-other-key', payload));
           });
 
-          it('签名被抹掉的令牌不被接受', () => {
+          it('a token with its signature stripped is not accepted', () => {
             const issuer = makeIssuer();
             const token = issuer.issue({ userId: 'alice', tenantId: 'acme' });
 
             expectRejected(issuer, token.split('.')[0] + '.');
           });
 
-          it('过期的令牌不被接受', async () => {
+          it('an expired token is not accepted', async () => {
             const issuer = makeIssuer();
             const token = issuer.issue({ userId: 'alice', tenantId: 'acme' });
 
             await sleep(TTL);
-            // 到点即失效，不是「到点之后再宽限一会儿」
+            // It expires exactly on time, with no grace period afterwards
             expectRejected(issuer, token);
           });
 
-          it('还没到期的令牌照常接受', async () => {
+          it('a token not yet expired is accepted as usual', async () => {
             const issuer = makeIssuer();
             const token = issuer.issue({ userId: 'alice', tenantId: 'acme' });
 
@@ -1152,7 +1165,7 @@ const stage2 = {
             expect(issuer.verify(token)).toBeTruthy();
           });
 
-          it('畸形输入返回 null，不抛异常', () => {
+          it('malformed input returns null rather than throwing', () => {
             const issuer = makeIssuer();
 
             expect(issuer.verify('')).toBeNull();
@@ -1161,18 +1174,19 @@ const stage2 = {
             expect(issuer.verify('zzzz.' + hmac(SECRET, 'zzzz'))).toBeNull();
           });
 
-          it('换一个新的实例，同一把密钥照样验得过', () => {
+          it('a fresh instance with the same key still verifies it', () => {
             const token = makeIssuer().issue({ userId: 'alice', tenantId: 'acme' });
 
-            // 服务重启、请求打到另一台机器：无状态令牌不该受影响
+            // Service restart, request landing on another machine: a stateless token should not care
             expect(makeIssuer().verify(token).sub).toBe('alice');
           });
 
-          it('载荷是可读的，签名保证的是不可篡改', () => {
+          it('the payload is readable; the signature guarantees integrity, not secrecy', () => {
             const issuer = makeIssuer();
             const token = issuer.issue({ userId: 'alice', tenantId: 'acme' });
 
-            // 这不是 bug：任何拿到令牌的人都能读出载荷，所以里面不能放秘密
+            // This is not a bug: anyone holding the token can read the payload, which is why no
+            // secret belongs in it
             expect(decodeSegment(token.split('.')[0])).toEqual(issuer.verify(token));
           });
         });
@@ -1240,7 +1254,7 @@ const stage2 = {
                 iat: issuedAt,
                 exp: issuedAt + options.ttlMs,
               };
-              // 纪元是可选的：第 4 关之前没人会传
+              // The epoch is optional: nobody passes one before stage 4
               if (typeof input.epoch === 'number') claims.epoch = input.epoch;
 
               const payload = encodeSegment(claims);
@@ -1252,12 +1266,13 @@ const stage2 = {
               const parts = token.split(SEPARATOR);
               if (parts.length !== SEGMENTS) return null;
 
-              // 验签是入口：下面这行之前，payload 只是一串攻击者可以随便写的字符
+              // Verification is the gate: before this line, payload is just a string an attacker
+              // can write at will
               if (!constantTimeEqual(sign(parts[0]), parts[1])) return null;
 
               const claims = decodeSegment(parts[0]) as SessionClaims | null;
               if (!claims || typeof claims.exp !== 'number') return null;
-              // 到点即失效：exp 是「最后一刻的下一刻」
+              // Expires exactly on time: exp is the first instant that is too late
               if (now() >= claims.exp) return null;
 
               return claims;
@@ -1538,7 +1553,7 @@ const stage3 = {
         import { now } from '@lab/env';
 
         export interface RefreshOptions {
-          /** 刷新令牌的存活时长（毫秒） */
+          /** Refresh token lifetime in milliseconds */
           ttlMs: number;
         }
 
@@ -1549,7 +1564,7 @@ const stage3 = {
 
         export interface RefreshService {
           start(input: { userId: string; tenantId: string }): TokenPair;
-          /** 换一对新的；旧的立刻作废。任何失败都返回 null。 */
+          /** Exchange for a fresh pair; the old one is void immediately. Any failure returns null. */
           rotate(refreshToken: string): TokenPair | null;
         }
 
@@ -1558,7 +1573,7 @@ const stage3 = {
           issuer: SessionIssuer,
           options: RefreshOptions
         ): RefreshService {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -1588,8 +1603,8 @@ const stage3 = {
           return service.start({ userId: 'alice', tenantId: 'acme' });
         }
 
-        describe('阶段3 · 刷新令牌轮转', () => {
-          it('登录拿到一对令牌，访问令牌验得过', () => {
+        describe('Stage 3 · Refresh token rotation', () => {
+          it('login returns a pair and the access token verifies', () => {
             const service = makeService(createStore());
             const pair = login(service);
 
@@ -1598,7 +1613,7 @@ const stage3 = {
             expect(pair.refreshToken).toBeTruthy();
           });
 
-          it('刷新换回一对全新的令牌', () => {
+          it('refreshing returns a brand-new pair', () => {
             const service = makeService(createStore());
             const first = login(service);
 
@@ -1610,7 +1625,7 @@ const stage3 = {
             expect(issuer.verify(second.accessToken).sub).toBe('alice');
           });
 
-          it('同一条链上的访问令牌共用一个会话 id', () => {
+          it('access tokens on one chain share a session id', () => {
             const service = makeService(createStore());
             const issuer = createSessionIssuer({ secret: SECRET, ttlMs: 60000 });
             const first = login(service);
@@ -1619,7 +1634,7 @@ const stage3 = {
             expect(issuer.verify(second.accessToken).sid).toBe(issuer.verify(first.accessToken).sid);
           });
 
-          it('轮转之后旧的刷新令牌立刻失效', () => {
+          it('the old refresh token is void immediately after rotation', () => {
             const service = makeService(createStore());
             const first = login(service);
             service.rotate(first.refreshToken);
@@ -1629,23 +1644,24 @@ const stage3 = {
             expect(replayed).toBeNull();
           });
 
-          it('重放旧令牌会让整个族连坐作废 [gate:family]', () => {
+          it('replaying an old token voids the entire family [gate:family]', () => {
             const service = makeService(createStore());
             const first = login(service);
             const second = service.rotate(first.refreshToken);
 
-            // 小偷拿着被复制的旧令牌来了
+            // The thief turns up with the copied old token
             const stolen = service.rotate(first.refreshToken);
             if (stolen) count('replayAccepted');
             expect(stolen).toBeNull();
 
-            // 真用户手上的最新那张也必须一起作废：这时候分不清谁是谁
+            // The newest one, in the real user's hands, has to be voided too: at this point the two
+            // are indistinguishable
             const legit = service.rotate(second.refreshToken);
             if (!legit) count('familyRevoked');
             expect(legit).toBeNull();
           });
 
-          it('连坐只影响这一条链，别人的会话不受牵连', () => {
+          it('the family void affects only this chain and leaves other sessions alone', () => {
             const store = createStore();
             const service = makeService(store);
             const alice = login(service);
@@ -1657,7 +1673,7 @@ const stage3 = {
             expect(service.rotate(bob.refreshToken)).toBeTruthy();
           });
 
-          it('没见过的刷新令牌返回 null', () => {
+          it('an unrecognised refresh token returns null', () => {
             const service = makeService(createStore());
             login(service);
 
@@ -1666,7 +1682,7 @@ const stage3 = {
             expect(forged).toBeNull();
           });
 
-          it('过期的刷新令牌返回 null', async () => {
+          it('an expired refresh token returns null', async () => {
             const service = makeService(createStore());
             const pair = login(service);
 
@@ -1674,7 +1690,7 @@ const stage3 = {
             expect(service.rotate(pair.refreshToken)).toBeNull();
           });
 
-          it('库里存的是摘要，不是令牌原文', () => {
+          it('the store holds a digest, not the token itself', () => {
             const store = createStore();
             const service = makeService(store);
             const pair = login(service);
@@ -1683,16 +1699,16 @@ const stage3 = {
             expect(dump).not.toContain(pair.refreshToken);
           });
 
-          it('状态在 store 里，换个服务实例照样认得这条链', () => {
+          it('the state lives in the store, so a fresh service instance recognises the chain', () => {
             const store = createStore();
             const pair = login(makeService(store));
 
-            // 服务重启、请求打到另一台机器
+            // Service restart, request landing on another machine
             const rebuilt = makeService(store);
             expect(rebuilt.rotate(pair.refreshToken)).toBeTruthy();
           });
 
-          it('连坐之后再重放，依然拒绝', () => {
+          it('replaying again after the family void is still rejected', () => {
             const service = makeService(createStore());
             const first = login(service);
             service.rotate(first.refreshToken);
@@ -1748,13 +1764,13 @@ const stage3 = {
           rotate(refreshToken: string): TokenPair | null;
         }
 
-        /** 存进 store 的一条刷新令牌记录。注意没有令牌原文。 */
+        /** One refresh token record in the store. Note it does not hold the token itself. */
         interface RefreshRecord {
           family: string;
           sub: string;
           tenantId: string;
           exp: number;
-          /** 用过了就标记，但不删 —— 删了就发现不了重放 */
+          /** Marked once used, but not deleted — deleting it makes replay undetectable */
           used: boolean;
         }
 
@@ -1775,7 +1791,7 @@ const stage3 = {
             return { accessToken: issuer.issue({ userId: sub, tenantId, sid: family }), refreshToken };
           }
 
-          /** 重放告警：这条链上的所有令牌一起作废，包括还没用过的那张 */
+          /** Replay alarm: every token on this chain is voided together, including the one not yet used */
           function revokeFamily(family: string): void {
             for (const key of store.keys(COLLECTIONS.refresh)) {
               const record = store.get(COLLECTIONS.refresh, key) as unknown as RefreshRecord | undefined;
@@ -1785,7 +1801,7 @@ const stage3 = {
 
           return {
             start(input: { userId: string; tenantId: string }): TokenPair {
-              // 族 id 同时就是会话 id：一次登录 = 一条链
+              // The family id doubles as the session id: one login = one chain
               return mint(randomId('sid'), input.userId, input.tenantId);
             },
 
@@ -1794,7 +1810,7 @@ const stage3 = {
               if (!record) return null;
 
               if (record.used) {
-                // 同一张出现了第二次 —— 它被复制过，两边都不能再信
+                // The same one showed up twice — it has been copied, and neither side can be trusted now
                 revokeFamily(record.family);
                 return null;
               }
@@ -2099,18 +2115,18 @@ const stage4 = {
         import { now } from '@lab/env';
 
         export interface RevocationGuard {
-          /** 签发前取当前纪元，调用方把它写进 claims.epoch */
+          /** Read the current epoch before issuing; the caller writes it into claims.epoch */
           stamp(userId: string): number;
-          /** 登出一个会话 */
+          /** Log one session out */
           revokeSession(claims: SessionClaims): void;
-          /** 踢掉这个用户的全部会话 */
+          /** Kick every session belonging to this user */
           revokeUser(userId: string): void;
-          /** 验签之后再问一句：这张还作数吗 */
+          /** After verifying the signature, ask one more question: does this one still count? */
           isActive(claims: SessionClaims): boolean;
         }
 
         export function createRevocationGuard(store: Store): RevocationGuard {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -2135,27 +2151,27 @@ const stage4 = {
           return createSessionIssuer({ secret: SECRET, ttlMs: TTL });
         }
 
-        /** 走一遍完整的签发：取纪元 → 签 → 验回 claims */
+        /** Run a full issue: read the epoch, sign, verify back to claims */
         function loginAs(issuer: any, guard: any, userId: string) {
           const token = issuer.issue({ userId, tenantId: 'acme', epoch: guard.stamp(userId) });
           return issuer.verify(token);
         }
 
-        /** 撤销之后还被放行，就是门槛要数的那件事 */
+        /** Getting through after revocation is exactly what the gate counts */
         function expectRevoked(guard: any, claims: any): void {
           if (guard.isActive(claims)) count('revokedAccepted');
           expect(guard.isActive(claims)).toBe(false);
         }
 
-        describe('阶段4 · 撤销与登出', () => {
-          it('没撤销过的令牌照常有效', () => {
+        describe('Stage 4 · Revocation and logout', () => {
+          it('a token that was never revoked stays valid', () => {
             const guard = createRevocationGuard(createStore());
             const claims = loginAs(makeIssuer(), guard, 'alice');
 
             expect(guard.isActive(claims)).toBe(true);
           });
 
-          it('登出之后这张令牌立刻失效', () => {
+          it('the token is invalid immediately after logout', () => {
             const guard = createRevocationGuard(createStore());
             const claims = loginAs(makeIssuer(), guard, 'alice');
 
@@ -2163,7 +2179,7 @@ const stage4 = {
             expectRevoked(guard, claims);
           });
 
-          it('单点登出不影响同一个用户的其他会话', () => {
+          it("a single logout does not affect the user's other sessions", () => {
             const issuer = makeIssuer();
             const guard = createRevocationGuard(createStore());
             const laptop = loginAs(issuer, guard, 'alice');
@@ -2175,7 +2191,7 @@ const stage4 = {
             expect(guard.isActive(phone)).toBe(true);
           });
 
-          it('踢掉用户会让他所有的旧令牌一起失效', () => {
+          it('kicking a user invalidates all of their old tokens', () => {
             const issuer = makeIssuer();
             const guard = createRevocationGuard(createStore());
             const sessions = [loginAs(issuer, guard, 'alice'), loginAs(issuer, guard, 'alice')];
@@ -2185,7 +2201,7 @@ const stage4 = {
             for (const claims of sessions) expectRevoked(guard, claims);
           });
 
-          it('踢掉之后新签发的令牌照常可用', () => {
+          it('tokens issued after the kick work as usual', () => {
             const issuer = makeIssuer();
             const guard = createRevocationGuard(createStore());
             const before = loginAs(issuer, guard, 'alice');
@@ -2197,7 +2213,7 @@ const stage4 = {
             expect(guard.isActive(after)).toBe(true);
           });
 
-          it('连着踢两次，中间签发的也失效', () => {
+          it('kicking twice invalidates what was issued in between', () => {
             const issuer = makeIssuer();
             const guard = createRevocationGuard(createStore());
 
@@ -2208,10 +2224,10 @@ const stage4 = {
             expectRevoked(guard, middle);
           });
 
-          it('没带纪元的老令牌按 0 处理，同样会被踢掉', () => {
+          it('an old token with no epoch is treated as 0 and gets kicked too', () => {
             const issuer = makeIssuer();
             const guard = createRevocationGuard(createStore());
-            // 第 4 关之前签的令牌没有 epoch 字段
+            // Tokens signed before stage 4 have no epoch field
             const legacy = issuer.verify(issuer.issue({ userId: 'alice', tenantId: 'acme' }));
 
             expect(guard.isActive(legacy)).toBe(true);
@@ -2219,7 +2235,7 @@ const stage4 = {
             expectRevoked(guard, legacy);
           });
 
-          it('踢掉一个用户不影响别人', () => {
+          it('kicking one user does not affect anyone else', () => {
             const issuer = makeIssuer();
             const guard = createRevocationGuard(createStore());
             const alice = loginAs(issuer, guard, 'alice');
@@ -2231,7 +2247,7 @@ const stage4 = {
             expect(guard.isActive(bob)).toBe(true);
           });
 
-          it('撤销状态在 store 里，换个实例照样生效', () => {
+          it('revocation state lives in the store and works from a fresh instance', () => {
             const store = createStore();
             const claims = loginAs(makeIssuer(), createRevocationGuard(store), 'alice');
 
@@ -2240,7 +2256,7 @@ const stage4 = {
             expectRevoked(createRevocationGuard(store), claims);
           });
 
-          it('六次登录加两次撤销，留下的记录寥寥无几 [gate:entries]', () => {
+          it('six logins and two revocations leave barely any records behind [gate:entries]', () => {
             const store = createStore();
             const issuer = makeIssuer();
             const g = createRevocationGuard(store);
@@ -2248,7 +2264,7 @@ const stage4 = {
             const alice = [0, 1, 2].map(() => loginAs(issuer, g, 'alice'));
             const bob = [0, 1, 2].map(() => loginAs(issuer, g, 'bob'));
 
-            // 一次踢掉 alice 的三个会话，外加登出 bob 的一台设备
+            // One kick covering alice's three sessions, plus logging one of bob's devices out
             g.revokeUser('alice');
             g.revokeSession(bob[0]);
 
@@ -2256,11 +2272,11 @@ const stage4 = {
             expectRevoked(g, bob[0]);
             expect(g.isActive(bob[1])).toBe(true);
 
-            // 门槛量的就是这个数：登录次数不该变成记录条数
+            // This count is what the gate measures: login count must not turn into record count
             count('revocationEntries', store.size(COLLECTIONS.revocations));
           });
 
-          it('令牌自然过期之后，那条登出记录会被清掉', async () => {
+          it('the logout record is cleaned up once the token expires naturally', async () => {
             const store = createStore();
             const issuer = makeIssuer();
             const g = createRevocationGuard(store);
@@ -2269,7 +2285,7 @@ const stage4 = {
             expect(store.size(COLLECTIONS.revocations)).toBe(1);
 
             await sleep(TTL);
-            // 那张令牌自己已经过期了，这条记录再也拦不到任何东西
+            // That token has expired on its own, so this record can never stop anything again
             g.revokeSession(loginAs(issuer, g, 'bob'));
             expect(store.size(COLLECTIONS.revocations)).toBe(1);
           });
@@ -2312,7 +2328,7 @@ const stage4 = {
           isActive(claims: SessionClaims): boolean;
         }
 
-        /** 两类记录共用一个集合，靠 key 前缀分开 */
+        /** Both kinds of record share one collection, separated by key prefix */
         const USER_KEY = 'user:';
         const SESSION_KEY = 'sid:';
 
@@ -2323,8 +2339,8 @@ const stage4 = {
           }
 
           /**
-           * 清理：令牌自己都过期了，那条登出记录就再也拦不到东西。
-           * 只在写路径上做 —— 读路径要保持「不写任何东西」。
+           * Cleanup: once the token itself has expired, its logout record can never stop anything again.
+           * Done on the write path only — the read path must stay free of writes.
            */
           function prune(): void {
             for (const key of store.keys(COLLECTIONS.revocations)) {
@@ -2336,26 +2352,26 @@ const stage4 = {
 
           return {
             stamp(userId: string): number {
-              // 注意这里只读不写：登录不该在服务端留下痕迹
+              // Note this reads without writing: logging in should leave no trace on the server
               return epochOf(userId);
             },
 
             revokeSession(claims: SessionClaims): void {
               prune();
-              // 存下 exp，将来才知道这条什么时候可以扔
+              // Store exp so we know later when this record can be thrown away
               store.put(COLLECTIONS.revocations, SESSION_KEY + claims.sid, { exp: claims.exp });
             },
 
             revokeUser(userId: string): void {
               prune();
-              // 一个整数加一，这个用户已经签出去的令牌全部作废
+              // One integer increment voids every token already issued to this user
               store.put(COLLECTIONS.revocations, USER_KEY + userId, { epoch: epochOf(userId) + 1 });
             },
 
             isActive(claims: SessionClaims): boolean {
               if (!claims) return false;
               if (store.get(COLLECTIONS.revocations, SESSION_KEY + claims.sid)) return false;
-              // 缺失按 0 处理：删掉这个字段不该等于免疫撤销
+              // A missing field is treated as 0: deleting it must not amount to immunity from revocation
               return (claims.epoch || 0) >= epochOf(claims.sub);
             },
           };
@@ -2648,18 +2664,18 @@ const stage5 = {
         import { now } from '@lab/env';
 
         export interface MfaOptions {
-          /** 和手机共享的密钥 */
+          /** The secret shared with the phone */
           secret: string;
-          /** 一个时间窗多长（毫秒），真实世界里是 30000 */
+          /** How long one time window is, in milliseconds; 30000 in the real world */
           stepMs: number;
-          /** 允许前后各几个窗口的时钟漂移 */
+          /** How many windows of clock drift are allowed on either side */
           drift: number;
-          /** 恢复码的摘要。原文只在生成时给过用户一次。 */
+          /** Digests of the recovery codes. The user is shown the originals once, at generation time. */
           recoveryHashes: string[];
         }
 
         export interface MfaVerifier {
-          /** 某个时刻应该显示的六位数 */
+          /** The six digits that should be showing at a given instant */
           code(atMs: number): string;
           verifyCode(candidate: string): boolean;
           useRecoveryCode(candidate: string): boolean;
@@ -2667,7 +2683,7 @@ const stage5 = {
         }
 
         export function createMfa(options: MfaOptions): MfaVerifier {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -2696,14 +2712,14 @@ const stage5 = {
           });
         }
 
-        describe('阶段5 · 一次性密码与恢复码', () => {
-          it('当前窗口的验证码通过', () => {
+        describe('Stage 5 · One-time passwords and recovery codes', () => {
+          it("the current window's code passes", () => {
             const mfa = makeMfa();
 
             expect(mfa.verifyCode(mfa.code(now()))).toBe(true);
           });
 
-          it('同一个码用第二次就不通过', () => {
+          it('using the same code a second time fails', () => {
             const mfa = makeMfa();
             const code = mfa.code(now());
             expect(mfa.verifyCode(code)).toBe(true);
@@ -2713,7 +2729,7 @@ const stage5 = {
             expect(replay).toBe(false);
           });
 
-          it('上一个窗口的码仍然接受 [gate:drift]', () => {
+          it("the previous window's code is still accepted [gate:drift]", () => {
             const mfa = makeMfa();
 
             const accepted = mfa.verifyCode(mfa.code(now() - STEP));
@@ -2721,7 +2737,7 @@ const stage5 = {
             expect(accepted).toBe(true);
           });
 
-          it('下一个窗口的码也接受 [gate:drift]', () => {
+          it("the next window's code is accepted too [gate:drift]", () => {
             const mfa = makeMfa();
 
             const accepted = mfa.verifyCode(mfa.code(now() + STEP));
@@ -2729,28 +2745,28 @@ const stage5 = {
             expect(accepted).toBe(true);
           });
 
-          it('再往外一个窗口就不接受了', () => {
+          it('one window further out is not accepted', () => {
             const mfa = makeMfa();
 
             expect(mfa.verifyCode(mfa.code(now() - STEP * 2))).toBe(false);
             expect(mfa.verifyCode(mfa.code(now() + STEP * 2))).toBe(false);
           });
 
-          it('错误的码不通过', () => {
+          it('a wrong code does not pass', () => {
             const mfa = makeMfa();
 
             expect(mfa.verifyCode('000000')).toBe(false);
             expect(mfa.verifyCode('')).toBe(false);
           });
 
-          it('别的密钥算出来的码不通过', () => {
+          it('a code computed from a different secret does not pass', () => {
             const mfa = makeMfa();
             const other = makeMfa('a-different-secret');
 
             expect(mfa.verifyCode(other.code(now()))).toBe(false);
           });
 
-          it('验证码是六位字符串，同一个窗口内保持不变', () => {
+          it('the code is a six-character string and stays the same within one window', () => {
             const mfa = makeMfa();
             const code = mfa.code(now());
 
@@ -2759,19 +2775,19 @@ const stage5 = {
             expect(mfa.code(now() + STEP - 1)).toBe(code);
           });
 
-          it('时间走到下一个窗口，用过的那个码不会复活', async () => {
+          it('a used code does not come back to life once the clock enters the next window', async () => {
             const mfa = makeMfa();
             const code = mfa.code(now());
             expect(mfa.verifyCode(code)).toBe(true);
 
             await sleep(STEP);
-            // 窗口滚动之后它仍然在漂移范围内，但它已经用掉了
+            // After the window rolls it is still within the drift range, but it has already been spent
             const replay = mfa.verifyCode(code);
             if (replay) count('totpReplayAccepted');
             expect(replay).toBe(false);
           });
 
-          it('恢复码能用一次，第二次不行', () => {
+          it('a recovery code works once and not twice', () => {
             const mfa = makeMfa();
 
             expect(mfa.remainingRecoveryCodes()).toBe(2);
@@ -2783,14 +2799,14 @@ const stage5 = {
             expect(replay).toBe(false);
           });
 
-          it('不认识的恢复码不通过，也不消耗额度', () => {
+          it('an unrecognised recovery code does not pass and does not consume one', () => {
             const mfa = makeMfa();
 
             expect(mfa.useRecoveryCode('recovery-zzz')).toBe(false);
             expect(mfa.remainingRecoveryCodes()).toBe(2);
           });
 
-          it('验证码的比较走常数时间比较', () => {
+          it('code comparison goes through the constant-time comparison', () => {
             const mfa = makeMfa();
 
             const before = getCounters()['constantTimeCompares'] || 0;
@@ -2842,13 +2858,13 @@ const stage5 = {
 
         const DIGITS = 6;
         const MODULO = 1000000;
-        /** 从摘要里取多少位十六进制来算这六位数 */
+        /** How many hex digits of the digest go into the six-digit code */
         const SLICE = 8;
 
         export function createMfa(options: MfaOptions): MfaVerifier {
-          /** 已经用掉的窗口号。记窗口，不记码。 */
+          /** Window numbers already spent. Record the window, not the code. */
           const spent = new Set<number>();
-          /** 恢复码只留摘要，用掉就删 */
+          /** Only digests of recovery codes are kept, and a used one is deleted */
           const recovery = new Set<string>(options.recoveryHashes);
 
           function counterAt(atMs: number): number {
@@ -2881,7 +2897,7 @@ const stage5 = {
             useRecoveryCode(candidate: string): boolean {
               const digest = sha256(candidate);
               if (!recovery.has(digest)) return false;
-              // 用掉就删：一次性最直接的实现方式就是让它不再存在
+              // Delete on use: the most direct way to make something single-use is to stop it existing
               recovery.delete(digest);
               return true;
             },
@@ -3183,10 +3199,10 @@ const stage6 = {
         import { constantTimeEqual, randomId, sha256 } from './support/crypto';
         import { now } from '@lab/env';
 
-        /** 注册过的第三方客户端 */
+        /** A registered third-party client */
         export interface ClientRegistration {
           clientId: string;
-          /** 只有登记过的回调地址才能接收授权码 */
+          /** Only registered redirect URIs may receive an authorization code */
           redirectUris: string[];
         }
 
@@ -3195,7 +3211,7 @@ const stage6 = {
           redirectUri: string;
           /** sha256(codeVerifier) */
           codeChallenge: string;
-          /** 只接受 'S256' */
+          /** Only 'S256' is accepted */
           codeChallengeMethod: string;
           userId: string;
           tenantId: string;
@@ -3209,7 +3225,7 @@ const stage6 = {
         }
 
         export interface OAuthOptions {
-          /** 授权码的存活时长，短命是它的设计要点 */
+          /** Authorization code lifetime; being short-lived is the point of its design */
           ttlMs: number;
           clients: ClientRegistration[];
         }
@@ -3224,7 +3240,7 @@ const stage6 = {
           refresh: RefreshService,
           options: OAuthOptions
         ): OAuthServer {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -3282,8 +3298,8 @@ const stage6 = {
           });
         }
 
-        describe('阶段6 · 授权码与 PKCE', () => {
-          it('完整流程走得通', () => {
+        describe('Stage 6 · Authorization codes and PKCE', () => {
+          it('the full flow works', () => {
             const server = makeServer(createStore());
             const code = authorize(server);
             expect(code).toBeTruthy();
@@ -3295,7 +3311,7 @@ const stage6 = {
             expect(issuer.verify(pair.accessToken).sub).toBe('alice');
           });
 
-          it('一个授权码只能换一次', () => {
+          it('an authorization code can be exchanged only once', () => {
             const server = makeServer(createStore());
             const code = authorize(server);
             expect(exchange(server, code)).toBeTruthy();
@@ -3305,7 +3321,7 @@ const stage6 = {
             expect(again).toBeNull();
           });
 
-          it('verifier 不对就换不到', () => {
+          it('a wrong verifier cannot be exchanged', () => {
             const server = makeServer(createStore());
 
             const stolen = exchange(server, authorize(server), { codeVerifier: 'guessed-wrong' });
@@ -3313,7 +3329,7 @@ const stage6 = {
             expect(stolen).toBeNull();
           });
 
-          it('不带 verifier 也换不到', () => {
+          it('no verifier cannot be exchanged either', () => {
             const server = makeServer(createStore());
 
             const empty = exchange(server, authorize(server), { codeVerifier: '' });
@@ -3321,16 +3337,16 @@ const stage6 = {
             expect(empty).toBeNull();
           });
 
-          it('拿 challenge 冒充 verifier 换不到', () => {
+          it('passing the challenge as the verifier does not work', () => {
             const server = makeServer(createStore());
 
-            // 这正是 plain 模式下攻击者能做的事：他看得到 challenge
+            // This is exactly what an attacker can do in plain mode: they can see the challenge
             const downgraded = exchange(server, authorize(server), { codeVerifier: CHALLENGE });
             if (downgraded) count('pkceBypassAccepted');
             expect(downgraded).toBeNull();
           });
 
-          it('猜错一次之后，正确的 verifier 也换不到了', () => {
+          it('after one wrong guess even the right verifier stops working', () => {
             const server = makeServer(createStore());
             const code = authorize(server);
 
@@ -3341,21 +3357,21 @@ const stage6 = {
             expect(retried).toBeNull();
           });
 
-          it('method 不是 S256 就不给码', () => {
+          it('no code is issued when method is not S256', () => {
             const server = makeServer(createStore());
 
             expect(authorize(server, { codeChallengeMethod: 'plain' })).toBeNull();
             expect(authorize(server, { codeChallengeMethod: '' })).toBeNull();
           });
 
-          it('未注册的客户端与回调地址都拿不到码', () => {
+          it('an unregistered client or redirect URI gets no code', () => {
             const server = makeServer(createStore());
 
             expect(authorize(server, { clientId: 'evil-app' })).toBeNull();
             expect(authorize(server, { redirectUri: 'https://evil.example/callback' })).toBeNull();
           });
 
-          it('换令牌时的 client 必须和申请时一致', () => {
+          it('the client at token exchange must match the one that requested it', () => {
             const server = makeServer(createStore());
 
             const hijacked = exchange(server, authorize(server), { clientId: 'other-app' });
@@ -3363,7 +3379,7 @@ const stage6 = {
             expect(hijacked).toBeNull();
           });
 
-          it('换令牌时的 redirectUri 必须和申请时一致', () => {
+          it('the redirectUri at token exchange must match the one that requested it', () => {
             const server = makeServer(createStore());
 
             const redirected = exchange(server, authorize(server), {
@@ -3373,7 +3389,7 @@ const stage6 = {
             expect(redirected).toBeNull();
           });
 
-          it('过期的授权码换不到', async () => {
+          it('an expired authorization code cannot be exchanged', async () => {
             const server = makeServer(createStore());
             const code = authorize(server);
 
@@ -3381,14 +3397,14 @@ const stage6 = {
             expect(exchange(server, code)).toBeNull();
           });
 
-          it('没见过的码换不到', () => {
+          it('an unrecognised code cannot be exchanged', () => {
             const server = makeServer(createStore());
             authorize(server);
 
             expect(exchange(server, 'code_made-up')).toBeNull();
           });
 
-          it('库里存的是码的摘要', () => {
+          it('the store holds a digest of the code', () => {
             const store = createStore();
             const code = authorize(makeServer(store));
 
@@ -3458,7 +3474,7 @@ const stage6 = {
           exchange(request: ExchangeRequest): TokenPair | null;
         }
 
-        /** 唯一接受的挑战算法。plain 是历史包袱，不给它留门。 */
+        /** The only challenge method accepted. plain is a historical leftover and gets no door here. */
         const S256 = 'S256';
 
         interface CodeRecord {
@@ -3509,7 +3525,8 @@ const stage6 = {
               const record = store.get(COLLECTIONS.codes, key) as unknown as CodeRecord | undefined;
               if (!record || record.used) return null;
 
-              // 先烧掉再检查：攻击者截到码之后只有这一次机会去猜 verifier
+              // Burn it before checking: once an attacker intercepts a code, this is their one
+              // chance to guess the verifier
               save(request.code, { ...record, used: true });
 
               if (now() >= record.exp) return null;
@@ -3517,7 +3534,7 @@ const stage6 = {
               if (record.redirectUri !== request.redirectUri) return null;
               if (!constantTimeEqual(sha256(request.codeVerifier || ''), record.challenge)) return null;
 
-              // 所有登录路径最终都汇到同一处发令牌
+              // Every login path eventually converges on this one place that issues tokens
               return refresh.start({ userId: record.userId, tenantId: record.tenantId });
             },
           };
@@ -3818,39 +3835,39 @@ const stage7 = {
         import { decodeSegment, verifyRsa } from './support/crypto';
         import { now } from '@lab/env';
 
-        /** 外部 IdP 签发的身份令牌里的字段 */
+        /** The fields inside an ID token issued by an external IdP */
         export interface IdTokenClaims {
           iss: string;
-          /** 标准允许一个字符串，也允许一个字符串数组 */
+          /** The standard permits a single string as well as an array of strings */
           aud: string | string[];
           sub: string;
           nonce: string;
           iat: number;
           exp: number;
-          /** 联邦身份带过来的租户 */
+          /** The tenant carried across from the federated identity */
           tenantId?: string;
         }
 
         export interface IdTokenVerifierOptions {
-          /** 我们信任的签发方 */
+          /** The issuer we trust */
           issuer: string;
-          /** 我们自己在对方那里的 client id */
+          /** Our own client id at their end */
           audience: string;
-          /** 只接受这一种算法。注意它在配置里，不在令牌里。 */
+          /** The only algorithm accepted. Note it lives in the configuration, not in the token. */
           algorithm: string;
-          /** JWKS：kid -> 公钥 */
+          /** JWKS: kid -> public key */
           keys: Record<string, string>;
-          /** 允许的时钟偏差（毫秒） */
+          /** Clock skew allowed, in milliseconds */
           clockSkewMs: number;
         }
 
         export interface IdTokenVerifier {
-          /** 通过返回 claims，任何一项不过返回 null */
+          /** Returns the claims on success and null if any single check fails */
           verify(token: string, expectedNonce: string): IdTokenClaims | null;
         }
 
         export function createIdTokenVerifier(options: IdTokenVerifierOptions): IdTokenVerifier {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -3903,21 +3920,21 @@ const stage7 = {
           };
         }
 
-        /** 扮演 IdP：用私钥签一张 ID Token */
+        /** Playing the IdP: sign an ID token with the private key */
         function mint(claims: any, header: any = { alg: 'RS256', kid: signing.kid }, key = signing.privateKey) {
           const body = encodeSegment(header) + '.' + encodeSegment(claims);
           return body + '.' + signRsa(key, body);
         }
 
-        /** 伪造的令牌被放行就记一笔 */
+        /** Every forged token that gets through is recorded */
         function expectForgeryRejected(verifier: any, token: string): void {
           const claims = verifier.verify(token, NONCE);
           if (claims) count('forgedTokensAccepted');
           expect(claims).toBeNull();
         }
 
-        describe('阶段7 · 校验别人签发的身份', () => {
-          it('合法的 ID Token 验得过', () => {
+        describe('Stage 7 · Verifying an identity someone else issued', () => {
+          it('a legitimate ID token verifies', () => {
             const verifier = makeVerifier();
 
             const claims = verifier.verify(mint(claimsFor()), NONCE);
@@ -3926,7 +3943,7 @@ const stage7 = {
             expect(claims.tenantId).toBe('acme');
           });
 
-          it('验过之后可以直接开一个本地会话', () => {
+          it('a verified token can open a local session directly', () => {
             const store = createStore();
             const issuer = createSessionIssuer({ secret: 'session-signing-key', ttlMs: 60000 });
             const refresh = createRefreshService(store, issuer, { ttlMs: 600000 });
@@ -3937,23 +3954,23 @@ const stage7 = {
             expect(issuer.verify(pair.accessToken).sub).toBe('alice');
           });
 
-          it('alg 为 none 的无签名令牌不接受', () => {
+          it('an unsigned token with alg set to none is not accepted', () => {
             const verifier = makeVerifier();
             const body = encodeSegment({ alg: 'none' }) + '.' + encodeSegment(claimsFor());
 
             expectForgeryRejected(verifier, body + '.');
           });
 
-          it('用公钥当 HMAC 密钥的算法混淆令牌不接受', () => {
+          it('an algorithm-confusion token using the public key as an HMAC secret is not accepted', () => {
             const verifier = makeVerifier();
             const header = { alg: 'HS256', kid: signing.kid };
             const body = encodeSegment(header) + '.' + encodeSegment(claimsFor());
 
-            // 公钥是公开的，攻击者拿它当对称密钥签一张
+            // The public key is public, so an attacker signs one with it as a symmetric key
             expectForgeryRejected(verifier, body + '.' + hmac(signing.publicKey, body));
           });
 
-          it('用没登记过的密钥签的令牌不接受', () => {
+          it('a token signed with an unregistered key is not accepted', () => {
             const verifier = makeVerifier();
 
             expectForgeryRejected(
@@ -3962,7 +3979,7 @@ const stage7 = {
             );
           });
 
-          it('把签名挪到别的载荷上不接受', () => {
+          it('moving a signature onto a different payload is not accepted', () => {
             const verifier = makeVerifier();
             const original = mint(claimsFor());
             const tampered = encodeSegment({ alg: 'RS256', kid: signing.kid }) +
@@ -3972,27 +3989,28 @@ const stage7 = {
             expectForgeryRejected(verifier, tampered);
           });
 
-          it('签发方不对不接受', () => {
+          it('a wrong issuer is not accepted', () => {
             const verifier = makeVerifier();
 
             expectForgeryRejected(verifier, mint(claimsFor({ iss: 'https://evil.example' })));
           });
 
-          it('受众不是我们不接受', () => {
+          it('an audience that is not us is not accepted', () => {
             const verifier = makeVerifier();
 
-            // 这张票是同一个 IdP 签给别家应用的，签名完全有效
+            // This ticket was signed by the same IdP for a different application, and the signature
+            // is perfectly valid
             expectForgeryRejected(verifier, mint(claimsFor({ aud: 'someone-elses-client' })));
           });
 
-          it('受众是数组时，包含我们就接受', () => {
+          it('an array audience is accepted when it contains us', () => {
             const verifier = makeVerifier();
 
             const claims = verifier.verify(mint(claimsFor({ aud: ['someone-else', AUDIENCE] })), NONCE);
             expect(claims).toBeTruthy();
           });
 
-          it('过期的令牌不接受', async () => {
+          it('an expired token is not accepted', async () => {
             const verifier = makeVerifier();
             const token = mint(claimsFor());
 
@@ -4000,13 +4018,13 @@ const stage7 = {
             expectForgeryRejected(verifier, token);
           });
 
-          it('签发时间在未来太远的不接受', () => {
+          it('an issued-at too far in the future is not accepted', () => {
             const verifier = makeVerifier();
 
             expectForgeryRejected(verifier, mint(claimsFor({ iat: now() + SKEW * 10 })));
           });
 
-          it('nonce 对不上不接受', () => {
+          it('a mismatched nonce is not accepted', () => {
             const verifier = makeVerifier();
 
             const claims = verifier.verify(mint(claimsFor({ nonce: 'some-other-nonce' })), NONCE);
@@ -4014,7 +4032,7 @@ const stage7 = {
             expect(claims).toBeNull();
           });
 
-          it('同一个 nonce 不能用第二次', () => {
+          it('the same nonce cannot be used twice', () => {
             const verifier = makeVerifier();
             const token = mint(claimsFor());
             expect(verifier.verify(token, NONCE)).toBeTruthy();
@@ -4024,7 +4042,7 @@ const stage7 = {
             expect(replay).toBeNull();
           });
 
-          it('畸形令牌返回 null，不抛异常', () => {
+          it('a malformed token returns null rather than throwing', () => {
             const verifier = makeVerifier();
 
             expect(verifier.verify('', NONCE)).toBeNull();
@@ -4089,14 +4107,14 @@ const stage7 = {
           kid?: string;
         }
 
-        /** aud 允许是字符串或字符串数组，这里归一成一种形态 */
+        /** aud may be a string or an array of strings; normalise it to one shape here */
         function audienceContains(aud: string | string[], expected: string): boolean {
           const list = Array.isArray(aud) ? aud : [aud];
           return list.indexOf(expected) >= 0;
         }
 
         export function createIdTokenVerifier(options: IdTokenVerifierOptions): IdTokenVerifier {
-          /** 用过的 nonce。一个 nonce 只对应一次登录。 */
+          /** Nonces already used. One nonce corresponds to exactly one login. */
           const spentNonces = new Set<string>();
 
           function publicKeyFor(header: TokenHeader): string | null {
@@ -4118,7 +4136,7 @@ const stage7 = {
 
               const header = decodeSegment(parts[0]) as TokenHeader | null;
               if (!header) return null;
-              // 算法来自我们的配置。令牌说它是什么，不作数。
+              // The algorithm comes from our configuration. What the token claims to be does not count.
               if (header.alg !== options.algorithm) return null;
 
               const publicKey = publicKeyFor(header);
@@ -4133,7 +4151,7 @@ const stage7 = {
               if (!expectedNonce || claims.nonce !== expectedNonce) return null;
               if (spentNonces.has(claims.nonce)) return null;
 
-              // 只有全部通过才记下 nonce：失败的尝试不该消耗掉这次登录
+              // Record the nonce only when everything passed: a failed attempt should not consume this login
               spentNonces.add(claims.nonce);
               return claims;
             },
@@ -4421,14 +4439,17 @@ const stage8 = {
         import type { RoleDefinition, RoleDirectory } from './contract';
 
         export interface PermissionResolver {
-          /** 展开继承之后这些角色一共有哪些权限，去重并排序 */
+          /** Every permission these roles hold once inheritance is expanded, deduplicated and sorted */
           permissionsOf(roles: string[]): string[];
-          /** 有没有某个具体权限。通配只单向生效：doc:* 覆盖 doc:read，反之不然。 */
+          /**
+           * Whether a specific permission is held. Wildcards work one way only: doc:* covers
+           * doc:read, not the reverse.
+           */
           can(roles: string[], permission: string): boolean;
         }
 
         export function createRbac(directory: RoleDirectory): PermissionResolver {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -4458,8 +4479,9 @@ const stage8 = {
         };
 
         /**
-         * 平台侧的角色目录：每读一个定义记一笔。
-         * 读得太多说明这张图没走完 —— 那就是死循环，这里把它变成一次可观测的失败。
+         * The platform-side role directory: every definition read is recorded.
+         * Reading too many means the graph was never fully walked — that is an infinite loop,
+         * turned here into an observable failure.
          */
         function makeDirectory(graph: any) {
           let reads = 0;
@@ -4476,31 +4498,31 @@ const stage8 = {
           };
         }
 
-        describe('阶段8 · 角色继承与通配权限', () => {
-          it('直接持有的权限算数', () => {
+        describe('Stage 8 · Role inheritance and wildcard permissions', () => {
+          it('directly held permissions count', () => {
             const rbac = createRbac(makeDirectory(GRAPH));
 
             expect(rbac.can(['viewer'], 'doc:read')).toBe(true);
           });
 
-          it('继承来的权限算数', () => {
+          it('inherited permissions count', () => {
             const rbac = createRbac(makeDirectory(GRAPH));
 
             expect(rbac.can(['editor'], 'doc:read')).toBe(true);
             expect(rbac.can(['editor'], 'doc:write')).toBe(true);
           });
 
-          it('隔了几层继承来的也算数', () => {
+          it('permissions inherited several levels up count too', () => {
             const rbac = createRbac(makeDirectory(GRAPH));
 
             expect(rbac.can(['publisher'], 'doc:read')).toBe(true);
             expect(rbac.permissionsOf(['publisher'])).toEqual(['doc:publish', 'doc:read', 'doc:write']);
           });
 
-          it('菱形继承不产生重复', () => {
+          it('diamond inheritance produces no duplicates', () => {
             const rbac = createRbac(makeDirectory(GRAPH));
 
-            // admin 经 publisher 和 auditor 两条路都能走到 viewer
+            // admin reaches viewer through both publisher and auditor
             expect(rbac.permissionsOf(['admin'])).toEqual([
               '*',
               'audit:read',
@@ -4510,56 +4532,56 @@ const stage8 = {
             ]);
           });
 
-          it('doc:* 覆盖 doc: 开头的一切', () => {
+          it('doc:* covers everything beginning with doc:', () => {
             const rbac = createRbac(makeDirectory(GRAPH));
 
             expect(rbac.can(['support'], 'ticket:close')).toBe(true);
             expect(rbac.can(['support'], 'ticket:read')).toBe(true);
           });
 
-          it('星号覆盖一切', () => {
+          it('a bare asterisk covers everything', () => {
             const rbac = createRbac(makeDirectory(GRAPH));
 
             expect(rbac.can(['admin'], 'anything:at:all')).toBe(true);
           });
 
-          it('通配不反向匹配', () => {
+          it('wildcards do not match in reverse', () => {
             const rbac = createRbac(makeDirectory(GRAPH));
 
-            // 持有 doc:read 不等于持有整个 doc 域
+            // Holding doc:read is not the same as holding the whole doc namespace
             expect(rbac.can(['viewer'], 'doc:*')).toBe(false);
             expect(rbac.can(['viewer'], 'doc:write')).toBe(false);
           });
 
-          it('通配只在段边界上生效', () => {
+          it('wildcards only take effect on segment boundaries', () => {
             const rbac = createRbac(makeDirectory(GRAPH));
 
             expect(rbac.can(['support'], 'ticketing:read')).toBe(false);
           });
 
-          it('未知角色被忽略，不抛错', () => {
+          it('an unknown role is ignored rather than throwing', () => {
             const rbac = createRbac(makeDirectory(GRAPH));
 
             expect(rbac.permissionsOf(['ghost-role'])).toEqual([]);
             expect(rbac.can(['ghost-role', 'viewer'], 'doc:read')).toBe(true);
           });
 
-          it('没有角色就什么都不能做', () => {
+          it('no roles means nothing is permitted', () => {
             const rbac = createRbac(makeDirectory(GRAPH));
 
             expect(rbac.permissionsOf([])).toEqual([]);
             expect(rbac.can([], 'doc:read')).toBe(false);
           });
 
-          it('图里有环也要能走完 [gate:cycle]', () => {
+          it('a graph with a cycle still gets walked to completion [gate:cycle]', () => {
             const rbac = createRbac(makeDirectory(CYCLIC));
 
             expect(rbac.permissionsOf(['alpha'])).toEqual(['x:1', 'x:2', 'x:3']);
-            // 从环上任何一点出发，看到的都是同一组权限
+            // Starting from any point on the cycle yields the same set of permissions
             expect(rbac.permissionsOf(['gamma'])).toEqual(['x:1', 'x:2', 'x:3']);
           });
 
-          it('反复判权不会反复读角色定义 [gate:memo]', () => {
+          it('repeated checks do not re-read the role definitions [gate:memo]', () => {
             const rbac = createRbac(makeDirectory(GRAPH));
 
             expect(rbac.can(['admin'], 'doc:read')).toBe(true);
@@ -4605,19 +4627,20 @@ const stage8 = {
         const ANY = '*';
         const WILDCARD_SUFFIX = ':*';
 
-        /** 授予的 pattern 能不能覆盖被问的 permission。方向是单向的。 */
+        /** Whether a granted pattern covers the permission being asked about. The direction is one-way. */
         function grants(pattern: string, permission: string): boolean {
           if (pattern === ANY) return true;
           if (pattern === permission) return true;
           if (pattern.slice(-WILDCARD_SUFFIX.length) !== WILDCARD_SUFFIX) return false;
-          // 只在段边界上生效：doc:* 覆盖 doc:read，但不覆盖 document:read
+          // Only on segment boundaries: doc:* covers doc:read but not document:read
           return permission.indexOf(pattern.slice(0, pattern.length - 1)) === 0;
         }
 
         export function createRbac(directory: RoleDirectory): PermissionResolver {
           /**
-           * 角色定义的缓存，跨查询存活。
-           * 缓存的是**定义**而不是展开后的权限：定义是事实，展开结果依赖于问法。
+           * A cache of role definitions that outlives a single query.
+           * It caches the **definitions**, not the expanded permissions: a definition is a fact, an
+           * expansion depends on the question.
            */
           const definitions = new Map<string, RoleDefinition | undefined>();
 
@@ -4633,7 +4656,7 @@ const stage8 = {
 
             while (queue.length > 0) {
               const name = queue.shift() as string;
-              // 环在这里终止：一轮查询里同一个角色只展开一次
+              // Cycles terminate here: within one query a role is expanded at most once
               if (seen.has(name)) continue;
               seen.add(name);
 
@@ -4945,40 +4968,43 @@ const stage9 = {
         export interface AccessResource {
           id: string;
           tenantId: string;
-          /** 谁拥有这份资源 */
+          /** Who owns this resource */
           ownerId: string;
-          /** 资源分级，比如 public / internal / secret */
+          /** Resource classification, e.g. public / internal / secret */
           classification?: string;
         }
 
         export interface AccessRequest {
           subject: AccessSubject;
-          /** 比如 doc:read */
+          /** For example doc:read */
           action: string;
           resource: AccessResource;
-          /** 请求发生的时刻。时间是请求的一部分，不要在引擎里读时钟。 */
+          /**
+           * When the request happened. Time is part of the request; do not read the clock inside
+           * the engine.
+           */
           atMs: number;
         }
 
         export interface PolicyCondition {
-          /** 资源必须和请求者同租户 */
+          /** The resource must be in the same tenant as the requester */
           sameTenant?: boolean;
-          /** 资源属主必须是请求者本人 */
+          /** The resource owner must be the requester themselves */
           ownerOnly?: boolean;
-          /** 请求者至少带着其中一个角色 */
+          /** The requester must hold at least one of these roles */
           roles?: string[];
-          /** 资源分级必须在这个集合里 */
+          /** The resource classification must be in this set */
           classification?: string[];
-          /** 只在这个时间窗内生效，左闭右开 */
+          /** Only in effect within this time window, start inclusive and end exclusive */
           between?: { fromMs: number; toMs: number };
         }
 
         export interface Policy {
           id: string;
           effect: 'allow' | 'deny';
-          /** 这条规则管哪些动作，支持 doc:* 这样的通配 */
+          /** Which actions this rule governs; wildcards such as doc:* are supported */
           actions: string[];
-          /** 不写就是「无条件」 */
+          /** Omitted means unconditional */
           condition?: PolicyCondition;
         }
 
@@ -4993,7 +5019,7 @@ const stage9 = {
         }
 
         export function createPolicyEngine(rbac: PermissionResolver, policies: Policy[]): PolicyEngine {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -5056,7 +5082,7 @@ const stage9 = {
           };
         }
 
-        /** 匹配到 deny 却被放行 —— 门槛数的就是这件事 */
+        /** Getting through despite matching a deny — that is what the gate counts */
         function expectDenyWins(engine: any, input: any, policyId: string): void {
           const decision = engine.evaluate(input);
           if (decision.allowed) count('denyOverridden');
@@ -5064,7 +5090,7 @@ const stage9 = {
           expect(decision.reason).toBe('policy:' + policyId);
         }
 
-        /** 一条规则都没匹配上却被放行 —— 这是「默认允许」，另一个门槛 */
+        /** Getting through without matching a single rule — that is default-allow, and the other gate */
         function expectDefaultDeny(engine: any, input: any): void {
           const decision = engine.evaluate(input);
           if (decision.allowed) count('implicitAllows');
@@ -5072,8 +5098,8 @@ const stage9 = {
           expect(decision.reason).toBe('default-deny');
         }
 
-        describe('阶段9 · 条件策略与默认拒绝', () => {
-          it('条件成立时 allow 生效，并说明是哪条规则', () => {
+        describe('Stage 9 · Conditional policies and default deny', () => {
+          it('allow takes effect when the condition holds, and names the rule', () => {
             const engine = makeEngine();
 
             const decision = engine.evaluate(request({ action: 'doc:write' }));
@@ -5081,7 +5107,7 @@ const stage9 = {
             expect(decision.reason).toBe('policy:own-docs');
           });
 
-          it('同租户别人的文档可以读', () => {
+          it("someone else's document in the same tenant can be read", () => {
             const engine = makeEngine();
 
             const decision = engine.evaluate(request({
@@ -5091,17 +5117,17 @@ const stage9 = {
             expect(decision.reason).toBe('policy:team-read');
           });
 
-          it('同租户别人的文档不能写', () => {
+          it("someone else's document in the same tenant cannot be written", () => {
             const engine = makeEngine();
 
-            // own-docs 因为 ownerOnly 不匹配，team-read 只管 doc:read
+            // own-docs does not match because of ownerOnly, and team-read only governs doc:read
             expectDefaultDeny(engine, request({
               action: 'doc:write',
               resource: { id: 'doc-2', tenantId: 'acme', ownerId: 'bob', classification: 'internal' },
             }));
           });
 
-          it('跨租户一律拒绝', () => {
+          it('cross-tenant access is always denied', () => {
             const engine = makeEngine();
 
             expectDefaultDeny(engine, request({
@@ -5109,17 +5135,17 @@ const stage9 = {
             }));
           });
 
-          it('deny 规则压过同时匹配的 allow', () => {
+          it('a deny rule overrides an allow that matches at the same time', () => {
             const engine = makeEngine();
 
-            // 是自己的文档（own-docs 匹配），但它是 secret
+            // It is their own document (own-docs matches), but it is secret
             expectDenyWins(engine, request({
               action: 'doc:write',
               resource: { id: 'doc-4', tenantId: 'acme', ownerId: 'alice', classification: 'secret' },
             }), 'no-secret');
           });
 
-          it('deny 规则的顺序不影响结果', () => {
+          it('the order of deny rules does not change the outcome', () => {
             const reordered = [POLICIES[2], POLICIES[0], POLICIES[1], POLICIES[3]];
             const engine = makeEngine(reordered);
 
@@ -5128,7 +5154,7 @@ const stage9 = {
             }), 'no-secret');
           });
 
-          it('时间窗内允许，窗外拒绝', () => {
+          it('allowed inside the time window, denied outside it', () => {
             const engine = makeEngine();
             const auditing = {
               subject: { userId: 'carol', tenantId: 'acme', roles: ['auditor'] },
@@ -5141,8 +5167,8 @@ const stage9 = {
             expectDefaultDeny(engine, request({ ...auditing, atMs: 999 }));
           });
 
-          it('角色条件不满足时那条规则视为不存在', () => {
-            // inspector 有 audit:read 权限，但它不是 auditor
+          it('a rule whose role condition is unmet is treated as absent', () => {
+            // inspector holds the audit:read permission, but it is not auditor
             const graph: any = {
               inspector: { name: 'inspector', permissions: ['audit:read'], inherits: [] },
             };
@@ -5158,7 +5184,7 @@ const stage9 = {
             }));
           });
 
-          it('角色没给的动作，策略再宽也放不出去', () => {
+          it('however permissive the policy, an action the roles never granted does not get through', () => {
             const engine = makeEngine();
 
             const decision = engine.evaluate(request({
@@ -5170,7 +5196,7 @@ const stage9 = {
             expect(decision.reason).toBe('rbac-denied');
           });
 
-          it('动作通配能匹配上', () => {
+          it('an action wildcard matches', () => {
             const engine = makeEngine();
 
             const decision = engine.evaluate(request({ action: 'doc:publish' }));
@@ -5178,13 +5204,13 @@ const stage9 = {
             expect(decision.reason).toBe('policy:own-docs');
           });
 
-          it('没有任何策略时一律拒绝', () => {
+          it('with no policies at all everything is denied', () => {
             const engine = makeEngine([]);
 
             expectDefaultDeny(engine, request());
           });
 
-          it('资源没有分级字段也不会崩', () => {
+          it('a resource with no classification field does not crash', () => {
             const engine = makeEngine();
 
             const decision = engine.evaluate(request({
@@ -5268,8 +5294,8 @@ const stage9 = {
         const WILDCARD_SUFFIX = ':*';
 
         /**
-         * 动作匹配。规则和第 8 关的权限通配是同一条 —— 真实代码里
-         * 这两处应该共用一个实现，这里各写一份是为了让每一关都能独立读懂。
+         * Action matching. The rule is the same one as the permission wildcard in stage 8 — in real code
+         * the two should share an implementation; they are written twice here so each stage reads on its own.
          */
         function covers(pattern: string, action: string): boolean {
           if (pattern === ANY || pattern === action) return true;
@@ -5281,7 +5307,7 @@ const stage9 = {
           return atMs >= window.fromMs && atMs < window.toMs;
         }
 
-        /** 条件里每一项都是可选的：没写就等于不限制 */
+        /** Every field in a condition is optional: omitting one means no restriction */
         function holds(condition: PolicyCondition | undefined, request: AccessRequest): boolean {
           if (!condition) return true;
           const subject = request.subject;
@@ -5312,21 +5338,21 @@ const stage9 = {
 
           return {
             evaluate(request: AccessRequest): PolicyDecision {
-              // 角色决定上限，策略只在上限之内挑
+              // Roles set the ceiling; the policy only picks from below it
               if (!rbac.can(request.subject.roles, request.action)) {
                 return { allowed: false, reason: 'rbac-denied' };
               }
 
               const matched = applicable(request);
 
-              // deny 先看，而且不看顺序：只要有一条就够了
+              // deny is checked first, and order does not matter: one match is enough
               const denied = firstWith(matched, 'deny');
               if (denied) return { allowed: false, reason: 'policy:' + denied.id };
 
               const allowed = firstWith(matched, 'allow');
               if (allowed) return { allowed: true, reason: 'policy:' + allowed.id };
 
-              // 显式的最后一行：没匹配上就是不许
+              // An explicit last line: no match means not permitted
               return { allowed: false, reason: 'default-deny' };
             },
           };
@@ -5632,7 +5658,10 @@ const stage10 = {
         import { now } from '@lab/env';
 
         export interface CacheOptions {
-          /** 一条缓存活多久。它是兜底：忘了失效，最多错这么久。 */
+          /**
+           * How long one entry lives. It is the backstop: forget to invalidate and you are wrong
+           * for at most this long.
+           */
           ttlMs: number;
         }
 
@@ -5642,11 +5671,11 @@ const stage10 = {
         }
 
         export interface CachedPolicyEngine extends PolicyEngine {
-          /** 这个用户的角色或策略变了 */
+          /** This user's roles or policies changed */
           invalidateSubject(userId: string): void;
-          /** 这份资源变了：换了属主、改了分级 */
+          /** This resource changed: new owner, new classification */
           invalidateResource(resourceId: string): void;
-          /** 策略集本身换了 */
+          /** The policy set itself was replaced */
           invalidateAll(): void;
           stats(): CacheStats;
         }
@@ -5655,7 +5684,7 @@ const stage10 = {
           engine: PolicyEngine,
           options: CacheOptions
         ): CachedPolicyEngine {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -5673,8 +5702,8 @@ const stage10 = {
         const TTL = 5000;
 
         /**
-         * 平台侧的判权引擎替身：每被问一次记一笔，
-         * 并且可以在运行中「撤权」，用来检验缓存失效。
+         * A stand-in for the platform-side authorization engine: every question is recorded,
+         * and access can be revoked at runtime to exercise cache invalidation.
          */
         function makeProbe() {
           const state = { allowed: true };
@@ -5705,8 +5734,8 @@ const stage10 = {
           return createPermissionCache(probe.engine, { ttlMs: TTL });
         }
 
-        describe('阶段10 · 权限缓存与失效', () => {
-          it('第一次穿透，第二次命中', () => {
+        describe('Stage 10 · Permission caching and invalidation', () => {
+          it('the first call goes through and the second hits the cache', () => {
             const probe = makeProbe();
             const cache = makeCache(probe);
 
@@ -5717,7 +5746,7 @@ const stage10 = {
             expect(cache.stats().hits).toBe(1);
           });
 
-          it('十二次查询只求值三次 [gate:evals]', () => {
+          it('twelve queries evaluate only three times [gate:evals]', () => {
             const probe = makeProbe();
             const cache = makeCache(probe);
 
@@ -5729,12 +5758,12 @@ const stage10 = {
             expect(cache.stats().hits).toBe(9);
           });
 
-          it('撤权之后不再返回缓存里的允许', () => {
+          it('a cached allow is no longer returned after revocation', () => {
             const probe = makeProbe();
             const cache = makeCache(probe);
             expect(cache.evaluate(request()).allowed).toBe(true);
 
-            // 管理员把 alice 的角色撤了
+            // An administrator revokes alice's role
             probe.state.allowed = false;
             cache.invalidateSubject('alice');
 
@@ -5743,7 +5772,7 @@ const stage10 = {
             expect(after.allowed).toBe(false);
           });
 
-          it('TTL 到期之后重新求值', async () => {
+          it('re-evaluates once the TTL expires', async () => {
             const probe = makeProbe();
             const cache = makeCache(probe);
             cache.evaluate(request());
@@ -5751,13 +5780,13 @@ const stage10 = {
             probe.state.allowed = false;
             await sleep(TTL);
 
-            // 就算没人调 invalidate，过了 TTL 也不能再用旧答案
+            // Even with nobody calling invalidate, the old answer must not be reused past the TTL
             const after = cache.evaluate(request());
             if (after.allowed) count('staleAllows');
             expect(after.allowed).toBe(false);
           });
 
-          it('TTL 之内仍然命中缓存', async () => {
+          it('still hits the cache within the TTL', async () => {
             const probe = makeProbe();
             const cache = makeCache(probe);
             cache.evaluate(request());
@@ -5768,7 +5797,7 @@ const stage10 = {
             expect(cache.stats().misses).toBe(1);
           });
 
-          it('不同用户不共用缓存', () => {
+          it('different users do not share a cache entry', () => {
             const probe = makeProbe();
             const cache = makeCache(probe);
 
@@ -5778,7 +5807,7 @@ const stage10 = {
             expect(cache.stats().misses).toBe(2);
           });
 
-          it('同名用户在不同租户下也不共用', () => {
+          it('the same username in different tenants does not share one either', () => {
             const probe = makeProbe();
             const cache = makeCache(probe);
 
@@ -5788,7 +5817,7 @@ const stage10 = {
             expect(cache.stats().misses).toBe(2);
           });
 
-          it('不同资源不共用缓存', () => {
+          it('different resources do not share a cache entry', () => {
             const probe = makeProbe();
             const cache = makeCache(probe);
 
@@ -5798,7 +5827,7 @@ const stage10 = {
             expect(cache.stats().misses).toBe(2);
           });
 
-          it('拒绝的结果同样被缓存', () => {
+          it('a denial is cached just the same', () => {
             const probe = makeProbe();
             probe.state.allowed = false;
             const cache = makeCache(probe);
@@ -5811,7 +5840,7 @@ const stage10 = {
             expect(cache.stats().hits).toBe(2);
           });
 
-          it('清一个用户不会牵连别人', () => {
+          it('clearing one user does not affect anyone else', () => {
             const probe = makeProbe();
             const cache = makeCache(probe);
             cache.evaluate(request());
@@ -5820,12 +5849,12 @@ const stage10 = {
             cache.invalidateSubject('alice');
             cache.evaluate(request({ subject: { userId: 'bob', tenantId: 'acme', roles: ['editor'] } }));
 
-            // bob 的那条还在
+            // bob's entry is still there
             expect(cache.stats().misses).toBe(2);
             expect(cache.stats().hits).toBe(1);
           });
 
-          it('按资源失效只清这份资源', () => {
+          it('invalidating by resource clears only that resource', () => {
             const probe = makeProbe();
             const cache = makeCache(probe);
             cache.evaluate(request());
@@ -5837,13 +5866,13 @@ const stage10 = {
             const stale = cache.evaluate(request());
             if (stale.allowed) count('staleAllows');
             expect(stale.allowed).toBe(false);
-            // doc-2 那条没被牵连
+            // The doc-2 entry was left alone
             expect(cache.evaluate(request({
               resource: { id: 'doc-2', tenantId: 'acme', ownerId: 'alice' },
             })).allowed).toBe(true);
           });
 
-          it('策略集换了就整个清空', () => {
+          it('replacing the policy set clears everything', () => {
             const probe = makeProbe();
             const cache = makeCache(probe);
             cache.evaluate(request());
@@ -5909,7 +5938,7 @@ const stage10 = {
         interface CacheEntry {
           decision: PolicyDecision;
           expiresAt: number;
-          /** 这两个字段不为读路径服务，只为失效路径服务 */
+          /** These two fields serve the invalidation path, not the read path */
           userId: string;
           resourceId: string;
         }
@@ -5923,7 +5952,7 @@ const stage10 = {
           const entries = new Map<string, CacheEntry>();
           const counters: CacheStats = { hits: 0, misses: 0 };
 
-          /** 决定取决于哪些东西，键里就得有哪些东西 —— 时间除外，它由 TTL 管 */
+          /** Whatever the decision depends on has to be in the key — time excepted, which the TTL handles */
           function keyOf(request: AccessRequest): string {
             return [
               request.subject.tenantId,
@@ -5950,7 +5979,7 @@ const stage10 = {
 
               counters.misses += 1;
               const decision = engine.evaluate(request);
-              // 拒绝也缓存：被拒的流量往往比被放行的还密集
+              // Denials are cached too: rejected traffic is often heavier than admitted traffic
               entries.set(key, {
                 decision,
                 expiresAt: now() + options.ttlMs,
@@ -6311,7 +6340,7 @@ const stage11 = {
         import type { SessionClaims } from './contract';
         import type { Store } from './support/store';
 
-        /** 一份业务数据。tenant 字段就是平台记账时看的那个。 */
+        /** One row of business data. The tenant field is the one the platform accounts on. */
         export interface TenantDocument {
           id: string;
           tenant: string;
@@ -6320,7 +6349,7 @@ const stage11 = {
           classification?: string;
         }
 
-        /** 写入时调用方能提供的东西 —— 注意没有 tenant */
+        /** What a caller may supply on write — note there is no tenant */
         export interface DocumentInput {
           id: string;
           ownerId: string;
@@ -6336,7 +6365,7 @@ const stage11 = {
         }
 
         export function createTenantRepository(store: Store, claims: SessionClaims): TenantRepository {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -6361,8 +6390,8 @@ const stage11 = {
           return createTenantRepository(store, claimsFor(userId, tenantId));
         }
 
-        describe('阶段11 · 租户隔离', () => {
-          it('写进去的能读回来', () => {
+        describe('Stage 11 · Tenant isolation', () => {
+          it('what is written can be read back', () => {
             const repository = repositoryFor(createStore(), 'alice', 'acme');
             repository.write({ id: 'doc-1', ownerId: 'alice', title: 'roadmap' });
 
@@ -6372,7 +6401,7 @@ const stage11 = {
             expect(document.tenant).toBe('acme');
           });
 
-          it('写进去的记录带着租户标记', () => {
+          it('a written record carries its tenant marker', () => {
             const store = createStore();
             repositoryFor(store, 'alice', 'acme').write({ id: 'doc-1', ownerId: 'alice', title: 'roadmap' });
 
@@ -6381,7 +6410,7 @@ const stage11 = {
             expect(records[0].tenant).toBe('acme');
           });
 
-          it('读不到别的租户的同名文档', () => {
+          it('a same-named document in another tenant is not readable', () => {
             const store = createStore();
             repositoryFor(store, 'mallory', 'globex').write({
               id: 'doc-1',
@@ -6392,7 +6421,7 @@ const stage11 = {
             expect(repositoryFor(store, 'alice', 'acme').read('doc-1')).toBeNull();
           });
 
-          it('两个租户可以有同名文档，互不覆盖', () => {
+          it('two tenants may hold same-named documents without overwriting each other', () => {
             const store = createStore();
             const acme = repositoryFor(store, 'alice', 'acme');
             const globex = repositoryFor(store, 'mallory', 'globex');
@@ -6404,7 +6433,7 @@ const stage11 = {
             expect(globex.read('doc-1').title).toBe('globex plan');
           });
 
-          it('列表里只有本租户的文档', () => {
+          it("a listing contains only this tenant's documents", () => {
             const store = createStore();
             const acme = repositoryFor(store, 'alice', 'acme');
             const globex = repositoryFor(store, 'mallory', 'globex');
@@ -6418,21 +6447,21 @@ const stage11 = {
             expect(globex.list()).toHaveLength(1);
           });
 
-          it('按属主筛也只在本租户内', () => {
+          it('filtering by owner stays within this tenant too', () => {
             const store = createStore();
             const acme = repositoryFor(store, 'alice', 'acme');
             const globex = repositoryFor(store, 'alice', 'globex');
 
             acme.write({ id: 'doc-1', ownerId: 'alice', title: 'a1' });
             acme.write({ id: 'doc-2', ownerId: 'bob', title: 'a2' });
-            // 同一个人在另一个租户下也有文档
+            // The same person also has documents in the other tenant
             globex.write({ id: 'doc-9', ownerId: 'alice', title: 'g1' });
 
             expect(acme.listOwnedBy('alice')).toHaveLength(1);
             expect(acme.listOwnedBy('alice')[0].title).toBe('a1');
           });
 
-          it('写入时租户以会话为准，入参说了不算', () => {
+          it('the tenant on write comes from the session, not from the arguments', () => {
             const store = createStore();
             const acme = repositoryFor(store, 'alice', 'acme');
 
@@ -6442,7 +6471,7 @@ const stage11 = {
             expect(repositoryFor(store, 'mallory', 'globex').read('doc-1')).toBeNull();
           });
 
-          it('同一个 id 再写一次只更新本租户那条', () => {
+          it("writing the same id again updates only this tenant's row", () => {
             const store = createStore();
             const acme = repositoryFor(store, 'alice', 'acme');
             const globex = repositoryFor(store, 'mallory', 'globex');
@@ -6455,7 +6484,7 @@ const stage11 = {
             expect(globex.read('doc-1').title).toBe('globex v1');
           });
 
-          it('不存在的文档返回 null，空租户列出空数组', () => {
+          it('a missing document returns null and an empty tenant lists an empty array', () => {
             const store = createStore();
             repositoryFor(store, 'mallory', 'globex').write({
               id: 'doc-1',
@@ -6468,7 +6497,7 @@ const stage11 = {
             expect(acme.list()).toEqual([]);
           });
 
-          it('仓储的租户来自登录时签发的会话', () => {
+          it("the repository's tenant comes from the session issued at login", () => {
             const store = createStore();
             const issuer = createSessionIssuer({ secret: 'session-signing-key', ttlMs: 60000 });
             const refresh = createRefreshService(store, issuer, { ttlMs: 600000 });
@@ -6481,7 +6510,7 @@ const stage11 = {
             expect(repositoryFor(store, 'mallory', 'globex').list()).toEqual([]);
           });
 
-          it('别的租户往库里写了很多条，也不该被读到', () => {
+          it('however many rows another tenant writes, none of them become readable', () => {
             const store = createStore();
             const globex = repositoryFor(store, 'mallory', 'globex');
             for (let index = 0; index < 20; index += 1) {
@@ -6490,7 +6519,8 @@ const stage11 = {
             const acme = repositoryFor(store, 'alice', 'acme');
             acme.write({ id: 'doc-1', ownerId: 'alice', title: 'mine' });
 
-            // 门槛数的是「读到了多少条别人的记录」，先全取再 filter 会在这里露馅
+            // The gate counts how many of someone else's records were read; fetching everything and
+            // then filtering shows up here
             expect(acme.list()).toHaveLength(1);
             expect(acme.listOwnedBy('mallory')).toEqual([]);
             expect(acme.read('doc-7')).toBeNull();
@@ -6542,12 +6572,15 @@ const stage11 = {
         const KEY_SEPARATOR = '|';
 
         export function createTenantRepository(store: Store, claims: SessionClaims): TenantRepository {
-          // 租户在这里被钉死一次，之后没有任何方法能改变它
+          // The tenant is pinned once here, and no method afterwards can change it
           const tenant = claims.tenantId;
           const scope = { tenantId: tenant };
           const prefix = tenant + KEY_SEPARATOR;
 
-          /** 整个仓储只有这一处读 store，作用域也就只写一次 */
+          /**
+           * The whole repository reads the store in exactly one place, so the scope is written
+           * exactly once
+           */
           function fetch(key: string): TenantDocument | null {
             const record = store.get(COLLECTIONS.documents, key, scope);
             return record ? (record as unknown as TenantDocument) : null;
@@ -6556,7 +6589,8 @@ const stage11 = {
           function all(): TenantDocument[] {
             const documents: TenantDocument[] = [];
             for (const key of store.keys(COLLECTIONS.documents)) {
-              // 先按租户筛 key，再取数据：别人的记录根本不会被读出来
+              // Filter keys by tenant first and fetch the data second: other tenants' records are
+              // never read at all
               if (key.indexOf(prefix) !== 0) continue;
               const document = fetch(key);
               if (document) documents.push(document);
@@ -6578,7 +6612,7 @@ const stage11 = {
             },
 
             write(input: DocumentInput): TenantDocument {
-              // tenant 写在后面：入参里就算带了这个字段也会被会话覆盖掉
+              // tenant goes last: even if the arguments carry that field, the session overrides it
               const document: TenantDocument = { ...input, tenant };
               store.put(COLLECTIONS.documents, prefix + input.id, document as unknown as Record<string, unknown>);
               return document;
@@ -6953,15 +6987,15 @@ const stage12 = {
         export interface AuditEvent {
           actor: string;
           tenantId: string;
-          /** 比如 auth:login */
+          /** For example auth:login */
           action: string;
           outcome: 'allow' | 'deny';
-          /** 附加信息。里面的秘密要脱敏。 */
+          /** Extra detail. Any secrets inside it must be redacted. */
           detail?: Record<string, unknown>;
         }
 
         export interface AuditEntry {
-          /** 从 1 开始连续递增 */
+          /** Contiguous, starting at 1 */
           seq: number;
           at: number;
           actor: string;
@@ -6976,24 +7010,24 @@ const stage12 = {
         export interface AuditLog {
           record(event: AuditEvent): AuditEntry;
           entries(): AuditEntry[];
-          /** 第一处断裂的下标；完好返回 -1 */
+          /** The index of the first break; -1 when the chain is intact */
           verifyChain(): number;
         }
 
         export interface AuditOptions {
-          /** 链上 HMAC 的密钥。它不在数据库里，这是全部意义所在。 */
+          /** The key for the chain HMAC. It is not in the database, and that is the entire point. */
           secret: string;
         }
 
         export function createAuditLog(store: Store, options: AuditOptions): AuditLog {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
 
         export interface LoginOptions {
-          /** 连续失败几次就锁 */
+          /** How many consecutive failures before locking */
           maxAttempts: number;
-          /** 锁多久 */
+          /** How long the lock lasts */
           lockoutMs: number;
         }
 
@@ -7012,7 +7046,7 @@ const stage12 = {
           audit: AuditLog,
           options: LoginOptions
         ): HardenedLogin {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -7053,8 +7087,8 @@ const stage12 = {
           }
         }
 
-        describe('阶段12 · 审计链与登录加固', () => {
-          it('成功和失败的登录都留下审计', async () => {
+        describe('Stage 12 · Audit chain and login hardening', () => {
+          it('both successful and failed logins leave an audit entry', async () => {
             const context = await setup();
 
             await context.guard.login({ userId: 'alice', password: PASSWORD, tenantId: 'acme' });
@@ -7067,7 +7101,7 @@ const stage12 = {
             expect(entries[1].outcome).toBe('deny');
           });
 
-          it('审计条目连续编号且链能验通过', async () => {
+          it('audit entries are numbered contiguously and the chain verifies', async () => {
             const context = await setup();
             await failLogin(context.guard, 2);
             await context.guard.login({ userId: 'alice', password: PASSWORD, tenantId: 'acme' });
@@ -7083,7 +7117,7 @@ const stage12 = {
             expect(broken).toBe(-1);
           });
 
-          it('改掉一条记录，验链能指出位置', async () => {
+          it('altering one record makes chain verification point at its position', async () => {
             const context = await setup();
             await failLogin(context.guard, 3);
 
@@ -7096,7 +7130,7 @@ const stage12 = {
             expect(broken).toBeGreaterThanOrEqual(0);
           });
 
-          it('删掉一条记录，验链同样能发现', async () => {
+          it('deleting one record is detected by chain verification too', async () => {
             const context = await setup();
             await failLogin(context.guard, 3);
 
@@ -7108,7 +7142,7 @@ const stage12 = {
             expect(broken).toBeGreaterThanOrEqual(0);
           });
 
-          it('审计里不会出现明文密码', async () => {
+          it('no plaintext password appears in the audit log', async () => {
             const context = await setup();
             await failLogin(context.guard, 2);
             await context.guard.login({ userId: 'alice', password: PASSWORD, tenantId: 'acme' });
@@ -7119,7 +7153,7 @@ const stage12 = {
             expect(dump).not.toContain(PASSWORD);
           });
 
-          it('记事件时带进来的秘密会被脱敏', async () => {
+          it('secrets passed in when recording an event are redacted', async () => {
             const context = await setup();
 
             context.audit.record({
@@ -7140,7 +7174,7 @@ const stage12 = {
             expect(dump).toContain('this one is fine');
           });
 
-          it('嵌套在对象里的秘密也要脱敏', async () => {
+          it('secrets nested inside objects are redacted too', async () => {
             const context = await setup();
 
             context.audit.record({
@@ -7156,7 +7190,7 @@ const stage12 = {
             expect(dump).toContain('10.0.0.1');
           });
 
-          it('连续失败到上限就锁定', async () => {
+          it('the account locks once consecutive failures reach the limit', async () => {
             const context = await setup();
             await failLogin(context.guard, MAX_ATTEMPTS);
 
@@ -7168,7 +7202,7 @@ const stage12 = {
             expect(result.reason).toBe('locked');
           });
 
-          it('锁定期间正确的密码也进不来', async () => {
+          it('even the right password does not get in while locked', async () => {
             const context = await setup();
             await failLogin(context.guard, MAX_ATTEMPTS);
 
@@ -7182,7 +7216,7 @@ const stage12 = {
             expect(result.reason).toBe('locked');
           });
 
-          it('锁定期间不再做慢哈希', async () => {
+          it('no slow hash is computed while locked', async () => {
             const context = await setup();
             await failLogin(context.guard, MAX_ATTEMPTS);
 
@@ -7190,11 +7224,12 @@ const stage12 = {
             await context.guard.login({ userId: 'alice', password: PASSWORD, tenantId: 'acme' });
             const after = getCounters()['kdfRounds'] || 0;
 
-            // 拒绝是注定的，那次哈希就是白烧的 CPU，而攻击者可以无限次触发它
+            // The rejection is a foregone conclusion, so that hash is pure wasted CPU an attacker
+            // can trigger without limit
             expect(after).toBe(before);
           });
 
-          it('锁定期满之后可以重新登录', async () => {
+          it('login works again once the lock expires', async () => {
             const context = await setup();
             await failLogin(context.guard, MAX_ATTEMPTS);
 
@@ -7207,7 +7242,7 @@ const stage12 = {
             expect(result.ok).toBe(true);
           });
 
-          it('成功登录会把失败计数清零', async () => {
+          it('a successful login resets the failure count', async () => {
             const context = await setup();
             await failLogin(context.guard, MAX_ATTEMPTS - 1);
             await context.guard.login({ userId: 'alice', password: PASSWORD, tenantId: 'acme' });
@@ -7222,7 +7257,7 @@ const stage12 = {
             expect(result.ok).toBe(true);
           });
 
-          it('锁定只针对这个账号', async () => {
+          it('the lock applies to this account only', async () => {
             const context = await setup();
             await failLogin(context.guard, MAX_ATTEMPTS);
 
@@ -7234,7 +7269,7 @@ const stage12 = {
             expect(result.ok).toBe(true);
           });
 
-          it('锁定期间的尝试同样留下审计', async () => {
+          it('attempts made while locked are audited as well', async () => {
             const context = await setup();
             await failLogin(context.guard, MAX_ATTEMPTS);
             const before = context.audit.entries().length;
@@ -7315,11 +7350,11 @@ const stage12 = {
           secret: string;
         }
 
-        /** 链的起点。第一条的 prevHash 指向它。 */
+        /** The start of the chain. The first entry's prevHash points at it. */
         const GENESIS = 'genesis';
         const MASK = '[redacted]';
         const KEY_WIDTH = 6;
-        /** 字段名里出现这些词就当作秘密 */
+        /** A field whose name contains one of these words is treated as a secret */
         const SENSITIVE = ['password', 'secret', 'token', 'authorization', 'verifier', 'code'];
 
         function isSensitive(key: string): boolean {
@@ -7333,7 +7368,7 @@ const stage12 = {
           return redact(value as Record<string, unknown>);
         }
 
-        /** 递归脱敏：秘密经常藏在「整个请求体」这种嵌套结构里 */
+        /** Recursive redaction: secrets often hide inside nested structures such as a whole request body */
         function redact(detail: Record<string, unknown>): Record<string, unknown> {
           const clean: Record<string, unknown> = {};
           for (const key of Object.keys(detail)) {
@@ -7356,7 +7391,10 @@ const stage12 = {
             ].join('|');
           }
 
-          /** 用 HMAC 而不是普通摘要：能改库的人不该能重算这个值 */
+          /**
+           * HMAC rather than a plain digest: someone who can edit the database should not be able
+           * to recompute this value
+           */
           function hashOf(entry: AuditEntry): string {
             return hmac(options.secret, bodyOf(entry));
           }
@@ -7404,7 +7442,8 @@ const stage12 = {
               const list = all();
               for (let index = 0; index < list.length; index += 1) {
                 const entry = list[index];
-                // 三种断裂：编号跳了、接不上上一条、内容被改过
+                // Three kinds of break: a skipped number, a mismatch with the previous entry, or
+                // altered content
                 if (entry.seq !== index + 1) return index;
                 if (entry.prevHash !== expected) return index;
                 if (entry.hash !== hashOf(entry)) return index;
@@ -7443,7 +7482,7 @@ const stage12 = {
           function stateOf(userId: string): LockState {
             const record = store.get(COLLECTIONS.lockouts, userId) as unknown as LockState | undefined;
             if (!record) return { failures: 0, lockedUntil: 0 };
-            // 锁定期满就当作从头开始，不需要另外的清理任务
+            // Once the lock expires, treat it as starting over; no separate cleanup task is needed
             if (record.lockedUntil && record.lockedUntil <= now()) return { failures: 0, lockedUntil: 0 };
             return record;
           }
@@ -7460,7 +7499,8 @@ const stage12 = {
             async login(input: { userId: string; password: string; tenantId: string }): Promise<LoginResult> {
               const state = stateOf(input.userId);
 
-              // 锁定判断在验密码之前：结果已经注定，那次慢哈希纯属白烧
+              // The lock check comes before the password check: the outcome is already decided, so
+              // that slow hash is pure waste
               if (state.lockedUntil > now()) {
                 trace(input.userId, input.tenantId, 'deny', 'locked');
                 return { ok: false, reason: 'locked' };

@@ -18,7 +18,7 @@ declare module '@lab/net' {
     body?: unknown;
   }
 
-  /** 调用模拟的下游服务。失败时 reject 一个 LabHttpError。 */
+  /** Call the simulated downstream service. Rejects with a LabHttpError on failure. */
   export function request(url: string, options?: LabRequestOptions): Promise<LabResponse>;
 
   export class LabHttpError extends Error {
@@ -44,22 +44,22 @@ declare module '@lab/net' {
     counters: Record<string, number>;
   }
 
-  /** 只在验收用例里使用 */
+  /** For use in the acceptance specs only */
   export function getMetrics(): LabMetrics;
 }
 
 declare module '@lab/env' {
-  /** 虚拟时钟上的等待，不会真的阻塞 */
+  /** Wait on the virtual clock; this never really blocks */
   export function sleep(ms: number): Promise<void>;
-  /** 当前虚拟时间（毫秒） */
+  /** The current virtual time, in milliseconds */
   export function now(): number;
-  /** 可复现的伪随机数 */
+  /** A reproducible pseudo-random number */
   export function random(): number;
 }
 
 declare module '@lab/metrics' {
   import type { LabMetrics } from '@lab/net';
-  /** 自定义埋点计数 */
+  /** Record a custom instrumentation counter */
   export function count(name: string, delta?: number): void;
   export function getCounters(): Record<string, number>;
   export function getMetrics(): LabMetrics;

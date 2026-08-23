@@ -8,22 +8,22 @@ const { t, code, file, readonlyFile, spec, gate } = require('./_helpers');
 const contract = readonlyFile(
   'src/contract.ts',
   code`
-    /** 平台提供的契约（只读） */
+    /** Contract provided by the platform (read-only) */
 
     export interface OrderEvent {
-      /** 事件唯一 id，用于幂等 */
+      /** Unique event id, used for idempotency */
       id: string;
       type: string;
       payload: Record<string, unknown>;
-      /** 事件产生时间（虚拟时钟） */
+      /** When the event was produced (virtual clock) */
       at?: number;
     }
 
     export interface Context {
       event: OrderEvent;
-      /** 中间件之间传递的数据 */
+      /** Data passed between middleware */
       state: Record<string, unknown>;
-      /** 处理结果，最后一个中间件负责写入 */
+      /** The result; the last middleware is responsible for writing it */
       result?: unknown;
     }
 
@@ -270,7 +270,7 @@ const stage1 = {
         export interface VersionedEvent {
           id: string;
           type: string;
-          /** 版本号必须是事件自己的一部分，不能存在外部元数据里 */
+          /** The version must be part of the event itself, not kept in external metadata */
           version: number;
           payload: Record<string, unknown>;
         }
@@ -278,15 +278,15 @@ const stage1 = {
         export type Upcaster = (payload: Record<string, unknown>) => Record<string, unknown>;
 
         export interface SchemaRegistry {
-          /** 登记一次「从 fromVersion 升到 fromVersion + 1」的转换 */
+          /** Register one step that upgrades fromVersion to fromVersion + 1 */
           register(type: string, fromVersion: number, upcaster: Upcaster): void;
-          /** 逐级升到最新版本；版本高于最新时抛错 */
+          /** Upgrade step by step to the latest version; throws if the version is newer than the latest */
           upcast(event: VersionedEvent): VersionedEvent;
           latestVersion(type: string): number;
         }
 
         export function createRegistry(): SchemaRegistry {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -313,16 +313,16 @@ const stage1 = {
           return registry;
         }
 
-        describe('阶段1 · 事件模式演进', () => {
-          it('没登记过升级的类型版本是 1', () => {
+        describe('Stage 1 · Event schema evolution', () => {
+          it('a type with no registered upgrade is at version 1', () => {
             expect(createRegistry().latestVersion('Unknown')).toBe(1);
           });
 
-          it('登记两级之后最新版本是 3', () => {
+          it('after registering two steps the latest version is 3', () => {
             expect(registryWithChain().latestVersion('OrderPlaced')).toBe(3);
           });
 
-          it('已经是最新版本的事件原样通过', () => {
+          it('an event already at the latest version passes through untouched', () => {
             const registry = registryWithChain();
             const event = {
               id: 'e1',
@@ -333,7 +333,7 @@ const stage1 = {
             expect(registry.upcast(event)).toEqual(event);
           });
 
-          it('v1 的事件被逐级升到 v3 [gate:chain]', () => {
+          it('a v1 event is upgraded step by step to v3 [gate:chain]', () => {
             const applied: string[] = [];
             const registry = registryWithChain(applied);
 
@@ -345,13 +345,13 @@ const stage1 = {
             });
 
             count('upcastSteps', applied.length);
-            // 只调最后一个 upcaster 的实现在这里只有 1 步，而且缺 currency 字段
+            // Calling only the last upcaster takes a single step here, and leaves currency missing
             expect(applied).toEqual(['1->2', '2->3']);
             expect(upcasted.version).toBe(3);
             expect(upcasted.payload).toEqual({ amount: 10, currency: 'CNY', amountCents: 1000 });
           });
 
-          it('v2 的事件只升一级', () => {
+          it('a v2 event is upgraded by one step only', () => {
             const applied: string[] = [];
             const registry = registryWithChain(applied);
 
@@ -364,7 +364,7 @@ const stage1 = {
             expect(applied).toEqual(['2->3']);
           });
 
-          it('比最新还新的版本会抛错', () => {
+          it('a version newer than the latest throws', () => {
             const registry = registryWithChain();
             let thrown = false;
             try {
@@ -372,11 +372,12 @@ const stage1 = {
             } catch (caught) {
               thrown = true;
             }
-            // 老消费者读到新数据时，字段语义可能已经变了，静默接受会算错
+            // When an old consumer reads newer data, field meanings may have changed; accepting it
+            // silently computes the wrong answer
             expect(thrown).toBe(true);
           });
 
-          it('不同类型的版本链互相独立', () => {
+          it('version chains for different types are independent', () => {
             const registry = registryWithChain();
             registry.register('OrderShipped', 1, (payload) => ({ ...payload, carrier: 'sf' }));
 
@@ -387,7 +388,7 @@ const stage1 = {
             ).toEqual({ carrier: 'sf' });
           });
 
-          it('upcast 不修改传入的事件', () => {
+          it('upcast does not mutate the event it is given', () => {
             const registry = registryWithChain();
             const original = {
               id: 'e1',
@@ -397,18 +398,18 @@ const stage1 = {
             };
             registry.upcast(original);
 
-            // 同一个事件可能被多个消费者读取，原地修改会让第二个消费者升两次
+            // The same event may be read by several consumers; mutating in place upgrades it twice
             expect(original.version).toBe(1);
             expect(original.payload).toEqual({ amount: 10 });
           });
 
-          it('同一个事件升两次结果相同', () => {
+          it('upgrading the same event twice gives the same result', () => {
             const registry = registryWithChain();
             const event = { id: 'e1', type: 'OrderPlaced', version: 1, payload: { amount: 10 } };
             expect(registry.upcast(event)).toEqual(registry.upcast(event));
           });
 
-          it('没登记过的类型只接受 v1', () => {
+          it('an unregistered type only accepts v1', () => {
             const registry = createRegistry();
             const event = { id: 'e1', type: 'Unknown', version: 1, payload: { a: 1 } };
             expect(registry.upcast(event)).toEqual(event);
@@ -422,7 +423,7 @@ const stage1 = {
             expect(thrown).toBe(true);
           });
 
-          it('版本链中间缺一环会抛错而不是跳过', () => {
+          it('a missing link in the version chain throws instead of being skipped', () => {
             const registry = createRegistry();
             registry.register('Gappy', 1, (payload) => payload);
             registry.register('Gappy', 3, (payload) => payload);
@@ -433,7 +434,8 @@ const stage1 = {
             } catch (caught) {
               thrown = true;
             }
-            // 缺 2->3 这一环，静默跳过会产出一个谁也不认识的中间态
+            // The 2->3 step is missing; skipping it silently would produce an in-between shape
+            // nobody recognises
             expect(thrown).toBe(true);
           });
         });
@@ -498,8 +500,8 @@ const stage1 = {
             upcast(event: VersionedEvent): VersionedEvent {
               const target = latest(event.type);
               if (event.version > target) {
-                // 老消费者读到了新数据。字段语义可能已经变了，
-                // 静默当作最新处理会产生业务错误，明确失败才拦得住
+                // An old consumer has read newer data. Field meanings may have changed,
+                // so treating it silently as current produces business errors; only failing loudly catches it
                 throw new Error(
                   'event ' + event.id + ' is version ' + event.version + ' but this consumer only knows ' + target
                 );
@@ -507,14 +509,14 @@ const stage1 = {
 
               const chain = chainOf(event.type);
               let version = event.version;
-              // 每一级都返回新对象：同一个事件可能被多个消费者读取，
-              // 原地修改会让第二个消费者在已经升过的对象上再升一次
+              // Every step returns a new object: the same event may be read by several consumers,
+              // and mutating in place would upgrade it a second time for the next one
               let payload: Record<string, unknown> = { ...event.payload };
 
               while (version < target) {
                 const upcaster = chain.get(version);
-                // 链断了就停下来报错。静默跳过会产出一个
-                // 既不是旧格式也不是新格式的中间态
+                // Stop and report when the chain is broken. Skipping silently produces a shape that is
+                // neither the old format nor the new one
                 if (!upcaster) {
                   throw new Error(
                     'no upcaster from version ' + version + ' for event type ' + event.type
@@ -802,7 +804,7 @@ const stage2 = {
         export type EventHandler = (payload: Record<string, unknown>, event: OrderEvent) => Promise<void> | void;
 
         export interface EventBusOptions {
-          /** handler 抛错时的兜底上报 */
+          /** Last-resort reporting for when a handler throws */
           onError?: (error: unknown, type: string) => void;
         }
 
@@ -813,7 +815,7 @@ const stage2 = {
         }
 
         export function createEventBus(options: EventBusOptions = {}): EventBus {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -827,8 +829,8 @@ const stage2 = {
         import { createEventBus } from '../src/bus';
         import { sleep, now } from '@lab/env';
 
-        describe('阶段2 · 事件总线', () => {
-          it('所有监听都会收到事件', async () => {
+        describe('Stage 2 · Event bus', () => {
+          it('every listener receives the event', async () => {
             const bus = createEventBus();
             const seen: string[] = [];
             bus.on('order.created', (payload) => {
@@ -846,7 +848,7 @@ const stage2 = {
             expect(bus.listenerCount('order.created')).toBe(2);
           });
 
-          it('取消订阅之后不再收到事件', async () => {
+          it('no more events arrive after unsubscribing', async () => {
             const bus = createEventBus();
             let calls = 0;
             const off = bus.on('order.paid', () => {
@@ -861,7 +863,7 @@ const stage2 = {
             expect(bus.listenerCount('order.paid')).toBe(0);
           });
 
-          it('emit 会等待异步 handler 完成', async () => {
+          it('emit waits for async handlers to finish', async () => {
             const bus = createEventBus();
             let done = false;
             bus.on('order.created', async () => {
@@ -873,7 +875,7 @@ const stage2 = {
             expect(done).toBe(true);
           });
 
-          it('一个 handler 抛错不影响其他 handler', async () => {
+          it('one handler throwing does not affect the others', async () => {
             const errors: unknown[] = [];
             const bus = createEventBus({ onError: (error) => errors.push(error) });
             let survived = false;
@@ -892,7 +894,7 @@ const stage2 = {
             expect(errors).toHaveLength(1);
           });
 
-          it('互不依赖的 handler 并行执行 [gate:latency]', async () => {
+          it('independent handlers run in parallel [gate:latency]', async () => {
             const bus = createEventBus();
             const startedAt = now();
             for (let index = 0; index < 3; index += 1) {
@@ -905,13 +907,13 @@ const stage2 = {
             expect(now() - startedAt).toBe(50);
           });
 
-          it('没有监听的事件不会炸', async () => {
+          it('an event with no listeners does not blow up', async () => {
             const bus = createEventBus();
             await bus.emit('nobody.listens', { a: 1 });
             expect(bus.listenerCount('nobody.listens')).toBe(0);
           });
 
-          it('不同事件类型互不串台', async () => {
+          it('different event types do not cross wires', async () => {
             const bus = createEventBus();
             const seen: string[] = [];
             bus.on('order.created', () => seen.push('created'));
@@ -921,7 +923,7 @@ const stage2 = {
             expect(seen).toEqual(['paid']);
           });
 
-          it('同一个函数注册两次会被调用两次，取消一次只减一个', async () => {
+          it('registering the same function twice calls it twice, and one unsubscribe removes only one', async () => {
             const bus = createEventBus();
             let calls = 0;
             const handler = () => {
@@ -939,14 +941,14 @@ const stage2 = {
             expect(calls).toBe(1);
           });
 
-          it('handler 里取消订阅不会打乱本次派发', async () => {
+          it('unsubscribing inside a handler does not disturb the dispatch in flight', async () => {
             const bus = createEventBus();
             const seen: string[] = [];
             let off2: (() => void) | null = null;
 
             bus.on('order.created', () => {
               seen.push('first');
-              // 在派发过程中移除后面的监听：本次派发仍然应该完整
+              // Remove a later listener mid-dispatch: this dispatch should still complete in full
               off2?.();
             });
             off2 = bus.on('order.created', () => {
@@ -958,7 +960,7 @@ const stage2 = {
             expect(bus.listenerCount('order.created')).toBe(1);
           });
 
-          it('全部 handler 都抛错时 emit 依然 resolve', async () => {
+          it('emit still resolves when every handler throws', async () => {
             const errors: unknown[] = [];
             const bus = createEventBus({ onError: (error) => errors.push(error) });
             bus.on('order.created', () => {
@@ -972,7 +974,7 @@ const stage2 = {
             expect(errors).toHaveLength(2);
           });
 
-          it('同步 handler 抛错也会被隔离', async () => {
+          it('a throwing sync handler is isolated too', async () => {
             const errors: unknown[] = [];
             const bus = createEventBus({ onError: (error) => errors.push(error) });
             let survived = false;
@@ -1040,7 +1042,7 @@ const stage2 = {
             },
 
             async emit(type, payload) {
-              // 先快照，避免 handler 内部 off() 改坏正在遍历的数组
+              // Snapshot first, so a handler calling off() cannot corrupt the array being iterated
               const handlers = [...(listeners.get(type) || [])];
               const event: OrderEvent = { id: type + ':' + Date.now(), type, payload };
 
@@ -1336,21 +1338,21 @@ const stage3 = {
 
         export interface PartitionOptions {
           partitions: number;
-          /** 从事件里取出分区键 */
+          /** Extract the partition key from an event */
           keyOf(event: OrderEvent): string;
         }
 
         export interface PartitionedBus {
-          /** 返回的 Promise 在这个事件被处理完时 resolve */
+          /** The returned Promise resolves once this event has been processed */
           publish(event: OrderEvent): Promise<void>;
           subscribe(handler: (event: OrderEvent) => Promise<void> | void): void;
           partitionOf(key: string): number;
-          /** 还有多少事件没处理完 */
+          /** How many events are still in flight */
           pending(): number;
         }
 
         export function createPartitionedBus(options: PartitionOptions): PartitionedBus {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -1374,8 +1376,8 @@ const stage3 = {
           keyOf: (e: any) => String(e.payload.orderId),
         };
 
-        describe('阶段3 · 分区与顺序', () => {
-          it('同一个 key 稳定落到同一个分区', () => {
+        describe('Stage 3 · Partitioning and ordering', () => {
+          it('the same key lands on the same partition every time', () => {
             const bus = createPartitionedBus(OPTIONS);
             const first = bus.partitionOf('order-1');
             for (let index = 0; index < 10; index += 1) {
@@ -1385,7 +1387,7 @@ const stage3 = {
             expect(first).toBeLessThan(4);
           });
 
-          it('publish 的 Promise 在处理完成时 resolve', async () => {
+          it("publish's Promise resolves when processing completes", async () => {
             const bus = createPartitionedBus(OPTIONS);
             let handled = false;
             bus.subscribe(async () => {
@@ -1397,11 +1399,12 @@ const stage3 = {
             expect(handled).toBe(true);
           });
 
-          it('同一个订单的事件严格按发布顺序处理 [gate:ordering]', async () => {
+          it('events for one order are processed strictly in publish order [gate:ordering]', async () => {
             const bus = createPartitionedBus(OPTIONS);
             const seen: number[] = [];
             bus.subscribe(async (incoming: any) => {
-              // 故意让先来的慢、后来的快，乱序的实现在这里必然翻车
+              // Deliberately make the earlier one slow and the later one fast; an out-of-order
+              // implementation cannot survive this
               await sleep(incoming.payload.index === 0 ? 80 : 10);
               seen.push(incoming.payload.index);
             });
@@ -1424,13 +1427,13 @@ const stage3 = {
             expect(violations).toBe(0);
           });
 
-          it('不同分区并行推进 [gate:parallel]', async () => {
+          it('separate partitions make progress in parallel [gate:parallel]', async () => {
             const bus = createPartitionedBus(OPTIONS);
             bus.subscribe(async () => {
               await sleep(100);
             });
 
-            // 找出四个落在不同分区上的 key
+            // Find four keys that land on four different partitions
             const keys: string[] = [];
             const used = new Set<number>();
             for (let index = 0; keys.length < 4 && index < 200; index += 1) {
@@ -1452,18 +1455,18 @@ const stage3 = {
             }
             await Promise.all(published);
 
-            // 分区内串行 3 × 100ms，四个分区并行 = 300ms。
-            // 全局串行的实现在这里是 1200ms
+            // Serial within a partition is 3 × 100ms; four partitions in parallel = 300ms.
+            // A globally serial implementation takes 1200ms here
             expect(now() - startedAt).toBe(300);
           });
 
-          it('没有订阅者时 publish 也能完成', async () => {
+          it('publish completes even with no subscribers', async () => {
             const bus = createPartitionedBus(OPTIONS);
             await bus.publish(event('e1', 'order-1'));
             expect(bus.pending()).toBe(0);
           });
 
-          it('handler 抛错不会卡死这个分区', async () => {
+          it('a throwing handler does not wedge its partition', async () => {
             const bus = createPartitionedBus(OPTIONS);
             const seen: string[] = [];
             bus.subscribe(async (incoming: any) => {
@@ -1475,11 +1478,11 @@ const stage3 = {
             await bus.publish({ id: 'bad', type: 'x', payload: { orderId: 'order-1' } });
             await bus.publish({ id: 'after', type: 'x', payload: { orderId: 'order-1' } });
 
-            // 链断掉的实现里 'after' 的 promise 永远不会 resolve
+            // In an implementation with a broken chain, the promise for 'after' never resolves
             expect(seen).toEqual(['first', 'after']);
           });
 
-          it('pending 反映未处理完的数量', async () => {
+          it('pending reflects how many events are still unprocessed', async () => {
             const bus = createPartitionedBus(OPTIONS);
             bus.subscribe(async () => {
               await sleep(100);
@@ -1496,7 +1499,7 @@ const stage3 = {
             expect(bus.pending()).toBe(0);
           });
 
-          it('多个订阅者都会收到事件', async () => {
+          it('every subscriber receives the event', async () => {
             const bus = createPartitionedBus(OPTIONS);
             const seen: string[] = [];
             bus.subscribe(async () => {
@@ -1510,7 +1513,7 @@ const stage3 = {
             expect(seen.sort()).toEqual(['a', 'b']);
           });
 
-          it('不同订单互不阻塞', async () => {
+          it('separate orders do not block each other', async () => {
             const bus = createPartitionedBus({ partitions: 8, keyOf: OPTIONS.keyOf });
             bus.subscribe(async (incoming: any) => {
               await sleep(incoming.payload.orderId === 'slow' ? 500 : 20);
@@ -1521,13 +1524,13 @@ const stage3 = {
 
             const startedAt = now();
             await bus.publish(event('f1', 'fast'));
-            // slow 那个订单在别的分区上，不该拖住这个
+            // The slow order sits on a different partition and should not hold this one up
             expect(now() - startedAt).toBeLessThanOrEqual(30);
 
             await slow;
           });
 
-          it('分区数为 1 时退化成全局有序', async () => {
+          it('a single partition degenerates to global ordering', async () => {
             const bus = createPartitionedBus({ partitions: 1, keyOf: OPTIONS.keyOf });
             const seen: string[] = [];
             bus.subscribe(async (incoming: any) => {
@@ -1595,8 +1598,8 @@ const stage3 = {
 
         export function createPartitionedBus(options: PartitionOptions): PartitionedBus {
           const handlers: Array<(event: OrderEvent) => Promise<void> | void> = [];
-          // 每个分区一条「尾部 promise」，新任务接在它后面，
-          // 于是分区内天然串行，分区之间互不相干
+          // One tail promise per partition, with new work chained onto it,
+          // which makes a partition serial by construction while partitions stay independent
           const tails: Array<Promise<void>> = [];
           for (let index = 0; index < Math.max(1, options.partitions); index += 1) {
             tails.push(Promise.resolve());
@@ -1619,12 +1622,13 @@ const stage3 = {
               const run = async (): Promise<void> => {
                 try {
                   for (const handler of handlers.slice()) {
-                    // 分区内逐个 await：这里用 Promise.all 的话顺序保证就没了
+                    // Await one at a time within the partition: Promise.all here would throw the
+                    // ordering guarantee away
                     await handler(event);
                   }
                 } catch (error) {
-                  // 吞掉：一次未处理的 reject 会把这条链断掉，
-                  // 该分区后续事件的 promise 全部永远悬着
+                  // Swallow it: a single unhandled rejection breaks this chain and leaves
+                  // every later event on the partition hanging forever
                 } finally {
                   inFlight -= 1;
                 }
@@ -1926,11 +1930,11 @@ const stage4 = {
         import type { Context, Middleware, Next } from './contract';
 
         /**
-         * 把中间件数组组合成一个函数。
-         * 语义与 koa-compose 一致。
+         * Compose an array of middleware into a single function.
+         * Semantics match koa-compose.
          */
         export function compose(middlewares: Middleware[]): (ctx: Context, next?: Next) => Promise<void> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -1948,8 +1952,8 @@ const stage4 = {
           return { event: { id: 'e1', type: 'order.created', payload: {} }, state: {} } as any;
         }
 
-        describe('阶段4 · 洋葱式中间件', () => {
-          it('按洋葱顺序执行', async () => {
+        describe('Stage 4 · Onion middleware', () => {
+          it('runs in onion order', async () => {
             const trace: string[] = [];
             const run = compose([
               async (ctx, next) => {
@@ -1971,7 +1975,7 @@ const stage4 = {
             expect(trace).toEqual(['a:in', 'b:in', 'handler', 'b:out', 'a:out']);
           });
 
-          it('异步中间件被正确 await', async () => {
+          it('async middleware is awaited properly', async () => {
             const trace: string[] = [];
             const run = compose([
               async (ctx, next) => {
@@ -1990,7 +1994,7 @@ const stage4 = {
             expect(trace).toEqual(['a', 'b', 'a-out']);
           });
 
-          it('不调用 next 会短路后续中间件', async () => {
+          it('not calling next short-circuits the rest of the chain', async () => {
             let reached = false;
             const run = compose([
               async (ctx) => {
@@ -2007,7 +2011,7 @@ const stage4 = {
             expect(ctx.state.blocked).toBe(true);
           });
 
-          it('中间件抛错会传播给调用方', async () => {
+          it('an error in middleware propagates to the caller', async () => {
             const run = compose([
               async (ctx, next) => {
                 await next();
@@ -2020,7 +2024,7 @@ const stage4 = {
             await expect(async () => run(createContext())).rejects.toThrow('auth failed');
           });
 
-          it('重复调用 next 会抛错', async () => {
+          it('calling next twice throws', async () => {
             const run = compose([
               async (ctx, next) => {
                 await next();
@@ -2034,13 +2038,13 @@ const stage4 = {
             await expect(async () => run(createContext())).rejects.toThrow();
           });
 
-          it('空中间件数组也能安全运行', async () => {
+          it('an empty middleware array runs safely', async () => {
             const run = compose([]);
             await run(createContext());
             expect(true).toBe(true);
           });
 
-          it('中间件之间通过 ctx.state 传值', async () => {
+          it('middleware passes values through ctx.state', async () => {
             const run = compose([
               async (ctx, next) => {
                 ctx.state.user = 'alice';
@@ -2056,7 +2060,7 @@ const stage4 = {
             expect(ctx.result).toBe('handled by alice');
           });
 
-          it('回程阶段抛出的错误同样会传播', async () => {
+          it('errors thrown on the way back out propagate too', async () => {
             const run = compose([
               async (ctx, next) => {
                 await next();
@@ -2069,11 +2073,11 @@ const stage4 = {
 
             const ctx = createContext();
             await expect(async () => run(ctx)).rejects.toThrow('failed on the way out');
-            // 下游确实先跑完了
+            // Downstream really did finish first
             expect(ctx.result).toBe('inner done');
           });
 
-          it('中间件可以捕获下游错误做降级', async () => {
+          it('middleware can catch downstream errors and degrade', async () => {
             const run = compose([
               async (ctx, next) => {
                 try {
@@ -2094,7 +2098,7 @@ const stage4 = {
             expect(ctx.result).toBe('fallback');
           });
 
-          it('最内层的 next 会调用 compose 的第二个参数', async () => {
+          it("the innermost next calls compose's second argument", async () => {
             let reachedOuter = false;
             const run = compose([
               async (ctx, next) => {
@@ -2108,7 +2112,7 @@ const stage4 = {
             expect(reachedOuter).toBe(true);
           });
 
-          it('同步中间件也能正常组合', async () => {
+          it('sync middleware composes fine as well', async () => {
             const trace: string[] = [];
             const run = compose([
               (ctx, next) => {
@@ -2124,7 +2128,7 @@ const stage4 = {
             expect(trace).toEqual(['sync-in', 'sync-handler']);
           });
 
-          it('组合出来的函数可以复用，多次调用互不影响', async () => {
+          it('a composed function is reusable and calls do not interfere', async () => {
             const run = compose([
               async (ctx, next) => {
                 ctx.state.count = 1;
@@ -2156,7 +2160,8 @@ const stage4 = {
 
         export function compose(middlewares: Middleware[]): (ctx: Context, next?: Next) => Promise<void> {
           return function run(ctx: Context, next?: Next): Promise<void> {
-            // index 是「已经进入过的最深层数」，用来发现同一层被 next 两次
+            // index is the deepest level already entered, which is how a second next() on the same
+            // level is spotted
             let index = -1;
 
             function dispatch(current: number): Promise<void> {
@@ -2433,16 +2438,16 @@ const stage5 = {
         export interface ConsumerGroup {
           join(consumerId: string): void;
           leave(consumerId: string): void;
-          /** 这个消费者负责的分区，升序 */
+          /** Partitions this consumer owns, ascending */
           assignmentOf(consumerId: string): number[];
-          /** 这个分区归谁，无主返回 null */
+          /** Who owns this partition; null when unowned */
           ownerOf(partition: number): string | null;
           members(): string[];
           rebalances(): number;
         }
 
         export function createConsumerGroup(options: GroupOptions): ConsumerGroup {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -2462,19 +2467,19 @@ const stage5 = {
           return owners;
         }
 
-        describe('阶段5 · 消费者组', () => {
-          it('没有成员时所有分区无主', () => {
+        describe('Stage 5 · Consumer groups', () => {
+          it('with no members every partition is unowned', () => {
             const group = createConsumerGroup({ partitions: 6 });
             expect(snapshot(group, 6)).toEqual([null, null, null, null, null, null]);
           });
 
-          it('单个消费者拿走全部分区', () => {
+          it('a single consumer takes every partition', () => {
             const group = createConsumerGroup({ partitions: 6 });
             group.join('c1');
             expect(group.assignmentOf('c1')).toEqual([0, 1, 2, 3, 4, 5]);
           });
 
-          it('两个消费者平分', () => {
+          it('two consumers split them evenly', () => {
             const group = createConsumerGroup({ partitions: 6 });
             group.join('c1');
             group.join('c2');
@@ -2482,7 +2487,7 @@ const stage5 = {
             expect(group.assignmentOf('c2')).toHaveLength(3);
           });
 
-          it('分不整齐时相差不超过 1', () => {
+          it('an uneven split differs by at most 1', () => {
             const group = createConsumerGroup({ partitions: 7 });
             group.join('c1');
             group.join('c2');
@@ -2491,7 +2496,7 @@ const stage5 = {
             expect(sizes).toEqual([2, 2, 3]);
           });
 
-          it('每个分区恰好一个主人 [gate:exclusive]', () => {
+          it('every partition has exactly one owner [gate:exclusive]', () => {
             const group = createConsumerGroup({ partitions: 12 });
             for (const id of ['c1', 'c2', 'c3', 'c4', 'c5']) group.join(id);
 
@@ -2515,7 +2520,7 @@ const stage5 = {
             expect(unowned).toBe(0);
           });
 
-          it('成员退出后它的分区被接管', () => {
+          it("a departed member's partitions are taken over", () => {
             const group = createConsumerGroup({ partitions: 6 });
             group.join('c1');
             group.join('c2');
@@ -2528,14 +2533,14 @@ const stage5 = {
             }
           });
 
-          it('全部退出后分区重新无主', () => {
+          it('once everyone leaves the partitions are unowned again', () => {
             const group = createConsumerGroup({ partitions: 4 });
             group.join('c1');
             group.leave('c1');
             expect(snapshot(group, 4)).toEqual([null, null, null, null]);
           });
 
-          it('重复 join 同一个 id 不会重复分配', () => {
+          it('joining twice with the same id does not assign twice', () => {
             const group = createConsumerGroup({ partitions: 6 });
             group.join('c1');
             group.join('c1');
@@ -2543,7 +2548,7 @@ const stage5 = {
             expect(group.assignmentOf('c1')).toHaveLength(6);
           });
 
-          it('leave 不存在的成员是无操作', () => {
+          it('leaving with an unknown member is a no-op', () => {
             const group = createConsumerGroup({ partitions: 4 });
             group.join('c1');
             const before = group.rebalances();
@@ -2551,7 +2556,7 @@ const stage5 = {
             expect(group.rebalances()).toBe(before);
           });
 
-          it('rebalances 统计再平衡次数', () => {
+          it('rebalances counts how many rebalances happened', () => {
             const group = createConsumerGroup({ partitions: 4 });
             group.join('c1');
             group.join('c2');
@@ -2559,7 +2564,7 @@ const stage5 = {
             expect(group.rebalances()).toBe(3);
           });
 
-          it('新成员加入时只移动必要的分区 [gate:sticky]', () => {
+          it('a new member only moves the partitions it has to [gate:sticky]', () => {
             const group = createConsumerGroup({ partitions: 12 });
             for (const id of ['c1', 'c2', 'c3']) group.join(id);
             const before = snapshot(group, 12);
@@ -2573,13 +2578,13 @@ const stage5 = {
             }
             count('partitionsMoved', moved);
 
-            // 4/4/4 -> 3/3/3/3 只需要动 3 个。
-            // 推倒重分的实现在这里会移动 9 个
+            // 4/4/4 -> 3/3/3/3 only needs three to move.
+            // An implementation that reassigns from scratch moves nine
             expect(moved).toBeLessThanOrEqual(4);
             expect(group.assignmentOf('c4')).toHaveLength(3);
           });
 
-          it('成员退出时不动其他人已有的分区', () => {
+          it('a member leaving does not disturb what others already hold', () => {
             const group = createConsumerGroup({ partitions: 12 });
             for (const id of ['c1', 'c2', 'c3', 'c4']) group.join(id);
             const keptBefore = group.assignmentOf('c1');
@@ -2587,7 +2592,7 @@ const stage5 = {
             group.leave('c4');
             const keptAfter = group.assignmentOf('c1');
 
-            // c1 原有的分区应该全部还在它手上，只是可能又多接了几个
+            // Everything c1 held should still be c1's; it may just have picked up a few more
             for (const partition of keptBefore) {
               expect(keptAfter).toContain(partition);
             }
@@ -2635,9 +2640,9 @@ const stage5 = {
 
         export function createConsumerGroup(options: GroupOptions): ConsumerGroup {
           const order: string[] = [];
-          // 分配是有状态的：记住现在谁拥有什么，在此基础上做最小调整。
-          // 用 partition % memberCount 算出来的分配没有状态，
-          // 成员数一变几乎所有分区都会换主
+          // Assignment is stateful: remember who owns what right now and adjust minimally from there.
+          // An assignment computed as partition % memberCount has no state,
+          // so almost every partition changes hands the moment the member count does
           const assignments = new Map<string, number[]>();
           let rebalanceCount = 0;
 
@@ -2652,28 +2657,29 @@ const stage5 = {
             const extra = options.partitions % order.length;
             const targetOf = (index: number) => base + (index < extra ? 1 : 0);
 
-            // 先记下「调整之前谁都持有什么」。用调整之后的 keep 来算无主分区的话，
-            // 刚被收回的那些会同时出现在 surplus 和「无主」里，被分配两次
+            // Record who held what *before* the adjustment. Computing unowned partitions from the
+            // post-adjustment keep would list the just-revoked ones as both surplus and unowned,
+            // assigning them twice
             const heldBefore = new Set<number>();
             for (const id of order) {
               for (const partition of assignments.get(id) || []) heldBefore.add(partition);
             }
 
-            // 第一步：收回超额的
+            // Step one: revoke the surplus
             const orphans: number[] = [];
             order.forEach((id, index) => {
               const current = (assignments.get(id) || []).slice().sort((a, b) => a - b);
               assignments.set(id, current.slice(0, targetOf(index)));
               for (const partition of current.slice(targetOf(index))) orphans.push(partition);
             });
-            // 再加上从来没被认领过的
+            // Plus the ones that were never claimed
             for (let partition = 0; partition < options.partitions; partition += 1) {
               if (!heldBefore.has(partition)) orphans.push(partition);
             }
             orphans.sort((a, b) => a - b);
 
-            // 第二步：把收回来的分给还不够的。没被这两步碰到的分配原封不动，
-            // 粘性就是这么来的
+            // Step two: hand the revoked ones to whoever is short. Anything untouched by these two steps
+            // stays exactly where it was — that is where the stickiness comes from
             let cursor = 0;
             order.forEach((id, index) => {
               const current = assignments.get(id) as number[];
@@ -2698,8 +2704,8 @@ const stage5 = {
               if (index === -1) return;
               order.splice(index, 1);
               assignments.delete(consumerId);
-              // 退出必须触发真正的再分配：只标成无主的话
-              // 那些分区从此没人消费，而监控上看不出任何异常
+              // Leaving has to trigger a real reassignment: merely marking partitions unowned
+              // leaves them with no consumer while monitoring shows nothing wrong
               rebalance();
             },
 
@@ -2775,10 +2781,10 @@ const databaseSupport = readonlyFile(
   'src/support/db.ts',
   code`
     /**
-     * 极简数据库（只读，平台提供）
+     * Minimal database (read-only, provided by the platform)
      *
-     * 只提供这一关需要的东西：一个真正会回滚的事务。
-     * work 抛错时，事务里所有写入一起撤销。
+     * It offers only what this stage needs: a transaction that really does roll back.
+     * When work throws, every write in the transaction is undone together.
      */
     export interface Tx {
       insert(table: string, row: Record<string, unknown>): void;
@@ -2786,7 +2792,7 @@ const databaseSupport = readonlyFile(
     }
 
     export interface Database {
-      /** work 抛错则整个事务回滚，异常继续向上抛 */
+      /** If work throws, the whole transaction rolls back and the error keeps propagating */
       transaction<T>(work: (tx: Tx) => T): T;
       rows(table: string): Array<Record<string, unknown>>;
     }
@@ -3096,15 +3102,18 @@ const stage6 = {
         import type { Database, Tx } from './support/db';
 
         export interface Outbox {
-          /** work 在一个事务里执行，它返回的事件和业务数据一起提交或一起回滚 */
+          /**
+           * work runs inside a transaction; the events it returns commit or roll back with the
+           * business data
+           */
           commit(work: (tx: Tx) => OrderEvent[]): void;
-          /** 把未投递的事件按写入顺序发出去，返回本次投递成功的数量 */
+          /** Emit undelivered events in write order and return how many were delivered this round */
           dispatch(publish: (event: OrderEvent) => Promise<void>): Promise<number>;
           pending(): number;
         }
 
         export function createOutbox(db: Database): Outbox {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -3123,8 +3132,8 @@ const stage6 = {
           return { id, type: 'order.created', payload: { orderId } };
         }
 
-        describe('阶段6 · 事务性 outbox', () => {
-          it('业务数据和事件一起写入', () => {
+        describe('Stage 6 · Transactional outbox', () => {
+          it('business data and events are written together', () => {
             const db = createDatabase();
             const outbox = createOutbox(db);
 
@@ -3137,7 +3146,7 @@ const stage6 = {
             expect(outbox.pending()).toBe(1);
           });
 
-          it('业务写入失败时事件一起回滚 [gate:atomic]', () => {
+          it('a failed business write rolls the events back too [gate:atomic]', () => {
             const db = createDatabase();
             const outbox = createOutbox(db);
 
@@ -3154,11 +3163,11 @@ const stage6 = {
             count('orphanEvents', outbox.pending());
             expect(thrown).toBe(true);
             expect(db.rows('orders')).toHaveLength(0);
-            // 事务外面写 outbox 的实现会在这里留下一个孤儿事件
+            // An implementation that writes the outbox outside the transaction leaves an orphan event here
             expect(outbox.pending()).toBe(0);
           });
 
-          it('投递成功后标记，不会重发', async () => {
+          it('delivered events are marked and never sent twice', async () => {
             const db = createDatabase();
             const outbox = createOutbox(db);
             outbox.commit(() => [orderEvent('e1', 'o1')]);
@@ -3175,7 +3184,7 @@ const stage6 = {
             expect(sent).toEqual(['e1']);
           });
 
-          it('投递顺序与写入顺序一致', async () => {
+          it('delivery order matches write order', async () => {
             const db = createDatabase();
             const outbox = createOutbox(db);
             outbox.commit(() => [orderEvent('e1', 'o1'), orderEvent('e2', 'o1')]);
@@ -3188,19 +3197,19 @@ const stage6 = {
             expect(sent).toEqual(['e1', 'e2', 'e3']);
           });
 
-          it('投递失败的事件一个都不丢 [gate:no-loss]', async () => {
+          it('not a single failed delivery is lost [gate:no-loss]', async () => {
             const db = createDatabase();
             const outbox = createOutbox(db);
             outbox.commit(() => [orderEvent('e1', 'o1'), orderEvent('e2', 'o1'), orderEvent('e3', 'o1')]);
 
-            // 第一次投递：第二个开始全部失败
+            // First pass: everything from the second one on fails
             const firstRound: string[] = [];
             await outbox.dispatch(async (event) => {
               if (event.id !== 'e1') throw new Error('broker is down');
               firstRound.push(event.id);
             });
 
-            // 第二次投递：broker 恢复
+            // Second pass: the broker is back
             const secondRound: string[] = [];
             await outbox.dispatch(async (event) => {
               secondRound.push(event.id);
@@ -3213,7 +3222,7 @@ const stage6 = {
             expect(outbox.pending()).toBe(0);
           });
 
-          it('失败时已成功的那些已经被标记，不会重发', async () => {
+          it('the ones that already succeeded are marked and not resent', async () => {
             const db = createDatabase();
             const outbox = createOutbox(db);
             outbox.commit(() => [orderEvent('e1', 'o1'), orderEvent('e2', 'o1')]);
@@ -3230,12 +3239,12 @@ const stage6 = {
             expect(second).toEqual(['e2']);
           });
 
-          it('没有待投递事件时 dispatch 返回 0', async () => {
+          it('dispatch returns 0 when nothing is pending', async () => {
             const outbox = createOutbox(createDatabase());
             expect(await outbox.dispatch(async () => undefined)).toBe(0);
           });
 
-          it('work 不返回事件也能正常提交', () => {
+          it('work that returns no events still commits normally', () => {
             const db = createDatabase();
             const outbox = createOutbox(db);
             outbox.commit((tx) => {
@@ -3246,14 +3255,14 @@ const stage6 = {
             expect(outbox.pending()).toBe(0);
           });
 
-          it('多次 commit 累积在 outbox 里', () => {
+          it('repeated commits accumulate in the outbox', () => {
             const outbox = createOutbox(createDatabase());
             outbox.commit(() => [orderEvent('e1', 'o1')]);
             outbox.commit(() => [orderEvent('e2', 'o2')]);
             expect(outbox.pending()).toBe(2);
           });
 
-          it('回滚之后业务数据也不留痕迹', () => {
+          it('a rollback leaves no trace of the business data either', () => {
             const db = createDatabase();
             const outbox = createOutbox(db);
             outbox.commit((tx) => {
@@ -3267,7 +3276,7 @@ const stage6 = {
                 return [orderEvent('e2', 'o2')];
               });
             } catch (caught) {
-              // 这一次不会抛
+              // This one does not throw
             }
             expect(db.rows('orders')).toHaveLength(2);
 
@@ -3277,9 +3286,9 @@ const stage6 = {
                 throw new Error('nope');
               });
             } catch (caught) {
-              // 预期之内
+              // Expected
             }
-            // 第三次回滚了，前两次的数据必须还在
+            // The third one rolled back; the data from the first two must still be there
             expect(db.rows('orders')).toHaveLength(2);
             expect(outbox.pending()).toBe(2);
           });
@@ -3327,8 +3336,10 @@ const stage6 = {
             commit(work: (tx: Tx) => OrderEvent[]): void {
               db.transaction((tx) => {
                 const events = work(tx);
-                // 关键就是这一行的位置：事件的写入在业务写入的同一个事务回调里。
-                // 挪到 transaction 外面，就退回成了「先写库再写 outbox」的两步问题
+                // The position of this line is the whole point: the event write sits inside the
+                // same transaction callback as the business write.
+                // Move it outside transaction and you are back to the two-step 'write the database,
+                // then write the outbox' problem
                 for (const event of events) {
                   tx.insert(TABLE, {
                     id: event.id,
@@ -3352,12 +3363,12 @@ const stage6 = {
                 };
 
                 try {
-                  // 先发送、成功了再标记。反过来的话，
-                  // 发送失败的事件已经被标成已投递，永远不会重试——静默丢失
+                  // Send first, mark only on success. The other way round leaves a failed send
+                  // marked as delivered and never retried — a silent loss
                   await publish(event);
                 } catch (error) {
-                  // 保持顺序：中断整批，剩下的留到下一轮。
-                  // 跳过继续发会让同一个订单的事件倒序送达
+                  // Preserve order: stop the batch and leave the rest for the next round.
+                  // Skipping ahead would deliver one order's events out of order
                   break;
                 }
 
@@ -3677,13 +3688,13 @@ const stage7 = {
 
         export interface ProcessorOptions {
           middlewares: Middleware[];
-          /** 最多尝试几次（含第一次），默认 1 */
+          /** How many attempts at most, including the first; defaults to 1 */
           maxAttempts?: number;
         }
 
         export interface ProcessOutcome {
           ok: boolean;
-          /** 是否命中幂等表（没有真正执行） */
+          /** Whether the idempotency table was hit (nothing actually ran) */
           deduplicated: boolean;
           result?: unknown;
           error?: string;
@@ -3696,7 +3707,7 @@ const stage7 = {
         }
 
         export function createOrderProcessor(options: ProcessorOptions): OrderProcessor {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -3715,8 +3726,8 @@ const stage7 = {
           return { id, type, payload: { orderId: id } };
         }
 
-        describe('阶段7 · 幂等与死信', () => {
-          it('正常事件跑完中间件链', async () => {
+        describe('Stage 7 · Idempotency and dead letters', () => {
+          it('a normal event runs the whole middleware chain', async () => {
             const trace: string[] = [];
             const processor = createOrderProcessor({
               middlewares: [
@@ -3738,7 +3749,7 @@ const stage7 = {
             expect(trace).toEqual(['audit', 'handle']);
           });
 
-          it('相同 id 的重复投递只执行一次 [gate:idempotent]', async () => {
+          it('a redelivery with the same id executes only once [gate:idempotent]', async () => {
             let sideEffects = 0;
             const processor = createOrderProcessor({
               middlewares: [
@@ -3760,7 +3771,7 @@ const stage7 = {
             expect(getCounters()['order.processed']).toBe(1);
           });
 
-          it('失败的事件会重试到 maxAttempts', async () => {
+          it('a failing event is retried up to maxAttempts', async () => {
             let attempts = 0;
             const processor = createOrderProcessor({
               maxAttempts: 3,
@@ -3779,7 +3790,7 @@ const stage7 = {
             expect(processor.deadLetters()).toHaveLength(0);
           });
 
-          it('彻底失败的事件进入死信队列 [gate:dlq]', async () => {
+          it('an event that fails for good goes to the dead-letter queue [gate:dlq]', async () => {
             const processor = createOrderProcessor({
               maxAttempts: 2,
               middlewares: [
@@ -3800,7 +3811,7 @@ const stage7 = {
             expect(getCounters()['order.deadLettered']).toBe(1);
           });
 
-          it('死信不会挡住后面的事件', async () => {
+          it('a dead letter does not block the events behind it', async () => {
             const processor = createOrderProcessor({
               maxAttempts: 1,
               middlewares: [
@@ -3818,14 +3829,14 @@ const stage7 = {
             expect(processor.deadLetters().map((item) => item.id)).toEqual(['BAD']);
           });
 
-          it('失败的事件不会写进幂等表，重投时会再次尝试', async () => {
+          it('a failed event is not written to the idempotency table and is retried on redelivery', async () => {
             let attempts = 0;
             const processor = createOrderProcessor({
               maxAttempts: 1,
               middlewares: [
                 async (ctx) => {
                   attempts += 1;
-                  // 第一次投递失败，第二次投递应该真的重跑
+                  // The first delivery failed, so the second should really run again
                   if (attempts === 1) throw new Error('transient');
                   ctx.result = 'recovered';
                 },
@@ -3841,7 +3852,7 @@ const stage7 = {
             expect(attempts).toBe(2);
           });
 
-          it('每次重试都用全新的 ctx，不带上一次的脏数据', async () => {
+          it('every retry gets a fresh ctx with no leftovers from the last one', async () => {
             const seen: unknown[] = [];
             const processor = createOrderProcessor({
               maxAttempts: 3,
@@ -3859,7 +3870,7 @@ const stage7 = {
             expect(seen).toEqual([undefined, undefined, undefined]);
           });
 
-          it('maxAttempts 默认只尝试一次', async () => {
+          it('maxAttempts defaults to a single attempt', async () => {
             let attempts = 0;
             const processor = createOrderProcessor({
               middlewares: [
@@ -3876,7 +3887,7 @@ const stage7 = {
             expect(outcome.ok).toBe(false);
           });
 
-          it('deadLetters 返回副本，外部改不动内部队列', async () => {
+          it('deadLetters returns a copy that callers cannot use to mutate the queue', async () => {
             const processor = createOrderProcessor({
               maxAttempts: 1,
               middlewares: [
@@ -3893,7 +3904,7 @@ const stage7 = {
             expect(processor.deadLetters()).toHaveLength(1);
           });
 
-          it('幂等命中时不会重复打点', async () => {
+          it('an idempotency hit does not record the metric twice', async () => {
             const processor = createOrderProcessor({
               middlewares: [
                 async (ctx) => {
@@ -3909,7 +3920,7 @@ const stage7 = {
             expect(getCounters()['order.processed']).toBe(1);
           });
 
-          it('中间件链为空时事件也算处理成功', async () => {
+          it('an event with an empty middleware chain still counts as handled', async () => {
             const processor = createOrderProcessor({ middlewares: [] });
             const outcome = await processor.process(event('E10'));
             expect(outcome.ok).toBe(true);
@@ -3973,7 +3984,7 @@ const stage7 = {
 
           return {
             async process(event: OrderEvent): Promise<ProcessOutcome> {
-              // 幂等检查必须在任何副作用之前
+              // The idempotency check has to come before any side effect
               if (processed.has(event.id)) {
                 return {
                   ok: true,
@@ -4277,13 +4288,13 @@ const stage8 = {
 
         export interface SagaResult {
           ok: boolean;
-          /** 成功执行的步骤，按执行顺序 */
+          /** Steps that succeeded, in execution order */
           completed: string[];
-          /** 被补偿的步骤，按补偿执行的顺序 */
+          /** Steps that were compensated, in compensation order */
           compensated: string[];
-          /** 失败发生在哪一步 */
+          /** Which step the failure happened on */
           failedAt: string | null;
-          /** 补偿本身失败的步骤 */
+          /** Steps whose compensation itself failed */
           compensationFailures: string[];
         }
 
@@ -4291,7 +4302,7 @@ const stage8 = {
           steps: SagaStep[],
           context: Record<string, unknown>
         ): Promise<SagaResult> {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -4319,8 +4330,8 @@ const stage8 = {
           };
         }
 
-        describe('阶段8 · Saga 与补偿', () => {
-          it('全部成功时不补偿任何一步', async () => {
+        describe('Stage 8 · Sagas and compensation', () => {
+          it('nothing is compensated when every step succeeds', async () => {
             const log: string[] = [];
             const result = await runSaga(
               [step('stock', log), step('payment', log), step('shipment', log)],
@@ -4333,7 +4344,7 @@ const stage8 = {
             expect(log).toEqual(['do:stock', 'do:payment', 'do:shipment']);
           });
 
-          it('第一步就失败时无事可补偿', async () => {
+          it('a failure on the first step leaves nothing to compensate', async () => {
             const log: string[] = [];
             const result = await runSaga([step('stock', log, { failInvoke: true }), step('payment', log)], {});
 
@@ -4344,7 +4355,7 @@ const stage8 = {
             expect(log).toEqual([]);
           });
 
-          it('中途失败时按逆序补偿 [gate:reverse]', async () => {
+          it('a failure part-way through compensates in reverse order [gate:reverse]', async () => {
             const log: string[] = [];
             const result = await runSaga(
               [
@@ -4359,7 +4370,7 @@ const stage8 = {
             expect(result.ok).toBe(false);
             expect(result.failedAt).toBe('shipment');
             expect(result.completed).toEqual(['stock', 'payment']);
-            // 逆序：先撤 payment 再撤 stock
+            // Reverse order: undo payment before stock
             expect(result.compensated).toEqual(['payment', 'stock']);
 
             let orderErrors = 0;
@@ -4370,15 +4381,15 @@ const stage8 = {
             expect(orderErrors).toBe(0);
           });
 
-          it('失败的那一步自己不被补偿', async () => {
+          it('the step that failed is not compensated itself', async () => {
             const log: string[] = [];
             await runSaga([step('stock', log), step('payment', log, { failInvoke: true })], {});
-            // payment 的 invoke 抛了错，可能什么都没做，撤销它可能撤掉别的东西
+            // payment's invoke threw and may have done nothing; undoing it could undo something else
             expect(log).not.toContain('undo:payment');
             expect(log).toContain('undo:stock');
           });
 
-          it('失败之后没有未补偿的已完成步骤 [gate:complete]', async () => {
+          it('no completed step is left uncompensated after a failure [gate:complete]', async () => {
             const log: string[] = [];
             const result = await runSaga(
               [
@@ -4399,7 +4410,7 @@ const stage8 = {
             expect(uncompensated).toEqual([]);
           });
 
-          it('补偿失败时继续补偿剩下的', async () => {
+          it('a failed compensation does not stop the remaining ones', async () => {
             const log: string[] = [];
             const result = await runSaga(
               [
@@ -4410,12 +4421,12 @@ const stage8 = {
               {}
             );
 
-            // payment 的补偿失败了，但 stock 的补偿必须照常执行
+            // payment's compensation failed, but stock's still has to run
             expect(result.compensationFailures).toEqual(['payment']);
             expect(log).toContain('undo:stock');
           });
 
-          it('补偿失败被记录在 compensationFailures 里', async () => {
+          it('failed compensations are recorded in compensationFailures', async () => {
             const log: string[] = [];
             const result = await runSaga(
               [
@@ -4428,7 +4439,7 @@ const stage8 = {
             expect(result.compensationFailures.sort()).toEqual(['a', 'b']);
           });
 
-          it('context 在各步之间传递', async () => {
+          it('context is threaded through the steps', async () => {
             const context: Record<string, unknown> = {};
             await runSaga(
               [
@@ -4456,7 +4467,7 @@ const stage8 = {
             expect(context.shipmentFor).toBe('r-1');
           });
 
-          it('补偿也能读到 context', async () => {
+          it('compensations can read the context too', async () => {
             const context: Record<string, unknown> = {};
             let seen: unknown = null;
             await runSaga(
@@ -4485,7 +4496,7 @@ const stage8 = {
             expect(seen).toBe('r-1');
           });
 
-          it('空步骤列表直接成功', async () => {
+          it('an empty step list succeeds immediately', async () => {
             const result = await runSaga([], {});
             expect(result.ok).toBe(true);
             expect(result.completed).toEqual([]);
@@ -4548,8 +4559,8 @@ const stage8 = {
               done.push(step);
               completed.push(step.name);
             } catch (error) {
-              // 这一步没做成，它自己没什么可撤销的。
-              // 强行补偿它，轻则找不到记录，重则撤销掉别人的东西
+              // This step never completed, so it has nothing of its own to undo.
+              // Compensating it anyway finds no record at best, and undoes someone else's work at worst
               failedAt = step.name;
               break;
             }
@@ -4559,16 +4570,16 @@ const stage8 = {
             return { ok: true, completed, compensated, failedAt: null, compensationFailures };
           }
 
-          // 逆序：后面的步骤依赖前面的结果，正序补偿会制造出
-          // 「物流单指向已经还回库存池的货」这种中间态
+          // Reverse order: later steps depend on earlier results, so compensating forwards creates
+          // in-between states like a shipment pointing at stock that has already gone back to the pool
           for (let index = done.length - 1; index >= 0; index -= 1) {
             const step = done[index];
             try {
               await step.compensate(context);
               compensated.push(step.name);
             } catch (error) {
-              // 尽最大努力补偿完：中断的话剩下的步骤永远不会被撤销，
-              // 系统停在一个谁也说不清的状态
+              // Compensate on a best-effort basis: stopping here leaves the remaining steps undone forever
+              // and the system parked in a state nobody can explain
               compensationFailures.push(step.name);
             }
           }
@@ -4911,15 +4922,15 @@ const stage9 = {
         }
 
         export interface EventStore {
-          /** expectedVersion 与当前版本不符时抛 ConcurrencyError */
+          /** Throws ConcurrencyError when expectedVersion does not match the current version */
           append(streamId: string, events: OrderEvent[], expectedVersion: number): void;
-          /** 返回版本 fromVersion 之后的事件，不传则全部 */
+          /** Events after version fromVersion, or all of them when omitted */
           read(streamId: string, fromVersion?: number): OrderEvent[];
-          /** 流里事件的总数 */
+          /** Total number of events in the stream */
           version(streamId: string): number;
           saveSnapshot(streamId: string, version: number, state: unknown): void;
           latestSnapshot(streamId: string): Snapshot | null;
-          /** 从最近的快照开始重放，返回折叠结果 */
+          /** Replay from the most recent snapshot and return the folded result */
           rebuild(
             streamId: string,
             apply: (state: unknown, event: OrderEvent) => unknown,
@@ -4928,7 +4939,7 @@ const stage9 = {
         }
 
         export function createEventStore(): EventStore {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -4950,12 +4961,12 @@ const stage9 = {
           total: (state.total || 0) + Number(event.payload.delta),
         });
 
-        describe('阶段9 · 事件溯源', () => {
-          it('空流的版本是 0', () => {
+        describe('Stage 9 · Event sourcing', () => {
+          it('an empty stream is at version 0', () => {
             expect(createEventStore().version('order-1')).toBe(0);
           });
 
-          it('追加之后版本等于事件总数', () => {
+          it('after appending, the version equals the event count', () => {
             const store = createEventStore();
             store.append('order-1', [amountEvent('e1', 10), amountEvent('e2', 5)], 0);
             expect(store.version('order-1')).toBe(2);
@@ -4964,29 +4975,29 @@ const stage9 = {
             expect(store.version('order-1')).toBe(3);
           });
 
-          it('read 返回全部事件', () => {
+          it('read returns every event', () => {
             const store = createEventStore();
             store.append('order-1', [amountEvent('e1', 10), amountEvent('e2', 5)], 0);
             expect(store.read('order-1').map((e) => e.id)).toEqual(['e1', 'e2']);
           });
 
-          it('read 可以从指定版本之后开始', () => {
+          it('read can start after a given version', () => {
             const store = createEventStore();
             store.append('order-1', [amountEvent('e1', 1), amountEvent('e2', 2), amountEvent('e3', 3)], 0);
             expect(store.read('order-1', 2).map((e) => e.id)).toEqual(['e3']);
           });
 
-          it('状态由事件折叠得出', () => {
+          it('state is derived by folding the events', () => {
             const store = createEventStore();
             store.append('order-1', [amountEvent('e1', 10), amountEvent('e2', -3)], 0);
             expect(store.rebuild('order-1', applyAmount, { total: 0 })).toEqual({ total: 7 });
           });
 
-          it('版本不匹配的追加被拒绝 [gate:concurrency]', () => {
+          it('an append with a mismatched version is rejected [gate:concurrency]', () => {
             const store = createEventStore();
             store.append('order-1', [amountEvent('e1', 10)], 0);
 
-            // 两个并发写者都以为自己在版本 1 上
+            // Both concurrent writers believe they are on version 1
             store.append('order-1', [amountEvent('e2', 5)], 1);
 
             let conflicts = 0;
@@ -4998,11 +5009,11 @@ const stage9 = {
 
             count('lostUpdates', conflicts === 1 ? 0 : 1);
             expect(conflicts).toBe(1);
-            // 冲突的事件不该被写进去
+            // The conflicting event must not be written
             expect(store.version('order-1')).toBe(2);
           });
 
-          it('ConcurrencyError 带上期望和实际版本', () => {
+          it('ConcurrencyError carries the expected and actual versions', () => {
             const store = createEventStore();
             store.append('order-1', [amountEvent('e1', 1)], 0);
             let error: any = null;
@@ -5015,7 +5026,7 @@ const stage9 = {
             expect(error.actual).toBe(1);
           });
 
-          it('不同的流互不影响', () => {
+          it('separate streams do not affect each other', () => {
             const store = createEventStore();
             store.append('order-1', [amountEvent('e1', 10)], 0);
             store.append('order-2', [amountEvent('e2', 20)], 0);
@@ -5023,7 +5034,7 @@ const stage9 = {
             expect(store.rebuild('order-2', applyAmount, { total: 0 })).toEqual({ total: 20 });
           });
 
-          it('快照不改变重建出来的状态', () => {
+          it('a snapshot does not change the rebuilt state', () => {
             const store = createEventStore();
             store.append('order-1', [amountEvent('e1', 10), amountEvent('e2', 5)], 0);
             const withoutSnapshot = store.rebuild('order-1', applyAmount, { total: 0 });
@@ -5034,7 +5045,7 @@ const stage9 = {
             expect(withSnapshot).toEqual(withoutSnapshot);
           });
 
-          it('快照存的是副本，后续 apply 改不到它', () => {
+          it('a snapshot stores a copy that later applies cannot reach', () => {
             const store = createEventStore();
             const state = { total: 10 };
             store.saveSnapshot('order-1', 1, state);
@@ -5043,11 +5054,11 @@ const stage9 = {
             expect(store.latestSnapshot('order-1')!.state).toEqual({ total: 10 });
           });
 
-          it('没有快照时 latestSnapshot 返回 null', () => {
+          it('latestSnapshot returns null when there is no snapshot', () => {
             expect(createEventStore().latestSnapshot('order-1')).toBeNull();
           });
 
-          it('重建从最近的快照开始，不从头 [gate:snapshot]', () => {
+          it('a rebuild starts from the latest snapshot, not from the beginning [gate:snapshot]', () => {
             const store = createEventStore();
             const events: any[] = [];
             for (let index = 0; index < 1000; index += 1) events.push(amountEvent('e' + index, 1));
@@ -5064,7 +5075,7 @@ const stage9 = {
             count('eventsReplayed', replayed);
 
             expect(rebuilt).toEqual({ total: 1000 });
-            // 从头折叠的实现在这里是 1000 次
+            // An implementation that folds from the start does 1000 iterations here
             expect(replayed).toBeLessThanOrEqual(12);
           });
         });
@@ -5145,8 +5156,9 @@ const stage9 = {
           return {
             append(streamId: string, events: OrderEvent[], expectedVersion: number): void {
               const stream = streamOf(streamId);
-              // 事件溯源里唯一的写冲突防线。少了它，两个基于同一旧状态的
-              // 并发写都会成功，事件流里会同时存在互相矛盾的两条
+              // The only guard against write conflicts in event sourcing. Without it, two concurrent
+              // writes based on the same old state both succeed and the stream ends up holding two
+              // contradictory events
               if (stream.length !== expectedVersion) {
                 throw new ConcurrencyError(streamId, expectedVersion, stream.length);
               }
@@ -5162,8 +5174,8 @@ const stage9 = {
             },
 
             saveSnapshot(streamId: string, version: number, state: unknown): void {
-              // 存副本：存引用的话，后续 apply 原地改动会把快照一起改掉，
-              // 于是「历史状态」变成了当前状态
+              // Store a copy: storing a reference lets a later in-place apply mutate the snapshot too,
+              // turning the historical state into the current one
               snapshots.set(streamId, { version, state: JSON.parse(JSON.stringify(state)) });
             },
 
@@ -5179,8 +5191,8 @@ const stage9 = {
               initial: unknown
             ): unknown {
               const snapshot = snapshots.get(streamId);
-              // 快照存在就从它开始：忽略快照的实现功能完全正确，
-              // 只是读取成本会随历史长度线性增长
+              // Start from the snapshot when there is one: ignoring it is perfectly correct,
+              // it just makes read cost grow linearly with history length
               let state = snapshot ? JSON.parse(JSON.stringify(snapshot.state)) : initial;
               const from = snapshot ? snapshot.version : 0;
 
@@ -5486,17 +5498,17 @@ const stage10 = {
         ) => Record<string, unknown>;
 
         export interface Projection {
-          /** 从 checkpoint 之后开始追赶，返回本次处理了几个事件 */
+          /** Catch up from the checkpoint and return how many events were processed this round */
           catchUp(events: OrderEvent[]): number;
-          /** 已经处理到事件流的第几个位置 */
+          /** How far into the event stream processing has got */
           checkpoint(): number;
           state(): Record<string, unknown>;
-          /** 清空读模型和 checkpoint，用于全量重建 */
+          /** Clear the read model and checkpoint, for a full rebuild */
           reset(): void;
         }
 
         export function createProjection(reduce: Reducer): Projection {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -5514,7 +5526,7 @@ const stage10 = {
           return { id, type: 'order.placed', payload: { orderId, amount } };
         }
 
-        /** 累加型 reducer：不幂等的实现在重放时会多加一次 */
+        /** An accumulating reducer: a non-idempotent implementation double-counts on replay */
         const sumByOrder = (state: any, event: any) => {
           const orderId = String(event.payload.orderId);
           return { ...state, [orderId]: (Number(state[orderId]) || 0) + Number(event.payload.amount) };
@@ -5528,21 +5540,21 @@ const stage10 = {
           return events;
         }
 
-        describe('阶段10 · 读模型投影', () => {
-          it('初始 checkpoint 是 0，状态为空', () => {
+        describe('Stage 10 · Read-model projection', () => {
+          it('the checkpoint starts at 0 with empty state', () => {
             const projection = createProjection(sumByOrder);
             expect(projection.checkpoint()).toBe(0);
             expect(projection.state()).toEqual({});
           });
 
-          it('catchUp 处理全部事件并推进 checkpoint', () => {
+          it('catchUp processes every event and advances the checkpoint', () => {
             const projection = createProjection(sumByOrder);
             expect(projection.catchUp(stream(6))).toBe(6);
             expect(projection.checkpoint()).toBe(6);
             expect(projection.state()).toEqual({ 'order-0': 20, 'order-1': 20, 'order-2': 20 });
           });
 
-          it('重复追赶同一批事件不改变状态 [gate:idempotent]', () => {
+          it('catching up on the same batch twice does not change the state [gate:idempotent]', () => {
             const projection = createProjection(sumByOrder);
             const events = stream(6);
 
@@ -5557,7 +5569,7 @@ const stage10 = {
             expect(afterSecond).toEqual(afterFirst);
           });
 
-          it('追加新事件之后只处理新的那些 [gate:resume]', () => {
+          it('after appending, only the new events are processed [gate:resume]', () => {
             const projection = createProjection(sumByOrder);
             const events = stream(6);
             projection.catchUp(events);
@@ -5568,13 +5580,13 @@ const stage10 = {
             const processed = projection.catchUp(events);
             count('reprocessed', processed - 2);
 
-            // 从头重放的实现在这里会处理 8 个
+            // An implementation that replays from the start processes eight here
             expect(processed).toBe(2);
             expect(projection.checkpoint()).toBe(8);
             expect(projection.state()).toEqual({ 'order-0': 25, 'order-1': 25, 'order-2': 20 });
           });
 
-          it('分批追赶和一次追赶结果相同', () => {
+          it('catching up in batches matches catching up in one go', () => {
             const events = stream(9);
 
             const incremental = createProjection(sumByOrder);
@@ -5588,7 +5600,7 @@ const stage10 = {
             expect(incremental.state()).toEqual(atOnce.state());
           });
 
-          it('reset 之后可以全量重建', () => {
+          it('a full rebuild is possible after reset', () => {
             const projection = createProjection(sumByOrder);
             const events = stream(6);
             projection.catchUp(events);
@@ -5602,13 +5614,13 @@ const stage10 = {
             expect(projection.state()).toEqual(before);
           });
 
-          it('空事件流不会出错', () => {
+          it('an empty event stream does not error', () => {
             const projection = createProjection(sumByOrder);
             expect(projection.catchUp([])).toBe(0);
             expect(projection.state()).toEqual({});
           });
 
-          it('state 返回副本，外部改不坏读模型', () => {
+          it('state returns a copy that callers cannot use to corrupt the read model', () => {
             const projection = createProjection(sumByOrder);
             projection.catchUp(stream(3));
 
@@ -5618,7 +5630,7 @@ const stage10 = {
             expect((projection.state() as any)['order-0']).toBe(10);
           });
 
-          it('reduce 拿到的状态没有被上一次调用改坏', () => {
+          it('reduce receives state that the previous call did not corrupt', () => {
             const seen: any[] = [];
             const projection = createProjection((state, event) => {
               seen.push(state);
@@ -5626,11 +5638,11 @@ const stage10 = {
             });
             projection.catchUp(stream(3));
 
-            // 第一次 reduce 拿到的是空状态，如果被原地改过就不是了
+            // The first reduce sees empty state — which it would not, had it been mutated in place
             expect(seen[0]).toEqual({});
           });
 
-          it('checkpoint 前进之后旧事件不会再被处理', () => {
+          it('events before the checkpoint are not processed again', () => {
             const applied: string[] = [];
             const projection = createProjection((state, event) => {
               applied.push(event.id);
@@ -5692,12 +5704,13 @@ const stage10 = {
 
           return {
             catchUp(events: OrderEvent[]): number {
-              // 幂等就来自这一行：第二次追赶时 slice 是空的，什么都不会重复应用
+              // This line is where idempotency comes from: on a second catch-up the slice is empty
+              // and nothing is reapplied
               const pending = events.slice(position);
 
               for (const event of pending) {
-                // 先应用、后推进 checkpoint。反过来的话，中间崩溃会让
-                // 这个事件永远丢失——checkpoint 已经越过它了
+                // Apply first, advance the checkpoint second. The other way round, a crash in between
+                // loses this event forever — the checkpoint has already moved past it
                 current = reduce(current, event);
                 position += 1;
               }
@@ -5710,14 +5723,15 @@ const stage10 = {
             },
 
             state(): Record<string, unknown> {
-              // 交出副本：读模型是给很多地方查的，返回内部对象
-              // 意味着任何一个调用方都能改坏它
+              // Hand out a copy: the read model is queried from many places, and returning the
+              // internal object
+              // means any one caller can corrupt it
               return { ...current };
             },
 
             reset(): void {
-              // 读模型是派生数据，出错了的修复手段就是清空重建，
-              // 所以这不是可选功能
+              // A read model is derived data, and the way to fix a broken one is to clear and rebuild,
+              // so this is not an optional feature
               current = {};
               position = 0;
             },
@@ -6039,20 +6053,20 @@ const stage11 = {
         }
 
         export interface ReconcileOptions {
-          /** 两边都是数字时，差异不超过它就不算 mismatch */
+          /** When both sides are numbers, a difference no larger than this is not a mismatch */
           tolerance?: number;
         }
 
         /**
-         * expected 来自事件流折叠，actual 来自读模型。
-         * 返回按 key 排序的差异列表；完全一致时返回空数组。
+         * expected comes from folding the event stream, actual from the read model.
+         * Returns the differences sorted by key; an empty array when they agree exactly.
          */
         export function reconcile(
           expected: Record<string, unknown>,
           actual: Record<string, unknown>,
           options?: ReconcileOptions
         ): Discrepancy[] {
-          // TODO: 在这里实现
+          // TODO: implement this
           throw new Error('not implemented');
         }
       `,
@@ -6066,63 +6080,63 @@ const stage11 = {
         import { reconcile } from '../src/reconcile';
         import { count } from '@lab/metrics';
 
-        describe('阶段11 · 端到端对账', () => {
-          it('完全一致时返回空列表', () => {
+        describe('Stage 11 · End-to-end reconciliation', () => {
+          it('returns an empty list when the two agree exactly', () => {
             expect(reconcile({ a: 1, b: 2 }, { a: 1, b: 2 })).toEqual([]);
           });
 
-          it('两边都空时返回空列表', () => {
+          it('returns an empty list when both sides are empty', () => {
             expect(reconcile({}, {})).toEqual([]);
           });
 
-          it('读模型里少了一条是 missing', () => {
+          it('a row absent from the read model is missing', () => {
             expect(reconcile({ a: 1, b: 2 }, { a: 1 })).toEqual([
               { key: 'b', kind: 'missing', expected: 2, actual: undefined },
             ]);
           });
 
-          it('读模型里多了一条是 extra', () => {
+          it('a row only in the read model is extra', () => {
             expect(reconcile({ a: 1 }, { a: 1, ghost: 9 })).toEqual([
               { key: 'ghost', kind: 'extra', expected: undefined, actual: 9 },
             ]);
           });
 
-          it('值不同是 mismatch', () => {
+          it('a differing value is a mismatch', () => {
             expect(reconcile({ a: 10 }, { a: 12 })).toEqual([
               { key: 'a', kind: 'mismatch', expected: 10, actual: 12 },
             ]);
           });
 
-          it('0 不会被误判成缺失', () => {
-            // if (!actual[key]) 的实现会把这里报成 missing
+          it('0 is not mistaken for absent', () => {
+            // An implementation written as if (!actual[key]) reports this as missing
             expect(reconcile({ a: 0 }, { a: 0 })).toEqual([]);
           });
 
-          it('空字符串和 false 也不会被误判', () => {
+          it('an empty string and false are not mistaken either', () => {
             expect(reconcile({ a: '', b: false }, { a: '', b: false })).toEqual([]);
           });
 
-          it('容差内的数值差异不算 mismatch', () => {
+          it('a numeric difference within tolerance is not a mismatch', () => {
             expect(reconcile({ a: 10 }, { a: 10.0000001 }, { tolerance: 0.001 })).toEqual([]);
             expect(reconcile({ a: 10 }, { a: 10.5 }, { tolerance: 0.001 })).toHaveLength(1);
           });
 
-          it('不传容差时数值必须精确相等', () => {
+          it('without a tolerance, numbers must match exactly', () => {
             expect(reconcile({ a: 10 }, { a: 10.0000001 })).toHaveLength(1);
           });
 
-          it('容差只对数字生效', () => {
+          it('tolerance applies to numbers only', () => {
             expect(reconcile({ a: 'x' }, { a: 'y' }, { tolerance: 100 })).toEqual([
               { key: 'a', kind: 'mismatch', expected: 'x', actual: 'y' },
             ]);
           });
 
-          it('结果按 key 排序', () => {
+          it('results are sorted by key', () => {
             const found = reconcile({ z: 1, a: 1, m: 1 }, { z: 2, a: 2, m: 2 });
             expect(found.map((entry) => entry.key)).toEqual(['a', 'm', 'z']);
           });
 
-          it('三种差异一个不漏、一个不错 [gate:reconcile]', () => {
+          it('all three kinds of difference are caught, with no false positives [gate:reconcile]', () => {
             const expected = { keep: 1, drift: 100, gone: 7, zero: 0, blank: '' };
             const actual = { keep: 1, drift: 130, zero: 0, blank: '', ghost: 42 };
 
@@ -6132,7 +6146,7 @@ const stage11 = {
               return acc;
             }, {});
 
-            // 应该恰好是：gone -> missing，drift -> mismatch，ghost -> extra
+            // Should be exactly: gone -> missing, drift -> mismatch, ghost -> extra
             const correct =
               found.length === 3 &&
               byKind.missing === 1 &&
@@ -6144,7 +6158,7 @@ const stage11 = {
             expect(byKind).toEqual({ missing: 1, mismatch: 1, extra: 1 });
           });
 
-          it('大量一致数据里只挑出那一条差异', () => {
+          it('picks out the single difference buried in a pile of matching data', () => {
             const expected: Record<string, unknown> = {};
             const actual: Record<string, unknown> = {};
             for (let index = 0; index < 500; index += 1) {
@@ -6195,15 +6209,17 @@ const stage11 = {
         }
 
         function has(source: Record<string, unknown>, key: string): boolean {
-          // 不能写成 if (source[key])：金额 0、状态空串、标志 false
-          // 都是完全合法的值，用真值判断会把它们全报成缺失
+          // Cannot be written as if (source[key]): an amount of 0, an empty status string, a false flag
+          // are all perfectly valid values, and a truthiness check reports every one of them as missing
           return Object.prototype.hasOwnProperty.call(source, key);
         }
 
         function equal(left: unknown, right: unknown, tolerance: number): boolean {
           if (typeof left === 'number' && typeof right === 'number') {
-            // 事件流折叠和读模型累加的运算顺序不同，浮点末位必然有差异。
-            // 用 === 的话对账每天报一堆 0.0000001，很快就没人看了
+            // Folding an event stream and accumulating a read model apply operations in a different
+            // order, so the last floating-point digits always differ.
+            // With === the reconciliation reports a pile of 0.0000001 differences every day, and
+            // people stop reading it
             return Math.abs(left - right) <= tolerance;
           }
           return left === right;
@@ -6215,8 +6231,9 @@ const stage11 = {
           options?: ReconcileOptions
         ): Discrepancy[] {
           const tolerance = options?.tolerance ?? 0;
-          // 两边的键都要遍历：只走 expected 的话，读模型里凭空多出来的
-          // 记录永远发现不了，而那恰恰是最严重的一类差异
+          // Both sides' keys have to be walked: going through expected alone never finds a record that
+          // appeared in the read model out of nowhere, and that is the most serious kind of
+          // difference there is
           const keys = new Set<string>([...Object.keys(expected), ...Object.keys(actual)]);
 
           const found: Discrepancy[] = [];
@@ -6233,7 +6250,7 @@ const stage11 = {
             }
           }
 
-          // 排序让每次对账的输出可以直接 diff，看出「今天新增了哪些差异」
+          // Sorting makes each run's output directly diffable, so you can see which differences are new today
           return found.sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
         }
       `
