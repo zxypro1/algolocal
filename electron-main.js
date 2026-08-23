@@ -143,6 +143,12 @@ function loadSavedConfig() {
         if (configData.ollama.endpoint) process.env.OLLAMA_ENDPOINT = configData.ollama.endpoint;
         if (configData.ollama.model) process.env.OLLAMA_MODEL = configData.ollama.model;
       }
+
+      if (configData.compatible) {
+        if (configData.compatible.endpoint) process.env.OPENAI_COMPATIBLE_ENDPOINT = configData.compatible.endpoint;
+        if (configData.compatible.model) process.env.OPENAI_COMPATIBLE_MODEL = configData.compatible.model;
+        if (configData.compatible.apiKey) process.env.OPENAI_COMPATIBLE_API_KEY = configData.compatible.apiKey;
+      }
       
       return configData;
     }

@@ -144,7 +144,7 @@ Las cuatro funciones comparten una única configuración de proveedor.
 | Asistente de chat | Responde sobre el código que hay en el editor sin revelar la solución completa |
 | Revisión de ingeniería | Revisa una etapa terminada por seguridad ante concurrencia, comportamiento ante fallos, límites de módulo y estilo |
 
-Proveedores soportados: DeepSeek, OpenAI, Claude, Qwen y modelos locales mediante Ollama. Consulta [AI_PROVIDER_GUIDE.md](./AI_PROVIDER_GUIDE.md).
+Proveedores soportados: DeepSeek, OpenAI, Claude, Qwen y modelos locales mediante Ollama o cualquier endpoint compatible con OpenAI (LM Studio, vLLM, LocalAI, llama.cpp). Consulta [AI_PROVIDER_GUIDE.md](./AI_PROVIDER_GUIDE.md).
 
 ## Uso
 

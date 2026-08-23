@@ -5,7 +5,7 @@
  * 又不会把服务端的流式实现打进客户端 bundle。
  */
 
-export type ProviderKind = 'deepseek' | 'openai' | 'qwen' | 'claude' | 'ollama';
+export type ProviderKind = 'deepseek' | 'openai' | 'qwen' | 'claude' | 'ollama' | 'compatible';
 
 /**
  * 各家没填模型时的默认值。
@@ -17,6 +17,9 @@ export const DEFAULT_MODELS: Record<ProviderKind, string> = {
   qwen: 'qwen-plus',
   claude: 'claude-sonnet-5',
   ollama: 'llama3.1',
+  // 兼容端点的模型 id 完全由对端决定，没有通用默认值可猜。
+  // 设置页会连上端点、拉 /models 列表让用户选。
+  compatible: '',
 };
 
 /** 设置页的下拉建议，仍然允许自由输入任意模型 id */
@@ -26,6 +29,8 @@ export const SUGGESTED_MODELS: Record<ProviderKind, string[]> = {
   qwen: ['qwen-plus', 'qwen-max', 'qwen-turbo'],
   claude: ['claude-sonnet-5', 'claude-opus-5', 'claude-haiku-4-5-20251001'],
   ollama: ['llama3.1', 'qwen2.5-coder', 'deepseek-r1'],
+  // 这一栏在设置页是动态填充的：连上端点后直接列出对方 /models 返回的模型
+  compatible: [],
 };
 
 /** 不同世代的模型接受的参数不一样，这里显式建模而不是「都发一遍碰运气」 */

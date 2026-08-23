@@ -280,6 +280,7 @@
     "unlimitedProblems": "生成无限编程题目",
     "usingOnlineAI": "使用在线 AI ({{provider}})",
     "usingLocalAI": "使用本地 AI (Ollama)",
+    "usingCompatibleAI": "使用 OpenAI 兼容端点",
     "changeInSettings": "在设置中更改",
     "selectAIProvider": "选择 AI 提供商",
     "autoSelect": "自动选择",
@@ -343,6 +344,22 @@
       "endpointPlaceholder": "输入 Ollama 端点 (例如: http://localhost:11434)",
       "model": "模型",
       "modelPlaceholder": "输入模型名称 (例如: llama3)"
+    },
+    "compatible": {
+      "title": "OpenAI 兼容端点（本地）",
+      "intro": "任何提供 OpenAI 接口的服务都能连。用 LM Studio 的话，把它的本地服务打开，然后在下面填 http://localhost:1234/v1 即可。vLLM、LocalAI、llama.cpp server 同理。",
+      "endpoint": "服务地址",
+      "endpointHint": "LM Studio 填 http://localhost:1234/v1。只填主机和端口时会自动补上 /v1。",
+      "apiKey": "API Key（可选）",
+      "apiKeyPlaceholder": "本地服务通常不需要",
+      "apiKeyHint": "本地服务一般不校验这一项，只有你的端点要求鉴权时才填。",
+      "model": "模型",
+      "modelPlaceholder": "点「获取模型列表」，或直接输入 id",
+      "modelHint": "模型 id 由服务端决定，所以没有默认值可用。",
+      "fetchModels": "获取模型列表",
+      "fetchFailed": "连不上这个地址。",
+      "noModels": "端点有响应，但没有列出任何模型。请先在服务端加载一个模型。",
+      "foundModels": "找到 {count} 个模型。"
     },
     "modelHint": "留空则使用默认模型。可直接输入任意模型 id。"
   },

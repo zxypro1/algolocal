@@ -12,6 +12,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const isOpenAIConfigured = !!process.env.OPENAI_API_KEY;
     const isQwenConfigured = !!process.env.QWEN_API_KEY;
     const isClaudeConfigured = !!process.env.CLAUDE_API_KEY;
+    // 端点和模型都得有才算配好：模型 id 由对端决定，猜不出来
+    const isCompatibleConfigured =
+      !!process.env.OPENAI_COMPATIBLE_ENDPOINT && !!process.env.OPENAI_COMPATIBLE_MODEL;
     
     return res.status(200).json({
       providers: {
@@ -19,7 +22,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         deepseek: isDeepSeekConfigured,
         openai: isOpenAIConfigured,
         qwen: isQwenConfigured,
-        claude: isClaudeConfigured
+        claude: isClaudeConfigured,
+        compatible: isCompatibleConfigured
       }
     });
   } catch (error) {

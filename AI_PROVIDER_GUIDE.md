@@ -49,6 +49,21 @@ OLLAMA_ENDPOINT=http://localhost:11434   # optional
 OLLAMA_MODEL=llama3.1                    # optional
 ```
 
+Any OpenAI-compatible server, local or self-hosted. This is the one to pick for **LM Studio**: open its Developer/Server tab, start the server, and paste the address below. The same setting also covers vLLM, LocalAI, llama.cpp's `llama-server`, text-generation-webui and any gateway that speaks the OpenAI API.
+
+```bash
+OPENAI_COMPATIBLE_ENDPOINT=http://localhost:1234/v1   # LM Studio's default
+OPENAI_COMPATIBLE_MODEL=qwen2.5-coder-7b-instruct     # required, ask the server what it has
+OPENAI_COMPATIBLE_API_KEY=                            # optional, local servers rarely check it
+```
+
+Two things differ from the other providers:
+
+- **The model id is required.** It is decided by whichever server you run, so there is no sensible default to fall back on. In Settings, fill in the address and press **Fetch models** — the app asks the endpoint's `/models` and fills the dropdown for you.
+- **The address is a base URL, not a host.** If you give it just a host and port, `/v1` is appended (`http://localhost:1234` becomes `http://localhost:1234/v1`). If you write any path yourself it is left alone, because not every server mounts its API at `/v1`.
+
+Note that LM Studio and LM Studio Bionic are two different apps. Bionic is an agent app and does not expose a server for other programs to call; it is LM Studio that provides the OpenAI-compatible endpoint above.
+
 Reasoning models are handled for you: when the model id looks like an OpenAI reasoning model (`o1`, `o3`, `gpt-5` and so on), the request uses `max_completion_tokens` and drops the temperature, because those models reject the older parameters.
 
 ## Three ways to set it

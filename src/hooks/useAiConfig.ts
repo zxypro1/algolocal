@@ -12,6 +12,8 @@ export interface AIProviderConfig {
   qwen?: { apiKey: string; model: string };
   claude?: { apiKey: string; model: string };
   ollama?: { endpoint: string; model: string };
+  /** 任意 OpenAI 兼容端点：LM Studio、vLLM、LocalAI、llama.cpp server… */
+  compatible?: { endpoint: string; model: string; apiKey?: string };
   selectedProvider?: string;
 }
 

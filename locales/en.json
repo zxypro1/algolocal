@@ -280,6 +280,7 @@
     "unlimitedProblems": "Generate unlimited coding problems",
     "usingOnlineAI": "Using Online AI ({{provider}})",
     "usingLocalAI": "Using Local AI (Ollama)",
+    "usingCompatibleAI": "Using an OpenAI-compatible endpoint",
     "changeInSettings": "Change in Settings",
     "selectAIProvider": "Select AI Provider",
     "autoSelect": "Auto",
@@ -343,6 +344,22 @@
       "endpointPlaceholder": "Enter Ollama endpoint (e.g., http://localhost:11434)",
       "model": "Model",
       "modelPlaceholder": "Enter model name (e.g., llama3)"
+    },
+    "compatible": {
+      "title": "OpenAI-compatible endpoint (Local)",
+      "intro": "Connect any server that speaks the OpenAI API. Running LM Studio? Start its server and paste http://localhost:1234/v1 below. vLLM, LocalAI and llama.cpp's server work the same way.",
+      "endpoint": "Base URL",
+      "endpointHint": "For LM Studio use http://localhost:1234/v1. A bare host and port gets /v1 appended automatically.",
+      "apiKey": "API key (optional)",
+      "apiKeyPlaceholder": "Usually not needed for a local server",
+      "apiKeyHint": "Local servers normally ignore this. Fill it in only if your endpoint requires a key.",
+      "model": "Model",
+      "modelPlaceholder": "Click Fetch models, or type the id",
+      "modelHint": "The model id comes from the server, so there is no default to fall back on.",
+      "fetchModels": "Fetch models",
+      "fetchFailed": "Could not reach that endpoint.",
+      "noModels": "The endpoint replied, but listed no models. Load a model in the server first.",
+      "foundModels": "Found {count} model(s)."
     },
     "modelHint": "Leave empty to use the default. Any model id works."
   },

@@ -63,6 +63,7 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
   const [isQwenConfigured, setIsQwenConfigured] = useState(false);
   const [isClaudeConfigured, setIsClaudeConfigured] = useState(false);
   const [isOllamaConfigured, setIsOllamaConfigured] = useState(false);
+  const [isCompatibleConfigured, setIsCompatibleConfigured] = useState(false);
   
   // JSON Editor states
   const [showJsonEditor, setShowJsonEditor] = useState(false);
@@ -89,6 +90,7 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
             setIsOpenAIConfigured(data.providers.openai);
             setIsQwenConfigured(data.providers.qwen);
             setIsClaudeConfigured(data.providers.claude);
+            setIsCompatibleConfigured(!!data.providers.compatible);
           } else {
             console.error('Failed to fetch provider configuration:', data.error);
           }
@@ -103,6 +105,8 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
               setIsOpenAIConfigured(!!config.openAI?.apiKey);
               setIsQwenConfigured(!!config.qwen?.apiKey);
               setIsClaudeConfigured(!!config.claude?.apiKey);
+              // 和服务端一致：端点和模型都得有才算配好
+              setIsCompatibleConfigured(!!(config.compatible?.endpoint && config.compatible?.model));
               setConfigSelectedProvider(config.selectedProvider || 'auto');
             } catch (parseError) {
               console.error('Error parsing saved configuration:', parseError);
@@ -116,6 +120,7 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
                 setIsOpenAIConfigured(data.providers.openai);
                 setIsQwenConfigured(data.providers.qwen);
                 setIsClaudeConfigured(data.providers.claude);
+            setIsCompatibleConfigured(!!data.providers.compatible);
               } else {
                 console.error('Failed to fetch provider configuration:', data.error);
               }
@@ -131,6 +136,7 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
               setIsOpenAIConfigured(data.providers.openai);
               setIsQwenConfigured(data.providers.qwen);
               setIsClaudeConfigured(data.providers.claude);
+            setIsCompatibleConfigured(!!data.providers.compatible);
             } else {
               console.error('Failed to fetch provider configuration:', data.error);
             }
@@ -162,6 +168,8 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
         return 'claude';
       } else if (isOllamaConfigured) {
         return 'ollama';
+      } else if (isCompatibleConfigured) {
+        return 'compatible';
       } else {
         return null; // None configured
       }
@@ -172,7 +180,8 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
   useEffect(() => {
     const provider = getCurrentAIProvider();
     setCurrentAIProvider(provider);
-    setIsUsingLocalAI(provider === 'ollama');
+    // 兼容端点绝大多数场景也是本地服务
+    setIsUsingLocalAI(provider === 'ollama' || provider === 'compatible');
 
     const providers = [];
     if (isDeepSeekConfigured) providers.push('deepseek');
@@ -180,6 +189,7 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
     if (isQwenConfigured) providers.push('qwen');
     if (isClaudeConfigured) providers.push('claude');
     if (isOllamaConfigured) providers.push('ollama');
+    if (isCompatibleConfigured) providers.push('compatible');
 
     setAvailableProviders(providers);
     setCanGenerate(providers.length > 0);
@@ -189,7 +199,8 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
     isOpenAIConfigured,
     isQwenConfigured,
     isClaudeConfigured,
-    isOllamaConfigured
+    isOllamaConfigured,
+    isCompatibleConfigured
   ]);
 
   const suggestedRequests = [
@@ -401,9 +412,13 @@ const ProblemGenerator: React.FC<ProblemGeneratorProps> = ({ onProblemGenerated,
               <Group gap="xs">
                 <IconBrain size={16} />
                 <Text size="sm" fw={500}>
-                  {currentAIProvider === 'ollama' 
-                    ? t('aiGenerator.usingLocalAI') 
-                    : t('aiGenerator.usingOnlineAI', { provider: currentAIProvider || 'unknown' })}
+                  {currentAIProvider === 'ollama'
+                    ? t('aiGenerator.usingLocalAI')
+                    : currentAIProvider === 'compatible'
+                      // 兼容端点可以指向本地服务，也可以指向自建网关，
+                      // 这里不替用户断言是「本地」还是「在线」
+                      ? t('aiGenerator.usingCompatibleAI')
+                      : t('aiGenerator.usingOnlineAI', { provider: currentAIProvider || 'unknown' })}
                 </Text>
                 <Text size="xs" c="dimmed">
                   ({t('aiGenerator.changeInSettings')})

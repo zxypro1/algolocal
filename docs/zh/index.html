@@ -6,7 +6,7 @@
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <title>AlgoLocal：本地离线刷题与工程实战，从力扣算法题到真实项目</title>
   <meta name="description" content="免费开源的离线刷题桌面应用。用 JavaScript、TypeScript 或 Python 刷力扣风格算法题，再做多关卡的工程实战项目，按并发、延迟和代码质量打分。AI 可选。">
-  <meta name="keywords" content="leetcode, 力扣, 离线刷题, 刷题软件, 算法练习, 数据结构与算法, 编程面试, 面试刷题, 手撕代码, 工程实战, 系统设计, 并发编程, 代码评审, JavaScript, TypeScript, Python, WASM, Pyodide, Monaco 编辑器, 桌面应用, 离线 IDE, 本地优先, 开源, AI 编程助手, DeepSeek, Ollama">
+  <meta name="keywords" content="leetcode, 力扣, 离线刷题, 刷题软件, 算法练习, 数据结构与算法, 编程面试, 面试刷题, 手撕代码, 工程实战, 系统设计, 并发编程, 代码评审, JavaScript, TypeScript, Python, WASM, Pyodide, Monaco 编辑器, 桌面应用, 离线 IDE, 本地优先, 开源, AI 编程助手, DeepSeek, Ollama, LM Studio, OpenAI 兼容, 本地大模型">
   <meta name="author" content="zxypro1">
   <meta name="robots" content="index, follow">
   <meta name="msvalidate.01" content="851E8929724BC064EAFA2D4AAE903E09">
@@ -195,7 +195,7 @@
       <div class="site-container">
         <div class="ai-modes reveal" aria-label="AI 工作流"><div><span>生成</span><p>从一个主题到一道完整题目。</p></div><div><span>提问</span><p>在解题过程中获得上下文提示。</p></div><div class="orange"><span>对比</span><p>对比多种解法和它们的复杂度取舍。</p></div></div>
         <div class="ai-grid">
-          <div class="ai-copy reveal"><h2>需要时用 AI。<br>不需要时只管专注。</h2><p>生成新题、获取提示、对比解法。可以接入 DeepSeek、OpenAI、Claude、通义千问或本地 Ollama，也可以完全不用。</p><a class="text-link text-link-light" href="https://github.com/zxypro1/algolocal/blob/main/AI_PROVIDER_GUIDE.md" target="_blank" rel="noopener">查看 AI 配置说明 <span>→</span></a></div>
+          <div class="ai-copy reveal"><h2>需要时用 AI。<br>不需要时只管专注。</h2><p>生成新题、获取提示、对比解法。可以接入 DeepSeek、OpenAI、Claude、通义千问，也可以用 Ollama 或 LM Studio 全部跑在本地，或者完全不用。</p><a class="text-link text-link-light" href="https://github.com/zxypro1/algolocal/blob/main/AI_PROVIDER_GUIDE.md" target="_blank" rel="noopener">查看 AI 配置说明 <span>→</span></a></div>
           <div class="ai-demo reveal"><div class="mini-bar"><div class="window-dots"><i></i><i></i><i></i></div><span>AlgoLocal / AI 助手</span><b>DeepSeek⌄</b></div><div class="ai-demo-body"><div class="ai-context"><small>当前题目</small><h3>两数之和</h3><p>返回数组中和等于目标值的两个数字的下标。</p><code>const complement = target - nums[i];</code></div><div class="ai-response"><small>你的问题</small><p class="question">给我一个提示，但不要直接说出完整答案。</p><p>想一想：只遍历数组一次时，你需要记住哪些信息？</p><div class="approach"><b>下一步可以尝试</b><span>记录每个值及其下标，再寻找它的补数。</span></div><label>继续提问… <span>➤</span></label></div></div></div>
         </div>
       </div>

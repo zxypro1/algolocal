@@ -22,6 +22,8 @@ export interface AIProviderConfig {
   qwen?: { apiKey: string; model: string };
   claude?: { apiKey: string; model: string };
   ollama?: { endpoint: string; model: string };
+  /** 任意 OpenAI 兼容端点：LM Studio、vLLM、LocalAI、llama.cpp server… */
+  compatible?: { endpoint: string; model: string; apiKey?: string };
   selectedProvider?: string;
 }
 
@@ -58,7 +60,37 @@ export class SelectedProviderUnavailableError extends NoProviderError {
   }
 }
 
-const AUTO_ORDER: ProviderKind[] = ['deepseek', 'openai', 'qwen', 'claude', 'ollama'];
+/**
+ * 把用户填的地址规整成 OpenAI 风格的 base URL。
+ *
+ * 只在「对方只给了 host:port、完全没有路径」时补 /v1 —— LM Studio 的地址
+ * 写成 http://localhost:1234 和 http://localhost:1234/v1 的人一样多。
+ * 一旦用户明确写了路径就原样尊重，因为不是所有兼容服务都挂在 /v1 下。
+ */
+export function normalizeCompatibleEndpoint(raw: string): string {
+  let trimmed = (raw || '').trim().replace(/\/+$/, '');
+  if (!trimmed) return trimmed;
+
+  // 少了协议头就补 http://。注意不能直接丢给 new URL：
+  // 'localhost:1234' 会被解析成协议 "localhost:"、路径 "1234"，
+  // 于是既补不上 /v1，最后 fetch 还会因为未知协议报一个看不懂的错。
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+    trimmed = `http://${trimmed}`;
+  }
+
+  try {
+    const url = new URL(trimmed);
+    if (url.pathname === '' || url.pathname === '/') {
+      return `${url.origin}/v1`;
+    }
+    return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    // 实在解析不了就原样返回，让请求自己报错 —— 那个错误信息比这里瞎猜更有用
+    return trimmed;
+  }
+}
+
+const AUTO_ORDER: ProviderKind[] = ['deepseek', 'openai', 'qwen', 'claude', 'ollama', 'compatible'];
 
 export function resolveProvider(config?: AIProviderConfig, maxTokens = 4000): ResolvedProvider {
   const build = (
@@ -106,6 +138,21 @@ export function resolveProvider(config?: AIProviderConfig, maxTokens = 4000): Re
       ? build('ollama', {
           endpoint: config?.ollama?.endpoint || process.env.OLLAMA_ENDPOINT || 'http://localhost:11434',
           model: config?.ollama?.model || process.env.OLLAMA_MODEL,
+        })
+      : null,
+    // 只有端点没有模型时不算「配好了」：模型 id 由对端决定，猜不出来。
+    // 这里返回 null，让它在 auto 顺序里被跳过；用户显式选了它则会收到
+    // SelectedProviderUnavailableError，提示去设置页补上。
+    compatible: (config?.compatible?.endpoint || process.env.OPENAI_COMPATIBLE_ENDPOINT)
+      && (config?.compatible?.model || process.env.OPENAI_COMPATIBLE_MODEL)
+      ? build('compatible', {
+          endpoint: normalizeCompatibleEndpoint(
+            config?.compatible?.endpoint || process.env.OPENAI_COMPATIBLE_ENDPOINT || ''
+          ),
+          model: config?.compatible?.model || process.env.OPENAI_COMPATIBLE_MODEL,
+          // 本地服务通常不校验 key，所以它是可选的；填了就照常带上，
+          // 这样同一个 provider 也能连需要鉴权的自建网关。
+          apiKey: config?.compatible?.apiKey || process.env.OPENAI_COMPATIBLE_API_KEY,
         })
       : null,
   };
@@ -204,6 +251,17 @@ function buildRequest(
       };
     }
 
+    case 'compatible':
+      return {
+        url: `${provider.endpoint}/chat/completions`,
+        headers: {
+          'Content-Type': 'application/json',
+          // 本地服务大多不看这个头，带上空 key 反而可能被某些实现拒绝，所以没填就不带
+          ...(provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : {}),
+        },
+        body: openAiCompatibleBody(provider, messages, options),
+      };
+
     case 'ollama':
       return {
         url: `${provider.endpoint}/api/chat`,
@@ -250,6 +308,7 @@ function extractContent(kind: ProviderKind, data: any): string {
     case 'deepseek':
     case 'openai':
     case 'qwen':
+    case 'compatible':
       return data?.choices?.[0]?.message?.content || '';
     case 'claude':
       return (data?.content || [])
