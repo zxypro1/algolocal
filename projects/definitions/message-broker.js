@@ -8165,8 +8165,8 @@ module.exports = {
   id: 'message-broker',
   title: t('高并发消息系统', 'A high-throughput message broker'),
   summary: t(
-    '十二关造出一个消息中间件：分段日志、稀疏索引、攒批落盘、至少一次投递、重投与死信、扇出订阅、credit 流控、副本同步与高水位、保留与压缩、心跳与再平衡、配额公平，最后组装成一个能报 lag 的 broker。',
-    'Twelve stages building a message broker: a segmented log, a sparse index, batched writes, at-least-once delivery, redelivery and dead letters, fan-out subscriptions, credit-based flow control, replication with a high watermark, retention and compaction, heartbeats and rebalancing, per-client quotas, and finally a broker that reports its own lag.'
+    '从追加日志和稀疏索引开始，接着解决投递、流控、副本、保留策略和消费者再平衡。十二关后，broker 能报告自己的消费 lag。',
+    'Start with an append log and sparse index, then work through delivery, flow control, replication, retention and consumer rebalancing. The finished broker reports its own consumer lag.'
   ),
   difficulty: 'Hard',
   domain: 'messaging',

@@ -7572,8 +7572,8 @@ module.exports = {
   id: 'enterprise-auth',
   title: t('企业级鉴权授权系统', 'Enterprise authentication and authorisation'),
   summary: t(
-    '十二关从一条密码记录走到一套完整的鉴权体系：慢哈希、会话令牌、刷新轮转、撤销、MFA、OAuth 与 OIDC，再到 RBAC、ABAC、权限缓存、租户隔离与审计加固。',
-    'Twelve stages from a single password record to a complete auth stack: slow hashing, session tokens, refresh rotation, revocation, MFA, OAuth and OIDC, then RBAC, ABAC, permission caching, tenant isolation and audit hardening.'
+    '先把密码存对，再处理会话、MFA、OAuth 与 OIDC。后半程转向权限模型、租户隔离和审计，共十二关。',
+    'Store passwords correctly, then handle sessions, MFA, OAuth and OIDC. The later stages cover permission models, tenant isolation and audit hardening across twelve stages.'
   ),
   difficulty: 'Hard',
   domain: 'security',
