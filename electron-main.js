@@ -5,6 +5,7 @@ const os = require('os');
 const { createServer } = require('http');
 // electron 的 net 已经占用了这个名字，Node 的 net 只能另起一个
 const nodeNet = require('node:net');
+const { labelsFor, buildAppMenuTemplate, buildContextMenuTemplate } = require('./electron-menu');
 
 // Global error handlers
 process.on('uncaughtException', (error) => {
@@ -33,80 +34,28 @@ let mainWindow;
 let server;
 let nextApp;
 
+/** 当前菜单用的那套文案，右键菜单跟着应用语言走 */
+let currentMenuLabels = labelsFor('en');
+
 // Function to update the application menu
 function updateApplicationMenu(language = 'en') {
-  const menuLabels = {
-    en: {
-      navigation: 'Navigation',
-      home: 'Home',
-      settings: 'Settings',
-      aiGenerator: 'AI Generator',
-      addProblem: 'Add Problem',
-      view: 'View',
-      help: 'Help',
-      documentation: 'Documentation'
-    },
-    zh: {
-      navigation: '导航',
-      home: '首页',
-      settings: '设置',
-      aiGenerator: 'AI 生成器',
-      addProblem: '添加题目',
-      view: '视图',
-      help: '帮助',
-      documentation: '文档'
-    }
-  };
-  
-  const labels = menuLabels[language] || menuLabels.en;
-  
-  const menu = Menu.buildFromTemplate([
-    {
-      label: labels.navigation,
-      submenu: [
-        {
-          label: labels.home,
-          click: () => mainWindow && mainWindow.loadURL(`http://localhost:${port}`)
-        },
-        {
-          label: labels.settings,
-          click: () => mainWindow && mainWindow.loadURL(`http://localhost:${port}/settings`)
-        },
-        {
-          label: labels.aiGenerator,
-          click: () => mainWindow && mainWindow.loadURL(`http://localhost:${port}/generator`)
-        },
-        {
-          label: labels.addProblem,
-          click: () => mainWindow && mainWindow.loadURL(`http://localhost:${port}/add-problem`)
-        }
-      ]
-    },
-    {
-      label: labels.view,
-      submenu: [
-        { role: 'reload' },
-        { role: 'forceReload' },
-        { role: 'toggleDevTools' },
-        { type: 'separator' },
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
-        { type: 'separator' },
-        { role: 'togglefullscreen' }
-      ]
-    },
-    {
-      label: labels.help,
-      submenu: [
-        {
-          label: labels.documentation,
-          click: () => shell.openExternal('https://github.com/zxypro1/OfflineLeetPractice')
-        }
-      ]
-    }
-  ]);
-  Menu.setApplicationMenu(menu);
+  currentMenuLabels = labelsFor(language);
+  const template = buildAppMenuTemplate({
+    language,
+    platform: process.platform,
+    navigate: (routePath) => mainWindow && mainWindow.loadURL(`http://${hostname}:${port}${routePath}`),
+    openDocumentation: () => shell.openExternal('https://github.com/zxypro1/OfflineLeetPractice')
+  });
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+/** 装上右键菜单：键盘快捷键之外的另一条剪切/复制/粘贴路径 */
+function attachContextMenu(webContents) {
+  webContents.on('context-menu', (_event, params) => {
+    const template = buildContextMenuTemplate(params, currentMenuLabels);
+    if (template.length === 0) return;
+    Menu.buildFromTemplate(template).popup({ window: BrowserWindow.fromWebContents(webContents) });
+  });
 }
 
 // Load saved configuration
@@ -308,6 +257,9 @@ function createWindow() {
   
   // Update the application menu with the saved language
   updateApplicationMenu(savedLanguage);
+
+  // 右键菜单：键盘快捷键之外的另一条剪切/复制/粘贴路径
+  attachContextMenu(mainWindow.webContents);
 
   // Open external links in the default browser
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

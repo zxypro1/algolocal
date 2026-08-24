@@ -37,6 +37,7 @@ module.exports = {
   // 打包文件
   files: [
     'electron-main.js',
+    'electron-menu.js',
     'electron-preload.js',
     'next.config.js',
     'package.json',

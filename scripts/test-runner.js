@@ -35,6 +35,11 @@ class TestRunner {
         name: 'Engineering Practice Runtime',
         file: 'tests/engineering/runtime.test.ts',
         description: 'Virtual clock, module runtime, metric gates and preset project solvability'
+      },
+      {
+        name: 'Desktop Menus',
+        file: 'tests/desktop',
+        description: 'Application and context menus, including the edit roles that ⌘V depends on'
       }
     ];
   }
