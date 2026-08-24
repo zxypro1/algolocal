@@ -6,6 +6,8 @@ import '../styles/globals.css';
 import { I18nProvider, useI18n } from '../src/contexts/I18nContext';
 import { ThemeProvider, useTheme } from '../src/contexts/ThemeContext';
 import FindBar from '../src/components/FindBar';
+import ErrorBoundary from '../src/components/ErrorBoundary';
+import { useRouter } from 'next/router';
 
 // AlgoLocal 品牌青色：与新的本地执行回路标志保持一致
 const brand: MantineColorsTuple = [
@@ -91,13 +93,21 @@ const darkTheme = createTheme({
 });
 
 function AppContent({ Component, pageProps }: AppProps) {
+  const router = useRouter();
   const { colorScheme } = useTheme();
   const theme = colorScheme === 'dark' ? darkTheme : lightTheme;
   const forceScheme = (colorScheme === 'dark' || colorScheme === 'light') ? colorScheme : 'light';
 
   return (
     <MantineProvider theme={theme} defaultColorScheme={forceScheme} forceColorScheme={forceScheme}>
-      <Component {...pageProps} />
+      {/*
+        最外层兜底。页面内部各自还有更细的边界（关卡、架构图），那些能把损坏范围
+        收得更小；这一层是为了保证**任何**没被接住的渲染异常都不会变成整页白屏。
+        按路由重置：换一个页面就该重新试一次。
+      */}
+      <ErrorBoundary resetKey={router.asPath}>
+        <Component {...pageProps} />
+      </ErrorBoundary>
       {/* 桌面端的 ⌘F 查找栏；浏览器里它自己不渲染 */}
       <FindBar />
     </MantineProvider>

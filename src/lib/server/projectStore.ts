@@ -91,11 +91,26 @@ export function loadPresetProjects(): StoredProject[] {
   return [];
 }
 
-export function loadUserProjects(): StoredProject[] {
+/**
+ * 磁盘上的原样内容，不做规整。
+ *
+ * 只给写路径用：增删一个项目时必须在原始数据上改，否则每保存一次就会把已有的
+ * 项目全部按 coerceProject 重写一遍，规整过程中丢掉的字段会被永久写死。
+ */
+function loadUserProjectsRaw(): any[] {
   try {
     if (!fs.existsSync(USER_PROJECTS_FILE)) return [];
     const parsed = JSON.parse(fs.readFileSync(USER_PROJECTS_FILE, 'utf8'));
-    if (!Array.isArray(parsed)) return [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.error('Failed to read user projects:', error);
+    return [];
+  }
+}
+
+export function loadUserProjects(): StoredProject[] {
+  try {
+    const parsed = loadUserProjectsRaw();
 
     /**
      * 用户项目一律过一遍 coerceProject 再交出去。
@@ -147,16 +162,17 @@ export function uniqueProjectId(desired: string): string {
 
 export function addUserProject(project: EngineeringProject): StoredProject {
   const stored = { ...project, id: uniqueProjectId(project.id) };
-  const users = loadUserProjects();
-  users.push(stored as StoredProject);
-  saveUserProjects(users);
+  // 在原始数据上追加：读路径的规整只服务于渲染，不该顺手改写用户的文件
+  const users = loadUserProjectsRaw();
+  users.push(stored);
+  saveUserProjects(users as StoredProject[]);
   return { ...stored, source: 'user' };
 }
 
 export function deleteUserProject(id: string): boolean {
-  const users = loadUserProjects();
-  const next = users.filter((project) => project.id !== id);
+  const users = loadUserProjectsRaw();
+  const next = users.filter((project) => project?.id !== id);
   if (next.length === users.length) return false;
-  saveUserProjects(next);
+  saveUserProjects(next as StoredProject[]);
   return true;
 }

@@ -176,3 +176,50 @@ describe('stored projects are normalised before they reach the renderer', () => 
     expect(stage.focus).toEqual([]);
   });
 });
+
+describe('saving does not rewrite the projects already on disk', () => {
+  /**
+   * 读路径的规整只服务于渲染。写路径必须在原始数据上改：
+   * 否则每保存一个新项目，都会把已有项目按 coerceProject 重写一遍，
+   * 规整时丢掉的字段就永久没了。
+   */
+  const os = require('os');
+  const realHome = os.homedir();
+  let tmpHome: string;
+
+  beforeEach(() => {
+    tmpHome = fs.mkdtempSync(path.join(require('os').tmpdir(), 'algolocal-store-'));
+    jest.spyOn(os, 'homedir').mockReturnValue(tmpHome);
+    jest.resetModules();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    expect(os.homedir()).toBe(realHome);
+  });
+
+  it('leaves an existing project byte-identical when another is added', () => {
+    const store = require('../../src/lib/server/projectStore');
+    const dir = path.join(tmpHome, '.offline-leet-practice');
+    fs.mkdirSync(dir, { recursive: true });
+
+    // 一份带着 coerceProject 不认识的字段的项目
+    const existing = {
+      id: 'existing', title: { zh: 'a', en: 'a' }, summary: { zh: 's', en: 's' },
+      brief: { zh: 'b', en: 'b' }, difficulty: 'Medium', domain: 'x', tags: [],
+      estimatedMinutes: 10, language: 'typescript', files: [], stages: [],
+      variants: { javascript: { files: [], stages: [] } },
+      generatedAt: '2020-01-01T00:00:00.000Z',
+    };
+    fs.writeFileSync(path.join(dir, 'user-projects.json'), JSON.stringify([existing]));
+
+    store.addUserProject({ ...existing, id: 'second' } as any);
+
+    const after = JSON.parse(fs.readFileSync(path.join(dir, 'user-projects.json'), 'utf8'));
+    const kept = after.find((p: any) => p.id === 'existing');
+    expect(kept).toEqual(existing);
+    expect(kept.variants).toBeDefined();
+    expect(kept.generatedAt).toBe('2020-01-01T00:00:00.000Z');
+  });
+});
