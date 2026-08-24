@@ -8,6 +8,7 @@ import {
   Badge,
   Button,
   Center,
+  Code,
   Group,
   List,
   Loader,
@@ -22,6 +23,7 @@ import {
   Tooltip,
 } from '@mantine/core';
 import {
+  IconAlertTriangle,
   IconBug,
   IconChartBar,
   IconChecklist,
@@ -57,6 +59,7 @@ import {
   toFileMap,
 } from '../../src/lib/engineering/workspace';
 import { loadProgress, ProjectProgress, resetProgress, saveProgress } from '../../src/lib/engineering/progress';
+import ErrorBoundary from '../../src/components/ErrorBoundary';
 import type {
   AiReview,
   EngineeringProject,
@@ -72,6 +75,27 @@ const EngineeringChat = dynamic(() => import('../../src/components/engineering/E
 const MIN_BOTTOM_HEIGHT = 120;
 /** 停止输入多久之后落盘 */
 const SAVE_DEBOUNCE_MS = 800;
+
+/**
+ * 渲染失败时显示什么。
+ *
+ * 一定要把 error.message 亮出来：白屏最大的问题不是坏，是完全不知道哪儿坏了。
+ */
+function renderErrorFallback(t: (key: string) => string) {
+  return (error: Error, reset: () => void) => (
+    <Alert color="red" title={t('renderError.title')} icon={<IconAlertTriangle size={16} />}>
+      <Stack gap="xs" align="flex-start">
+        <Text size="sm">{t('renderError.body')}</Text>
+        <Code block style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+          {error.message}
+        </Code>
+        <Button size="xs" variant="light" color="red" onClick={reset}>
+          {t('renderError.retry')}
+        </Button>
+      </Stack>
+    </Alert>
+  );
+}
 
 export default function ProjectWorkspacePage() {
   const router = useRouter();
@@ -696,6 +720,8 @@ export default function ProjectWorkspacePage() {
                   className="panel-scroll"
                 >
                   <Tabs.Panel value="stage">
+                    {/* 关卡内容大半来自 AI 生成，坏数据只能毁掉这一块，不能把整页带走 */}
+                    <ErrorBoundary resetKey={stage.id} fallback={renderErrorFallback(t)}>
                     <StagePanel
                       // 按关卡 key：不这样的话组件会被复用，
                       // 在一关点过「仍然查看」之后，后面每一关的参考实现都直接敞开了
@@ -714,13 +740,16 @@ export default function ProjectWorkspacePage() {
                       onAdvance={() => goToStage(stageIndex + 1)}
                       hasNextStage={stageIndex < project.stages.length - 1}
                     />
+                    </ErrorBoundary>
                   </Tabs.Panel>
 
 
                   {(stage.architecture || project.architecture) && (
                     <Tabs.Panel value="architecture">
                       <Paper withBorder radius="lg" p="lg">
-                        <MarkdownRenderer content={pick(stage.architecture || project.architecture)} />
+                        <ErrorBoundary resetKey={stage.id} fallback={renderErrorFallback(t)}>
+                          <MarkdownRenderer content={pick(stage.architecture || project.architecture)} />
+                        </ErrorBoundary>
                       </Paper>
                     </Tabs.Panel>
                   )}

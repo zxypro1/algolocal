@@ -1,0 +1,28 @@
+{
+  "_why": "A generated project that the old code accepted and then could not open. Every field here is shaped the way a model actually gets it wrong: a stage with no starter files (the workspace opens empty), two stages sharing one id (progress is keyed by stage id, so they overwrite each other), no title and no summary (coerceProject used to invent a title, which made the validator's own title check unreachable), and a spec that is not a .ts/.js file. validateProjectShape must reject all of it, and the save endpoint must refuse to persist it.",
+  "id": "broken-generated-project",
+  "difficulty": "Medium",
+  "domain": "concurrency",
+  "tags": ["generated"],
+  "estimatedMinutes": 90,
+  "language": "typescript",
+  "brief": { "zh": "简介", "en": "Brief" },
+  "files": [],
+  "stages": [
+    {
+      "id": "stage-1",
+      "title": { "zh": "第一关", "en": "Stage 1" },
+      "goal": { "zh": "目标", "en": "Goal" },
+      "specs": [{ "path": "specs/stage-1.spec.ts", "content": "it('x', () => {})" }],
+      "referenceFiles": [{ "path": "src/pool.ts", "content": "export const pool = 1;" }]
+    },
+    {
+      "id": "stage-1",
+      "title": { "zh": "", "en": "" },
+      "goal": { "zh": "", "en": "" },
+      "specs": [{ "path": "specs/stage-2.txt", "content": "not a spec" }],
+      "starterFiles": [{ "path": "src/queue.ts", "content": "export const queue = 0;" }],
+      "referenceFiles": [{ "path": "src/queue.ts", "content": "export const queue = 1;" }]
+    }
+  ]
+}

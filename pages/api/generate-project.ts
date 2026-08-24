@@ -172,8 +172,33 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     // 保存：用户接受了一份生成结果（可能是验证通过的，也可能是「仍然保存」）
     if (presetProject && force) {
-      const saved = addUserProject(coerceProject(presetProject));
-      return res.status(200).json({ success: true, project: saved, saved: true });
+      const candidate = coerceProject(presetProject);
+
+      /**
+       * 「仍然保存」也要过结构校验。
+       *
+       * 之前这里是直接落盘的：一份缺关卡、缺起始文件或者标题为空的项目照样能写进
+       * user-projects.json，然后在工作区里打不开。校验器放行的东西渲染器必须渲染得了，
+       * 所以这道关必须和 validateProjectShape 是同一套判断。
+       */
+      const structuralProblems = validateProjectShape(candidate);
+      if (structuralProblems.length > 0) {
+        return res.status(400).json({
+          error: 'The project is not structurally valid and was not saved',
+          details: structuralProblems,
+        });
+      }
+
+      try {
+        const saved = addUserProject(candidate);
+        return res.status(200).json({ success: true, project: saved, saved: true });
+      } catch (writeError) {
+        // 写盘失败过去是被外层 catch 吞成一句泛化的 500，用户只知道「失败了」
+        console.error('Failed to persist generated project:', writeError);
+        return res.status(500).json({
+          error: `Could not write the project to disk: ${(writeError as Error).message}`,
+        });
+      }
     }
 
     if (!request || typeof request !== 'string') {

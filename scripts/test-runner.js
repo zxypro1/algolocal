@@ -37,6 +37,11 @@ class TestRunner {
         description: 'Virtual clock, module runtime, metric gates and preset project solvability'
       },
       {
+        name: 'Project Generator',
+        file: 'tests/generator',
+        description: 'Structural validation, stage verification and the save path for generated projects'
+      },
+      {
         name: 'Desktop Menus',
         file: 'tests/desktop',
         description: 'Application and context menus, including the edit roles that ⌘V depends on'

@@ -8,6 +8,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import type { EngineeringProject } from '../engineering/types';
+import { coerceProject } from '../engineering/validateProject';
 
 const USER_DIR = path.join(os.homedir(), '.offline-leet-practice');
 const USER_PROJECTS_FILE = path.join(USER_DIR, 'user-projects.json');
@@ -90,12 +91,41 @@ export function loadPresetProjects(): StoredProject[] {
   return [];
 }
 
-export function loadUserProjects(): StoredProject[] {
+/**
+ * 磁盘上的原样内容，不做规整。
+ *
+ * 只给写路径用：增删一个项目时必须在原始数据上改，否则每保存一次就会把已有的
+ * 项目全部按 coerceProject 重写一遍，规整过程中丢掉的字段会被永久写死。
+ */
+function loadUserProjectsRaw(): any[] {
   try {
     if (!fs.existsSync(USER_PROJECTS_FILE)) return [];
     const parsed = JSON.parse(fs.readFileSync(USER_PROJECTS_FILE, 'utf8'));
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map((project) => ({ ...project, source: 'user' as const }));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.error('Failed to read user projects:', error);
+    return [];
+  }
+}
+
+export function loadUserProjects(): StoredProject[] {
+  try {
+    const parsed = loadUserProjectsRaw();
+
+    /**
+     * 用户项目一律过一遍 coerceProject 再交出去。
+     *
+     * 这个文件是 AI 生成结果落盘的地方，也可以被手工改。以前它是原样读出来直接
+     * 送进渲染层的：一份 `checklist` 写成字符串的项目会让 `checklist.map` 抛异常，
+     * 整页白屏。保存那头现在有结构校验挡着，但**已经写进去的**坏数据只能在这里兜住。
+     * 预置题库不走这条路——它由我们自己的构建流程产出并逐关验证过。
+     */
+    return parsed.map((project) => ({
+      ...coerceProject(project),
+      // coerceProject 会盖上当前时间，这里保留原始的生成时刻
+      generatedAt: project?.generatedAt || undefined,
+      source: 'user' as const,
+    }));
   } catch (error) {
     console.error('Failed to read user projects:', error);
     return [];
@@ -132,16 +162,17 @@ export function uniqueProjectId(desired: string): string {
 
 export function addUserProject(project: EngineeringProject): StoredProject {
   const stored = { ...project, id: uniqueProjectId(project.id) };
-  const users = loadUserProjects();
-  users.push(stored as StoredProject);
-  saveUserProjects(users);
+  // 在原始数据上追加：读路径的规整只服务于渲染，不该顺手改写用户的文件
+  const users = loadUserProjectsRaw();
+  users.push(stored);
+  saveUserProjects(users as StoredProject[]);
   return { ...stored, source: 'user' };
 }
 
 export function deleteUserProject(id: string): boolean {
-  const users = loadUserProjects();
-  const next = users.filter((project) => project.id !== id);
+  const users = loadUserProjectsRaw();
+  const next = users.filter((project) => project?.id !== id);
   if (next.length === users.length) return false;
-  saveUserProjects(next);
+  saveUserProjects(next as StoredProject[]);
   return true;
 }
