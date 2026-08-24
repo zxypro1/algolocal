@@ -170,7 +170,7 @@ module.exports = {
     entitlements: 'build/entitlements.mac.plist',
     entitlementsInherit: 'build/entitlements.mac.plist',
     bundleVersion: '1',
-    bundleShortVersion: '0.15.0',
+    bundleShortVersion: '0.15.1',
     fileAssociations: [
       {
         ext: 'algo',
