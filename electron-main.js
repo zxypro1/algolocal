@@ -86,9 +86,11 @@ function attachContextMenu(webContents) {
  * downloadURL 触发 will-download，默认行为是直接落到下载目录、不问用户。
  * 这里给这一次下载挂上保存对话框，走完就把标记清掉。
  */
-let pendingSaveAs = false;
+// 按地址记，而不是一个全局布尔：万一同时有别的下载在跑，
+// 布尔会被那一次消费掉，对话框就弹到错误的文件上了。
+const pendingSaveAs = new Set();
 function saveImageAs(webContents, url) {
-  pendingSaveAs = true;
+  pendingSaveAs.add(url);
   webContents.downloadURL(url);
 }
 
@@ -98,10 +100,16 @@ function saveImageAs(webContents, url) {
  * 浏览器里点下载会弹「保存到哪里」，Electron 不接这个事件的话会静默存到
  * 默认目录，用户完全不知道文件去哪了。
  */
+let downloadHandlerAttached = false;
 function attachDownloadHandler(session) {
+  // session 是全局共享的；createWindow 可能再跑一次（macOS 上关窗后重新激活），
+  // 重复注册会让同一次下载弹两个对话框。
+  if (downloadHandlerAttached) return;
+  downloadHandlerAttached = true;
+
   session.on('will-download', (_event, item) => {
-    if (pendingSaveAs) {
-      pendingSaveAs = false;
+    if (pendingSaveAs.has(item.getURL())) {
+      pendingSaveAs.delete(item.getURL());
       const suggested = item.getFilename();
       const target = dialog.showSaveDialogSync(mainWindow, { defaultPath: suggested });
       if (!target) {
