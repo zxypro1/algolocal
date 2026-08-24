@@ -634,5 +634,12 @@
     "savedJustNow": "Saved just now",
     "savedMinutes": "Saved {{minutes}}m ago",
     "autosaveOn": "Autosave on"
+  },
+  "find": {
+    "placeholder": "Find in page",
+    "none": "No results",
+    "next": "Next match",
+    "previous": "Previous match",
+    "close": "Close find bar"
   }
 }

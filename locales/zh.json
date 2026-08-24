@@ -634,5 +634,12 @@
     "savedJustNow": "已保存 · 刚刚",
     "savedMinutes": "已保存 · {{minutes}} 分钟前",
     "autosaveOn": "自动保存已开启"
+  },
+  "find": {
+    "placeholder": "在页面中查找",
+    "none": "无结果",
+    "next": "下一个",
+    "previous": "上一个",
+    "close": "关闭查找栏"
   }
 }
