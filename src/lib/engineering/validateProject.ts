@@ -75,7 +75,9 @@ export function coerceProject(raw: any): EngineeringProject {
 
   return {
     id: String(raw?.id || 'generated-project'),
-    title: normalizeLocalized(raw?.title, 'Generated project'),
+    // 不要在这里编一个标题：编了之后 validateProjectShape 的「标题为空」永远不成立，
+    // 一份没有标题的生成结果就会一路通过校验落盘
+    title: normalizeLocalized(raw?.title),
     summary: normalizeLocalized(raw?.summary),
     difficulty: DIFFICULTIES.includes(raw?.difficulty) ? raw.difficulty : 'Medium',
     domain: String(raw?.domain || 'engineering'),
@@ -101,10 +103,19 @@ export function validateProjectShape(project: EngineeringProject): string[] {
   if (!project.brief.zh && !project.brief.en) errors.push('brief is empty');
   if (!project.stages.length) errors.push('stages must contain at least one stage');
 
+  // 渲染侧会直接显示 summary，运行侧按 id 存进度，两者都不能是空的
+  if (!project.summary.zh && !project.summary.en) errors.push('summary is empty');
+  if (!project.id.trim()) errors.push('id is empty');
+
   project.stages.forEach((stage, index) => {
     const label = `stage ${index + 1} (${stage.id})`;
+    if (!stage.title.zh && !stage.title.en) errors.push(`${label}: title is empty`);
     if (!stage.goal.zh && !stage.goal.en) errors.push(`${label}: goal is empty`);
     if (!stage.specs.length) errors.push(`${label}: no spec files`);
+    // 工作区是从 starterFiles 搭出来的，一关没有它就是一个空编辑器
+    if (!stage.starterFiles?.length) {
+      errors.push(`${label}: no starter files — the workspace would open empty`);
+    }
     if (!stage.referenceFiles?.length) {
       errors.push(`${label}: referenceFiles missing — a stage without a reference solution cannot be verified`);
     }
@@ -123,6 +134,15 @@ export function validateProjectShape(project: EngineeringProject): string[] {
     stage.specs.forEach((spec) => {
       if (!/\.(ts|js)$/.test(spec.path)) errors.push(`${label}: spec "${spec.path}" must be a .ts or .js file`);
     });
+  });
+
+  // 进度（已完成关卡、提示解锁数）是按关卡 id 存的，重复 id 会让两关共用一份进度
+  const seenStageIds = new Set<string>();
+  project.stages.forEach((stage, index) => {
+    if (seenStageIds.has(stage.id)) {
+      errors.push(`stage ${index + 1}: duplicate stage id "${stage.id}"`);
+    }
+    seenStageIds.add(stage.id);
   });
 
   return errors;
@@ -162,7 +182,25 @@ export type StageExecutor = (options: {
   specs: ProjectStage['specs'];
   lab: ProjectStage['lab'];
   gates: ProjectStage['gates'];
-}) => Promise<StageRunReport>;
+  /**
+   * 执行器可能跑不出报告：worker 崩了、或者生成的代码里有死循环被超时掐掉。
+   * 类型上必须带 null，否则调用方会像之前那样直接解引用，把整轮验证炸掉。
+   */
+}) => Promise<StageRunReport | null>;
+
+/** 跑不出报告时用它顶上，让「验证失败」照常是一条可读的结论而不是异常 */
+function unexecutedReport(reason: string): StageRunReport {
+  return {
+    status: 'error',
+    totals: { total: 0, passed: 0, failed: 0 },
+    cases: [],
+    gates: [],
+    metrics: undefined as any,
+    console: [],
+    wallClockMs: 0,
+    error: reason,
+  };
+}
 
 /**
  * 用参考实现真跑一遍每一关，确认题目是可解的。
@@ -181,12 +219,16 @@ export async function verifyProject(
   for (let index = 0; index < project.stages.length; index += 1) {
     const stage = project.stages[index];
 
-    const report = await execute({
-      files: workspaceFor(project, index, true),
-      specs: stage.specs,
-      lab: stage.lab,
-      gates: stage.gates,
-    });
+    // 执行器返回 null 表示这一关根本没跑起来（worker 出错或超时）。
+    // 那是一条「验证不通过」的结论，不是一个可以往上抛的异常 —— 抛出去会中断
+    // 整轮生成，用户既看不到是哪一关的问题，题目也不会被保存。
+    const report =
+      (await execute({
+        files: workspaceFor(project, index, true),
+        specs: stage.specs,
+        lab: stage.lab,
+        gates: stage.gates,
+      })) ?? unexecutedReport('the stage could not be executed (worker error or timeout)');
 
     let starterAlsoPasses = false;
     if (report.status === 'passed') {
@@ -196,7 +238,7 @@ export async function verifyProject(
         lab: stage.lab,
         gates: stage.gates,
       });
-      starterAlsoPasses = starterReport.status === 'passed';
+      starterAlsoPasses = starterReport?.status === 'passed';
     }
 
     verifications.push({

@@ -23,6 +23,7 @@ import { AppHeader, HEADER_HEIGHT } from '../../src/components/AppHeader';
 import { useAiConfig } from '../../src/hooks/useAiConfig';
 import { useProjectRunner } from '../../src/hooks/useProjectRunner';
 import { describeVerification, verifyProject } from '../../src/lib/engineering/validateProject';
+import { StreamRequestError } from '../../src/lib/streamRequest';
 import { requestStructuredStream } from '../../src/lib/streamRequest';
 import type { EngineeringProject } from '../../src/lib/engineering/types';
 
@@ -38,6 +39,16 @@ interface GenerateResult {
   verification?: VerificationSummary[];
   problems?: string[];
   saved: boolean;
+}
+
+/** 保留服务端逐条列出的结构问题，否则界面上只剩一句「保存失败」 */
+function messageWithDetails(error: unknown): string {
+  const message = (error as Error)?.message || 'Something went wrong';
+  const details = (error as StreamRequestError)?.details;
+  if (Array.isArray(details) && details.length > 0) {
+    return `${message}\n${details.map((item) => `• ${String(item)}`).join('\n')}`;
+  }
+  return message;
 }
 
 export default function ProjectGeneratorPage() {
@@ -92,7 +103,8 @@ export default function ProjectGeneratorPage() {
 
     const check = async (candidate: EngineeringProject) => {
       setStatus(t('engineering.generator.verifying'));
-      const verifications = await verifyProject(candidate, (options) => run(options) as any);
+      // 不要 as any：StageExecutor 现在明说可能没有报告，verifyProject 自己会处理
+      const verifications = await verifyProject(candidate, (options) => run(options));
       const failureReport = describeVerification(verifications);
       return {
         verification: verifications.map((item) => ({
@@ -150,7 +162,7 @@ export default function ProjectGeneratorPage() {
         setResult({ project, verification, problems, saved: false });
       }
     } catch (generateError) {
-      setError((generateError as Error).message);
+      setError(messageWithDetails(generateError));
     } finally {
       setStatus(null);
       setLoading(false);
@@ -167,10 +179,14 @@ export default function ProjectGeneratorPage() {
         body: JSON.stringify({ project: result.project, force: true }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to save project');
+      if (!response.ok) {
+        // 服务端会把结构问题逐条放在 details 里，只显示一句「保存失败」等于把原因扔了
+        throw new StreamRequestError(data.error || 'Failed to save project', data.details);
+      }
+      if (!data.project?.id) throw new Error('The server did not return a saved project');
       router.push(`/projects/${data.project.id}`);
     } catch (saveError) {
-      setError((saveError as Error).message);
+      setError(messageWithDetails(saveError));
     } finally {
       setSaving(false);
     }

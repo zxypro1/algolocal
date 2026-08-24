@@ -641,5 +641,10 @@
     "next": "Next match",
     "previous": "Previous match",
     "close": "Close find bar"
+  },
+  "renderError": {
+    "title": "This section could not be displayed",
+    "body": "The project data is malformed, so this part of the page failed to render. The rest of the app is still usable.",
+    "retry": "Try again"
   }
 }
