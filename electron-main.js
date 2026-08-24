@@ -54,7 +54,10 @@ function attachContextMenu(webContents) {
   webContents.on('context-menu', (_event, params) => {
     const template = buildContextMenuTemplate(params, currentMenuLabels);
     if (template.length === 0) return;
-    Menu.buildFromTemplate(template).popup({ window: BrowserWindow.fromWebContents(webContents) });
+    // 窗口可能在右键和弹出之间被关掉，fromWebContents 这时返回 null
+    const window = BrowserWindow.fromWebContents(webContents);
+    if (!window) return;
+    Menu.buildFromTemplate(template).popup({ window });
   });
 }
 
