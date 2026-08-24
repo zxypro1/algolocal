@@ -35,6 +35,7 @@ function workingProject() {
       {
         id: 'stage-1',
         title: { zh: '第一关', en: 'Stage 1' },
+        primer: { zh: '前置知识', en: 'Primer' },
         goal: { zh: '目标', en: 'Goal' },
         starterFiles: [{ path: 'src/a.ts', content: 'export const a = 0;' }],
         referenceFiles: [{ path: 'src/a.ts', content: 'export const a = 1;' }],
@@ -118,6 +119,12 @@ describe('validateProjectShape', () => {
   it('catches a stage with no starter files', () => {
     // 工作区是从 starterFiles 搭出来的，没有它编辑器就是空的
     expect(problems.join('\n')).toMatch(/no starter files/);
+  });
+
+  it('catches a stage with no primer', () => {
+    const project = workingProject();
+    project.stages[0].primer = { zh: '', en: '' };
+    expect(validateProjectShape(project).join('\n')).toMatch(/primer is empty/);
   });
 
   it('catches duplicate stage ids, which would share one progress record', () => {

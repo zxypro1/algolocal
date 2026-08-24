@@ -69,6 +69,7 @@ const SCHEMA = `{
     {
       "id": "kebab-case",
       "title": { "zh": "...", "en": "..." },
+      "primer": { "zh": "markdown: teach every concept and term needed for this stage to a learner who only knows basic programming", "en": "same, in English" },
       "goal": { "zh": "markdown: what to build and why it matters in production", "en": "..." },
       "checklist": [{ "zh": "...", "en": "..." }],
       "pitfalls": [{ "zh": "a wrong approach AND why it fails in production", "en": "..." }],
@@ -110,6 +111,10 @@ const RULES = `Hard requirements — the generated project is automatically exec
      not a restatement of the requirement. "Do not forget to await" is weak;
      "forgetting await makes the timing middleware report 0ms and swallows downstream errors" is right;
    - each stage needs an \`extension\` note naming real libraries, protocols or failure modes;
+   - each stage needs a \`primer\` written for a learner with basic programming ability and no prior
+     knowledge of the domain. Define every new term on first use, explain the data flow or state
+     transition in plain language, and connect the model in the workspace to the real system. Use
+     two or more short paragraphs. A glossary list by itself is not enough;
    - \`brief\` must contain: context with a concrete symptom, a stage table, hard constraints,
      non-goals, and a glossary of 3-4 terms;
    - \`goal\` must state the exact API contract the specs will call.

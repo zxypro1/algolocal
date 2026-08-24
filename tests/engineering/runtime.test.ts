@@ -712,6 +712,31 @@ describe('preset projects', () => {
     }
   });
 
+  it('explains prerequisite concepts before every stage', () => {
+    const problems: string[] = [];
+
+    for (const project of projects) {
+      for (const stage of project.stages) {
+        const where = `${project.id}/${stage.id}`;
+        if (!stage.primer?.zh) problems.push(`${where} needs a Chinese primer`);
+        if (!stage.primer?.en) problems.push(`${where} needs an English primer`);
+        if ((stage.primer?.zh.length || 0) < 150) problems.push(`${where} Chinese primer is too brief`);
+        if ((stage.primer?.en.length || 0) < 500) problems.push(`${where} English primer is too brief`);
+        if ((stage.primer?.zh.split(/\n\n+/).length || 0) < 2) {
+          problems.push(`${where} Chinese primer needs explanatory paragraphs`);
+        }
+        if ((stage.primer?.en.split(/\n\n+/).length || 0) < 2) {
+          problems.push(`${where} English primer needs explanatory paragraphs`);
+        }
+        if (`${stage.primer?.zh}\n${stage.primer?.en}`.match(/[—–]/)) {
+          problems.push(`${where} uses mechanical long dashes`);
+        }
+      }
+    }
+
+    expect(problems).toEqual([]);
+  });
+
   it('derived JavaScript files carry no TypeScript syntax', () => {
     for (const project of projects) {
       const variant = project.variants?.javascript;

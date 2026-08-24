@@ -70,7 +70,25 @@ export default function StagePanel({
         )}
       </Group>
 
+      {stage.primer && pick(stage.primer) && (
+        <Card withBorder radius="lg" padding="lg" bg="var(--mantine-color-blue-light)">
+          <Group gap={6} mb={4}>
+            <IconBook2 size={16} />
+            <Text size="sm" fw={600}>
+              {t('engineering.stage.primer')}
+            </Text>
+          </Group>
+          <Text size="xs" c="dimmed" mb="sm">
+            {t('engineering.stage.primerHint')}
+          </Text>
+          <MarkdownRenderer content={pick(stage.primer)} />
+        </Card>
+      )}
+
       <Card withBorder radius="lg" padding="lg">
+        <Text size="sm" fw={600} mb={8}>
+          {t('engineering.stage.goal')}
+        </Text>
         <MarkdownRenderer content={pick(stage.goal)} />
       </Card>
 

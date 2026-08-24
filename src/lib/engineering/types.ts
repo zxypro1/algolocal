@@ -102,6 +102,13 @@ export interface ProjectStage {
   id: string;
   title: LocalizedText;
   /**
+   * 动手前的基础讲解。
+   *
+   * 假设读者会写函数、条件和常见数据结构，但没有接触过本关所属的技术领域。
+   * 这里负责解释术语、运行过程，以及练习中的模型和真实系统之间的对应关系。
+   */
+  primer: LocalizedText;
+  /**
    * 参考架构：这一关的参考代码结构，mermaid 流程图（flowchart TD）。
    * 是「一种可行的组织方式」，不是唯一答案。
    */

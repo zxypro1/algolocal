@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const { deriveJavaScriptVariant } = require('./derive-js-variant');
+const { attachStagePrimers } = require('../projects/stage-primers');
 
 const root = path.join(__dirname, '..');
 const definitionsDir = path.join(root, 'projects', 'definitions');
@@ -30,6 +31,9 @@ function validate(project, source) {
   }
   project.stages.forEach((stage, index) => {
     if (!stage.id) fail(`${source}: 第 ${index + 1} 关缺少 id`);
+    if (!stage.primer?.zh || !stage.primer?.en) {
+      fail(`${source}: 第 ${index + 1} 关缺少中英文前置知识讲解`);
+    }
     if (!stage.specs || stage.specs.length === 0) {
       fail(`${source}: 第 ${index + 1} 关没有验收用例`);
     }
@@ -50,7 +54,7 @@ function main() {
   const projects = files.map((name) => {
     const modulePath = path.join(definitionsDir, name);
     delete require.cache[require.resolve(modulePath)];
-    const project = require(modulePath);
+    const project = attachStagePrimers(require(modulePath));
     validate(project, name);
 
     // 题目只写一份 TypeScript，JS 版在这里自动派生，避免两份内容漂移

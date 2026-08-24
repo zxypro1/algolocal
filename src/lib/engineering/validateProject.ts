@@ -37,6 +37,7 @@ export function coerceProject(raw: any): EngineeringProject {
     ? raw.stages.map((stage: any, index: number) => ({
         id: String(stage?.id || `stage-${index + 1}`),
         title: normalizeLocalized(stage?.title, `Stage ${index + 1}`),
+        primer: normalizeLocalized(stage?.primer),
         goal: normalizeLocalized(stage?.goal),
         architecture: stage?.architecture ? normalizeLocalized(stage.architecture) : undefined,
         checklist: Array.isArray(stage?.checklist)
@@ -110,6 +111,7 @@ export function validateProjectShape(project: EngineeringProject): string[] {
   project.stages.forEach((stage, index) => {
     const label = `stage ${index + 1} (${stage.id})`;
     if (!stage.title.zh && !stage.title.en) errors.push(`${label}: title is empty`);
+    if (!stage.primer?.zh && !stage.primer?.en) errors.push(`${label}: primer is empty`);
     if (!stage.goal.zh && !stage.goal.en) errors.push(`${label}: goal is empty`);
     if (!stage.specs.length) errors.push(`${label}: no spec files`);
     // 工作区是从 starterFiles 搭出来的，一关没有它就是一个空编辑器
