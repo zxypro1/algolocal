@@ -38,6 +38,7 @@ module.exports = {
   files: [
     'electron-main.js',
     'electron-menu.js',
+    'electron-urls.js',
     'electron-preload.js',
     'next.config.js',
     'package.json',

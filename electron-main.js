@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, Menu, ipcMain, protocol, net, dialog } = require('electron');
+const { app, BrowserWindow, shell, Menu, ipcMain, protocol, net, dialog, clipboard, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -6,6 +6,7 @@ const { createServer } = require('http');
 // electron 的 net 已经占用了这个名字，Node 的 net 只能另起一个
 const nodeNet = require('node:net');
 const { labelsFor, buildAppMenuTemplate, buildContextMenuTemplate } = require('./electron-menu');
+const { isInternalUrl, isSafeExternalUrl } = require('./electron-urls');
 
 // Global error handlers
 process.on('uncaughtException', (error) => {
@@ -37,6 +38,16 @@ let nextApp;
 /** 当前菜单用的那套文案，右键菜单跟着应用语言走 */
 let currentMenuLabels = labelsFor('en');
 
+/** 应用自己的页面地址（判定逻辑与用例都在 electron-urls.js） */
+function isAppUrl(candidate) {
+  return isInternalUrl(candidate, { hostname, port });
+}
+
+/** 只把 http(s) 交给系统浏览器；file:// javascript: 这类一律不碰 */
+function openExternalSafely(candidate) {
+  if (isSafeExternalUrl(candidate)) shell.openExternal(candidate);
+}
+
 // Function to update the application menu
 function updateApplicationMenu(language = 'en') {
   currentMenuLabels = labelsFor(language);
@@ -44,7 +55,9 @@ function updateApplicationMenu(language = 'en') {
     language,
     platform: process.platform,
     navigate: (routePath) => mainWindow && mainWindow.loadURL(`http://${hostname}:${port}${routePath}`),
-    openDocumentation: () => shell.openExternal('https://github.com/zxypro1/OfflineLeetPractice')
+    openDocumentation: () => openExternalSafely('https://github.com/zxypro1/OfflineLeetPractice'),
+    openFind: () => mainWindow && mainWindow.webContents.send('find:open'),
+    findAgain: (forward) => mainWindow && mainWindow.webContents.send('find:again', forward)
   });
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
@@ -52,12 +65,85 @@ function updateApplicationMenu(language = 'en') {
 /** 装上右键菜单：键盘快捷键之外的另一条剪切/复制/粘贴路径 */
 function attachContextMenu(webContents) {
   webContents.on('context-menu', (_event, params) => {
-    const template = buildContextMenuTemplate(params, currentMenuLabels);
+    const template = buildContextMenuTemplate(params, currentMenuLabels, {
+      copyLink: (url) => clipboard.writeText(url),
+      openLink: (url) => openExternalSafely(url),
+      copyImage: (p) => webContents.copyImageAt(p.x, p.y),
+      saveImageAs: (url) => saveImageAs(webContents, url),
+      replaceMisspelling: (word) => webContents.replaceMisspelling(word)
+    });
     if (template.length === 0) return;
     // 窗口可能在右键和弹出之间被关掉，fromWebContents 这时返回 null
     const window = BrowserWindow.fromWebContents(webContents);
     if (!window) return;
     Menu.buildFromTemplate(template).popup({ window });
+  });
+}
+
+/**
+ * 「图片另存为」。
+ *
+ * downloadURL 触发 will-download，默认行为是直接落到下载目录、不问用户。
+ * 这里给这一次下载挂上保存对话框，走完就把标记清掉。
+ */
+// 按地址记，而不是一个全局布尔：万一同时有别的下载在跑，
+// 布尔会被那一次消费掉，对话框就弹到错误的文件上了。
+const pendingSaveAs = new Set();
+function saveImageAs(webContents, url) {
+  pendingSaveAs.add(url);
+  webContents.downloadURL(url);
+}
+
+/**
+ * 下载行为。
+ *
+ * 浏览器里点下载会弹「保存到哪里」，Electron 不接这个事件的话会静默存到
+ * 默认目录，用户完全不知道文件去哪了。
+ */
+let downloadHandlerAttached = false;
+function attachDownloadHandler(session) {
+  // session 是全局共享的；createWindow 可能再跑一次（macOS 上关窗后重新激活），
+  // 重复注册会让同一次下载弹两个对话框。
+  if (downloadHandlerAttached) return;
+  downloadHandlerAttached = true;
+
+  session.on('will-download', (_event, item) => {
+    if (pendingSaveAs.has(item.getURL())) {
+      pendingSaveAs.delete(item.getURL());
+      const suggested = item.getFilename();
+      const target = dialog.showSaveDialogSync(mainWindow, { defaultPath: suggested });
+      if (!target) {
+        item.cancel();
+        return;
+      }
+      item.setSavePath(target);
+    }
+    item.once('done', (_e, state) => {
+      if (state === 'completed') {
+        shell.showItemInFolder(item.getSavePath());
+      }
+    });
+  });
+}
+
+/**
+ * 导航守卫。
+ *
+ * setWindowOpenHandler 只管 window.open / target=_blank；普通 <a href> 点击走的是
+ * will-navigate。不拦的话，AI 回答或题解 markdown 里的外链会把整个应用窗口导航走，
+ * 而这个窗口没有地址栏也没有后退键，用户就出不来了。
+ */
+function attachNavigationGuards(webContents) {
+  webContents.on('will-navigate', (event, url) => {
+    if (isAppUrl(url)) return;
+    event.preventDefault();
+    openExternalSafely(url);
+  });
+
+  webContents.setWindowOpenHandler(({ url }) => {
+    if (isAppUrl(url)) return { action: 'allow' };
+    openExternalSafely(url);
+    return { action: 'deny' };
   });
 }
 
@@ -208,6 +294,52 @@ async function startNextServer() {
   }
 }
 
+const CONFIG_PATH = path.join(os.homedir(), '.offline-leet-practice', 'config.json');
+
+function readConfig() {
+  try {
+    if (fs.existsSync(CONFIG_PATH)) return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  } catch (error) {
+    console.error('Error reading config:', error);
+  }
+  return {};
+}
+
+/**
+ * 记住窗口大小和位置。
+ *
+ * 浏览器会替你记住窗口几何，Electron 每次都从默认值重开。
+ * 存之前先跟当前显示器比一下：外接屏拔掉之后，旧坐标会把窗口开到屏幕外。
+ */
+function persistWindowBounds() {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isMinimized()) return;
+  try {
+    const config = readConfig();
+    config.windowBounds = { ...mainWindow.getNormalBounds(), maximized: mainWindow.isMaximized() };
+    fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  } catch (error) {
+    console.error('Error saving window bounds:', error);
+  }
+}
+
+/** 落在任何一块屏幕里才用，否则回落到默认居中 */
+function restoredWindowBounds() {
+  const saved = readConfig().windowBounds;
+  if (!saved || typeof saved.width !== 'number' || typeof saved.height !== 'number') return null;
+
+  const visible = screen.getAllDisplays().some((display) => {
+    const area = display.workArea;
+    return (
+      saved.x >= area.x - 50 &&
+      saved.y >= area.y - 50 &&
+      saved.x + saved.width <= area.x + area.width + 50 &&
+      saved.y + saved.height <= area.y + area.height + 50
+    );
+  });
+  return visible ? saved : null;
+}
+
 let savedThemePref = 'light';
 
 function createWindow() {
@@ -224,9 +356,12 @@ function createWindow() {
     console.error('Error loading theme preference:', error);
   }
   
+  const restored = restoredWindowBounds();
+
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    width: restored?.width ?? 1400,
+    height: restored?.height ?? 900,
+    ...(restored && typeof restored.x === 'number' ? { x: restored.x, y: restored.y } : {}),
     minWidth: 1000,
     minHeight: 700,
     title: 'AlgoLocal',
@@ -238,7 +373,8 @@ function createWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, 'electron-preload.js'),
       webSecurity: true,
-      spellcheck: false
+      // 浏览器里输入框天然有拼写检查，关掉等于桌面端平白少一项
+      spellcheck: true
     },
     icon: path.join(__dirname, 'public', 'icon.png'),
     show: false // Don't show until ready
@@ -264,18 +400,39 @@ function createWindow() {
   // 右键菜单：键盘快捷键之外的另一条剪切/复制/粘贴路径
   attachContextMenu(mainWindow.webContents);
 
-  // Open external links in the default browser
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('http') && !url.includes('localhost')) {
-      shell.openExternal(url);
-      return { action: 'deny' };
+  // 外链走系统浏览器，不在应用窗口里导航
+  attachNavigationGuards(mainWindow.webContents);
+
+  // 下载要弹保存对话框，而不是静默落盘
+  attachDownloadHandler(mainWindow.webContents.session);
+
+  // 查找命中数回传给查找栏
+  mainWindow.webContents.on('found-in-page', (_event, result) => {
+    if (mainWindow) {
+      mainWindow.webContents.send('find:result', {
+        activeMatchOrdinal: result.activeMatchOrdinal,
+        matches: result.matches
+      });
     }
-    return { action: 'allow' };
   });
 
   // Show window when ready
   mainWindow.once('ready-to-show', () => {
+    if (restored?.maximized) mainWindow.maximize();
     mainWindow.show();
+  });
+
+  // 拖动/缩放停下来之后再写盘，别每一帧都写
+  let boundsTimer = null;
+  const scheduleBoundsSave = () => {
+    if (boundsTimer) clearTimeout(boundsTimer);
+    boundsTimer = setTimeout(persistWindowBounds, 400);
+  };
+  mainWindow.on('resize', scheduleBoundsSave);
+  mainWindow.on('move', scheduleBoundsSave);
+  mainWindow.on('close', () => {
+    if (boundsTimer) clearTimeout(boundsTimer);
+    persistWindowBounds();
   });
 
   // Load the app
@@ -329,6 +486,18 @@ function cleanup() {
     });
   }
 }
+
+// 页内查找：菜单发 find:open 给渲染进程，渲染进程把关键词回传到这里
+ipcMain.handle('find:query', (_event, text, options) => {
+  if (!mainWindow || !text) return false;
+  mainWindow.webContents.findInPage(text, options || {});
+  return true;
+});
+
+ipcMain.handle('find:stop', () => {
+  if (mainWindow) mainWindow.webContents.stopFindInPage('clearSelection');
+  return true;
+});
 
 // IPC event handlers for configuration management
 ipcMain.handle('save-config', async (event, configData) => {

@@ -5,6 +5,7 @@ import '@mantine/core/styles.css';
 import '../styles/globals.css';
 import { I18nProvider, useI18n } from '../src/contexts/I18nContext';
 import { ThemeProvider, useTheme } from '../src/contexts/ThemeContext';
+import FindBar from '../src/components/FindBar';
 
 // AlgoLocal 品牌青色：与新的本地执行回路标志保持一致
 const brand: MantineColorsTuple = [
@@ -97,6 +98,8 @@ function AppContent({ Component, pageProps }: AppProps) {
   return (
     <MantineProvider theme={theme} defaultColorScheme={forceScheme} forceColorScheme={forceScheme}>
       <Component {...pageProps} />
+      {/* 桌面端的 ⌘F 查找栏；浏览器里它自己不渲染 */}
+      <FindBar />
     </MantineProvider>
   );
 }
