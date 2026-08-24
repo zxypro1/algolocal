@@ -7928,7 +7928,7 @@ const stage12 = {
       '- 3 个成员共 6 台在线设备，一条消息**推 5 帧**',
       '  （门槛 `counters.framesPushed ≤ 8`）；',
       '- 一个在 40 个会话里的人取 10 行会话列表，**最多读 60 条记录**',
-      '  （门槛 `counters.messagesScanned ≤ 60`）；',
+      '  （门槛 `counters.messagesScanned ≤ 40`）；',
       '- 重发幂等、离线补齐、撤回收敛、大群仍然出现在列表里，全部照旧。',
       '',
       '## 那个坑',
@@ -7995,7 +7995,7 @@ const stage12 = {
       '- Three members with six connected devices cost **five frames** for one message',
       '  (the `counters.framesPushed ≤ 8` gate);',
       '- Someone in 40 conversations asking for 10 rows **reads at most 60 records**',
-      '  (the `counters.messagesScanned ≤ 60` gate);',
+      '  (the `counters.messagesScanned ≤ 40` gate);',
       '- Idempotent resends, offline catch-up, recall convergence and large groups appearing in the list',
       '  all still hold.',
       '',
@@ -8584,15 +8584,15 @@ const stage12 = {
             expect(outcome.delivered).toBe(5);
           });
 
-          it('四十个会话取十行，读取有上限 [gate:list]', () => {
+          it('八十个会话取十行，读取有上限 [gate:list]', () => {
             const world = makeServer();
             world.server.connect('alice', 'alice-phone');
-            for (let index = 1; index <= 40; index += 1) {
+            for (let index = 10; index <= 89; index += 1) {
               const id = 'd' + index;
               world.server.createConversation(id, 'direct', ['alice', 'peer' + index]);
             }
             for (let round = 1; round <= 2; round += 1) {
-              for (let index = 1; index <= 40; index += 1) {
+              for (let index = 10; index <= 89; index += 1) {
                 send(world, 'd' + index, 'alice', 'alice-phone', round);
               }
             }
@@ -8601,7 +8601,7 @@ const stage12 = {
 
             // 全部发生在同一个虚拟毫秒上，所以只断言取到的是最近的那十个
             expect(list.map((row: any) => row.conversationId).sort()).toEqual([
-              'd31', 'd32', 'd33', 'd34', 'd35', 'd36', 'd37', 'd38', 'd39', 'd40',
+              'd80', 'd81', 'd82', 'd83', 'd84', 'd85', 'd86', 'd87', 'd88', 'd89',
             ]);
           });
         });
@@ -8630,9 +8630,9 @@ const stage12 = {
     gate({
       metric: 'counters.messagesScanned',
       op: 'lte',
-      value: 60,
-      zh: '四十个会话取十行最多读六十条记录',
-      en: 'Ten rows out of forty conversations read at most sixty records',
+      value: 40,
+      zh: '八十个会话取十行最多读四十条记录',
+      en: 'Ten rows out of eighty conversations read at most forty records',
       dimension: 'latency',
       scope: 'gate:list',
     }),
