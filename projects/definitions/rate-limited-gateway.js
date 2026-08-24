@@ -6231,8 +6231,8 @@ module.exports = {
   id: 'rate-limited-gateway',
   title: t('有韧性的 API 网关', 'Resilient API gateway'),
   summary: t(
-    '十一关手写一整套网关可靠性机制：窗口算法、多维配额、分布式租约、熔断、负载均衡、舱壁、重试预算、降级与流量镜像。',
-    'Eleven stages of gateway reliability built by hand: window algorithms, multi-dimensional quotas, distributed leases, breakers, balancing, bulkheads, retry budgets, degradation and shadowing.'
+    '先把限流和配额算准，再处理熔断、负载均衡、舱壁与重试放大。最后两关完成降级和流量镜像，共十一关。',
+    'Get limiting and quotas right first, then handle breakers, load balancing, bulkheads and retry amplification. The final stages cover degradation and traffic shadowing.'
   ),
   difficulty: 'Hard',
   domain: 'reliability',

@@ -8695,8 +8695,8 @@ module.exports = {
   id: 'database-engine',
   title: t('从零实现一个数据库引擎', 'Build a database engine from scratch'),
   summary: t(
-    '十二关走完一条完整的数据库：页式存储、B+Tree、WAL、两阶段锁、快照隔离、SQL 解析、火山模型执行器，最后是代价优化器。',
-    'Twelve stages through a whole database: paged storage, a B+Tree, WAL, two-phase locking, snapshot isolation, a SQL parser, a Volcano executor, and a cost-based optimiser.'
+    '从页式存储起步，逐步补上 B+Tree、WAL、并发控制和 SQL 执行，最后用统计信息做代价优化。共十二关。',
+    'Start with paged storage, then add a B+Tree, WAL, concurrency control and SQL execution. The twelfth stage finishes with statistics and cost-based optimisation.'
   ),
   difficulty: 'Hard',
   domain: 'database',

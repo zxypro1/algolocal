@@ -6306,8 +6306,8 @@ module.exports = {
   id: 'order-event-pipeline',
   title: t('事件驱动的订单流水线', 'Event-driven order pipeline'),
   summary: t(
-    '十一关做完一条事件驱动的订单链路：模式演进、分区有序、消费者组、outbox、幂等、Saga、事件溯源、读模型投影与端到端对账。',
-    'Eleven stages of an event-driven order pipeline: schema evolution, partitioned ordering, consumer groups, the outbox, idempotency, sagas, event sourcing, projections and reconciliation.'
+    '从事件版本和分区顺序开始，逐步补上消费者组、outbox、幂等与 Saga，最后用投影和对账收住一致性问题。共十一关。',
+    'Start with event versions and partition ordering, then add consumer groups, an outbox, idempotency and sagas. Projections and reconciliation close the consistency gaps across eleven stages.'
   ),
   difficulty: 'Medium',
   domain: 'architecture',

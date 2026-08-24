@@ -6535,8 +6535,8 @@ module.exports = {
   id: 'resilient-fetch-pipeline',
   title: t('高可用抓取管线', 'Resilient fetch pipeline'),
   summary: t(
-    '从一个串行 for 循环出发，十二关加上并发池、超时预算、错误分类、对冲、缓存单飞、优先级、背压、分页与可观测性。',
-    'Start from a sequential for-loop and spend twelve stages on a pool, deadlines, failure classification, hedging, single-flight caching, priorities, backpressure, pagination and telemetry.'
+    '从一个串行 for 循环开始，逐步加入并发上限、超时、重试、缓存和背压。后几关再处理分页、调度与慢请求归因。',
+    'Start with a sequential for-loop, then add bounded concurrency, deadlines, retries, caching and backpressure. Later stages cover pagination, scheduling and slow-request attribution.'
   ),
   difficulty: 'Medium',
   domain: 'concurrency',

@@ -8945,8 +8945,8 @@ module.exports = {
   id: 'enterprise-im',
   title: t('企业级 IM 通讯系统', 'An enterprise IM system'),
   summary: t(
-    '十二关造出一个企业级 IM：连接与心跳、会话序号与幂等、离线增量拉取、多端同步、已读位点与未读数、送达与已读回执、写扩散与读扩散、在线状态订阅、撤回与编辑、端到端加密、合并推送，最后组装成一台能在有界代价内答出会话列表的服务器。',
-    'Twelve stages building an enterprise IM system: connections and heartbeats, idempotent conversation sequencing, bounded offline catch-up, multi-device sync, read cursors and unread counts, delivery and read receipts, write versus read fan-out, subscribed presence, recall and edit, end-to-end encryption, coalesced push, and finally a server that answers the conversation list at a bounded cost.'
+    '先维护连接、消息序号和多端进度，再处理回执、群聊扩散、在线状态与端到端加密。最后把十二关组装成一台查询代价有上限的 IM 服务器。',
+    'Begin with connections, message sequence and per-device progress. Then add receipts, group fan-out, presence and end-to-end encryption before assembling a server with bounded conversation-list cost.'
   ),
   difficulty: 'Hard',
   domain: 'messaging',
