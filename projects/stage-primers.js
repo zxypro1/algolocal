@@ -1057,6 +1057,36 @@ const primers = {
   },
 
   'intranet-k8s': {
+    'first-workload': t(
+      p(
+        '直接创建 `Pod` 很少见，因为它不会自愈：节点挂了它就没了。日常用的是 `Deployment`，你声明「要三个这样的副本」，它建一个 `ReplicaSet`，ReplicaSet 负责让 Pod 的数量始终等于三。改了镜像版本，Deployment 会新建一个 ReplicaSet 并逐步把流量从旧的挪过去，这就是`滚动更新`。',
+        '`标签`（label）是这套机制的粘合剂。ReplicaSet 靠 `selector` 认领属于自己的 Pod，Pod 靠 `metadata.labels` 表明身份。两边对不上，ReplicaSet 就会以为一个 Pod 都没有，于是不停地建新的。',
+        '`Service` 是集群内部的稳定入口。Pod 的 IP 随时会变（重建一次就换一个），Service 有一个固定的 ClusterIP 和一个 DNS 名字。它同样靠 `selector` 找后端，匹配到的 Pod 地址被写进一个叫 `Endpoints` 的对象里，转发时就查这张表。',
+        '于是有一种很典型的故障：Pod 全部 Running，Service 也有 ClusterIP，但访问不通。原因是 Service 的 selector 和 Pod 的标签对不上，Endpoints 是空的。`kubectl get svc` 看不出这件事，`kubectl get endpoints` 一眼就能看出来。这是排查「服务不通」时该敲的第一条命令。'
+      ),
+      p(
+        'Creating a `Pod` directly is rare because a bare pod does not heal: if its node dies, it is gone. Day to day you use a `Deployment`. You declare "I want three replicas like this", it creates a `ReplicaSet`, and the ReplicaSet keeps the pod count at three. Change the image version and the Deployment creates a new ReplicaSet, gradually shifting traffic from the old one. That is a `rolling update`.',
+        '`Labels` are the glue. A ReplicaSet claims its pods through a `selector`; pods declare their identity through `metadata.labels`. When the two disagree, the ReplicaSet believes it owns no pods and keeps creating more.',
+        'A `Service` is a stable in-cluster entrypoint. Pod IPs change constantly (every recreation brings a new one), while a Service has a fixed ClusterIP and DNS name. It also finds backends through a `selector`, and the matching pod addresses are written into an `Endpoints` object that forwarding consults.',
+        'This produces a very characteristic failure: every pod is Running, the Service has a ClusterIP, and nothing can reach it. The Service selector does not match the pod labels, so Endpoints is empty. `kubectl get svc` will not reveal this; `kubectl get endpoints` shows it immediately. It is the first command to run when a service is unreachable.'
+      )
+    ),
+
+    'containerize': t(
+      p(
+        '一个容器镜像是若干`层`叠起来的。Dockerfile 里每条会改动文件系统的指令（`COPY`、`ADD`、`RUN`）产生一层，每层只记录相对上一层的差异。运行时把这些层按顺序叠成一个完整的根文件系统，上面再盖一个可写层。',
+        '分层带来两个后果，一好一坏。好的是`构建缓存`：只要某一层的输入没变，这一层就直接复用。所以先 `COPY package.json` 再 `npm ci`、最后才 `COPY` 源码，改一行业务代码不会让依赖重装一遍；顺序反过来则每次都重装。',
+        '坏的是`层是不可变的历史`。某一层里写进去的文件，后面的层只能用一条「删除标记」把它遮住，字节本身还在镜像里。所以 `COPY . .` 把密钥带进去、再 `RUN rm` 删掉，最终文件系统确实干净，但 `docker save` 导出来一翻就找得到。真正的做法是让它根本不进构建上下文（`.dockerignore`），或者用`多阶段构建`把构建期的东西留在前一个阶段。',
+        '还有两个和运行时直接相关的字段。`USER` 决定容器里的进程以谁的身份跑，默认是 root，而以 root 跑容器是绝大多数安全基线的第一条禁令。`CMD` 有两种写法：exec form（`["node","server.js"]`）让应用进程直接成为容器里的 1 号进程，shell form（`node server.js`）会先起一个 `/bin/sh`，信号只发给 sh，应用收不到，优雅退出就无从谈起。'
+      ),
+      p(
+        'A container image is a stack of `layers`. Every Dockerfile instruction that changes the filesystem (`COPY`, `ADD`, `RUN`) produces one, and each layer records only its difference from the one below. At runtime the layers are stacked into a complete root filesystem with a writable layer on top.',
+        'Layering has two consequences, one good and one bad. The good one is the `build cache`: as long as a layer’s inputs are unchanged, it is reused. That is why you `COPY package.json` first, then `npm ci`, and only then copy the source: changing one line of business code no longer reinstalls every dependency. Reverse the order and it reinstalls every time.',
+        'The bad one is that `layers are immutable history`. A file written into one layer can only be hidden by a deletion marker in a later layer; the bytes remain in the image. So copying a secret in and then removing it leaves a genuinely clean final filesystem, and a recoverable secret for anyone who runs `docker save`. The real fixes are keeping it out of the build context entirely (`.dockerignore`) or using a `multi-stage build` so build-time material stays in an earlier stage.',
+        'Two more fields matter at runtime. `USER` decides which identity the process runs as; the default is root, and running as root is the first thing nearly every security baseline forbids. `CMD` has two forms: exec form (`["node","server.js"]`) makes your application PID 1 inside the container, while shell form (`node server.js`) starts a `/bin/sh` first, so signals go to the shell and never reach your application, which makes graceful shutdown impossible.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',
