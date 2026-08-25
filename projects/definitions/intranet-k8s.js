@@ -18,6 +18,7 @@ const PORTAL_IMAGE = 'harbor.corp.internal/team/portal:1.4.0';
 const PORTAL_IMAGE_NEXT = 'harbor.corp.internal/team/portal:1.5.0';
 const REPORTS_IMAGE = 'harbor.corp.internal/team/reports:2.1.0';
 const ENVOY_IMAGE = 'registry.k8s.io/gateway-api/envoy-gateway:v1.6.2';
+const CERT_MANAGER_IMAGE = 'quay.io/jetstack/cert-manager-controller:v1.19.1';
 /** 已经从仓库里下架的镜像，拉不到 —— ingress-nginx 2026-03-24 退役 */
 const RETIRED_NGINX_IMAGE = 'registry.k8s.io/ingress-nginx/controller:v1.13.0';
 
@@ -84,7 +85,10 @@ const WORLD = {
     { name: 'node-a2', cpu: '4', memory: '8Gi', labels: { 'topology.kubernetes.io/zone': 'a' } },
     { name: 'node-b1', cpu: '4', memory: '8Gi', labels: { 'topology.kubernetes.io/zone': 'b' } },
   ],
-  namespaces: ['default', 'kube-system', 'payments', 'envoy-gateway-system', 'ingress-nginx'],
+  namespaces: [
+    'default', 'kube-system', 'payments',
+    'envoy-gateway-system', 'ingress-nginx', 'cert-manager',
+  ],
   images: {
     [PORTAL_IMAGE]: {
       pullMs: 400, startupMs: 600, readyAfterMs: 300,
@@ -95,8 +99,9 @@ const WORLD = {
       handlesSigterm: true,
       runAsUser: 10001,
     },
-    // 平台组装的入口控制器
+    // 平台组装的入口控制器与 PKI
     [ENVOY_IMAGE]: { pullMs: 300, startupMs: 400, readyAfterMs: 200, listens: [18000] },
+    [CERT_MANAGER_IMAGE]: { pullMs: 300, startupMs: 400, readyAfterMs: 200, listens: [9402] },
     // 财务的报表任务：吃 900Mi，limits 写小了就会被 OOMKill
     [REPORTS_IMAGE]: {
       pullMs: 500, startupMs: 800, readyAfterMs: 200,
@@ -107,6 +112,23 @@ const WORLD = {
   },
   // 本地已经有的基础镜像，写 Dockerfile 时 FROM 得着
   baseImages: { 'node:22-alpine': 'node' },
+  // 内网 PKI：根 CA + 签发用的中间 CA，外加前任手工造的那张只有叶子的证书
+  pki: {
+    roots: [{ name: 'corp-root-ca', namespace: 'cert-manager', commonName: 'Corp Root CA' }],
+    intermediates: [{
+      name: 'corp-issuing-ca', namespace: 'cert-manager',
+      commonName: 'Corp Issuing CA', signedBy: 'corp-root-ca',
+    }],
+    serverCertificates: [{
+      name: 'portal-tls-manual', namespace: 'payments',
+      commonName: 'portal.corp.internal', dnsNames: ['portal.corp.internal'],
+      signedBy: 'corp-issuing-ca',
+      // 只放叶子，不接签发链 —— 第 9 关埋的就是这个
+      leafOnly: true,
+    }],
+    // 跳板机只信根，不信中间
+    trust: ['corp-root-ca'],
+  },
   // 内网入口与公网入口用不同的地址池，这是「不能上公网」这条要求的落点
   addressPools: [
     { loadBalancerClass: 'corp.internal/office-lb', cidrPrefix: '10.10.8', zones: ['office'] },
@@ -281,6 +303,120 @@ const stage1 = {
  * 所以从第 2 关起 context 已经切好。
  */
 const PREVIOUS_STAGES = ['kubectl config use-context prod'];
+
+/* ------------------------------------------------------------------ */
+/* 平台组已经装好的东西                                                */
+/* ------------------------------------------------------------------ */
+
+/** Envoy Gateway：控制器本身是集群里的一个工作负载 */
+const GATEWAY_PLATFORM = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: {
+      name: 'envoy-gateway', namespace: 'envoy-gateway-system',
+      labels: { 'app.kubernetes.io/name': 'envoy-gateway' },
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'envoy-gateway' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'envoy-gateway' } },
+        spec: { containers: [{ name: 'controller', image: ENVOY_IMAGE }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'gateway.envoyproxy.io/v1alpha1', kind: 'EnvoyProxy',
+    metadata: { name: 'internal', namespace: 'envoy-gateway-system' },
+    spec: { provider: { kubernetes: { envoyService: { loadBalancerClass: 'corp.internal/office-lb' } } } },
+  },
+  {
+    apiVersion: 'gateway.envoyproxy.io/v1alpha1', kind: 'EnvoyProxy',
+    metadata: { name: 'public', namespace: 'envoy-gateway-system' },
+    spec: { provider: { kubernetes: { envoyService: { loadBalancerClass: 'corp.internal/public-lb' } } } },
+  },
+  {
+    apiVersion: 'gateway.networking.k8s.io/v1', kind: 'GatewayClass',
+    metadata: { name: 'envoy-internal' },
+    spec: {
+      controllerName: 'gateway.envoyproxy.io/gatewayclass-controller',
+      parametersRef: {
+        group: 'gateway.envoyproxy.io', kind: 'EnvoyProxy',
+        name: 'internal', namespace: 'envoy-gateway-system',
+      },
+    },
+  },
+  {
+    apiVersion: 'gateway.networking.k8s.io/v1', kind: 'GatewayClass',
+    metadata: { name: 'envoy-public' },
+    spec: {
+      controllerName: 'gateway.envoyproxy.io/gatewayclass-controller',
+      parametersRef: {
+        group: 'gateway.envoyproxy.io', kind: 'EnvoyProxy',
+        name: 'public', namespace: 'envoy-gateway-system',
+      },
+    },
+  },
+];
+
+/** cert-manager 与指向中间 CA 的 ClusterIssuer */
+const CERT_MANAGER_PLATFORM = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: {
+      name: 'cert-manager', namespace: 'cert-manager',
+      labels: { 'app.kubernetes.io/name': 'cert-manager' },
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'cert-manager' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'cert-manager' } },
+        spec: { containers: [{ name: 'controller', image: CERT_MANAGER_IMAGE }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'cert-manager.io/v1', kind: 'ClusterIssuer',
+    metadata: { name: 'corp-ca' },
+    spec: { ca: { secretName: 'corp-issuing-ca' } },
+  },
+];
+
+/** 上一关迁好的路由。第 9 关开局它已经在了。 */
+const PORTAL_ROUTE = {
+  apiVersion: 'gateway.networking.k8s.io/v1', kind: 'HTTPRoute',
+  metadata: { name: 'portal', namespace: 'payments' },
+  spec: {
+    parentRefs: [{ name: 'corp-gw' }],
+    hostnames: ['portal.corp.internal'],
+    rules: [{
+      matches: [{ path: { type: 'PathPrefix', value: '/' } }],
+      backendRefs: [{ name: 'portal', port: 80 }],
+    }],
+  },
+};
+
+/** 门户本身 */
+const PORTAL_WORKLOAD = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: 'portal', namespace: 'payments' },
+    spec: {
+      replicas: 2,
+      selector: { matchLabels: { app: 'portal' } },
+      template: {
+        metadata: { labels: { app: 'portal' } },
+        spec: { containers: [{ name: 'web', image: PORTAL_IMAGE, ports: [{ containerPort: 8080 }] }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'v1', kind: 'Service',
+    metadata: { name: 'portal', namespace: 'payments' },
+    spec: { clusterIP: '10.96.1.10', selector: { app: 'portal' }, ports: [{ port: 80, targetPort: 8080 }] },
+  },
+];
 
 /* ------------------------------------------------------------------ */
 /* 第 2 关                                                             */
@@ -1832,54 +1968,7 @@ const stage8 = {
   ops: {
     setupCommands: [...PREVIOUS_STAGES],
     objects: [
-      // 平台组装好的 Envoy Gateway：控制器本身是集群里的一个工作负载
-      {
-        apiVersion: 'apps/v1', kind: 'Deployment',
-        metadata: {
-          name: 'envoy-gateway', namespace: 'envoy-gateway-system',
-          labels: { 'app.kubernetes.io/name': 'envoy-gateway' },
-        },
-        spec: {
-          replicas: 1,
-          selector: { matchLabels: { 'app.kubernetes.io/name': 'envoy-gateway' } },
-          template: {
-            metadata: { labels: { 'app.kubernetes.io/name': 'envoy-gateway' } },
-            spec: { containers: [{ name: 'controller', image: ENVOY_IMAGE }] },
-          },
-        },
-      },
-      {
-        apiVersion: 'gateway.envoyproxy.io/v1alpha1', kind: 'EnvoyProxy',
-        metadata: { name: 'internal', namespace: 'envoy-gateway-system' },
-        spec: { provider: { kubernetes: { envoyService: { loadBalancerClass: 'corp.internal/office-lb' } } } },
-      },
-      {
-        apiVersion: 'gateway.envoyproxy.io/v1alpha1', kind: 'EnvoyProxy',
-        metadata: { name: 'public', namespace: 'envoy-gateway-system' },
-        spec: { provider: { kubernetes: { envoyService: { loadBalancerClass: 'corp.internal/public-lb' } } } },
-      },
-      {
-        apiVersion: 'gateway.networking.k8s.io/v1', kind: 'GatewayClass',
-        metadata: { name: 'envoy-internal' },
-        spec: {
-          controllerName: 'gateway.envoyproxy.io/gatewayclass-controller',
-          parametersRef: {
-            group: 'gateway.envoyproxy.io', kind: 'EnvoyProxy',
-            name: 'internal', namespace: 'envoy-gateway-system',
-          },
-        },
-      },
-      {
-        apiVersion: 'gateway.networking.k8s.io/v1', kind: 'GatewayClass',
-        metadata: { name: 'envoy-public' },
-        spec: {
-          controllerName: 'gateway.envoyproxy.io/gatewayclass-controller',
-          parametersRef: {
-            group: 'gateway.envoyproxy.io', kind: 'EnvoyProxy',
-            name: 'public', namespace: 'envoy-gateway-system',
-          },
-        },
-      },
+      ...GATEWAY_PLATFORM,
       // 已经退役的 ingress-nginx：镜像下架了，控制器起不来
       {
         apiVersion: 'apps/v1', kind: 'Deployment',
@@ -1896,24 +1985,7 @@ const stage8 = {
           },
         },
       },
-      // 门户本身
-      {
-        apiVersion: 'apps/v1', kind: 'Deployment',
-        metadata: { name: 'portal', namespace: 'payments' },
-        spec: {
-          replicas: 2,
-          selector: { matchLabels: { app: 'portal' } },
-          template: {
-            metadata: { labels: { app: 'portal' } },
-            spec: { containers: [{ name: 'web', image: PORTAL_IMAGE, ports: [{ containerPort: 8080 }] }] },
-          },
-        },
-      },
-      {
-        apiVersion: 'v1', kind: 'Service',
-        metadata: { name: 'portal', namespace: 'payments' },
-        spec: { clusterIP: '10.96.1.10', selector: { app: 'portal' }, ports: [{ port: 80, targetPort: 8080 }] },
-      },
+      ...PORTAL_WORKLOAD,
     ],
     files: {
       '/root/infra/ingress.yaml': LEGACY_INGRESS,
@@ -2017,6 +2089,259 @@ const stage8 = {
   ),
 };
 
+/* ------------------------------------------------------------------ */
+/* 第 9 关                                                             */
+/* ------------------------------------------------------------------ */
+
+/** 前任手工造的证书，只放了叶子 —— 这是「链不完整」那个坑 */
+const TLS_STARTER = code`
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: Gateway
+  metadata:
+    name: corp-gw
+    namespace: payments
+  spec:
+    gatewayClassName: envoy-internal
+    listeners:
+    - name: https
+      port: 443
+      protocol: HTTPS
+      hostname: portal.corp.internal
+      tls:
+        mode: Terminate
+        certificateRefs:
+        - name: portal-tls-manual
+    - name: http
+      port: 80
+      protocol: HTTP
+      hostname: portal.corp.internal
+`;
+
+const TLS_REFERENCE = code`
+  apiVersion: cert-manager.io/v1
+  kind: Certificate
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    secretName: portal-tls
+    duration: 2160h
+    renewBefore: 720h
+    commonName: portal.corp.internal
+    dnsNames:
+    - portal.corp.internal
+    issuerRef:
+      name: corp-ca
+      kind: ClusterIssuer
+  ---
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: Gateway
+  metadata:
+    name: corp-gw
+    namespace: payments
+  spec:
+    gatewayClassName: envoy-internal
+    listeners:
+    - name: https
+      port: 443
+      protocol: HTTPS
+      hostname: portal.corp.internal
+      tls:
+        mode: Terminate
+        certificateRefs:
+        - name: portal-tls
+    - name: http
+      port: 80
+      protocol: HTTP
+      hostname: portal.corp.internal
+`;
+
+const stage9 = {
+  id: 'certificates-and-pki',
+  title: t('证书与 PKI', 'Certificates and PKI'),
+  goal: t(
+    code`
+      门户要上 HTTPS。前任已经在 Gateway 上配了 443，用的是他手工造的一张证书
+      （Secret \`portal-tls-manual\`）。但从跳板机访问的时候 curl 直接失败了，
+      而他坚称「证书是对的，浏览器里能打开」。
+
+      公司有自己的 PKI：一个根 CA \`Corp Root CA\`，下面一个签发用的中间 CA
+      \`Corp Issuing CA\`。cert-manager 已经装好，ClusterIssuer \`corp-ca\`
+      指向那个中间 CA。根 CA 已经装进这台跳板机的信任库了。
+
+      ## 通关标准
+
+      1. 先搞清楚手工那张证书到底哪里不对（\`openssl x509\` 与 \`openssl verify\`
+         能把话说明白）；
+      2. 用 cert-manager 签一张，Certificate 的 \`Ready\` 是 True；
+      3. Gateway 的 443 用上新证书；
+      4. **不加 \`-k\`** 的 \`curl https://portal.corp.internal/\` 返回 200；
+      5. 证书有效期至少还剩 60 天。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl get secret portal-tls-manual -n payments -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/manual.pem
+      openssl x509 -in /tmp/manual.pem -noout -text
+      openssl verify -CAfile /etc/ssl/certs/ca-certificates.crt /tmp/manual.pem
+      kubectl get clusterissuer
+      kubectl apply -f infra/tls.yaml
+      kubectl describe certificate portal -n payments
+      curl -v --resolve portal.corp.internal:443:<Gateway 地址> https://portal.corp.internal/
+      \`\`\`
+    `,
+    code`
+      The portal needs HTTPS. Your predecessor already configured port 443 on the
+      Gateway using a certificate he made by hand (Secret \`portal-tls-manual\`).
+      curl from the jump host fails outright, and he insists the certificate is fine
+      because "it opens in the browser".
+
+      The company runs its own PKI: a root CA \`Corp Root CA\` with an issuing
+      intermediate \`Corp Issuing CA\` under it. cert-manager is installed and the
+      ClusterIssuer \`corp-ca\` points at that intermediate. The root is already in
+      this jump host's trust store.
+
+      ## Done when
+
+      1. you work out what is actually wrong with the hand-made certificate
+         (\`openssl x509\` and \`openssl verify\` will say it plainly);
+      2. cert-manager issues a replacement and the Certificate reports \`Ready\` True;
+      3. the Gateway's port 443 uses the new certificate;
+      4. \`curl https://portal.corp.internal/\` returns 200 **without \`-k\`**;
+      5. the certificate has at least 60 days of validity left.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl get secret portal-tls-manual -n payments -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/manual.pem
+      openssl x509 -in /tmp/manual.pem -noout -text
+      openssl verify -CAfile /etc/ssl/certs/ca-certificates.crt /tmp/manual.pem
+      kubectl get clusterissuer
+      kubectl apply -f infra/tls.yaml
+      kubectl describe certificate portal -n payments
+      curl -v --resolve portal.corp.internal:443:<gateway address> https://portal.corp.internal/
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('看懂手工证书哪里不对', 'Diagnose the hand-made certificate'),
+    t('cert-manager 签出新证书并被 Gateway 用上', 'cert-manager issues one and the Gateway uses it'),
+    t('不加 -k 也能通，有效期充足', 'Works without -k, with plenty of validity left'),
+  ],
+  hints: [
+    t(
+      '\`openssl verify\` 会直接说 \`unable to get local issuer certificate\` —— 意思是「顺着这张证书往上找不到签它的那一级」。',
+      '\`openssl verify\` says \`unable to get local issuer certificate\` outright: it cannot find the certificate that signed this one.'
+    ),
+    t(
+      '根 CA 在信任库里，签这张证书的却是中间 CA。\`tls.crt\` 里应该是**叶子 + 中间**两张，前任只放了一张。',
+      'The root is trusted, but this certificate was signed by the intermediate. \`tls.crt\` should hold **leaf + intermediate**; your predecessor put in only one.'
+    ),
+    t(
+      'cert-manager 签发时会自动把签发链接在叶子后面，所以用它就不会犯这个错。',
+      'cert-manager appends the issuing chain after the leaf automatically, so using it avoids the mistake entirely.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '「浏览器里能打开」不能作为证据。浏览器可能缓存过那张中间证书，或者会主动去补齐（AIA chasing）；curl、Go 写的服务、Java 写的服务都不会。这类「我这儿好好的」正是链不完整最典型的表现。',
+      '"It opens in my browser" is not evidence. Browsers may have cached the intermediate or fetch it themselves (AIA chasing); curl, Go services, and Java services will not. "Works on my machine" is the signature symptom of an incomplete chain.'
+    ),
+    t(
+      '加 \`-k\` 让它通过。那不是修好了，是把校验关掉了 —— 中间人攻击也一起放进来了。判定明确要求不加 \`-k\`。',
+      'Adding \`-k\` makes it pass. That is not a fix, it is disabling verification, and it lets a man-in-the-middle in too. The grader requires no \`-k\`.'
+    ),
+    t(
+      '把中间 CA 也塞进跳板机的信任库。这样确实能通，但你只修好了自己这一台 —— 集群里的服务、别人的机器全都还是坏的。证书链应该由服务端提供完整。',
+      'Adding the intermediate to this jump host’s trust store. It works here and nowhere else: other machines and in-cluster callers still fail. The server is responsible for presenting a complete chain.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...PORTAL_WORKLOAD, PORTAL_ROUTE],
+    files: {
+      '/root/infra/tls.yaml': TLS_STARTER,
+    },
+    referenceFiles: { '/root/infra/tls.yaml': TLS_REFERENCE },
+    referenceCommands: [
+      'kubectl apply -f /root/infra/tls.yaml',
+    ],
+  },
+  specs: [
+    spec('certificates-and-pki.spec.ts', code`
+      import { get, list, sh } from '@ops/lab';
+
+      const DAY = 24 * 60 * 60 * 1000;
+
+      describe('证书与 PKI', () => {
+        it('cert-manager 签出了证书，Ready 是 True', () => {
+          const certificates = list('Certificate', { namespace: 'payments' });
+          expect(certificates.length).toBe(1);
+          const ready = certificates[0].status.conditions
+            .find((entry) => entry.type === 'Ready');
+          expect(ready.status).toBe('True');
+        });
+
+        it('Gateway 的 443 用的是 cert-manager 签的那张', () => {
+          const gateway = list('Gateway', { namespace: 'payments' })[0];
+          const https = gateway.spec.listeners.find((entry) => entry.protocol === 'HTTPS');
+          expect(https).toBeTruthy();
+
+          const reference = https.tls.certificateRefs[0].name;
+          const certificate = list('Certificate', { namespace: 'payments' })[0];
+          expect(reference).toBe(certificate.spec.secretName);
+        });
+
+        it('不加 -k 也能通，返回 200', async () => {
+          const gateway = list('Gateway', { namespace: 'payments' })[0];
+          const address = gateway.status.addresses[0].value;
+          const result = await sh(
+            'curl -s -o /dev/null -w %{http_code} --resolve portal.corp.internal:443:' + address
+            + ' https://portal.corp.internal/'
+          );
+          expect(result.code).toBe(0);
+          expect(result.stdout).toBe('200');
+        });
+
+        it('证书有效期至少还剩 60 天', () => {
+          const certificate = list('Certificate', { namespace: 'payments' })[0];
+          const notAfter = Date.parse(certificate.status.notAfter);
+          const remaining = (notAfter - Date.parse('2026-03-02T09:00:00Z')) / DAY;
+          expect(remaining >= 60).toBe(true);
+        });
+
+        it('没有靠把中间 CA 塞进本机信任库来蒙过去', async () => {
+          // 信任库里只该有根，多出来的中间 CA 说明修的是自己这一台
+          const bundle = await sh('grep -c BEGIN /etc/ssl/certs/ca-certificates.crt');
+          expect(bundle.stdout.trim()).toBe('1');
+        });
+      });
+    `),
+  ],
+  focus: ['correctness', 'resilience'],
+  extension: t(
+    code`
+      「链不完整」之所以难查，是因为它**不是必然失败**。浏览器缓存过那张中间
+      证书、或者按证书里的 AIA 扩展自己去下载，都会让它看起来是好的；而 curl、
+      Go 与 Java 写的服务不会做这些事。于是现象是「我这儿好好的，你那儿不行」。
+
+      判断的办法只有一个：把服务端实际发出来的那串证书拿出来看。
+      \`openssl s_client -connect host:443 -showcerts\` 会把它们全打出来，
+      数一数有几张，就知道链有没有断。
+    `,
+    code`
+      An incomplete chain is hard to diagnose precisely because it does not always
+      fail. A browser may have cached the intermediate, or fetch it itself through the
+      AIA extension; curl, Go services, and Java services do neither. The result is
+      "it works here and not there".
+
+      There is only one reliable check: look at the certificates the server actually
+      sends. \`openssl s_client -connect host:443 -showcerts\` prints all of them, and
+      counting them tells you whether the chain is complete.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -2059,5 +2384,5 @@ module.exports = {
   ),
   workspace: { kind: 'ops', world: WORLD },
   files: [],
-  stages: [stage1, stage2, stage3, stage4, stage5, stage6, stage7, stage8],
+  stages: [stage1, stage2, stage3, stage4, stage5, stage6, stage7, stage8, stage9],
 };

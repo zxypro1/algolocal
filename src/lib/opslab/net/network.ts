@@ -14,6 +14,8 @@
  */
 import type { KubeObject, Registry, Scheme } from '../apiserver';
 import type { ImageBehavior } from '../controllers/runtime';
+import type { Certificate } from '../crypto';
+import { verifyChain } from '../crypto';
 import { CLUSTER_DOMAIN, isIpv4, resolve, type DnsView } from './dns';
 import { evaluate, type PolicyPeer } from './policy';
 import type { ConnectResult, Hop, Resolution, Source, Target, Zone } from './types';
@@ -38,6 +40,20 @@ export interface NetworkDeps {
    *
    * 由集群注入，网络层自己不认识 Gateway 的 CRD —— 数据面只管「转给谁」。
    */
+  /**
+   * 客户端信任哪些根。
+   *
+   * 办公网的机器读 `/etc/ssl/certs/ca-certificates.crt`，Pod 读挂进去的 bundle。
+   * 内网 CA 没装进信任库，就是 `unable to get local issuer certificate`。
+   */
+  trustBundle?(source: Source): Certificate[];
+  /**
+   * 服务端在这个端口上出示什么证书链。
+   *
+   * Gateway 的 HTTPS listener 从 `tls.certificateRefs` 指的 Secret 里拿，
+   * 没配就是「这个端口不讲 TLS」。
+   */
+  serverChain?(input: { address: string; port: number; host: string }): Certificate[] | undefined;
   gatewayRoute?(address: string, request: { host: string; port: number; path: string }): {
     gateway: string;
     route?: string;
@@ -226,8 +242,71 @@ export class Network {
       });
     }
 
-    // 6. 端口上有没有人听、应用怎么答
+    // 6. TLS 握手。证书验不过就在这里断，还没到应用。
+    if (target.tls) {
+      const handshake = this.handshake(source, target, address, hops);
+      if (handshake) return { ...handshake, elapsedMs: elapsed + handshake.elapsedMs };
+      elapsed += LATENCY.hop;
+    }
+
+    // 7. 端口上有没有人听、应用怎么答
     return this.deliver(chosen.pod, chosen.port, target, hops, elapsed);
+  }
+
+  /**
+   * TLS 握手。
+   *
+   * 验不过就返回一个失败结果 —— 注意这时候**请求还没发出去**，
+   * 所以应用日志里什么都不会有。这是排查证书问题时最容易走错的方向。
+   */
+  private handshake(
+    source: Source,
+    target: Target,
+    address: string,
+    hops: Hop[]
+  ): (Omit<ConnectResult, 'elapsedMs'> & { elapsedMs: number }) | undefined {
+    const serverName = target.serverName ?? target.headerHost ?? target.host;
+    const chain = this.deps.serverChain?.({ address, port: target.port, host: serverName });
+
+    if (!chain || chain.length === 0) {
+      hops.push({
+        at: `tls/${address}:${target.port}`,
+        detail: '这个端口不讲 TLS',
+        verdict: 'reject',
+        elapsedMs: LATENCY.hop,
+      });
+      return {
+        kind: 'reset', hops, elapsedMs: LATENCY.hop,
+        blockedBy: 'wrong version number（对面不是 TLS 端口）',
+      };
+    }
+
+    if (target.insecure) {
+      hops.push({
+        at: `tls/${serverName}`,
+        detail: `跳过校验（-k），对面是 ${chain[0].subject.commonName}`,
+        verdict: 'forward',
+        elapsedMs: LATENCY.hop,
+      });
+      return undefined;
+    }
+
+    const result = verifyChain({
+      chain,
+      roots: this.deps.trustBundle?.(source) ?? [],
+      hostname: serverName,
+      now: this.deps.now(),
+    });
+    hops.push({
+      at: `tls/${serverName}`,
+      detail: result.ok
+        ? `链验证通过（${result.path!.map((item) => item.subject.commonName).join(' <- ')}）`
+        : result.error!,
+      verdict: result.ok ? 'forward' : 'reject',
+      elapsedMs: LATENCY.hop,
+    });
+    if (result.ok) return undefined;
+    return { kind: 'reset', hops, elapsedMs: LATENCY.hop, blockedBy: result.error };
   }
 
   private deliver(

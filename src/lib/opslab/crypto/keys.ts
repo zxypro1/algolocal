@@ -1,0 +1,100 @@
+/**
+ * 预先生成的 RSA-2048 密钥对
+ *
+ * 为什么写死而不是运行时生成：**确定性**。同一个世界重放两次，证书的字节
+ * 必须一模一样，否则 golden 比对与进度恢复都塌了。而真正生成一对 RSA 密钥
+ * 需要找素数，既慢又必然随机。
+ *
+ * 这些是货真价实的密钥（Node 的 crypto 生成的），CRT 参数（p / q / dp / dq / qi）
+ * 也带着 —— 于是导出来的 `tls.key` 是一份**结构完整的 PKCS#1 私钥**，
+ * openssl 读得懂，我们自己也解析得回来。签出来的证书用任何真实的验证器
+ * 都验得过，我们只是不在运行时造它们。
+ */
+
+export interface RsaKeyPair {
+  /** 模数 */
+  n: string;
+  /** 公钥指数（都是 65537） */
+  e: string;
+  /** 私钥指数 */
+  d: string;
+  /** 两个素因子与 CRT 参数，导出 PKCS#1 时要用 */
+  p: string;
+  q: string;
+  dp: string;
+  dq: string;
+  qi: string;
+}
+
+export const KEY_POOL: RsaKeyPair[] = [
+  {
+    n: 'udEXNhmWpS4KnBXCZnHnKGcoQpliKx_ihby0x_VNWJO3j5R81AF6X2i7Y5d1IZz7wvTIvo7I5xVQekm2rmlPf8lWIsHm028qQRjU5-_cbgWA9R7Sa2D5ppJT6kTVtvAP4CmqwrUuk0POgCYwABBkTvQh2v4bN_KS4v4uiUpUj8QS-vD2m1-CcEd0w_kG-rvb2PxiSPPXDQOWOxN7_tBTtZUadCQYIESGsqeKA468Vz_q4R2gwA3hFf763xdXmUSLJyLBf8F0fuA1j3iOoXABSrV_Z9UJYN1hEMHVfYUldF7zjGGLXZm7Q0S0XWnof4hgEu4rcVinjUbEcQ27DbKC_w',
+    e: 'AQAB',
+    d: '6hJWHFtSwWJM890zZSoW6b_Vy5pzsGME_olDezJ4m5iO-vfBtUB_KMbbvHSSGJnM43k9Z_NRh1J-JFrF20cXAtOr77ZwD59RSqDumYbmAft_Lk_1yJ7ONb2bOaW3HSloql8F2hS6RqtIk3YoYFKsNT49-fB3fbJWtZtB33XKUe7ju998svQL52-ijzICageF7Ilfh9j1nWBYNgTYC3NfGYesEvGHgTrMEzqmfTwFbD86UaQ3J__ybrrkrrzYrkIAUHFoB_VAJVoPgyn5Bga2OVDacfh0YRoxvsqRYbvrOvxnKZ8-ZsFcBE4dwi3Oh0jnXhWIcKzsBYo_pr_cGd3h',
+    p: '8kKIxPtC6AiKotWMmDCsKyQoA5pEq67W4_QUa-uY15x_KdZgv8KRjeRvpGhC1lo-zV7Bzv3TR0eevxZljG9WeQMGHcIYy0N0OEAWRuhVCVm-WQdcbZiVKfPW3MNAE7dt8lbziTFsjiOSBhI2gJQ6_mLa8r74L4YlGR3-VlV44M8',
+    q: 'xFsJWRzNYF1OjFmLWVklt8ZE51mL1Dk7oUygpMn5DctkE1CiqMbtC4CPgSwR3GTlp15U6I4M8-ok77O2dEf3sMs8RkgnhNZgU4mb74bYXEmUpzxSSgjdxZRj0Q6s6d7VlGGGOgozfW_Bf9C3UsNm30DhRCpaN2DJFvPTBOun5tE',
+    dp: 'EuWNtY_D0EWaSslNhjGFvHe9h0ppQNsKeA156lEeQvM6GBFYypxqrh67dp-LVx0C-RIDHBpAeLblcxJUKXglzpqlx3x0YqaIUjrtgeptd6VAa8FfPE1ClVsnz2CLhv4v3U9a_8CTLyMnKMIS7kShtWYQng63XT2hdywXwrQ4EZE',
+    dq: 'AtfiocS2AKA5Q_UD_I466pdXZhY43SDbCTHn3ZsDHT0FvPXc9R60TgdVjKRLuepIHQ1To25zJ5ELaeErUjG8l3XJ8KaY0-aazHrgpC5KscNrAKTx-Bp6w6Krc1qIDHbqltR2sh51smpM3gHytaMYuUDiQi9u0QB4yPlM4_RZoRE',
+    qi: 'ZVfcpA6j1wLE7crN3dwXj-aJ-mPK5GxgbTHkVbfKejSJqAgWzwW8tw-YSuYtTR9CjXEthBfrOVdFbWJIML5HdhU82zJJkmM77Anij-KaC_E15eTyWL_GsAcZkWVEZYjKUYAaoHadr1_zd9oFF0iLVbb6TPDo-2btIBuMElawXgc',
+  },
+  {
+    n: 'lvT-89HQF6Ei2_OmEsDK_zkKQ5lFrzK4gY47IQSVY4klbUQZXU5__YQWm_4LaA21z02t4bMJXbp4vRQ-Cd31iTX7HsNtyGi_7duruv6FQD4CNvVx-rINOHBJAtFMZFEoVgZzp_Mmhawcrez_PJg3NR820_w6MIGo3WJr74ug8IQfPsN7y92kZ1YlDW5yMwtihOuZKid8X_TqE9pC0-1WT353qIW5nRGws2_M-C5i6NZ_LYNL_f2d-ftusmfmzq5g76mfQgPT45O8pc5KE2p6L82OQevwArsNiTFKNNFkbFBiVBr6nE3Udspg_6-uiwwkIi0HRWqKmmEznRQzX2at-w',
+    e: 'AQAB',
+    d: 'DgJajsIP78FyfLsV1HOz4w-mFjPpNaMdYFiUwDGus3gM0yEYwYIBesOBXaSr5lIvZzesRV_aJKqjfdidEUlZ-gvabDZyv8CI30gdndL1Bss6ZWNN2pgfhfdVrz9BOaYWejVLEnEMSCd62eE-pp7xsKpe6jlkJRBDXZg-sBJjMy7LMRGZ1sgrPAS1ZNMt6LNFI_hcU8qzRgrTv_f5bKeuOS2Mp8DxWkyNwOXsEmnshBbfEyJk7FHuic4AWAf8mES-25jjDbpbN4Z9L0bLHYgvmaU7vVNrUr2npvFx97m7BbvVMT-IggDXPGYaa29ddB6ihhSizhDcRRdv2bM3pkL8EQ',
+    p: '0Q4DkuMJmc1nhJ7WGEhDC6MHB77dMjxoYpZKCZnen5nnsJf7pdGZHqmpvXpwErLgU1LWpZ4YtiFSM8zZur7932mdf11fmCcCvN47kgsQvP7MUePMFjEac_IJ82J4NdFmzSLL643ieYoKLIf-6EYRK0pl-QvUemisDr92DVMiBK0',
+    q: 'uNsaMySDek3VT_kNQBP7h3zk-fe_gu5XVZ7pUITZeSKzEe62_ADDPQldzSQWwBbW-YM7Fbfp1hhH0wOCsmgGaMJqzYlT96M9YC3FogwVgNbk5F-BumlztsbW0m_d_beqvlABSL23Jtj-4v98izHd_G7AtF9Qbg9fkxjr9gBfKkc',
+    dp: 'lAXcOfFQJvrtxVXCOkdQUbkJjU5zyNJFBylrGwk8PL34821p3atfQ_rWGTfMizDk7ZrGKVacILnPPqZZtITvtXVO85Pl0BIvOhQREgOLwoaXnZQyObRjCp3itdaPT2wJ4k41HYDFT1GSip1wvH6AQarYMVNTC6l5yqd-q0il2bE',
+    dq: 'C5-zaQ3dup4UUMAPZj0bbuyalWFPyJLmKPsiHq8L4cMd0X3aQcRmgnsJS_H-ADwvbmcjGv2ClbTXJ1ysJj3GUWYQQzZkckjwfhDCwarS21Qn9nhO9wLUhOTB81-XbPHUqbzsJ7_OOYIhnPKFyVbsZ4grU-w-aX1L_Drv83sYgNc',
+    qi: 'X8VAshyS8SQ5UrdyrXJ5xWxpcQxbr_2G_MpA0FG5qxla4YbRh1KzRjzVF8-pFWxduFPGz5XxAt0hqK-VEirqm9Iqn4urgYl-w_jCO1ZZ4y_B8m2X4CMFf2bNWScb6WdMnYb3sUqG1naeIXISi_G4tSOOVqSWjEP7DuoPr-VYMMo',
+  },
+  {
+    n: 'uypktjKUNj8ZCLI7_rcaB4tE_BVek7yUrL5RPrOSYcjKN4k4n8EXGPDhEvopGEUG5Jlg6NeZDCqH5VvsL9juLKlk1dDgc832j_7SfmBNDVPj3NT83kRH5JP_xs8g2MD5XHphaCeirXBJrWBCOSspmadyHFDeL7k_SGW_pRTh23jYOfReewW47Tmn1WY4sfau3OXBNYeV48rfZrgVzerReVh4fr0kkWa-Ncnf1uG0gKuWd9kviZyqvTnyGmtBINi9ftJdfckLZLwKjXY_MoiTCED-2kjCWlowDEH2KPTH2axZPQeNI3vE8yyAlRiWR5LwHZVHXjrtolM7GpKf2qd9ew',
+    e: 'AQAB',
+    d: 'PDNRDHdtS5t0-mKVwIJ1aVrG2AwpjPxZl8xpRnEs0q3qOP22jE_nlXqY8mkrQaamJm4dCRebnxmo90FfUS6FwTDFAa77GtRzC3LLkqF39yL2Bigto3Iz65Yc7X3e00kSi8fDP-SLwxx8Xjs5Ybj72vPMVMZACPqdG7S6dScn1FbXNSk_l5iOo3X8hPvsjqcfiVmdQLym66M1bTRnh-aWa3OPS6PBvvHdj83R0Lsm9gvPzmKuU9W4nR5vQEQs26JSeHhV9WylnyoJF8QyQJb4c-j1LPb7vz_5XhLu3eN1xaKKQMU0PsHzXJj2lf9A_p_KqvEqIiM64lfN9iks6QDTNQ',
+    p: '8ehsNgZ24itsLKogO4EvGX_579fls-ON1k_3i1rEyoJL8CL6iFTlywEMEtTxEDC-9oufiPvFWRfpN-ZDO2gTrxqHuE7Z2RxHHeIVPSmYFA_d6_nPYYgNhySYlP4XxDgclz_lOs4rRr_cCEhaas7ZWim6sEaE6h0uikCniNh0r08',
+    q: 'xhGZAWT3-66jGmbqbNDXif1u5fPWMX7M_uHp12ZUHiX-Z9VCXBSgOmUgZP1Dx9_9wA-PTZ0WgeRIs5B3s27U87yzJ9Y3rijDhUR7LEzluSl-j9B4yWBxK7mTX9ulmM0EUOOuAemv_vGXJhBTbpC7LFKrA2GniYilDGWb2J0yJBU',
+    dp: 'NRnh9xIAMrF5c2x82tMGtcBD6wQnZg-DaRHwsuRf4lwrszDacebA8ojuT4vyxq0Mni4T_QvXTDFVfnHLPFUiTQOz2x9j7qaobcTdCKoCuhSpkE0r2qr03T-JRttn-CihDgp2lSwAj-05rY_EWUHCsGoMkvlH3-Q7_RkoLX_mTT0',
+    dq: 'hKGSEIH5ILqvk2VpAxbRziA725XtT1V2lhLXUJrAJzQP6J3AgwJ4zMGc8KM7eSM_uxVwQ2u2f6JLIJrT3P6RcOliGoHy5Rd83ceep2qSxevISSszRr3i6oGo8x6VA_39LuFXSwaeCJzkNuPlynr2K1bsFyaUVp9-zg9YTbPtuIU',
+    qi: 'JhBRRGi42EJQmj1IeN1QmJSAflNGvEkn2b_p4QsXaWoavbJQUlJJGVS0DDsZz-1VJUfoDu2FYXfYgb8qK1-OjBnktexaIJ3Xwi610jIMqwjuIEHrvWJyIbaiyDum_l7A1PvsxP7v1FGTGHjSZpFO-BR0N_mCya8LD1HMsTTFfRw',
+  },
+  {
+    n: 'patqCpxJBTICo-FZ5hUHPdv-2_nz0ptIN4YWQBqzdYlp3pmVJyjMQPXKdEPbuR36-CTNBu_aWMNV8kSR9gPljWD0kp6HtoNKO9yv23k7LcMDqaoaNcLEdTdvRd4UaXVEgbahfF5Y-8K8Eod37qyDCtD_wokK3yDkT2LjJv6tHuiws49JDek5UN1aw_CWKvaU6OeimSIKZUOeX81HSHgxmdIvo_wUHOp-VLCjTuIFO-_HfF-0ADoJpTcpgI4b9lIZvgoYSIXrn6Q6NOMkxoH4G80FirkMAWOD8rG3T-BELaH-9CjgeuGuwIVD0rABmkrfabniR69rLd964CM8fZOv6Q',
+    e: 'AQAB',
+    d: 'DH4mmvI6F2g0BsOhkdYYG7QRPelVV5ZaFcXIu8DHs59PGngeZTuQW32tbKMJWKZIHJo508IWhwcD3icJkrGsh8K97qiBt2OjH2x-3l__9G12Qz8OhutPAT_S5kPe6izro5RwDP7YWvPOVt9cTeU4ZIJqJvNKnJTQYqQkWPZve5sVM6Nnl4dhK-vdqSQPwMNzdfgrE9treHfIANuiasX9HhP3y9j5INyESzaJzZTaVMRONi71-ecXFJomdXfb3bqjdBnP0t4lOjdbq7CE6PMX6dXb_ClfCi2FAXmKO-Rl5i0egBL5CqpMx2DDRqBthYwqvlejrAk6BG4_Sv1QGnqnmQ',
+    p: '4tprDAbZVb9pSohzoRfJDMWkpUGDfsRWc5DLERiO-BpnpwraX8H9TUWFS7II8arDwkUOicbVgox4NZDRGP_XZLBcCUSk_RPPr8On9Sysc8uKSqJOLPRKZa_4pD4nz2Jns3bO4-LBKe3yvOBaK0Z6NqdenIBhXagIfGqkBDPD9Yc',
+    q: 'uvSQisi_QB7rby7c8yrXHcTLyxgV7fPYu7bjYDp1F7hXRSm4SnuUWFachr7LnNvwgJSZ_RzY0lPWufByc-j8JfDqq2sr1LsK1X_URz_oU-IkzGpeEOgv2WrkZSa4DXkfUsiX_IJnnlNE_8cmEbFHrr3hvzd1hbf4KS60nyz4iw8',
+    dp: 'D4j1m7U8XOrmwvvlLzr5wa4nQEnkP2IiqXdY8KrF36evQXk0yyn1trz0C-L9Sc9v6HXiMP000ePct45bQ2MB1RtesiPJSKt6pYa4kcmlZaiip8nFoL55-cy7MkQvZbxPbbLNKD33DHAHF3gltKD27Zc4m28PO-Kt8hc7dC43VTE',
+    dq: 'YI6feI5l-H__qNTTWOPvZniVqLcv3E3sykaS-Mg4YZ_bsuTxQcbBvz48aXtxPfp6JG6beZbEhRy38iC1fBgA4rei_BXF9YEE_2-d-46ON4S87LajDqhczjXe8D8nIA5Gl0Ly_H99dNAc-t2oU8rz8tQvG8tQ71cs3Fg7AVsAoxE',
+    qi: 'aRQWUka8etK7AjFIoHZkLtPj0l0I8mQaukkulax3IS1hkK7_H52ZE_iS4Vzq80YMhxWEr8v096H5Fqqa1Kgil-tZcIat6hnw5jLjZnr8jVqihGrHWuKLQdT6EZAJdD59h6LBphWrXxsAmFOmDo-GdTj2y2uZ73T48--OA_qSsRQ',
+  },
+  {
+    n: 'rSDXmBqv_KO1DiZ6EM8x8XG6LFUyzLFNN8fefP9mevabqJPc1uR1UpaVkLdavwDgnWkxk_9f5R34cSyO7I4bC9DVjmajTmTEPv02MOcbhFJ8ybT-tGNz8dUWuPJZbpfYJFiv1IabsRpbv9ZL6WBkRHVqvapfo2fg_O6fGQbjz6s3WrWrkor8YxD1R3NW1Od0C0PuHJrx2srzJCu_CxPqztzrou-o9s_NUCMX1C6P_scVBEZF5miDBEJ6ZCV7Ln00aD-93Oq5aaGu7ExwerK0zbdVEik8IVvBQvgztMIF4ALtpC93gf7-XNEp__vSFAoMFY-ts3uBi1eIwMOXoJvnDw',
+    e: 'AQAB',
+    d: 'NO8jvCf8wxwy0Z7GF7miJZaGO-PY4mkbmQCNcF6OsO4R7ds33KSBkrzkAhltr5TPGJH_TKb6ZQ1i1weus3lHn7c8dIvBRsjcj_3PwegHq8-kw--JKRJ3cuuaRPYkjgHzXjmXmT2HAQF0KBWXpEWKorvb5R3gnA-45Nz43CgVI3tPAziD6BIBho_VHK0tEQETijT8rOs9ek0moAZa8_qZAfmka7TyJOmhCSrBBQ0GhgIr0edrBX9lMAm_8DMj0Y0Eh-LwaF6nuC20K2ag_Fq9pNL6wpK-83OeL03w2viYfdXSpMks5VOQV74NLuvWNR_k7s0rgXz8OeypsMeq00mCsQ',
+    p: '5OC8L3owyxRTmaslnI_uamqecoGMkx1Vsjanh36CyYhWqikL2MeFEiO6fkawzwfZAGoDKJnv07BvHSBHHy5aPEsdMnIPpOJmMCAkjjfjVTdTNB3Hg4R3f7YMFr5dUto3ldwaXLiFlJ8bYRb10j1YXXXyDtUN2Z8JGy_dM9EQjyM',
+    q: 'waThqAlApXUMrHlyoI_26O5KYXE0NOsPMHUoF204lON0AcjgpZEUiYRO6xB3pwRCTN2tN8IhavwLX5dHwkYwIIzaSAWBURmfwTeW5mNDjk0Td9XUGHQuTw4vfYJ_vVcEsyVSbqP1eDZISPYx6GvWKzqiktnszbpD59zFOqki3SU',
+    dp: 'ZufMdKRBr-0RsXPL01q7XUlWuDEbHUIBN8FvDXKKJ0aPgK43z13VrNQ3k3MBJ_RlUtRXWzfrJoibTMModxKGK7myBO5XrlDElTq-dNsX8UaQuEvzWmSCvf8B7G_m0cufVlfB2pJ0LOBklQCXwdEnG85d6OFN-tyQYZLhp9yFz3U',
+    dq: 'CLmuNU0dbZclmAvs31E9VeeO0G8yZAQHbi6JPOz99K9_BamQfcVYwI2GpM7cJVlqx13htTZ5HQH4XTlK0XUqK_1MxJwC5K2b5i_kC8ODQsE0VFz9LpDlmUhRWX1s1hI6svvGiBe5Ms53WVpGi2t4fgApXSaWpfpzntnyxR7j5EU',
+    qi: 'QEmPvdhfUuXj0IjXU0JgzGdF-wkG6sqn7t78t8MFbDBrasrWnEXlFtVx1dyCfH0yAwwhlNhPkih94IEBvRV1Q_-4pXd3T-Y7gqxOMPvnelpHCWmN3D_O58jxZ9GH-c0h6Kj8A0smPRivFfXI4kI6wfoILw0vIdYjmyqosZpee7M',
+  },
+  {
+    n: 'lkUvKph1ICE4YPvOTXbar_Bfh7vnUwmbAs373UKoNyVO2zhtXncy35L5ewRE-DgXwZc8u2j6CjVE-vz8rlQ0f_SHNM7kmRZL-T5tOTOVFRZfkDIMMvKSj-OHFjsemarn6WNH_vhlx4Y9ldM-rXAd3IM3ObY9vbboow9VuxYr25tXpyA-jNjR0cGC36JMMUaqDkYp7dIJdqGkk4qc5Y8jB1Fh8kuk1Ds8vjjRmz-mlrL6jX_7KU4yRTtiQDqcGpf9ZUCb7rNR8PezDFq2gvW_cwepOpj7HEVZWXUvebQx4ZsnrWBE8LTVSM6wkKOrq7ttWLZzTs1m3RytbovmDwFGOw',
+    e: 'AQAB',
+    d: 'QaVbo4oSsMSScpvOVjzz8CRcN1m5BqeNlj4SJ2i1P9IGjvIppTkBenYkkr8cuisXBbViDKUhhlAbIGJgqG-Ut8lFP6aaat44tlu1L2X_XMT3XnDer2sU59MH8ohFJ_Bne6epjhNJs05LnSY5nV77TJfuCkI42qYLHyDV3PMkmbypPkCbDYtN6zG7Nvt8wMx-GnQhL3TTNIU5hTDsSr0v74N4ug1DAVLeUTfE0ahLTGUaxQoWRcHgrEL5h8GWLvrUb7SU7mDxNHkzlzRhHVUApRcUgWgAOIZfZTWBuvXq5uZxxZ2ofYHYYg2lVuL4flicKhxfsnoDPq0_enZRXrr5cQ',
+    p: '0_Ca5PufglJ0mc8KoWYVfx0q45yPmlVyqOLON1B3XefFlDXCIOl_HzpiZpILfCD05HxjPxIBhsM2IufKypLkUjL95w_K9a0K2XBL3RZ2xjh5wj6Xxmur2crd9v6CzfDCvPp2NhwkBPkQD4n2QyiwycujBByoH6SXWsYwO_P6ENc',
+    q: 'tYKJDtTa_6TJe2pqB__GnFl4vHnxqsIu8nDjcNWDZ19b8hj566cnohVagQ4zfuGKKRNXCmK65iVn5NA-w9ghzK_hxew_8Fg4GkEV8jZzlQJ5gEIVwdIJQIELgfEZ1toRXoURBlfctiq-ZuaFNkif7KbXS14x43GHSeW8SibvdT0',
+    dp: 'Su3rtT0InciNFLvQJFO1EeW7_hCh7Ix9JxxYj9HRAdApWEbRRVWH7gB0PZMwoEf-jLE1XVz-USi_AQQ1-_yG4FDK12AL_2OYTFuZVqbUgywAUB5VBn-WmD9SzjoZALo3_xwFowe77E4p0XSTLhc6uX1XOuLuxZEpOZyL_QY6yK0',
+    dq: 'irvXXoq7SSL_DWHs4WhSujZ43jamzMnXcF9wuFG6OkzczlLg04nT9UM1BeeA3L4vB-5MXRfRmw-ENZQmJTMRwo28l7dXt7D2ULrmt1d_SKm3jJz2XErZ33_C9_L8uQe8tu4mcR6_CE3rcmNH9pHUCuILNQQuRZYEvirmnBbeeFE',
+    qi: 'ZUY8s1mQMXKR6aPyWnmq1JaxGlWqFXe9uvGJUMG5VjHOOCEqRBSKiV_BZun1UH2BbJOv2F7gvbvkmKIdS9FXKyMNFynLyJip-UyUhwzzqywbWK5WJ9PLgyVZ7n5gMR_LqCnZOQz4fY6Qgd3tOxggg5iSCEyJV5KNtbkfIOuFxvw',
+  },
+];
+
+/** 按一个稳定的名字取密钥，同样的名字永远拿到同一对 */
+export function keyFor(name: string): RsaKeyPair {
+  let hash = 2166136261;
+  for (let i = 0; i < name.length; i += 1) {
+    hash ^= name.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return KEY_POOL[hash % KEY_POOL.length];
+}

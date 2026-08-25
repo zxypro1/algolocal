@@ -17,6 +17,9 @@ import {
 import type { ImageBehavior } from '../controllers';
 import { baseImageOf, toolchainFor } from './toolchains';
 import { createNetTools } from '../net';
+import { parseChain } from '../crypto';
+import { createOpensslCommand } from './openssl';
+import { materializePki } from './pki';
 import { CliRuntime, installClusterCli } from '../wasm';
 import type { KubeObject } from '../apiserver';
 
@@ -81,6 +84,21 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
       ...(spec.externalHosts ?? {}),
     },
     addressPools: spec.addressPools,
+    /**
+     * 跳板机信任哪些根。
+     *
+     * 读的是机器上那个文件，所以「把内网 CA 装进信任库」是一个学员做得到、
+     * 也看得见的动作，而不是宿主替他决定的。
+     */
+    trustBundle: () => {
+      const path = '/etc/ssl/certs/ca-certificates.crt';
+      if (!machine.vfs.exists(path)) return [];
+      try {
+        return parseChain(machine.vfs.readFile(path));
+      } catch {
+        return [];
+      }
+    },
   });
 
   const machineSpec = spec.machine ?? {};
@@ -117,6 +135,8 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
   }))) {
     machine.install(name, handler);
   }
+
+  machine.install('openssl', createOpensslCommand());
 
   machine.install('docker', createDockerCommand({
     store: images,
@@ -156,6 +176,20 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
       now: () => cluster.wallClock(),
     })
     : [];
+
+  /**
+   * 内网 PKI。
+   *
+   * 在别的初态对象之前铺：Gateway 的 listener、cert-manager 的 issuer
+   * 都可能引用这些 Secret。
+   */
+  const pki = materializePki(spec.pki, cluster.wallClock());
+  if (pki.trustBundle) {
+    machine.vfs.writeFile('/etc/ssl/certs/ca-certificates.crt', pki.trustBundle);
+  }
+  cluster.seedExisting(DEFAULT_OBJECT_AGE_MS, () => {
+    for (const secret of pki.secrets) applyObject(cluster, secret);
+  });
 
   // 世界的初态：项目级对象在前，关卡增量在后。它们是「本来就在」的东西，
   // 所以按 6 小时前建出来算，AGE 列才不会全是 0s。

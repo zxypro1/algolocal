@@ -37,7 +37,12 @@ export const GRPCROUTES: ResourceDefinition = {
   shortNames: [], subresources: ['status'],
 };
 
-/** BackendTLSPolicy 在 v1alpha3，第 9 关要用 */
+/**
+ * BackendTLSPolicy（v1alpha3）。
+ *
+ * **暂时不注册**：后端 TLS 还没实现，注册了就会出现「apply 成功但什么都没发生」
+ * 这种最坏的情况。等做到那一步再加进 GATEWAY_RESOURCES。
+ */
 export const BACKENDTLSPOLICIES: ResourceDefinition = {
   group: GROUP, version: 'v1alpha3', resource: 'backendtlspolicies',
   singular: 'backendtlspolicy', kind: 'BackendTLSPolicy', namespaced: true,
@@ -59,5 +64,5 @@ export const ENVOYPROXIES: ResourceDefinition = {
 };
 
 export const GATEWAY_RESOURCES: ResourceDefinition[] = [
-  GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES, BACKENDTLSPOLICIES, ENVOYPROXIES,
+  GATEWAYCLASSES, GATEWAYS, HTTPROUTES, GRPCROUTES, ENVOYPROXIES,
 ];

@@ -1162,6 +1162,21 @@ const primers = {
       )
     ),
 
+    'certificates-and-pki': t(
+      p(
+        'HTTPS 的信任建立在一条`证书链`上。服务端出示一张`叶子证书`，上面写着它是谁（`Subject`）、能代表哪些域名（`SAN`，Subject Alternative Name）、有效期、以及公钥。这张证书由某个`证书颁发机构`（CA）用私钥签过名。客户端手里有一份`信任库`，里面是它信任的根 CA。验证的过程就是从叶子往上找签它的那一级，一级级找到信任库里的某个根为止。',
+        '实际的 PKI 很少只有一层。通常是一个离线保存的根 CA，签出若干个`中间 CA`，日常签发全用中间 CA 做。好处是根的私钥可以锁在保险柜里，中间 CA 泄漏了也能单独吊销。代价是**服务端必须把中间证书一起发给客户端**：客户端信任库里只有根，它不认识那张中间 CA，链就断在那里。',
+        '这个坑之所以难查，是因为它不是必然失败。浏览器可能之前访问别的站点时缓存过同一张中间证书，或者按证书里的 AIA 扩展自己去下载补齐；而 curl、Go 与 Java 写的服务都不做这些事。于是现象是「浏览器能打开，服务之间调不通」。判断的办法只有一个：看服务端实际发出来的是几张证书。',
+        '`SAN` 是另一处常见问题。2017 年之后所有主流验证器都不再看 `CN` 字段，只认 SAN。一张 CN 写对但 SAN 里没有这个名字的证书会被拒绝，报错是「certificate is valid for A, not B」。Kubernetes 里这些事通常交给 `cert-manager`：`Issuer` 声明用哪个 CA，`Certificate` 声明要签什么，控制器把签好的叶子**连同签发链**一起写进一个 `kubernetes.io/tls` 类型的 Secret，链不完整这个错自然就不会犯。'
+      ),
+      p(
+        'HTTPS trust rests on a `certificate chain`. A server presents a `leaf certificate` stating who it is (`Subject`), which names it may represent (`SAN`, Subject Alternative Name), how long it is valid, and its public key. That certificate is signed by some `certificate authority` (CA). The client holds a `trust store` of root CAs it trusts, and verification walks upward from the leaf, level by level, until it reaches one of those roots.',
+        'Real PKIs rarely have a single level. The usual shape is an offline root CA that signs several `intermediate CAs`, with day-to-day issuance done by an intermediate. The root private key can then live in a safe, and a compromised intermediate can be revoked on its own. The price is that **the server must send the intermediate along with the leaf**: the client only trusts the root, does not recognise the intermediate, and the chain breaks there.',
+        'This is hard to diagnose because it does not always fail. A browser may have cached the same intermediate from another site, or fetch it itself via the AIA extension in the certificate; curl, Go services, and Java services do neither. The symptom is "the browser opens it, service-to-service calls fail". There is one reliable check: look at how many certificates the server actually sends.',
+        '`SAN` is the other frequent problem. Since 2017 no mainstream verifier reads the `CN` field; only SAN counts. A certificate with the right CN but a SAN that omits the name is rejected with "certificate is valid for A, not B". In Kubernetes this is normally handled by `cert-manager`: an `Issuer` names the CA, a `Certificate` describes what to issue, and the controller writes the leaf **together with its issuing chain** into a `kubernetes.io/tls` Secret, which makes the incomplete-chain mistake impossible to commit.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',
