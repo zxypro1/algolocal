@@ -44,3 +44,8 @@ export function sha1(input: Uint8Array | string): Uint8Array {
   for (let i = 0; i < 5; i += 1) outView.setUint32(i * 4, h[i]);
   return out;
 }
+
+/** 十六进制的摘要。git 的对象 id 就是这个。 */
+export function sha1Hex(input: Uint8Array | string): string {
+  return Array.from(sha1(input), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}

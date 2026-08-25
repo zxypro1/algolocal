@@ -200,6 +200,20 @@ export interface OpsImageSpec {
   needsEnv?: string[];
 }
 
+/** 内网 Git 服务上的一个仓库 */
+export interface OpsGitRepositorySpec {
+  /** 完整 URL，如 `https://git.corp.internal/platform/apps` */
+  url: string;
+  /** 默认分支，不写就是 main */
+  branch?: string;
+  /** 初始内容：仓库内相对路径 -> 文件内容 */
+  files?: Record<string, string>;
+  /** 首次提交的说明 */
+  message?: string;
+  /** 只读的仓库 push 会被 403 拒掉 */
+  readOnly?: boolean;
+}
+
 /** 一个私有镜像仓库 */
 export interface OpsRegistrySpec {
   host: string;
@@ -217,6 +231,8 @@ export interface OpsMachineSpec {
   cwd?: string;
   /** 开局就在磁盘上的文件 */
   files?: Record<string, string>;
+  /** `git commit` 的署名。真机上来自 ~/.gitconfig。 */
+  gitIdentity?: { name: string; email: string };
 }
 
 /** 这家公司的内网长什么样 */
@@ -237,6 +253,8 @@ export interface OpsWorldSpec {
    */
   baseImages?: Record<string, 'node' | 'python' | 'static'>;
   registries?: OpsRegistrySpec[];
+  /** 内网的 Git 仓库。GitOps 里那份 YAML 就住在这儿。 */
+  gitRepositories?: OpsGitRepositorySpec[];
   machine?: OpsMachineSpec;
   /** 集群外的名字：`git.corp.internal` -> ['10.10.0.30'] */
   externalHosts?: Record<string, string[]>;

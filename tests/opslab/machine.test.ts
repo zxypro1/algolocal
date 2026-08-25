@@ -519,3 +519,28 @@ describe('浏览器里的语法加载', () => {
     }
   });
 });
+
+/**
+ * `a && b > f` 只重定向 b
+ *
+ * 整段包起来的话，重定向的目标路径会在 a 跑之前就解析掉：
+ * `cd sub && echo x > f` 把文件写到 cd 之前的目录里，命令全部成功，
+ * 文件出现在错误的地方，一句报错都没有。
+ */
+describe('重定向挂在哪一段上', () => {
+  it('cd 之后的重定向落在新目录里', async () => {
+    const machine = createMachine({ files: {}, now: () => 0 });
+    await machine.exec('mkdir -p /root/sub');
+    const result = await machine.exec('cd /root/sub && echo hello > out.txt');
+    expect(result.code).toBe(0);
+    expect(machine.vfs.exists('/root/sub/out.txt')).toBe(true);
+    expect(machine.vfs.exists('/root/out.txt')).toBe(false);
+  });
+
+  it('前一段失败时后一段不跑，文件也不该被建出来', async () => {
+    const machine = createMachine({ files: {}, now: () => 0 });
+    const result = await machine.exec('false && echo hello > /root/never.txt');
+    expect(result.code).toBe(1);
+    expect(machine.vfs.exists('/root/never.txt')).toBe(false);
+  });
+});
