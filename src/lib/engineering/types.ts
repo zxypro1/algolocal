@@ -238,6 +238,8 @@ export interface OpsWorldSpec {
   baseImages?: Record<string, 'node' | 'python' | 'static'>;
   registries?: OpsRegistrySpec[];
   machine?: OpsMachineSpec;
+  /** 集群外的名字：`git.corp.internal` -> ['10.10.0.30'] */
+  externalHosts?: Record<string, string[]>;
   /**
    * 哪些主机名解析得到 apiserver。
    *

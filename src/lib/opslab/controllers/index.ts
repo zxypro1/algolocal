@@ -7,7 +7,8 @@
 export { Controller, Informer, WorkQueue, objectKey, splitKey, isConflict, isNotFound } from './framework';
 export type { ControllerContext, WorkQueueOptions } from './framework';
 export {
-  CORE_RESOURCES, CONFIGMAPS, DEPLOYMENTS, ENDPOINTS, EVENTS, NAMESPACES, NODES, PODS,
+  CORE_RESOURCES, CONFIGMAPS, DEPLOYMENTS, ENDPOINTS, EVENTS, INGRESSCLASSES, INGRESSES,
+  NAMESPACES, NETWORKPOLICIES, NODES, PODS,
   REPLICASETS, SECRETS, SERVICEACCOUNTS, SERVICES, POD_TEMPLATE_HASH,
   matchesSelector, templateHash,
 } from './resources';

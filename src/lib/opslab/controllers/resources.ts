@@ -62,10 +62,27 @@ export const SERVICEACCOUNTS: ResourceDefinition = {
   kind: 'ServiceAccount', namespaced: true, shortNames: ['sa'],
 };
 
+export const NETWORKPOLICIES: ResourceDefinition = {
+  group: 'networking.k8s.io', version: 'v1', resource: 'networkpolicies',
+  singular: 'networkpolicy', kind: 'NetworkPolicy', namespaced: true, shortNames: ['netpol'],
+};
+
+export const INGRESSES: ResourceDefinition = {
+  group: 'networking.k8s.io', version: 'v1', resource: 'ingresses',
+  singular: 'ingress', kind: 'Ingress', namespaced: true, shortNames: ['ing'],
+  subresources: ['status'],
+};
+
+export const INGRESSCLASSES: ResourceDefinition = {
+  group: 'networking.k8s.io', version: 'v1', resource: 'ingressclasses',
+  singular: 'ingressclass', kind: 'IngressClass', namespaced: false, shortNames: [],
+};
+
 export const CORE_RESOURCES: ResourceDefinition[] = [
   NAMESPACES, NODES, PODS, SERVICES, ENDPOINTS, EVENTS,
   CONFIGMAPS, SECRETS, SERVICEACCOUNTS,
   REPLICASETS, DEPLOYMENTS,
+  NETWORKPOLICIES, INGRESSES, INGRESSCLASSES,
 ];
 
 /** Deployment 给自己的 ReplicaSet 打的标签，用来区分不同版本 */

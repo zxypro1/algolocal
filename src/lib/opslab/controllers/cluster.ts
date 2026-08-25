@@ -26,7 +26,8 @@ import {
   ReplicaSetController,
   SchedulerController,
 } from './workloads';
-import type { RegistryAuth } from './runtime';
+import type { ImageBehavior, RegistryAuth } from './runtime';
+import { Network, createNetwork } from '../net';
 
 export interface NodeSpec {
   name: string;
@@ -50,6 +51,10 @@ export interface ClusterOptions {
   registries?: Record<string, RegistryAuth>;
   /** 目录里没有时再问一次（学员自己 push 上去的镜像） */
   resolveImage?: (image: string) => ImageSpec | undefined;
+  /** 集群外的名字，`harbor.corp.internal` 之类 */
+  externalHosts?: Record<string, string[]>;
+  /** 哪些地址暴露到了哪些分区（Gateway / LoadBalancer 往这里加） */
+  exposure?: (address: string) => import('../net').Zone[];
   /**
    * 集群「已经跑了多久」。
    *
@@ -67,6 +72,8 @@ export class Cluster {
   readonly scheme: Scheme;
   readonly registry: Registry;
   readonly apiServer: ApiServer;
+  /** 网络：DNS、Service 转发、NetworkPolicy 判定，全都读 apiserver 里的对象 */
+  readonly network: Network;
 
   private controllers: Controller[] = [];
   private uidSeq = 0;
@@ -89,8 +96,22 @@ export class Cluster {
       uid: () => `uid-${String(++this.uidSeq).padStart(6, '0')}`,
     });
     this.apiServer = createApiServer({ registry: this.registry, scheme: this.scheme, now });
+    this.network = createNetwork({
+      registry: this.registry,
+      scheme: this.scheme,
+      externalHosts: options.externalHosts,
+      exposure: options.exposure,
+      imageOf: (image) => this.imageBehaviorOf(image),
+      now,
+    });
 
     this.seed();
+  }
+
+  /** 这个镜像的运行时行为：端口、路由、内存。网络与 kubelet 共用同一份。 */
+  imageBehaviorOf(image: string | undefined): ImageBehavior | undefined {
+    if (!image) return undefined;
+    return this.options.images?.[image] ?? this.options.resolveImage?.(image);
   }
 
   /** 世界的墙钟：起始时刻 + 虚拟流逝 */
