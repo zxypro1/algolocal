@@ -125,14 +125,34 @@ export function parseFieldSelector(selector: string): (object: KubeObject) => bo
   return (object) => matchers.every((m) => m(object));
 }
 
+/**
+ * base64 编解码。
+ *
+ * 用 btoa/atob 而不是 Buffer —— 这段代码要在浏览器里跑，
+ * 而 webpack 5 不给 Node 内置模块打 polyfill，Buffer 在前端 bundle 里是 undefined。
+ * 测试跑在 Node 里发现不了这个问题（见 tests/opslab/browser-safety.test.ts 的守卫）。
+ */
+function toBase64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function fromBase64(encoded: string): string {
+  const binary = atob(encoded);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
 /** continue token 与真 apiserver 同形：base64 的 JSON，带上起始键与读的那一版 */
 function encodeContinue(startAfter: string, revision: number): string {
-  return Buffer.from(JSON.stringify({ start: startAfter, rv: revision })).toString('base64');
+  return toBase64(JSON.stringify({ start: startAfter, rv: revision }));
 }
 
 function decodeContinue(token: string): { start: string; rv: number } {
   try {
-    const parsed = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));
+    const parsed = JSON.parse(fromBase64(token));
     if (typeof parsed.start !== 'string' || typeof parsed.rv !== 'number') throw new Error('shape');
     return parsed;
   } catch {
