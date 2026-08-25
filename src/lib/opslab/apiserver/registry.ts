@@ -35,6 +35,19 @@ import type {
 export const FOREGROUND_DELETION = 'foregroundDeletion';
 export const ORPHAN_DEPENDENTS = 'orphan';
 
+/**
+ * 创建时补默认值的钩子。
+ *
+ * 真 apiserver 里这是 defaulting + 分配器：Service 的 ClusterIP 就是在这一层
+ * 从 service CIDR 里分出来的，不是哪个控制器事后补的 —— 所以 `kubectl create svc`
+ * 之后紧跟着 `kubectl get svc`，IP 已经在那儿了。
+ */
+export interface Defaulter {
+  matches(definition: ResourceDefinition): boolean;
+  /** existing 是整体替换时的旧对象；不可变字段要从它那里带过来 */
+  apply(object: KubeObject, definition: ResourceDefinition, existing?: KubeObject): void;
+}
+
 export interface RegistryDeps {
   store: Store;
   scheme: Scheme;
@@ -42,6 +55,7 @@ export interface RegistryDeps {
   now: () => number;
   /** 生成 uid，来自确定性随机数 */
   uid: () => string;
+  defaulters?: Defaulter[];
 }
 
 function clone<T>(value: T): T {
@@ -167,7 +181,21 @@ export class Registry {
   private readonly now: () => number;
   private readonly nextUid: () => string;
 
+  private readonly defaulters: Defaulter[];
+
+  /** 装一个 defaulter。集群起来的时候把 ClusterIP 分配器装在这里。 */
+  addDefaulter(defaulter: Defaulter): void {
+    this.defaulters.push(defaulter);
+  }
+
+  private applyDefaults(definition: ResourceDefinition, object: KubeObject, existing?: KubeObject): void {
+    for (const defaulter of this.defaulters) {
+      if (defaulter.matches(definition)) defaulter.apply(object, definition, existing);
+    }
+  }
+
   constructor(deps: RegistryDeps) {
+    this.defaulters = [...(deps.defaulters ?? [])];
     this.store = deps.store;
     this.scheme = deps.scheme;
     this.now = deps.now;
@@ -289,6 +317,8 @@ export class Registry {
     delete meta.resourceVersion;
     delete meta.deletionTimestamp;
 
+    this.applyDefaults(definition, candidate);
+
     if (options.dryRun) return this.decorate(candidate, this.store.revision);
 
     const kv = this.store.put(key, candidate);
@@ -339,6 +369,8 @@ export class Registry {
     next.kind = definition.kind;
     // status 归 status 子资源管
     next.status = existing.status;
+
+    this.applyDefaults(definition, next, existing);
 
     const specChanged = JSON.stringify(next.spec ?? null) !== JSON.stringify(existing.spec ?? null);
     meta.generation = (existing.metadata.generation ?? 1) + (specChanged ? 1 : 0);

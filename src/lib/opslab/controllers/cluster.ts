@@ -16,6 +16,7 @@ import {
   Scheme,
 } from '../apiserver';
 import { Controller, ControllerContext } from './framework';
+import { createServiceIpDefaulter } from './serviceip';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
@@ -58,6 +59,10 @@ export interface ClusterOptions {
   resolveImage?: (image: string) => ImageSpec | undefined;
   /** 集群外的名字，`harbor.corp.internal` 之类 */
   externalHosts?: Record<string, string[]>;
+  /** Service 的 VIP 从哪个网段分。默认 10.96.0.0/12，和真集群一样。 */
+  serviceCidr?: string;
+  /** `kubectl exec` 落到哪。不给就是这个集群不支持 exec。 */
+  exec?: import('../apiserver').ExecHandler;
   /** 客户端信任哪些根。办公网的机器读自己的 ca-certificates.crt。 */
   trustBundle?: (source: import('../net').Source) => Certificate[];
   /**
@@ -92,6 +97,8 @@ export class Cluster {
   /** 网络：DNS、Service 转发、NetworkPolicy 判定，全都读 apiserver 里的对象 */
   readonly network: Network;
 
+  /** 由外面装上（createOpsWorld 会接一个 Pod 里的 shell 进来） */
+  execHandler?: import('../apiserver').ExecHandler;
   private controllers: Controller[] = [];
   private uidSeq = 0;
   private started = false;
@@ -115,7 +122,13 @@ export class Cluster {
       now,
       uid: () => `uid-${String(++this.uidSeq).padStart(6, '0')}`,
     });
-    this.apiServer = createApiServer({ registry: this.registry, scheme: this.scheme, now });
+    this.apiServer = createApiServer({
+      registry: this.registry, scheme: this.scheme, now,
+      exec: (request, stdin) => {
+        if (!this.execHandler) throw new Error('exec 没有接上');
+        return this.execHandler(request, stdin);
+      },
+    });
     this.network = createNetwork({
       registry: this.registry,
       scheme: this.scheme,
@@ -128,6 +141,12 @@ export class Cluster {
       imageOf: (image) => this.imageBehaviorOf(image),
       now,
     });
+
+    // ClusterIP 在 apiserver 这一层分，不是控制器事后补的 ——
+    // 这样 `kubectl expose` 之后紧跟 `kubectl get svc`，IP 已经在那儿了
+    this.registry.addDefaulter(createServiceIpDefaulter({
+      registry: this.registry, scheme: this.scheme, cidr: options.serviceCidr,
+    }));
 
     this.seed();
   }

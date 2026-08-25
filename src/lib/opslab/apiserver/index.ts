@@ -13,7 +13,7 @@ export {
   parseFieldSelector,
   parseLabelSelector,
 } from './registry';
-export type { RegistryDeps } from './registry';
+export type { Defaulter, RegistryDeps } from './registry';
 export { Scheme, createScheme, storageKey, storagePrefix } from './scheme';
 export { ApiServer, createApiServer, parsePath } from './http';
 export type { ApiServerDeps } from './http';
@@ -48,3 +48,7 @@ export type {
   UpdateOptions,
   WatchEventOut,
 } from './types';
+export {
+  createExecSession, parseExecRequest, statusOf, CHANNEL, EXEC_PROTOCOL,
+  type ExecRequest, type ExecResult, type ExecHandler,
+} from './exec';

@@ -374,3 +374,84 @@ describe('确定性', () => {
     for (let i = 0; i < 19; i += 1) expect(await run()).toBe(first);
   }, 60_000);
 });
+
+/**
+ * ClusterIP 的分配
+ *
+ * 这件事发生在 apiserver 里，不是控制器事后补的 —— 学员 `kubectl expose`
+ * 完马上 `kubectl get svc`，IP 必须已经在那儿。
+ */
+describe('ClusterIP 分配器', () => {
+  function svc(name: string, extra: Record<string, unknown> = {}) {
+    return {
+      apiVersion: 'v1', kind: 'Service',
+      metadata: { name, namespace: 'default' },
+      spec: { selector: { app: name }, ports: [{ port: 80 }], ...extra },
+    };
+  }
+
+  function fresh() {
+    const cluster = createCluster();
+    cluster.start();
+    return cluster;
+  }
+
+  it('创建时就有 IP，而且在 service CIDR 里', () => {
+    const cluster = fresh();
+    const created = cluster.registry.create(SERVICES, 'default', svc('portal') as never);
+    const ip = (created.spec as { clusterIP: string }).clusterIP;
+    expect(ip).toMatch(/^10\.(9[6-9]|10\d|11\d)\.\d+\.\d+$/);
+    expect((created.spec as { clusterIPs: string[] }).clusterIPs).toEqual([ip]);
+  });
+
+  it('同一个名字在两个世界里拿到同一个 IP —— 重放要可复现', () => {
+    const a = fresh();
+    const b = fresh();
+    const ipA = (a.registry.create(SERVICES, 'default', svc('portal') as never).spec as any).clusterIP;
+    const ipB = (b.registry.create(SERVICES, 'default', svc('portal') as never).spec as any).clusterIP;
+    expect(ipA).toBe(ipB);
+  });
+
+  it('不同 Service 不撞车', () => {
+    const cluster = fresh();
+    const seen = new Set<string>();
+    for (const name of ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']) {
+      const created = cluster.registry.create(SERVICES, 'default', svc(name) as never);
+      seen.add((created.spec as any).clusterIP);
+    }
+    expect(seen.size).toBe(8);
+  });
+
+  it('headless 不分配', () => {
+    const cluster = fresh();
+    const created = cluster.registry.create(SERVICES, 'default', svc('db', { clusterIP: 'None' }) as never);
+    expect((created.spec as any).clusterIP).toBe('None');
+  });
+
+  it('ExternalName 不分配 —— 它就是个 CNAME', () => {
+    const cluster = fresh();
+    const created = cluster.registry.create(
+      SERVICES, 'default',
+      { apiVersion: 'v1', kind: 'Service', metadata: { name: 'legacy', namespace: 'default' },
+        spec: { type: 'ExternalName', externalName: 'legacy.corp.internal' } } as never
+    );
+    expect((created.spec as any).clusterIP).toBeUndefined();
+  });
+
+  it('关卡写死的 IP 不被改掉', () => {
+    const cluster = fresh();
+    const created = cluster.registry.create(SERVICES, 'default', svc('portal', { clusterIP: '10.96.1.10' }) as never);
+    expect((created.spec as any).clusterIP).toBe('10.96.1.10');
+  });
+
+  it('整体替换时不换 VIP —— ClusterIP 是不可变字段', () => {
+    const cluster = fresh();
+    const created = cluster.registry.create(SERVICES, 'default', svc('portal') as never);
+    const ip = (created.spec as any).clusterIP;
+    const replaced = cluster.registry.update(SERVICES, 'default', 'portal', {
+      apiVersion: 'v1', kind: 'Service', metadata: { name: 'portal', namespace: 'default' },
+      spec: { selector: { app: 'portal' }, ports: [{ port: 8080 }] },
+    } as never);
+    expect((replaced.spec as any).clusterIP).toBe(ip);
+  });
+});

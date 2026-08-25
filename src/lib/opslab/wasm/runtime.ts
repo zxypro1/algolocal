@@ -13,6 +13,7 @@
  */
 import { Vfs, createVfs } from '../machine/vfs';
 import { createGoFs } from './gofs';
+import { WebSocketConnection, type StreamServer } from '../net/websocket';
 import { CacheEntry, ModuleCache, createIndexedDbCache, remoteSignature } from './cache';
 
 export const CLI_WASM_URL = '/opslab/opslab-cli.wasm';
@@ -39,8 +40,23 @@ export interface CliRunOptions {
   stdin?: string;
   /** client-go 在 js 上统一走 fetch —— 把它指到内存里的 apiserver */
   fetch: FetchLike;
+  /**
+   * `kubectl exec` / `port-forward` 要的双向通道。
+   *
+   * fetch 撑不起 WebSocket，所以这条路单开：Go 那边 dial 出来的 net.Conn
+   * 就接在这里。不给就是这次运行不支持 exec，Go 会报「宿主没有提供」。
+   */
+  dial?: (address: string) => StreamServer | undefined;
   /** 虚拟墙钟 */
   now?: () => number;
+}
+
+/** 交给 Go 的那个句柄。字段名是 opslab_dial_js.go 认的那几个。 */
+interface DialHandle {
+  send(bytes: Uint8Array): void;
+  close(): void;
+  onData?: (bytes: Uint8Array) => void;
+  onClose?: () => void;
 }
 
 export interface CliResult {
@@ -156,7 +172,14 @@ export class CliRuntime {
     };
 
     const host = globalThis as Record<string, unknown>;
-    const saved = { fs: host.fs, fetch: host.fetch, process: host.process, path: host.path };
+    const saved = {
+      fs: host.fs, fetch: host.fetch, process: host.process, path: host.path,
+      dial: host.__opslabDial,
+    };
+    const openConnections: WebSocketConnection[] = [];
+    // Go 退出之后再 resume 就是 "Go program has already exited"。
+    // 收尾时先把这面旗子立起来，排在队里的字节直接丢掉。
+    let finished = false;
 
     host.fs = fs;
     host.path = { resolve: (...parts: string[]) => parts.join('/') };
@@ -166,6 +189,36 @@ export class CliRuntime {
       env, on: () => {},
     };
     host.fetch = (url: unknown, init: unknown) => options.fetch(String(url), init);
+    host.__opslabDial = (address: unknown): DialHandle | null => {
+      const server = options.dial?.(String(address));
+      if (!server) return null;
+      const handle: DialHandle = {
+        send: (bytes) => connection.receive(bytes),
+        close: () => connection.close(),
+      };
+      /**
+       * 回给 Go 的字节必须晚一拍。
+       *
+       * `handle.send` 是在 Go 的 Write 里同步调过来的；这时候直接回调
+       * `onData`，wasm_exec 会在 Go 还没出栈的时候再 `resume()` 一次 ——
+       * Go 的调度器不支持这种重入，整个实例就卡死在那里，连 panic 都没有。
+       * 排到微任务里，等 Go 让出控制权再送。
+       */
+      const defer = (fn: () => void) => {
+        queueMicrotask(() => {
+          // Go 已经退出的话，队里剩下的字节没人要了 —— 再 resume 一次会抛
+          if (finished || (go as { exited?: boolean } | undefined)?.exited) return;
+          fn();
+        });
+      };
+      const connection = new WebSocketConnection(
+        server,
+        (bytes) => defer(() => handle.onData?.(bytes)),
+        () => defer(() => handle.onClose?.()),
+      );
+      openConnections.push(connection);
+      return handle;
+    };
 
     const go = new (host.Go as new () => GoInstance)();
     go.argv = [applet, ...args];
@@ -185,6 +238,11 @@ export class CliRuntime {
       host.fetch = saved.fetch;
       host.process = saved.process;
       host.path = saved.path;
+      host.__opslabDial = saved.dial;
+      // Go 正常退出时自己会 Close；异常退出时别把连接留着，
+      // 不然下一条命令跑起来还有上一条的会话在往一个已经没人听的口子写
+      finished = true;
+      for (const connection of openConnections) connection.close();
     }
 
     return { stdout, stderr, code };

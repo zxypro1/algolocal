@@ -310,4 +310,200 @@ if old not in source:
 open(path, "w").write(source.replace(old, new))
 PYEOF
 
+# --- 6. websocket：让 gorilla 通过宿主提供的通道拨号 ----------------------
+#
+# `kubectl exec` / `logs -f` / `port-forward` 走的是 WebSocket（v5.channel.k8s.io）。
+# 上层全是真的 client-go remotecommand，问题只在最底下一层：gorilla 要一个
+# net.Conn，而 js/wasm 里没有 socket。
+#
+# 好在 gorilla 的 Dialer 有 NetDialContext 钩子。补一个由宿主 JS 提供的
+# net.Conn 进去，握手、分帧、子协议协商就全都还是真的走一遍。
+cat > "$V/k8s.io/client-go/transport/websocket/opslab_dial_js.go" <<'EOF'
+//go:build js
+
+package websocket
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"syscall/js"
+	"time"
+)
+
+// opslabConn 是一条由宿主 JS 提供的双向字节通道。
+//
+// 宿主那边是一个内存里的 WebSocket 服务端，所以 gorilla 照常做握手与分帧，
+// 只是字节没有真的过网卡。
+type opslabConn struct {
+	handle  js.Value
+	incoming chan []byte
+	pending []byte
+	closed  chan struct{}
+	onData  js.Func
+	onClose js.Func
+}
+
+func opslabDial(ctx context.Context, network, address string) (net.Conn, error) {
+	dial := js.Global().Get("__opslabDial")
+	if !dial.Truthy() {
+		return nil, errors.New("opslab: 宿主没有提供 __opslabDial")
+	}
+	handle := dial.Invoke(address)
+	if !handle.Truthy() {
+		return nil, errors.New("opslab: 连不上 " + address)
+	}
+
+	conn := &opslabConn{
+		handle:   handle,
+		incoming: make(chan []byte, 64),
+		closed:   make(chan struct{}),
+	}
+	conn.onData = js.FuncOf(func(this js.Value, args []js.Value) any {
+		if len(args) == 0 {
+			return nil
+		}
+		buffer := make([]byte, args[0].Get("length").Int())
+		js.CopyBytesToGo(buffer, args[0])
+		select {
+		case conn.incoming <- buffer:
+		case <-conn.closed:
+		}
+		return nil
+	})
+	conn.onClose = js.FuncOf(func(this js.Value, args []js.Value) any {
+		conn.shutdown()
+		return nil
+	})
+	handle.Set("onData", conn.onData)
+	handle.Set("onClose", conn.onClose)
+	return conn, nil
+}
+
+func (c *opslabConn) Read(p []byte) (int, error) {
+	if len(c.pending) == 0 {
+		select {
+		case chunk, ok := <-c.incoming:
+			if !ok {
+				return 0, io.EOF
+			}
+			c.pending = chunk
+		case <-c.closed:
+			return 0, io.EOF
+		}
+	}
+	n := copy(p, c.pending)
+	c.pending = c.pending[n:]
+	return n, nil
+}
+
+func (c *opslabConn) Write(p []byte) (int, error) {
+	select {
+	case <-c.closed:
+		return 0, io.ErrClosedPipe
+	default:
+	}
+	buffer := js.Global().Get("Uint8Array").New(len(p))
+	js.CopyBytesToJS(buffer, p)
+	c.handle.Call("send", buffer)
+	return len(p), nil
+}
+
+func (c *opslabConn) Close() error {
+	if c.handle.Truthy() {
+		c.handle.Call("close")
+	}
+	c.shutdown()
+	return nil
+}
+
+func (c *opslabConn) shutdown() {
+	select {
+	case <-c.closed:
+		return
+	default:
+	}
+	close(c.closed)
+	c.onData.Release()
+	c.onClose.Release()
+}
+
+type opslabAddr struct{}
+
+func (opslabAddr) Network() string { return "opslab" }
+func (opslabAddr) String() string  { return "opslab" }
+
+func (c *opslabConn) LocalAddr() net.Addr                { return opslabAddr{} }
+func (c *opslabConn) RemoteAddr() net.Addr               { return opslabAddr{} }
+func (c *opslabConn) SetDeadline(t time.Time) error      { return nil }
+func (c *opslabConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *opslabConn) SetWriteDeadline(t time.Time) error { return nil }
+EOF
+
+# 把钩子挂到 Dialer 上
+python3 - "$V" <<'PYEOF'
+import sys
+path = f"{sys.argv[1]}/k8s.io/client-go/transport/websocket/roundtripper.go"
+source = open(path).read()
+old = """	dialer := gwebsocket.Dialer{
+		Proxy:           rt.Proxier,"""
+new = """	dialer := gwebsocket.Dialer{
+		// opslab: js/wasm 里没有 socket，走宿主提供的内存通道。
+		// 握手、分帧、子协议协商仍然是 gorilla 真的做一遍。
+		NetDialContext:  opslabDialContext,
+		Proxy:           rt.Proxier,"""
+if old not in source:
+    raise SystemExit("websocket RoundTrip 的样子变了，补丁要重写")
+source = source.replace(old, new)
+
+# 通道本身就是宿主提供的内存管道，没有网卡也没有 TLS 记录层。
+# 不改这里的话 gorilla 会对着 https 的 kubeconfig 选 wss，然后在我们的
+# 管道上发一个 ClientHello 等 ServerHello —— 永远等不到，整条 exec 卡死。
+# fetch 那条路同样没有真 TLS，两边保持一致。
+old_scheme = (
+    '\tswitch request.URL.Scheme {\n'
+    '\tcase "https":\n'
+    '\t\trequest.URL.Scheme = "wss"\n'
+    '\tcase "http":\n'
+    '\t\trequest.URL.Scheme = "ws"\n'
+)
+new_scheme = (
+    '\tswitch request.URL.Scheme {\n'
+    '\tcase "https", "http":\n'
+    '\t\t// opslab: 通道是宿主给的内存管道，没有 TLS 记录层，统一走 ws\n'
+    '\t\trequest.URL.Scheme = "ws"\n'
+)
+if old_scheme not in source:
+    raise SystemExit("websocket 的 scheme 切换变了，补丁要重写")
+open(path, "w").write(source.replace(old_scheme, new_scheme))
+PYEOF
+
+# 非 js 平台上钩子是空的，保持可编译
+cat > "$V/k8s.io/client-go/transport/websocket/opslab_dial_other.go" <<'EOF'
+//go:build !js
+
+package websocket
+
+import (
+	"context"
+	"net"
+)
+
+var opslabDialContext func(ctx context.Context, network, address string) (net.Conn, error)
+EOF
+
+cat > "$V/k8s.io/client-go/transport/websocket/opslab_dial_hook_js.go" <<'EOF'
+//go:build js
+
+package websocket
+
+import (
+	"context"
+	"net"
+)
+
+var opslabDialContext func(ctx context.Context, network, address string) (net.Conn, error) = opslabDial
+EOF
+
 echo "js/wasm 补丁已应用"

@@ -11,3 +11,4 @@ export {
 } from './view';
 
 export { toolchainFor, baseImageOf, type ToolchainName } from './toolchains';
+export { createExecHandler, normalizeCommand } from './podshell';

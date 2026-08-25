@@ -7,13 +7,21 @@
  */
 import { Machine } from '../machine/machine';
 import { CliRuntime, CliRunOptions, FetchLike } from './runtime';
+import type { StreamServer, UpgradeRequest } from '../net/websocket';
 import { DEFAULT_KUBECONFIG_PATH, KubeconfigSpec, defaultKubeconfig, renderKubeconfig } from './kubeconfig';
 
 export interface InstallCliOptions {
   machine: Machine;
   runtime: CliRuntime;
-  /** client-go 的请求打到哪 —— 通常是 cluster.apiServer.handle */
-  apiServer: { handle: (url: string, init?: never) => Promise<Response> };
+  /**
+   * client-go 的请求打到哪 —— 通常是 cluster.apiServer。
+   *
+   * `handle` 走普通请求，`openStream` 走 `kubectl exec` 那条 WebSocket。
+   */
+  apiServer: {
+    handle: (url: string, init?: never) => Promise<Response>;
+    openStream?: (request: UpgradeRequest) => ReturnType<StreamServer['open']>;
+  };
   /** 装哪些 applet。不传就问二进制本人。 */
   applets?: string[];
   /** 不传就写一份单集群的默认配置；已经有配置文件时用 false 保留它 */
@@ -58,6 +66,20 @@ export async function installClusterCli(options: InstallCliOptions): Promise<str
     }
     return options.apiServer.handle(url, init as never);
   };
+  /**
+   * exec 的通道。
+   *
+   * gorilla dial 的是 `host:port`，主机名这一关和 fetch 那边同一套判断 ——
+   * 不然 context 选错集群时，普通命令连不上而 exec 却能连上。
+   */
+  const stream: StreamServer | undefined = options.apiServer.openStream
+    ? { open: (request) => options.apiServer.openStream!(request) }
+    : undefined;
+  const dial = (address: string) => {
+    const host = address.replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+    return endpoints.includes(host) ? stream : undefined;
+  };
+
   const applets = options.applets ?? (await runtime.applets());
 
   for (const applet of applets) {
@@ -66,6 +88,7 @@ export async function installClusterCli(options: InstallCliOptions): Promise<str
         vfs, cwd, stdin,
         env: { KUBECONFIG: path, ...env },
         fetch: fetchImpl,
+        dial,
         now: options.now,
       };
       const result = await runtime.run(applet, argv, run);
