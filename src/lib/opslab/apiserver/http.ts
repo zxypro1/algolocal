@@ -23,6 +23,7 @@ export interface ApiServerDeps {
   /** 集群版本，出现在 /version 与 discovery 里 */
   version?: { major: string; minor: string; gitVersion: string };
 }
+import { openApiDocument, openApiRoot } from './openapi';
 
 interface ParsedPath {
   group: string;
@@ -165,6 +166,19 @@ export class ApiServer {
     }
     if (path === '/apis') return json(this.apiGroupList());
     if (path === '/api/v1') return json(this.apiResourceList('', 'v1'));
+
+    // kubectl 1.27 之后 apply / create 默认要拉这个做校验，拉不到就直接失败
+    if (path === '/openapi/v3') return json(openApiRoot(this.scheme.list()));
+    const openApiMatch = /^\/openapi\/v3\/(?:apis\/([^/]+)\/([^/]+)|api\/([^/]+))$/.exec(path);
+    if (openApiMatch) {
+      const group = openApiMatch[1] ?? '';
+      const version = openApiMatch[2] ?? openApiMatch[3];
+      const resources = this.scheme.listGroupVersion(group, version);
+      if (resources.length === 0) {
+        return statusResponse(notFound('openapi', `${group}/${version}`, ''));
+      }
+      return json(openApiDocument(group, version, resources));
+    }
 
     const groupVersionMatch = /^\/apis\/([^/]+)\/([^/]+)$/.exec(path);
     if (groupVersionMatch) {
