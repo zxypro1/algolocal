@@ -375,3 +375,87 @@ describeIfBuilt('跳板机 -> Pod -> 集群网络', () => {
     expect(direct.stdout).toBe('');
   });
 });
+
+/**
+ * `kubectl auth can-i` 与 403
+ *
+ * `can-i` 不是本地算的，它 POST 一个 SelfSubjectAccessReview 让服务端回答。
+ * 所以这一组同时在验两件事：我们的 RBAC 判定，以及 kubectl 认不认这个回答。
+ */
+describeIfBuilt('真 kubectl 遇上 RBAC', () => {
+  jest.setTimeout(120_000);
+
+  const RBAC_WORLD = {
+    namespaces: ['default', 'shop'],
+    users: {
+      'dev-token': { username: 'dev@corp.internal', groups: ['developers'] },
+    },
+    objects: [
+      {
+        apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole',
+        metadata: { name: 'pod-reader' },
+        rules: [{ apiGroups: [''], resources: ['pods'], verbs: ['get', 'list'] }],
+      },
+      {
+        apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'RoleBinding',
+        metadata: { name: 'dev-reader', namespace: 'shop' },
+        subjects: [{ kind: 'User', name: 'dev@corp.internal' }],
+        roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'pod-reader' },
+      },
+    ],
+    machine: {
+      files: {
+        '/root/.kube/config': [
+          'apiVersion: v1',
+          'kind: Config',
+          'clusters:',
+          '- name: opslab',
+          '  cluster:',
+          '    server: https://apiserver.opslab:6443',
+          '    insecure-skip-tls-verify: true',
+          'contexts:',
+          '- name: dev',
+          '  context:',
+          '    cluster: opslab',
+          '    user: dev',
+          '    namespace: shop',
+          'current-context: dev',
+          'users:',
+          '- name: dev',
+          '  user:',
+          '    token: dev-token',
+          '',
+        ].join('\n'),
+      },
+    },
+  };
+
+  it('can-i 对允许的操作说 yes', async () => {
+    const world = await createOpsWorld({ world: RBAC_WORLD as never, runtime: runtime() });
+    const result = await world.run('kubectl auth can-i list pods -n shop');
+    expect(result.stdout.trim()).toBe('yes');
+    expect(result.code).toBe(0);
+  });
+
+  it('can-i 对不允许的操作说 no，退出码非 0', async () => {
+    const world = await createOpsWorld({ world: RBAC_WORLD as never, runtime: runtime() });
+    const result = await world.run('kubectl auth can-i delete pods -n shop');
+    expect(result.stdout.trim()).toBe('no');
+    expect(result.code).not.toBe(0);
+  });
+
+  it('换个命名空间就不行 —— RoleBinding 只管 shop', async () => {
+    const world = await createOpsWorld({ world: RBAC_WORLD as never, runtime: runtime() });
+    const result = await world.run('kubectl auth can-i list pods -n default');
+    expect(result.stdout.trim()).toBe('no');
+  });
+
+  it('真的去做被拒的操作时，报的是 apiserver 那句 Forbidden', async () => {
+    const world = await createOpsWorld({ world: RBAC_WORLD as never, runtime: runtime() });
+    const result = await world.run('kubectl get secrets -n shop');
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain('Error from server (Forbidden)');
+    expect(result.stderr).toContain('cannot list resource "secrets"');
+    expect(result.stderr).toContain('dev@corp.internal');
+  });
+});

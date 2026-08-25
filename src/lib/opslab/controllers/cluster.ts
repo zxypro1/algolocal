@@ -23,6 +23,9 @@ import {
   ISTIOD_LABEL, MESH_RESOURCES, WAYPOINT_CLASS, ZTUNNEL_LABEL, isAmbient, traverseMesh,
   type MeshPeer, type MeshView,
 } from '../mesh';
+import {
+  CLUSTERROLEBINDINGS, CLUSTERROLES, RBAC_RESOURCES, ROLEBINDINGS, ROLES, authorize,
+} from '../rbac';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
@@ -74,6 +77,14 @@ export interface ClusterOptions {
   gitSource?: import('../argocd').RepoResolver;
   /** 仓库有新提交时叫一声（webhook）。 */
   gitSubscribe?: (listener: () => void) => void;
+  /**
+   * token -> 身份。
+   *
+   * 一旦给了这张表，这个集群就开始鉴权：不在表里的 token 是匿名用户，
+   * 而匿名用户什么都干不了。不给就是「这个世界不讲 RBAC」，
+   * 所有请求都是 cluster-admin —— 前面十几关不必为此各配一套角色。
+   */
+  users?: Record<string, { username: string; groups?: string[] }>;
   /** Service 的 VIP 从哪个网段分。默认 10.96.0.0/12，和真集群一样。 */
   serviceCidr?: string;
   /** `kubectl exec` 落到哪。不给就是这个集群不支持 exec。 */
@@ -129,7 +140,7 @@ export class Cluster {
     this.store = createStore();
     this.scheme = createScheme([
       ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES, ...ARGOCD_RESOURCES,
-      ...MESH_RESOURCES,
+      ...MESH_RESOURCES, ...RBAC_RESOURCES,
       ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
@@ -140,6 +151,25 @@ export class Cluster {
     });
     this.apiServer = createApiServer({
       registry: this.registry, scheme: this.scheme, now,
+      ...(options.users
+        ? {
+            authenticate: (token) => {
+              if (!token) return undefined;
+              const found = options.users![token];
+              if (!found) return undefined;
+              return {
+                username: found.username,
+                groups: [...(found.groups ?? []), 'system:authenticated'],
+              };
+            },
+            authorize: (user, attributes) => authorize({
+              roles: () => this.registry.list(ROLES).items,
+              roleBindings: () => this.registry.list(ROLEBINDINGS).items,
+              clusterRoles: () => this.registry.list(CLUSTERROLES).items,
+              clusterRoleBindings: () => this.registry.list(CLUSTERROLEBINDINGS).items,
+            }, user, attributes),
+          }
+        : {}),
       exec: (request, stdin) => {
         if (!this.execHandler) throw new Error('exec 没有接上');
         return this.execHandler(request, stdin);
