@@ -81,6 +81,7 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
       machine,
       runtime: options.runtime,
       apiServer: cluster.apiServer,
+      endpoints: spec.endpoints,
       now: () => cluster.wallClock(),
     })
     : [];

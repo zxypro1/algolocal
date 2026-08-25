@@ -16,21 +16,48 @@ export interface InstallCliOptions {
   apiServer: { handle: (url: string, init?: never) => Promise<Response> };
   /** 装哪些 applet。不传就问二进制本人。 */
   applets?: string[];
-  /** 不传就写一份单集群的默认配置 */
+  /** 不传就写一份单集群的默认配置；已经有配置文件时用 false 保留它 */
   kubeconfig?: KubeconfigSpec | false;
   kubeconfigPath?: string;
+  /**
+   * 哪些主机名解析得到 apiserver。
+   *
+   * 不限制的话，kubeconfig 里写错的 server 也能连上 —— 而「context 选错了、
+   * 连的是另一个集群」正是第 1 关要教的东西。不在这个名单里的主机，
+   * 表现和真实的 DNS 失败一样。
+   */
+  endpoints?: string[];
   now?: () => number;
+}
+
+/** kubeconfig 里的 server 是完整 URL，取出主机名（不含端口） */
+function hostOf(url: string): string | undefined {
+  try {
+    return new URL(url, 'https://apiserver.opslab').hostname;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function installClusterCli(options: InstallCliOptions): Promise<string[]> {
   const { machine, runtime } = options;
   const path = options.kubeconfigPath ?? DEFAULT_KUBECONFIG_PATH;
 
-  if (options.kubeconfig !== false) {
+  // 世界自己铺过 kubeconfig 就别覆盖 —— 那份多半是关卡精心写歪的
+  if (options.kubeconfig !== false && !machine.vfs.exists(path)) {
     machine.vfs.writeFile(path, renderKubeconfig(options.kubeconfig ?? defaultKubeconfig()));
   }
 
-  const fetchImpl: FetchLike = (url, init) => options.apiServer.handle(url, init as never);
+  const endpoints = options.endpoints ?? ['apiserver.opslab'];
+  const fetchImpl: FetchLike = (url, init) => {
+    const host = hostOf(url);
+    if (host && !endpoints.includes(host)) {
+      // fetch 在 DNS 失败时抛的就是 TypeError，client-go 那边会翻成
+      // 「Unable to connect to the server」
+      return Promise.reject(new TypeError(`dial tcp: lookup ${host}: no such host`));
+    }
+    return options.apiServer.handle(url, init as never);
+  };
   const applets = options.applets ?? (await runtime.applets());
 
   for (const applet of applets) {

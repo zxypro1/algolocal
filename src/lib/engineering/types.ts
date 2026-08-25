@@ -229,6 +229,13 @@ export interface OpsWorldSpec {
   images?: Record<string, OpsImageSpec>;
   registries?: OpsRegistrySpec[];
   machine?: OpsMachineSpec;
+  /**
+   * 哪些主机名解析得到 apiserver。
+   *
+   * 不填就是 `apiserver.opslab`。写错 server 的 kubeconfig 应该连不上，
+   * 否则「context 选错了」这种题目根本没法出。
+   */
+  endpoints?: string[];
   /** 开局就存在的集群对象 */
   objects?: Record<string, unknown>[];
 }

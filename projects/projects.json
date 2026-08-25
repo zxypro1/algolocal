@@ -5555,6 +5555,173 @@
     }
   },
   {
+    "id": "intranet-k8s",
+    "title": {
+      "zh": "内网设施实战：接手一家公司的 Kubernetes",
+      "en": "Intranet Infrastructure: Inheriting a Kubernetes Cluster"
+    },
+    "summary": {
+      "zh": "在一台跳板机上接手真实规模的内网集群：真 kubectl、真 helm、真 docker，真的会坏。",
+      "en": "Take over a company intranet cluster from a jump host: real kubectl, real helm, real docker — and real breakage."
+    },
+    "difficulty": "Hard",
+    "domain": "infrastructure",
+    "tags": [
+      "kubernetes",
+      "sre",
+      "containers",
+      "gitops"
+    ],
+    "estimatedMinutes": 240,
+    "language": "typescript",
+    "brief": {
+      "zh": "你入职一家公司做基础设施。前任留下一台跳板机、一个 Kubernetes 集群，\n和一份不太靠谱的交接文档。\n\n这个项目里的东西都是真的：终端里的 shell 是 bash 语法（tree-sitter 解析），\n`kubectl` 与 `helm` 是官方二进制编译成 WebAssembly 的，\n`docker build` 真的按 Dockerfile 分层并算 sha256。\n集群是内存里的 apiserver + 控制器循环，Pod 会真的被调度、拉镜像、就绪、崩溃。\n\n**判定看的是集群的真实状态**，不是你敲了什么命令。\n怎么达成随你，达成了就算过。\n",
+      "en": "You have joined a company as an infrastructure engineer. Your predecessor\nleft behind a jump host, a Kubernetes cluster, and a handover document of\nquestionable accuracy.\n\nEverything here is real: the shell parses bash with tree-sitter, `kubectl`\nand `helm` are the upstream binaries compiled to WebAssembly, and\n`docker build` really layers your Dockerfile and computes sha256 digests.\nThe cluster is an in-memory apiserver plus controller loops — pods really do\nget scheduled, pull images, become ready, and crash.\n\n**Grading looks at the cluster's actual state**, not at what you typed.\nHow you get there is up to you.\n"
+    },
+    "workspace": {
+      "kind": "ops",
+      "world": {
+        "seed": 1,
+        "startTime": "2026-03-02T09:00:00Z",
+        "nodes": [
+          {
+            "name": "node-a1",
+            "cpu": "4",
+            "memory": "8Gi",
+            "labels": {
+              "topology.kubernetes.io/zone": "a"
+            }
+          },
+          {
+            "name": "node-a2",
+            "cpu": "4",
+            "memory": "8Gi",
+            "labels": {
+              "topology.kubernetes.io/zone": "a"
+            }
+          },
+          {
+            "name": "node-b1",
+            "cpu": "4",
+            "memory": "8Gi",
+            "labels": {
+              "topology.kubernetes.io/zone": "b"
+            }
+          }
+        ],
+        "namespaces": [
+          "default",
+          "kube-system",
+          "payments"
+        ],
+        "images": {
+          "harbor.corp.internal/team/portal:1.4.0": {
+            "pullMs": 400,
+            "startupMs": 600,
+            "readyAfterMs": 300
+          }
+        },
+        "registries": [
+          {
+            "host": "harbor.corp.internal",
+            "users": {
+              "ci": "Harbor@2026"
+            },
+            "projects": [
+              "team",
+              "library"
+            ],
+            "anonymousPull": false
+          }
+        ],
+        "endpoints": [
+          "apiserver.opslab"
+        ],
+        "machine": {
+          "hostname": "jump-01",
+          "user": "root",
+          "cwd": "/root",
+          "files": {
+            "/root/.kube/config": "apiVersion: v1\nkind: Config\nclusters:\n- name: corp-legacy\n  cluster:\n    server: https://apiserver.legacy.corp.internal:6443\n    insecure-skip-tls-verify: true\n- name: corp-prod\n  cluster:\n    server: https://apiserver.opslab:6443\n    insecure-skip-tls-verify: true\n- name: corp-staging\n  cluster:\n    server: https://apiserver.staging.corp.internal:6443\n    insecure-skip-tls-verify: true\ncontexts:\n- name: legacy\n  context:\n    cluster: corp-legacy\n    user: ops\n    namespace: default\n- name: prod\n  context:\n    cluster: corp-prod\n    user: ops\n    namespace: payments\n- name: staging\n  context:\n    cluster: corp-staging\n    user: ops\n    namespace: default\ncurrent-context: legacy\nusers:\n- name: ops\n  user:\n    token: opslab-token\n",
+            "/root/HANDOVER.md": "# 交接说明（前任留下的）\n\n集群是 v1.36，三台节点，都在机房 A。\n跳板机上的 kubeconfig 里有三套环境，生产那套的名字我忘了，你自己看一下。\nlegacy 那套上个月已经下线，别去连它。\n\n第一件事：确认三台节点都是 Ready，把结果记到 handover/nodes.txt 里。\n"
+          }
+        }
+      }
+    },
+    "files": [],
+    "stages": [
+      {
+        "id": "take-over-cluster",
+        "title": {
+          "zh": "接手集群",
+          "en": "Take over the cluster"
+        },
+        "goal": {
+          "zh": "前任把跳板机的账号给你就走了。终端里已经登好了，`~/.kube/config` 也在，\n但 `current-context` 指着一套**上个月就下线**的老集群 —— 敲什么都连不上。\n\n先把自己接进生产集群，再确认它是好的。\n\n## 通关标准\n\n1. `kubectl config get-contexts` 看清楚有哪几套环境，把 current-context\n   切到生产那一套（提示：`HANDOVER.md` 里说了怎么分辨）；\n2. 三台节点都是 `Ready`；\n3. 把 `kubectl get nodes -o wide` 的输出存到 `~/handover/nodes.txt`。\n\n## 会用到的命令\n\n```bash\ncat HANDOVER.md\nkubectl config get-contexts\nkubectl config use-context <name>\nkubectl get nodes -o wide\nmkdir -p handover && kubectl get nodes -o wide > handover/nodes.txt\n```\n",
+          "en": "Your predecessor handed you the jump host and left. The terminal is already\nlogged in and `~/.kube/config` is there, but `current-context` points at a\ncluster that was **decommissioned last month** — every command times out.\n\nGet yourself into the production cluster, then confirm it is healthy.\n\n## Done when\n\n1. `kubectl config get-contexts` shows the environments and current-context\n   is switched to production (`HANDOVER.md` says how to tell them apart);\n2. all three nodes report `Ready`;\n3. the output of `kubectl get nodes -o wide` is saved to `~/handover/nodes.txt`.\n\n## Commands you will need\n\n```bash\ncat HANDOVER.md\nkubectl config get-contexts\nkubectl config use-context <name>\nkubectl get nodes -o wide\nmkdir -p handover && kubectl get nodes -o wide > handover/nodes.txt\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "current-context 指向生产集群",
+            "en": "current-context points at production"
+          },
+          {
+            "zh": "三台节点都是 Ready",
+            "en": "All three nodes are Ready"
+          },
+          {
+            "zh": "handover/nodes.txt 里有三台节点",
+            "en": "handover/nodes.txt lists all three nodes"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "`kubectl config get-contexts` 会把三套环境列出来，带星号的是当前那套。",
+            "en": "`kubectl config get-contexts` lists all three; the starred one is current."
+          },
+          {
+            "zh": "连不上的时候 kubectl 报的是 `Unable to connect to the server` —— 这说明 server 地址解析不到，不是权限问题。",
+            "en": "When it cannot connect kubectl says `Unable to connect to the server` — that is name resolution, not permissions."
+          },
+          {
+            "zh": "`kubectl get nodes -o wide > handover/nodes.txt` 之前记得 `mkdir -p handover`。",
+            "en": "Run `mkdir -p handover` before redirecting into `handover/nodes.txt`."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "直接 `kubectl config use-context prod` 之前先确认名字 —— 三个 context 的名字不是 legacy/prod/staging 就是集群名，猜错了照样连不上。",
+            "en": "Confirm the context name before switching — guessing wrong leaves you on an unreachable cluster."
+          },
+          {
+            "zh": "`kubectl get nodes` 报 `Unable to connect to the server` 时，去改 kubeconfig 里的 server 地址是错的方向：生产那套地址本来就是对的，你只是没切过去。",
+            "en": "When you see `Unable to connect to the server`, editing the server URL is the wrong move: production’s URL is already correct, you simply are not on it."
+          }
+        ],
+        "ops": {
+          "files": {}
+        },
+        "specs": [
+          {
+            "path": "take-over.spec.ts",
+            "content": "import { sh, list, readFile, exists } from '@ops/lab';\n\ndescribe('接手集群', () => {\n  it('current-context 切到了生产集群', async () => {\n    const result = await sh('kubectl config current-context');\n    expect(result.code).toBe(0);\n    expect(result.stdout.trim()).toBe('prod');\n  });\n\n  it('三台节点都是 Ready', () => {\n    const nodes = list('Node');\n    expect(nodes.length).toBe(3);\n    for (const node of nodes) {\n      const ready = (node.status.conditions || []).find((c) => c.type === 'Ready');\n      expect(ready && ready.status).toBe('True');\n    }\n  });\n\n  it('handover/nodes.txt 里记着这三台', () => {\n    expect(exists('/root/handover/nodes.txt')).toBe(true);\n    const text = readFile('/root/handover/nodes.txt') || '';\n    for (const name of ['node-a1', 'node-a2', 'node-b1']) {\n      expect(text.includes(name)).toBe(true);\n    }\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness"
+        ],
+        "extension": {
+          "zh": "真实世界里「接手一个集群」第一件事就是搞清楚自己连的是哪一套。\n`kubectl config get-contexts` 之外，值得养成的习惯是把当前 context\n放进 shell 提示符（kube-ps1、starship 都支持）——\n**在生产集群上敲了本该在测试环境跑的命令**，是这一行里最常见的事故类型。\n",
+          "en": "In the real world the first thing you do with an inherited cluster is\nwork out which one you are actually talking to. Beyond\n`kubectl config get-contexts`, it is worth putting the current context in\nyour shell prompt (kube-ps1, starship). **Running a staging command against\nproduction** is one of the most common incidents in this line of work.\n"
+        },
+        "primer": {
+          "zh": "`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。\n\n和集群打交道的入口是 `kubectl`，它读一个叫 `kubeconfig` 的文件（默认在 `~/.kube/config`）来决定：连哪个集群（`cluster`，一个 API 地址）、用什么身份（`user`，一份凭据）、默认在哪个命名空间里操作（`namespace`）。这三样打包成一个 `context`，一份 kubeconfig 里可以有很多个 context，`current-context` 指着当前用哪个。\n\n一个人手里同时有生产、预发、测试几套环境是常态，所以「我现在连的是哪一套」是每次操作前都要确认的事。`kubectl config get-contexts` 列出全部，带星号的是当前那个；`kubectl config use-context <name>` 切换。切错了不会有任何提示 —— 命令照样执行，只是打在了别的集群上。\n\n`节点`（Node）是集群里的一台机器。`kubectl get nodes` 列出它们和各自的状态；`Ready` 表示这台机器上的 kubelet 正常上报、可以接收工作负载。接手一个陌生集群，先看节点是最省事的健康检查：三台里挂了一台，很多现象都能从这里解释。",
+          "en": "`Kubernetes` manages containers. Instead of telling it \"start a process on this machine\", you declare \"I want three replicas like this\" and controllers keep working until three exist. This idea — declare the desired state, let controllers converge toward it — underpins every later stage.\n\nYou talk to a cluster through `kubectl`, which reads a `kubeconfig` file (`~/.kube/config` by default) to decide which cluster to reach (`cluster`, an API endpoint), which identity to use (`user`, a credential), and which namespace to default to. Those three are bundled into a `context`; one kubeconfig can hold many contexts, and `current-context` selects the active one.\n\nHolding production, staging, and test environments at once is normal, so \"which one am I on?\" is a question to answer before every operation. `kubectl config get-contexts` lists them all with a star on the current one; `kubectl config use-context <name>` switches. Picking the wrong one produces no warning — commands still run, just against a different cluster.\n\nA `Node` is a machine in the cluster. `kubectl get nodes` lists them with their status; `Ready` means that machine’s kubelet is reporting in and can accept workloads. When inheriting an unfamiliar cluster, checking nodes first is the cheapest health check available: one dead node out of three explains a surprising number of symptoms."
+        }
+      }
+    ]
+  },
+  {
     "id": "message-broker",
     "title": {
       "zh": "高并发消息系统",
