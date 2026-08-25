@@ -52,8 +52,7 @@ import { analyzeWorkspace } from '../../lib/engineering/analysis';
 import { requestStructuredStream } from '../../lib/streamRequest';
 import { computeScoreCard } from '../../lib/engineering/scoring';
 import { editableFiles, toFileMap } from '../../lib/engineering/workspace';
-import type { ResultScope } from '../../hooks/useProjectSession';
-import type { ProjectSession } from '../../hooks/useProjectSession';
+import type { ProjectSession, ResultScope } from '../../hooks/useProjectSession';
 import type {
   AiReview,
   QualityReport,
