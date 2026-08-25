@@ -25,6 +25,13 @@ export interface ResourceDefinition {
   verbs?: string[];
   /** 有哪些子资源，如 status / scale */
   subresources?: string[];
+  /**
+   * OpenAPI v3 的 schema。
+   *
+   * 不填就用一份宽松的（结构对、字段不限），够 kubectl 通过客户端校验。
+   * 要考「字段写错被拒」的关卡自己挂一份严格的上来。
+   */
+  schema?: Record<string, unknown>;
 }
 
 const DEFAULT_VERBS = [

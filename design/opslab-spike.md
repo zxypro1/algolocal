@@ -189,20 +189,78 @@ apiserver + etcd 二进制 —— 即**作者本机录 golden 不需要 Docker**
 
 | 文件 | 说明 |
 | --- | --- |
-| `scripts/build-opslab-wasm.sh` | 从零构建 kubectl.wasm（已验证可复现） |
+| `scripts/build-opslab-wasm.sh` | 从零构建多合一二进制（已验证可复现） |
 | `scripts/opslab-wasm-patches.sh` | 6 处 js/wasm 补丁，脚本化可重放 |
-| `src/lib/opslab/vfs.ts` | Go wasm 的内存文件系统（kubectl 眼里的机器磁盘） |
-| `src/lib/opslab/miniApiServer.ts` | 三个 GVK 的 apiserver，含服务端表格渲染 |
-| `src/lib/opslab/kubectlWasm.ts` | 浏览器侧运行器（模块缓存、fetch 注入、实例回收） |
 | `src/components/opslab/OpsTerminal.tsx` | xterm 终端组件 |
 | `pages/opslab-spike.tsx` | 可玩 demo（`/opslab-spike`） |
 
-**这些是 spike 代码，第三段会大幅重写**；留在仓库里是为了让结论可复核，
-以及给第三段一个能跑的起点。
+spike 时那三个文件（`vfs.ts` / `miniApiServer.ts` / `kubectlWasm.ts`）已经在第三段
+被正式实现替换掉，见下一节。
 
 ### 怎么自己跑一遍
 
 ```bash
-bash scripts/build-opslab-wasm.sh   # 需要 Go；产出 public/opslab/kubectl.wasm（约 115MB，已 gitignore）
+bash scripts/build-opslab-wasm.sh   # 需要 Go；产出 public/opslab/opslab-cli.wasm（约 136MB，已 gitignore）
 npm run dev                         # 打开 /opslab-spike
 ```
+
+---
+
+## 十、第 3-5 片的实测补充（2026-08-26）
+
+spike 的结论都成立，这里把「多合一」真做出来之后量到的数字补上。
+
+### 多合一二进制
+
+kubectl v1.36.0 + helm v4.2.4，按 `argv[0]` 分发，Go 1.27 构建：
+
+| 制品 | 原始 | gzip | brotli |
+| --- | ---: | ---: | ---: |
+| kubectl 单独（spike 时） | 116.0 MB | 18.8 MB | 11.11 MB |
+| **kubectl + helm（本片）** | **135.7 MB** | 22.99 MB | **14.03 MB** |
+
+加上一整个 helm 只多了 2.9MB brotli —— 和 spike 的推断一致（client-go 的
+地板被摊薄了）。helm 单独编要再付一次 5.5MB 的地板。
+
+### 浏览器里的实测（Chromium，142,281,929 字节的产物）
+
+| 步骤 | 耗时 |
+| --- | ---: |
+| 下载（localhost） | 1571 ms |
+| `WebAssembly.compileStreaming` | 1657 ms |
+| 写进 IndexedDB（字节） | 174 ms |
+| 存储配额 | 3.96 GB |
+
+### 一处推翻了原计划的发现
+
+原本打算缓存**编译后的 `WebAssembly.Module`**，省掉那 1.6 秒编译。浏览器里实测直接被拒：
+
+```
+DataCloneError: A WebAssembly.Module can not be serialized for storage.
+```
+
+Chrome 已经把 Module 的结构化克隆去掉了。于是改成缓存字节：命中缓存省掉下载
+那一半（约 1.5 秒），编译仍要付。配额不是问题。
+
+### 另一处必须补的东西：OpenAPI v3
+
+`kubectl apply` 在 1.27 之后默认要校验，第一步就是拉 `/openapi/v3`；拉不到直接失败：
+
+```
+error: error validating "portal.yaml": error validating data: failed to download openapi
+```
+
+而且光有 `components.schemas` 不够 —— kubectl 还要在 **`paths` 里翻 PATCH 操作**，
+确认这个 GVK 支不支持 `fieldValidation` 参数（`cli-runtime` 的 `queryParamVerifierV3`）。
+`paths` 空着它会退回去拉 OpenAPI v2，那是 protobuf 编码的，我们给不了。
+
+所以 `src/lib/opslab/apiserver/openapi.ts` 从 scheme 生成完整的 v3 文档：
+每个资源的 REST 路径 + 带 GVK 扩展的 PATCH 操作 + 参数表。默认 schema 是宽松的
+（字段级把关交给服务端的 fieldValidation，那也是真集群 1.27 之后实际把关的地方），
+需要严格校验的关卡可以在 `ResourceDefinition.schema` 上挂自己的。
+
+### 版本号要用 ldflags 注进去
+
+不注入的话 `kubectl version` 打的是 `v0.0.0-master+$Format:%H$`，一眼假。
+构建脚本现在按上游发行版的做法注入 `client-go/pkg/version` 与
+`helm/v4/internal/version`，`buildDate` 写死以保证可复现。
