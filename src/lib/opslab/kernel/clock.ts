@@ -55,6 +55,24 @@ interface Timer {
   label?: string;
 }
 
+/**
+ * 同一时刻最多连续触发多少批定时器。
+ *
+ * 一个回调里再排一个 0 延迟的定时器，时间就永远停在原地 ——
+ * 没有这道闸，advanceTo 是个同步死循环，会把整个标签页转死而且一声不吭
+ * （虚拟时间和真实时间的预算都在 settle 里，根本轮不到执行）。
+ */
+const MAX_BATCHES_AT_SAME_INSTANT = 10_000;
+
+export class ClockLivelockError extends Error {
+  pending: string[];
+  constructor(message: string, pending: string[]) {
+    super(message);
+    this.name = 'ClockLivelockError';
+    this.pending = pending;
+  }
+}
+
 export class VirtualClock {
   private time = 0;
   private seq = 0;
@@ -137,9 +155,28 @@ export class VirtualClock {
 
   /** 把时钟推到某个绝对时刻 */
   advanceTo(target: number): void {
+    let batchesAtSameInstant = 0;
+    let lastInstant = this.time;
+
     while (true) {
       const next = this.peekNextTime();
       if (next === null || next > target) break;
+
+      // 时间没往前走 = 有人在原地不停重排自己
+      if (next === lastInstant) {
+        batchesAtSameInstant += 1;
+        if (batchesAtSameInstant > MAX_BATCHES_AT_SAME_INSTANT) {
+          throw new ClockLivelockError(
+            `虚拟时间卡在 ${this.time}ms 不动：连续 ${MAX_BATCHES_AT_SAME_INSTANT} 批定时器都排在同一刻，` +
+              `多半是某个回调在不停地排 0 延迟定时器。`,
+            this.describePending()
+          );
+        }
+      } else {
+        batchesAtSameInstant = 0;
+        lastInstant = next;
+      }
+
       this.fireUpTo(next);
     }
     if (target > this.time) this.time = target;
@@ -160,8 +197,10 @@ export class VirtualClock {
       .sort((a, b) => (a.priority - b.priority) || (a.seq - b.seq));
 
     for (const timer of due) {
-      const index = this.timers.indexOf(timer);
-      if (index < 0) continue;                    // 被同批里更早的回调清掉了
+      // 可能已经被同批里更早的回调清掉了。用 id 判断而不是 indexOf，
+      // 否则这里是 O(批量 × 挂着的定时器数)。
+      const index = this.timers.findIndex((t) => t.id === timer.id);
+      if (index < 0) continue;
       if (timer.intervalMs && timer.intervalMs > 0) {
         timer.time = this.time + timer.intervalMs;
         timer.seq = this.seq++;

@@ -6,6 +6,7 @@
  */
 import {
   BudgetExceededError,
+  ClockLivelockError,
   createKernel,
   createRandom,
   DeadlockError,
@@ -139,6 +140,15 @@ describe('异常与预算', () => {
     });
     await expect(kernel.settle()).rejects.toThrow('boom from task');
   });
+
+  it('在原地不停重排 0 延迟定时器的回调会被判活锁，而不是把线程转死', async () => {
+    // 这一条来自自审：虚拟时间与真实时间的预算都在 settle 里，而 advanceTo 是同步的，
+    // 没有这道闸的话下面这段会把整个进程转死，一声不吭。
+    const kernel = createKernel();
+    const tick = () => { kernel.setTimeout(tick, 0); };
+    kernel.setTimeout(tick, 0);
+    await expect(kernel.advanceBy(10)).rejects.toThrow(ClockLivelockError);
+  }, 20_000);
 
   it('收敛不了的世界撞上虚拟时间预算', async () => {
     const kernel = createKernel();

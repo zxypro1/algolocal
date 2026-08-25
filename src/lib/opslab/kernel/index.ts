@@ -6,6 +6,6 @@
  */
 export { Kernel, createKernel, DeadlockError, BudgetExceededError, Priority } from './kernel';
 export type { KernelOptions, KernelSnapshot, SettleOptions, PriorityValue, ScheduleOptions } from './kernel';
-export { VirtualClock } from './clock';
+export { VirtualClock, ClockLivelockError } from './clock';
 export { createRandom } from './random';
 export type { DeterministicRandom } from './random';
