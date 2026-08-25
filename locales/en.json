@@ -520,7 +520,9 @@
       "saveNow": "Save now",
       "saving": "Saving…",
       "language": "Language",
-      "languageHint": "Switching swaps the starter files and specs; each language keeps its own drafts"
+      "languageHint": "Switching swaps the starter files and specs; each language keeps its own drafts",
+      "unsupportedKind": "This build does not support that workspace",
+      "unsupportedKindBody": "This project needs a workspace layout that this build does not include yet. Update to a version that supports it."
     },
     "tabs": {
       "stage": "Task",

@@ -147,6 +147,35 @@ export interface ProjectStage {
   referenceNotes?: LocalizedText;
 }
 
+/**
+ * 工作台形态：这个项目需要哪些面板。
+ *
+ * 起初只有一种形态（任务描述 + IDE + 结果面板），布局直接写死在
+ * pages/projects/[id].tsx 里。要加入内网设施这类项目之后，工作台需要按项目组合
+ * ——终端、拓扑图这些面板只对特定形态有意义。
+ *
+ * 这里声明的是**形态**而不是布局坐标：面板怎么摆是代码的事，
+ * 题目只回答「这是哪一类实验台」。
+ */
+export type WorkspaceKind = 'code' | 'ops';
+
+/** 现有形态：多文件工作区 + 隐藏用例 + 指标门槛 */
+export interface CodeWorkspaceSpec {
+  kind: 'code';
+}
+
+/**
+ * 内网设施形态：终端 + IDE + 拓扑图 + 任务。
+ *
+ * 世界定义（主机、网络分区、集群初态）后续补，目前只占位，
+ * 好让分发器的两条分支都是真的而不是死代码。
+ */
+export interface OpsWorkspaceSpec {
+  kind: 'ops';
+}
+
+export type WorkspaceSpec = CodeWorkspaceSpec | OpsWorkspaceSpec;
+
 export interface EngineeringProject {
   id: string;
   title: LocalizedText;
@@ -173,6 +202,11 @@ export interface EngineeringProject {
    * 内容只写一份 TypeScript，JS 版在构建时自动派生（见 scripts/derive-js-variant.js）。
    */
   variants?: Partial<Record<WorkspaceLanguage, ProjectVariant>>;
+  /**
+   * 工作台形态。不写等同于 `{ kind: 'code' }` —— 现有项目一个字段都不用加，
+   * 走的也仍然是原来那条代码路径。
+   */
+  workspace?: WorkspaceSpec;
   /** AI 生成的项目会带上生成信息 */
   generatedAt?: string;
 }
