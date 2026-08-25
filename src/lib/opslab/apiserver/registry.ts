@@ -8,6 +8,7 @@
  * 这一层刻意不碰「这个字段合不合法」——schema 校验是下一片的事，
  * 会接官方 OpenAPI + ajv。这里管的是**对象生命周期**，两者边界分清。
  */
+import { applyPatch, PatchType } from './patch';
 import { Store, WatchEvent } from '../store';
 import {
   alreadyExists,
@@ -355,6 +356,88 @@ export class Registry {
   }
 
   /**
+   * scale 子资源。
+   *
+   * 它不是一个真的存储对象，而是父对象的一个投影：`kubectl scale` /
+   * HPA / `kubectl autoscale` 都只认这个形状。返回的 apiVersion 固定是
+   * `autoscaling/v1`，和真集群一致。
+   */
+  getScale(definition: ResourceDefinition, namespace: string | undefined, name: string): KubeObject {
+    const object = this.get(definition, namespace, name);
+    return {
+      apiVersion: 'autoscaling/v1',
+      kind: 'Scale',
+      metadata: {
+        name: object.metadata.name,
+        namespace: object.metadata.namespace,
+        uid: object.metadata.uid,
+        resourceVersion: object.metadata.resourceVersion,
+        creationTimestamp: object.metadata.creationTimestamp,
+      },
+      spec: { replicas: (object.spec as { replicas?: number } | undefined)?.replicas ?? 0 },
+      status: {
+        replicas: (object.status as { replicas?: number } | undefined)?.replicas ?? 0,
+        selector: selectorString((object.spec as { selector?: unknown } | undefined)?.selector),
+      },
+    } as KubeObject;
+  }
+
+  /** 把 scale 上的 replicas 写回父对象的 spec */
+  setScale(
+    definition: ResourceDefinition,
+    namespace: string | undefined,
+    name: string,
+    scale: KubeObject,
+    options: UpdateOptions = {}
+  ): KubeObject {
+    const object = clone(this.get(definition, namespace, name));
+    const replicas = (scale.spec as { replicas?: number } | undefined)?.replicas;
+    if (typeof replicas !== 'number') {
+      throw badRequest('Scale.spec.replicas: Invalid value: must be an integer');
+    }
+    (object.spec as { replicas?: number }).replicas = replicas;
+    delete object.metadata.resourceVersion;
+    this.update(definition, namespace, name, object, options);
+    return this.getScale(definition, namespace, name);
+  }
+
+  /**
+   * 打补丁。
+   *
+   * 三种 patch 类型的差别全在 patch.ts 里；这里只负责「取出来、打上、写回去」，
+   * 并且复用 update / updateStatus 的那套规则（generation、乐观并发、
+   * 服务端字段不许改）—— 否则 PATCH 会变成绕过所有校验的后门。
+   */
+  patch(
+    definition: ResourceDefinition,
+    namespace: string | undefined,
+    name: string,
+    patch: unknown,
+    patchType: PatchType,
+    options: UpdateOptions & { subresource?: string } = {}
+  ): KubeObject {
+    this.assertScope(definition, namespace);
+    const key = storageKey(definition, namespace, name);
+    const existingKv = this.store.get(key);
+    if (!existingKv) throw notFound(definition.resource, name, definition.group);
+
+    // scale 是投影，补丁要打在投影上，再写回父对象
+    if (options.subresource === 'scale') {
+      const scaled = applyPatch(this.getScale(definition, namespace, name), patch, patchType) as KubeObject;
+      return this.setScale(definition, namespace, name, scaled, options);
+    }
+
+    const existing = existingKv.value as KubeObject;
+    const patched = applyPatch(clone(existing), patch, patchType) as KubeObject;
+    // 补丁不该能改掉 resourceVersion 来绕过乐观并发
+    if (patched.metadata) delete (patched.metadata as ObjectMeta).resourceVersion;
+
+    return options.subresource === 'status'
+      ? this.updateStatus(definition, namespace, name, patched, options)
+      : this.update(definition, namespace, name, patched, options);
+  }
+
+  /**
    * 只写 status 子资源。
    *
    * 不动 spec、不 +generation —— 控制器每秒钟都在写 status，
@@ -548,4 +631,14 @@ export class Registry {
       throw badRequest(`namespace is not allowed on a cluster-scoped resource`);
     }
   }
+}
+
+/** `app=portal,tier=web` —— scale.status.selector 是这个字符串形式 */
+function selectorString(selector: unknown): string {
+  const labels = (selector as { matchLabels?: Record<string, string> } | undefined)?.matchLabels;
+  if (!labels) return '';
+  return Object.entries(labels)
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([key, value]) => `${key}=${value}`)
+    .join(',');
 }

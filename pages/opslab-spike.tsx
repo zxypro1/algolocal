@@ -88,7 +88,11 @@ export default function OpsLabSpikePage() {
         runtime: createCliRuntime(),
         apiServer: world.cluster.apiServer,
         now: () => world.cluster.wallClock(),
-      }).then(() => undefined);
+      }).then(() => undefined).catch((error) => {
+        // 装失败了要能再试一次，否则一次网络抖动就把整页锁死
+        readyRef.current = null;
+        throw error;
+      });
     }
     return readyRef.current;
   }, []);

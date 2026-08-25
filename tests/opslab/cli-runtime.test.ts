@@ -41,10 +41,16 @@ function runtime(): CliRuntime {
 }
 
 const NGINX = 'registry.k8s.io/nginx:1.27';
+const NGINX_NEXT = 'registry.k8s.io/nginx:1.28';
 
 /** 一台装好 kubectl 的机器，连着一个真在跑控制器的集群 */
 async function world(files: Record<string, string> = {}) {
-  const cluster = createCluster({ images: { [NGINX]: { pullMs: 200, startupMs: 300, readyAfterMs: 200 } } });
+  const cluster = createCluster({
+    images: {
+      [NGINX]: { pullMs: 200, startupMs: 300, readyAfterMs: 200 },
+      [NGINX_NEXT]: { pullMs: 200, startupMs: 300, readyAfterMs: 200 },
+    },
+  });
   cluster.start();
   const machine = createMachine({ files, now: () => cluster.wallClock() });
   const applets = await installClusterCli({
@@ -174,11 +180,68 @@ describeIfBuilt('真 kubectl 打到真集群上', () => {
     expect(missing.stderr).toBe('Error in configuration: context was not found for specified context: nope\n');
   });
 
+  it('kubectl 写文件（-o yaml 重定向、edit 之外的落盘路径）落回同一棵树', async () => {
+    const { machine, cluster } = await world({ '/root/portal.yaml': DEPLOYMENT });
+    await machine.exec('kubectl apply -f portal.yaml');
+    await cluster.settle();
+    // kubectl 自己打开文件写：--output-file 走的是 fs.open + write + close
+    const dumped = await machine.exec('kubectl get deploy portal -o yaml > /root/dump.yaml');
+    expect(dumped.code).toBe(0);
+    expect(machine.vfs.readFile('/root/dump.yaml')).toContain('name: portal');
+    // 再让 kubectl 自己把它读回去
+    expect((await machine.exec('kubectl apply -f /root/dump.yaml')).stdout)
+      .toBe('deployment.apps/portal configured\n');
+  });
+
   it('报错来自 apiserver，不是我们编的', async () => {
     const { machine } = await world();
     const result = await machine.exec('kubectl get pod does-not-exist');
     expect(result.code).toBe(1);
     expect(result.stderr).toBe('Error from server (NotFound): pods "does-not-exist" not found\n');
+  });
+
+  it('PATCH 打通之后：apply 二次、scale、set image、label、patch --type=json', async () => {
+    const { machine, cluster } = await world({ '/root/portal.yaml': DEPLOYMENT });
+    await machine.exec('kubectl apply -f portal.yaml');
+    await cluster.settle();
+
+    // 改完 manifest 再 apply 一次 —— 这是这个产品里最常发生的动作
+    machine.vfs.writeFile('/root/portal.yaml', DEPLOYMENT.replace('replicas: 2', 'replicas: 4'));
+    expect((await machine.exec('kubectl apply -f portal.yaml')).stdout)
+      .toBe('deployment.apps/portal configured\n');
+    await cluster.settle();
+    expect((await machine.exec('kubectl get deploy portal --no-headers')).stdout).toMatch(/portal\s+4\/4/);
+
+    expect((await machine.exec('kubectl scale deploy portal --replicas=1')).stdout)
+      .toBe('deployment.apps/portal scaled\n');
+    await cluster.settle();
+    expect((await machine.exec('kubectl get pods --no-headers | wc -l')).stdout).toBe('1\n');
+
+    // set image 只换镜像，容器数量不变 —— 策略合并的 merge key 在起作用
+    expect((await machine.exec(`kubectl set image deploy/portal web=${NGINX_NEXT}`)).stdout)
+      .toBe('deployment.apps/portal image updated\n');
+    expect((await machine.exec(
+      'kubectl get deploy portal -o jsonpath={.spec.template.spec.containers[*].name}'
+    )).stdout).toBe('web');
+    expect((await machine.exec(
+      'kubectl get deploy portal -o jsonpath={.spec.template.spec.containers[0].image}'
+    )).stdout).toBe(NGINX_NEXT);
+
+    expect((await machine.exec('kubectl annotate deploy portal note=changed')).stdout)
+      .toBe('deployment.apps/portal annotated\n');
+    expect((await machine.exec('kubectl rollout restart deploy/portal')).stdout)
+      .toBe('deployment.apps/portal restarted\n');
+
+    expect((await machine.exec('kubectl label deploy portal tier=frontend')).stdout)
+      .toBe('deployment.apps/portal labeled\n');
+    expect((await machine.exec('kubectl get deploy portal -o jsonpath={.metadata.labels.tier}')).stdout)
+      .toBe('frontend');
+
+    const jsonPatch = await machine.exec(
+      "kubectl patch deploy portal --type=json -p '[{\"op\":\"replace\",\"path\":\"/spec/replicas\",\"value\":3}]'"
+    );
+    expect(jsonPatch.stdout).toBe('deployment.apps/portal patched\n');
+    expect((await machine.exec('kubectl get deploy portal -o jsonpath={.spec.replicas}')).stdout).toBe('3');
   });
 
   it('同一串命令重放两次，逐字节一致', async () => {

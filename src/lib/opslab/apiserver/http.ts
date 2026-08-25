@@ -24,6 +24,7 @@ export interface ApiServerDeps {
   version?: { major: string; minor: string; gitVersion: string };
 }
 import { openApiDocument, openApiRoot } from './openapi';
+import type { PatchType } from './patch';
 
 interface ParsedPath {
   group: string;
@@ -215,6 +216,8 @@ export class ApiServer {
         return this.handleCreate(definition, parsed, init, params);
       case 'PUT':
         return this.handleUpdate(definition, parsed, init, params);
+      case 'PATCH':
+        return this.handlePatch(definition, parsed, init, params);
       case 'DELETE':
         return this.handleDelete(definition, parsed, init, params);
       default:
@@ -282,6 +285,9 @@ export class ApiServer {
     parsed: ParsedPath,
     accept: string | undefined
   ): Response {
+    if (parsed.subresource === 'scale') {
+      return json(this.registry.getScale(definition, parsed.namespace, parsed.name!));
+    }
     const object = this.registry.get(definition, parsed.namespace, parsed.name!);
     if (parsed.subresource === 'status') return json(object);
     if (parsed.subresource && parsed.subresource !== 'status') {
@@ -336,10 +342,45 @@ export class ApiServer {
     if (!parsed.name) return statusResponse(badRequest('name is required for update'));
     const body = await this.readBody(init);
     const options = { dryRun: params.getAll('dryRun').includes('All') };
-    const updated = parsed.subresource === 'status'
-      ? this.registry.updateStatus(definition, parsed.namespace, parsed.name, body, options)
-      : this.registry.update(definition, parsed.namespace, parsed.name, body, options);
+    const updated = parsed.subresource === 'scale'
+      ? this.registry.setScale(definition, parsed.namespace, parsed.name, body, options)
+      : parsed.subresource === 'status'
+        ? this.registry.updateStatus(definition, parsed.namespace, parsed.name, body, options)
+        : this.registry.update(definition, parsed.namespace, parsed.name, body, options);
     return json(updated);
+  }
+
+  /**
+   * PATCH。
+   *
+   * `kubectl apply` 对已存在的对象走的就是这条路 —— 「改完 manifest 再 apply
+   * 一次」全靠它。patch 的种类由 Content-Type 决定，缺省是策略合并。
+   */
+  private async handlePatch(
+    definition: ResourceDefinition,
+    parsed: ParsedPath,
+    init: RequestInit,
+    params: URLSearchParams
+  ): Promise<Response> {
+    if (!parsed.name) return statusResponse(badRequest('name is required for patch'));
+    const contentType = (headerOf(init, 'content-type') ?? '')
+      .split(';')[0]
+      .trim() as PatchType;
+    const patchType = (contentType || 'application/strategic-merge-patch+json') as PatchType;
+
+    const raw = await this.readBodyRaw(init);
+    let patch: unknown;
+    try {
+      patch = raw ? JSON.parse(raw) : {};
+    } catch {
+      return statusResponse(badRequest('the object provided is unrecognized (must be of type Patch)'));
+    }
+
+    const patched = this.registry.patch(definition, parsed.namespace, parsed.name, patch, patchType, {
+      dryRun: params.getAll('dryRun').includes('All'),
+      subresource: parsed.subresource,
+    });
+    return json(patched);
   }
 
   private async handleDelete(

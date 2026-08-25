@@ -118,14 +118,22 @@ function capitalize(text: string): string {
   return text ? text[0].toUpperCase() + text.slice(1) : text;
 }
 
-/** `io.k8s.api.apps.v1.Deployment` —— 真集群里的命名，学员 grep 得到 */
+/**
+ * `io.k8s.api.apps.v1.Deployment` —— 真集群里的命名，学员 grep 得到。
+ *
+ * 内置组的规则是「去掉 `.k8s.io`，取第一段，前面加 `io.k8s.api.`」：
+ * `rbac.authorization.k8s.io` → `io.k8s.api.rbac`，核心组（空串）→ `io.k8s.api.core`。
+ * 自定义组（CRD）没有这个规则，按反向域名拼。
+ */
 export function schemaName(definition: ResourceDefinition): string {
-  const group = definition.group || 'core';
-  const prefix = group.endsWith('.k8s.io')
-    ? `io.k8s.${group.slice(0, -'.k8s.io'.length).split('.').reverse().join('.')}`
-    : group.includes('.')
-      ? group.split('.').reverse().join('.')
-      : `io.k8s.api.${group}`;
+  const group = definition.group;
+  const prefix = !group
+    ? 'io.k8s.api.core'
+    : group.endsWith('.k8s.io')
+      ? `io.k8s.api.${group.slice(0, -'.k8s.io'.length).split('.')[0]}`
+      : group.includes('.')
+        ? group.split('.').reverse().join('.')
+        : `io.k8s.api.${group}`;
   return `${prefix}.${definition.version}.${definition.kind}`;
 }
 
@@ -192,7 +200,11 @@ function groupVersions(definitions: ResourceDefinition[]): GroupVersion[] {
 
 /** 内容指纹。变了客户端就会重新拉，不变就用缓存。 */
 function hashOf(definitions: ResourceDefinition[]): string {
-  const source = definitions.map((definition) => `${definition.resource}:${definition.kind}`).sort().join(',');
+  // 自定义 schema 也要算进去，否则改了 schema 客户端还在用缓存里的旧文档
+  const source = definitions
+    .map((definition) => `${definition.resource}:${definition.kind}:${JSON.stringify(definition.schema ?? null)}`)
+    .sort()
+    .join(',');
   let hash = 0x811c9dc5;
   for (let i = 0; i < source.length; i += 1) {
     hash ^= source.charCodeAt(i);

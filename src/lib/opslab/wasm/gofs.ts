@@ -35,8 +35,15 @@ export interface GoFsOptions {
 interface OpenFile {
   path: string;
   position: number;
-  /** 写模式下先攒着，close/fsync 时落盘 */
-  pending: Uint8Array | null;
+  /**
+   * 当前内容。
+   *
+   * 打开时读一次就留着 —— Go 读文件是一小块一小块读的，每次都从
+   * 字符串重新编码一遍整个文件的话，读一个大 manifest 就是 O(n²)。
+   */
+  data: Uint8Array;
+  /** 有没有被写过；写过才需要落盘 */
+  dirty: boolean;
 }
 
 const O_TRUNC = 512;
@@ -105,7 +112,8 @@ export function createGoFs(options: GoFsOptions) {
       if (fd === 2) { options.onStderr(buffer.slice()); return buffer.length; }
       const handle = open.get(fd);
       if (!handle) throw errorWith('EBADF');
-      handle.pending = concat(handle.pending ?? read(handle.path), buffer, handle.position);
+      handle.data = concat(handle.data, buffer, handle.position);
+      handle.dirty = true;
       handle.position += buffer.length;
       return buffer.length;
     },
@@ -128,7 +136,7 @@ export function createGoFs(options: GoFsOptions) {
       }
       const handle = open.get(fd);
       if (!handle) return callback(errorWith('EBADF'));
-      const data = handle.pending ?? read(handle.path);
+      const data = handle.data;
       const start = position === null ? handle.position : position;
       const count = Math.min(length, Math.max(0, data.length - start));
       buffer.set(data.subarray(start, start + count), offset);
@@ -143,25 +151,27 @@ export function createGoFs(options: GoFsOptions) {
       if (!exists) vfs.writeFile(resolved, '');
       if ((flags & O_TRUNC) !== 0) vfs.writeFile(resolved, '');
 
+      const data = read(resolved);
       const fd = nextFd++;
       open.set(fd, {
         path: resolved,
-        position: (flags & O_APPEND) !== 0 ? read(resolved).length : 0,
-        pending: null,
+        position: (flags & O_APPEND) !== 0 ? data.length : 0,
+        data,
+        dirty: false,
       });
       callback(null, fd);
     },
 
     close(fd: number, callback: Callback) {
       const handle = open.get(fd);
-      if (handle?.pending) write(handle.path, handle.pending);
+      if (handle?.dirty) write(handle.path, handle.data);
       open.delete(fd);
       callback(null);
     },
 
     fsync(fd: number, callback: Callback) {
       const handle = open.get(fd);
-      if (handle?.pending) { write(handle.path, handle.pending); handle.pending = null; }
+      if (handle?.dirty) { write(handle.path, handle.data); handle.dirty = false; }
       callback(null);
     },
 
@@ -177,6 +187,14 @@ export function createGoFs(options: GoFsOptions) {
       const handle = open.get(fd);
       if (!handle) return callback(errorWith('EBADF'));
       callback(null, statOf(handle.path));
+    },
+
+    /** `ftruncate(fd, 0)` 是「清空重写」的常见写法，不能当成 no-op */
+    ftruncateSync(fd: number, length: number) {
+      const handle = open.get(fd);
+      if (!handle) throw errorWith('EBADF');
+      handle.data = handle.data.slice(0, length);
+      handle.dirty = true;
     },
 
     mkdir(path: string, mode: number, callback: Callback) {
@@ -235,8 +253,19 @@ export function createGoFs(options: GoFsOptions) {
     fchown(fd: number, uid: number, gid: number, callback: Callback) { callback(null); },
     lchown(path: string, uid: number, gid: number, callback: Callback) { callback(null); },
     utimes(path: string, atime: number, mtime: number, callback: Callback) { callback(null); },
-    truncate(path: string, length: number, callback: Callback) { callback(null); },
-    ftruncate(fd: number, length: number, callback: Callback) { callback(null); },
+    truncate(path: string, length: number, callback: Callback) {
+      const resolved = resolve(path);
+      if (vfs.exists(resolved)) write(resolved, read(resolved).slice(0, length));
+      callback(null);
+    },
+    ftruncate(fd: number, length: number, callback: Callback) {
+      try {
+        fs.ftruncateSync(fd, length);
+        callback(null);
+      } catch (error) {
+        callback(error);
+      }
+    },
     link(from: string, to: string, callback: Callback) { callback(null); },
   };
 
