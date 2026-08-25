@@ -17,6 +17,9 @@ const { t, code, spec } = require('./_helpers');
 const PORTAL_IMAGE = 'harbor.corp.internal/team/portal:1.4.0';
 const PORTAL_IMAGE_NEXT = 'harbor.corp.internal/team/portal:1.5.0';
 const REPORTS_IMAGE = 'harbor.corp.internal/team/reports:2.1.0';
+const ENVOY_IMAGE = 'registry.k8s.io/gateway-api/envoy-gateway:v1.6.2';
+/** 已经从仓库里下架的镜像，拉不到 —— ingress-nginx 2026-03-24 退役 */
+const RETIRED_NGINX_IMAGE = 'registry.k8s.io/ingress-nginx/controller:v1.13.0';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -81,7 +84,7 @@ const WORLD = {
     { name: 'node-a2', cpu: '4', memory: '8Gi', labels: { 'topology.kubernetes.io/zone': 'a' } },
     { name: 'node-b1', cpu: '4', memory: '8Gi', labels: { 'topology.kubernetes.io/zone': 'b' } },
   ],
-  namespaces: ['default', 'kube-system', 'payments'],
+  namespaces: ['default', 'kube-system', 'payments', 'envoy-gateway-system', 'ingress-nginx'],
   images: {
     [PORTAL_IMAGE]: {
       pullMs: 400, startupMs: 600, readyAfterMs: 300,
@@ -92,6 +95,8 @@ const WORLD = {
       handlesSigterm: true,
       runAsUser: 10001,
     },
+    // 平台组装的入口控制器
+    [ENVOY_IMAGE]: { pullMs: 300, startupMs: 400, readyAfterMs: 200, listens: [18000] },
     // 财务的报表任务：吃 900Mi，limits 写小了就会被 OOMKill
     [REPORTS_IMAGE]: {
       pullMs: 500, startupMs: 800, readyAfterMs: 200,
@@ -102,6 +107,11 @@ const WORLD = {
   },
   // 本地已经有的基础镜像，写 Dockerfile 时 FROM 得着
   baseImages: { 'node:22-alpine': 'node' },
+  // 内网入口与公网入口用不同的地址池，这是「不能上公网」这条要求的落点
+  addressPools: [
+    { loadBalancerClass: 'corp.internal/office-lb', cidrPrefix: '10.10.8', zones: ['office'] },
+    { loadBalancerClass: 'corp.internal/public-lb', cidrPrefix: '203.0.113', zones: ['office', 'internet'] },
+  ],
   registries: [
     {
       host: 'harbor.corp.internal',
@@ -1651,6 +1661,362 @@ const stage7 = {
   ),
 };
 
+/* ------------------------------------------------------------------ */
+/* 第 8 关                                                             */
+/* ------------------------------------------------------------------ */
+
+/** 前任留下的老入口。ingress-nginx 已经退役，这个镜像在仓库里根本拉不到了。 */
+const LEGACY_INGRESS = code`
+  apiVersion: networking.k8s.io/v1
+  kind: Ingress
+  metadata:
+    name: portal
+    namespace: payments
+    annotations:
+      nginx.ingress.kubernetes.io/rewrite-target: /
+  spec:
+    ingressClassName: nginx
+    rules:
+    - host: portal.corp.internal
+      http:
+        paths:
+        - path: /
+          pathType: Prefix
+          backend:
+            service:
+              name: portal
+              port:
+                number: 80
+`;
+
+const GATEWAY_REFERENCE = code`
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: Gateway
+  metadata:
+    name: corp-gw
+    namespace: payments
+  spec:
+    gatewayClassName: envoy-internal
+    listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      hostname: portal.corp.internal
+      allowedRoutes:
+        namespaces:
+          from: Same
+  ---
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: HTTPRoute
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    parentRefs:
+    - name: corp-gw
+    hostnames:
+    - portal.corp.internal
+    rules:
+    - matches:
+      - path:
+          type: PathPrefix
+          value: /
+      backendRefs:
+      - name: portal
+        port: 80
+`;
+
+const stage8 = {
+  id: 'gateway-migration',
+  title: t('从 Ingress 迁到 Gateway API', 'Migrate from Ingress to Gateway API'),
+  goal: t(
+    code`
+      门户的对外入口还挂在 ingress-nginx 上，而这个项目已经在 2026 年 3 月退役了 ——
+      镜像从仓库里下架，控制器起不来，Ingress 一直没有地址，门户从办公网访问不了。
+
+      平台组已经把 Envoy Gateway 装好了，也提供了两个 GatewayClass：
+      \`envoy-internal\`（只暴露到办公网）和 \`envoy-public\`（暴露到公网）。
+      **门户是内部系统，不能上公网。**
+
+      ## 通关标准
+
+      1. 建一个 Gateway（用对 class）和一条 HTTPRoute，把
+         \`portal.corp.internal\` 指到 \`portal\` 这个 Service；
+      2. Gateway 的 \`Programmed\` 是 True，拿到了地址；
+      3. 从跳板机（办公网）访问得到，返回 200；
+      4. **从公网访问不到**；
+      5. 老的 Ingress 与 ingress-nginx 的 Deployment 都删掉 —— 留着不只是脏，
+         还会让下一个人以为它还在起作用。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl get ingress,pods -n payments
+      kubectl get gatewayclass
+      kubectl apply -f infra/gateway.yaml
+      kubectl get gateway corp-gw -n payments -o yaml
+      kubectl describe httproute portal -n payments
+      curl -s -o /dev/null -w '%{http_code}\n' \\
+        --resolve portal.corp.internal:80:<Gateway 的地址> http://portal.corp.internal/
+      \`\`\`
+
+      跳板机上没有配 \`portal.corp.internal\` 的解析，直接用 Gateway 拿到的
+      地址访问就行。
+    `,
+    code`
+      The portal's external entrypoint still runs on ingress-nginx, a project that
+      was retired in March 2026. The image was pulled from the registry, the
+      controller cannot start, the Ingress never got an address, and the portal is
+      unreachable from the office network.
+
+      The platform team has already installed Envoy Gateway and offers two
+      GatewayClasses: \`envoy-internal\` (office network only) and \`envoy-public\`
+      (public internet). **The portal is an internal system and must not be public.**
+
+      ## Done when
+
+      1. a Gateway (with the right class) and an HTTPRoute send
+         \`portal.corp.internal\` to the \`portal\` Service;
+      2. the Gateway reports \`Programmed\` True and has an address;
+      3. it answers 200 from the jump host (office network);
+      4. **it is not reachable from the internet**;
+      5. the old Ingress and the ingress-nginx Deployment are both deleted. Leaving
+         them is not just untidy: the next person will assume they still do something.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl get ingress,pods -n payments
+      kubectl get gatewayclass
+      kubectl apply -f infra/gateway.yaml
+      kubectl get gateway corp-gw -n payments -o yaml
+      kubectl describe httproute portal -n payments
+      curl -s -o /dev/null -w '%{http_code}\n' \\
+        --resolve portal.corp.internal:80:<gateway address> http://portal.corp.internal/
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('Gateway 与 HTTPRoute 建好并生效', 'Gateway and HTTPRoute created and effective'),
+    t('办公网访问得到、公网访问不到', 'Reachable from the office network, not from the internet'),
+    t('老的 Ingress 与 ingress-nginx 都下线', 'The old Ingress and ingress-nginx are gone'),
+  ],
+  hints: [
+    t(
+      '\`kubectl get gatewayclass\` 会列出平台提供了哪几个 class，名字里就写着内外网。',
+      '\`kubectl get gatewayclass\` lists what the platform offers; the names say internal or public.'
+    ),
+    t(
+      'Gateway 的 \`status.addresses\` 里就是访问地址。\`kubectl get gateway -o wide\` 也看得到。',
+      'The address is in the Gateway’s \`status.addresses\`; \`kubectl get gateway -o wide\` shows it too.'
+    ),
+    t(
+      '路由不生效时先看 \`kubectl describe httproute\` 里的 \`ResolvedRefs\`，它会直接说是后端不存在还是别的。',
+      'When a route does not work, check \`ResolvedRefs\` in \`kubectl describe httproute\`; it names the actual problem.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '用了 \`envoy-public\` 那个 class。门户能访问了，但同时也暴露到了公网上 —— 判定会挂在这一条，现实里则是一次事故。',
+      'Using the \`envoy-public\` class. The portal works, and is also on the public internet. The grader catches it; production would not.'
+    ),
+    t(
+      '只删 Ingress 不删 ingress-nginx 的 Deployment。那个 Pod 还在那儿 CrashLoop，占着资源，还会让下一个人以为入口是它在管。',
+      'Deleting the Ingress but not the ingress-nginx Deployment. The pod keeps crash-looping, burning resources and misleading the next person.'
+    ),
+    t(
+      'HTTPRoute 的 \`hostnames\` 和 Gateway listener 的 \`hostname\` 对不上，两边都写了但不一样，结果是永远 404。',
+      'Mismatched \`hostnames\` between the HTTPRoute and the Gateway listener: both set, both different, permanent 404.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      // 平台组装好的 Envoy Gateway：控制器本身是集群里的一个工作负载
+      {
+        apiVersion: 'apps/v1', kind: 'Deployment',
+        metadata: {
+          name: 'envoy-gateway', namespace: 'envoy-gateway-system',
+          labels: { 'app.kubernetes.io/name': 'envoy-gateway' },
+        },
+        spec: {
+          replicas: 1,
+          selector: { matchLabels: { 'app.kubernetes.io/name': 'envoy-gateway' } },
+          template: {
+            metadata: { labels: { 'app.kubernetes.io/name': 'envoy-gateway' } },
+            spec: { containers: [{ name: 'controller', image: ENVOY_IMAGE }] },
+          },
+        },
+      },
+      {
+        apiVersion: 'gateway.envoyproxy.io/v1alpha1', kind: 'EnvoyProxy',
+        metadata: { name: 'internal', namespace: 'envoy-gateway-system' },
+        spec: { provider: { kubernetes: { envoyService: { loadBalancerClass: 'corp.internal/office-lb' } } } },
+      },
+      {
+        apiVersion: 'gateway.envoyproxy.io/v1alpha1', kind: 'EnvoyProxy',
+        metadata: { name: 'public', namespace: 'envoy-gateway-system' },
+        spec: { provider: { kubernetes: { envoyService: { loadBalancerClass: 'corp.internal/public-lb' } } } },
+      },
+      {
+        apiVersion: 'gateway.networking.k8s.io/v1', kind: 'GatewayClass',
+        metadata: { name: 'envoy-internal' },
+        spec: {
+          controllerName: 'gateway.envoyproxy.io/gatewayclass-controller',
+          parametersRef: {
+            group: 'gateway.envoyproxy.io', kind: 'EnvoyProxy',
+            name: 'internal', namespace: 'envoy-gateway-system',
+          },
+        },
+      },
+      {
+        apiVersion: 'gateway.networking.k8s.io/v1', kind: 'GatewayClass',
+        metadata: { name: 'envoy-public' },
+        spec: {
+          controllerName: 'gateway.envoyproxy.io/gatewayclass-controller',
+          parametersRef: {
+            group: 'gateway.envoyproxy.io', kind: 'EnvoyProxy',
+            name: 'public', namespace: 'envoy-gateway-system',
+          },
+        },
+      },
+      // 已经退役的 ingress-nginx：镜像下架了，控制器起不来
+      {
+        apiVersion: 'apps/v1', kind: 'Deployment',
+        metadata: {
+          name: 'ingress-nginx-controller', namespace: 'ingress-nginx',
+          labels: { 'app.kubernetes.io/name': 'ingress-nginx' },
+        },
+        spec: {
+          replicas: 1,
+          selector: { matchLabels: { 'app.kubernetes.io/name': 'ingress-nginx' } },
+          template: {
+            metadata: { labels: { 'app.kubernetes.io/name': 'ingress-nginx' } },
+            spec: { containers: [{ name: 'controller', image: RETIRED_NGINX_IMAGE }] },
+          },
+        },
+      },
+      // 门户本身
+      {
+        apiVersion: 'apps/v1', kind: 'Deployment',
+        metadata: { name: 'portal', namespace: 'payments' },
+        spec: {
+          replicas: 2,
+          selector: { matchLabels: { app: 'portal' } },
+          template: {
+            metadata: { labels: { app: 'portal' } },
+            spec: { containers: [{ name: 'web', image: PORTAL_IMAGE, ports: [{ containerPort: 8080 }] }] },
+          },
+        },
+      },
+      {
+        apiVersion: 'v1', kind: 'Service',
+        metadata: { name: 'portal', namespace: 'payments' },
+        spec: { clusterIP: '10.96.1.10', selector: { app: 'portal' }, ports: [{ port: 80, targetPort: 8080 }] },
+      },
+    ],
+    files: {
+      '/root/infra/ingress.yaml': LEGACY_INGRESS,
+      '/root/infra/gateway.yaml': '# 在这里写 Gateway 与 HTTPRoute\n',
+    },
+    referenceFiles: { '/root/infra/gateway.yaml': GATEWAY_REFERENCE },
+    referenceCommands: [
+      'kubectl apply -f /root/infra/ingress.yaml',
+      'kubectl apply -f /root/infra/gateway.yaml',
+      'kubectl delete ingress portal -n payments',
+      'kubectl delete deployment ingress-nginx-controller -n ingress-nginx',
+      'rm -f /root/infra/ingress.yaml',
+    ],
+  },
+  specs: [
+    spec('gateway-migration.spec.ts', code`
+      import { get, list, sh, world } from '@ops/lab';
+
+      function conditionOf(object, type) {
+        return ((object.status || {}).conditions || []).find((entry) => entry.type === type);
+      }
+
+      describe('从 Ingress 迁到 Gateway API', () => {
+        it('Gateway 建出来了，而且被 program 了', () => {
+          const gateways = list('Gateway', { namespace: 'payments' });
+          expect(gateways.length).toBe(1);
+          expect(conditionOf(gateways[0], 'Programmed').status).toBe('True');
+          expect(gateways[0].status.addresses.length).toBe(1);
+        });
+
+        it('用的是内网 class，不是公网那个', () => {
+          const gateway = list('Gateway', { namespace: 'payments' })[0];
+          expect(gateway.spec.gatewayClassName).toBe('envoy-internal');
+        });
+
+        it('HTTPRoute 的后端解析得到', () => {
+          const routes = list('HTTPRoute', { namespace: 'payments' });
+          expect(routes.length).toBe(1);
+          const parent = routes[0].status.parents[0];
+          const resolved = parent.conditions.find((entry) => entry.type === 'ResolvedRefs');
+          expect(resolved.status).toBe('True');
+        });
+
+        it('办公网访问得到，返回 200', async () => {
+          const gateway = list('Gateway', { namespace: 'payments' })[0];
+          const address = gateway.status.addresses[0].value;
+          // DNS 还没改过来，用 --resolve 直连 Gateway 的地址
+          const result = await sh(
+            'curl -s -o /dev/null -w %{http_code} --resolve portal.corp.internal:80:' + address
+            + ' http://portal.corp.internal/'
+          );
+          expect(result.code).toBe(0);
+          expect(result.stdout).toBe('200');
+        });
+
+        it('公网访问不到', () => {
+          const gateway = list('Gateway', { namespace: 'payments' })[0];
+          const address = gateway.status.addresses[0].value;
+          const outcome = world.cluster.network.connect(
+            { zone: 'internet', label: 'outside', ip: '203.0.113.9' },
+            { host: 'portal.corp.internal', address, headerHost: 'portal.corp.internal', port: 80, path: '/' }
+          );
+          expect(outcome.kind).toBe('no-route');
+        });
+
+        it('老的 Ingress 下线了', () => {
+          expect(list('Ingress', { namespace: 'payments' }).length).toBe(0);
+        });
+
+        it('ingress-nginx 的控制器也下线了', () => {
+          const left = list('Deployment', { namespace: 'ingress-nginx' });
+          expect(left.length).toBe(0);
+        });
+      });
+    `),
+  ],
+  focus: ['correctness', 'resilience'],
+  extension: t(
+    code`
+      Gateway API 相对 Ingress 最大的改进是**角色分离**：GatewayClass 归平台，
+      Gateway 归集群管理员（决定端口、证书、暴露到哪个网段），HTTPRoute 归应用
+      团队。Ingress 时代所有这些都挤在一个对象和一堆 annotation 里，
+      于是「谁能改什么」根本没法划清。
+
+      这一关里「内网还是公网」由 GatewayClass 背后的 EnvoyProxy 参数决定，
+      应用团队写 HTTPRoute 时碰不到它 —— 这正是分离的价值：
+      应用团队不可能不小心把自己暴露到公网上。
+    `,
+    code`
+      The biggest improvement Gateway API makes over Ingress is **role separation**:
+      GatewayClass belongs to the platform, Gateway to the cluster administrator
+      (ports, certificates, which network it is exposed on), and HTTPRoute to the
+      application team. Under Ingress all of that was crammed into one object and a
+      pile of annotations, so "who may change what" could not be drawn at all.
+
+      Here, internal-versus-public is decided by the EnvoyProxy parameters behind the
+      GatewayClass, and the application team never touches it while writing an
+      HTTPRoute. That is the point of the separation: an application team cannot
+      accidentally publish itself to the internet.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -1693,5 +2059,5 @@ module.exports = {
   ),
   workspace: { kind: 'ops', world: WORLD },
   files: [],
-  stages: [stage1, stage2, stage3, stage4, stage5, stage6, stage7],
+  stages: [stage1, stage2, stage3, stage4, stage5, stage6, stage7, stage8],
 };

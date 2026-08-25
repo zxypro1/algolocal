@@ -1147,6 +1147,21 @@ const primers = {
       )
     ),
 
+    'gateway-migration': t(
+      p(
+        '集群里的服务默认只能在集群内部访问。要让外面进得来，需要一个`入口`。早年的做法是 `Ingress`：一个对象里写着域名、路径和后端 Service，再由某个 Ingress 控制器（nginx、traefik 之类）把它翻译成真正的反向代理配置。Ingress 的规范只覆盖了最基础的 HTTP 路由，超出的部分全靠 annotation，于是每家控制器一套写法，配置无法在实现之间迁移。',
+        '`Gateway API` 是它的继任者，2023 年 GA。最大的变化是把一个对象拆成三个，按`角色`分开：`GatewayClass` 由平台方提供，声明「这套入口由哪个控制器实现」；`Gateway` 由集群管理员建，决定监听哪些端口、用什么证书、暴露到哪个网段；`HTTPRoute` 由应用团队自己写，只管路径怎么分发到哪个 Service。谁能改什么，从此在 RBAC 上划得清。',
+        '一条请求进来要经过两层匹配。先看 Gateway 的 `listener`：端口对不对、`hostname` 对不对。再看挂在这个 Gateway 上的 HTTPRoute：`hostnames` 对不对、`rules.matches` 里的路径对不对。两层都过了才转给 `backendRefs` 指的 Service。任何一层没匹配上，Gateway 会回 404 而不是拒绝连接，因为 Gateway 本身是活着的。这个区别决定了排查方向：404 去查路由，连不上去查 Gateway。',
+        '状态写在两处，都值得先看。Gateway 的 `Programmed` 条件说明控制器有没有把配置下发下去，`status.addresses` 里是真正的访问地址。HTTPRoute 的 `status.parents[].conditions` 里有 `Accepted` 和 `ResolvedRefs`，后者会直接说出后端 Service 是不是不存在，省掉一轮猜测。'
+      ),
+      p(
+        'Services in a cluster are only reachable from inside it by default. Letting outside traffic in requires an `ingress point`. The original mechanism was `Ingress`: one object holding hostnames, paths, and backend Services, translated into real reverse-proxy configuration by some Ingress controller (nginx, traefik, and others). The Ingress spec only covered basic HTTP routing, so everything beyond it lived in annotations, every controller invented its own, and configuration could not move between implementations.',
+        '`Gateway API` is the successor, GA since 2023. Its central change is splitting that one object into three along `role` lines. `GatewayClass` is offered by the platform and names the controller implementing it. `Gateway` is created by the cluster administrator and decides which ports to listen on, which certificates to use, and which network it is exposed on. `HTTPRoute` is written by the application team and only says which path goes to which Service. Who may change what is finally expressible in RBAC.',
+        'An incoming request passes two matching layers. First the Gateway `listener`: correct port, correct `hostname`. Then the HTTPRoutes attached to that Gateway: correct `hostnames`, correct path in `rules.matches`. Only if both pass does traffic go to the Service in `backendRefs`. If either fails, the Gateway returns 404 rather than refusing the connection, because the Gateway itself is alive. That distinction sets the direction of an investigation: a 404 means look at routing, a refused connection means look at the Gateway.',
+        'Status lives in two places and both are worth reading first. The Gateway `Programmed` condition says whether the controller pushed configuration down, and `status.addresses` holds the real address. An HTTPRoute carries `Accepted` and `ResolvedRefs` in `status.parents[].conditions`, and the latter states outright whether the backend Service is missing, saving a round of guessing.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',

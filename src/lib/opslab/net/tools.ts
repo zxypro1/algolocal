@@ -46,10 +46,17 @@ interface CurlFlags {
   url?: string;
   method?: string;
   verbose: boolean;
+  /** `-H 'Host: x'` */
+  hostHeader?: string;
+  /** `--resolve host:port:addr` */
+  resolveTo: Array<{ host: string; port: number; address: string }>;
 }
 
 function parseCurl(argv: string[]): CurlFlags {
-  const flags: CurlFlags = { silent: false, headOnly: false, failOnError: false, include: false, verbose: false };
+  const flags: CurlFlags = {
+    silent: false, headOnly: false, failOnError: false, include: false, verbose: false,
+    resolveTo: [],
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     switch (arg) {
@@ -64,6 +71,20 @@ function parseCurl(argv: string[]): CurlFlags {
       case '-X': case '--request': flags.method = argv[++i]; break;
       case '-m': case '--max-time': flags.maxTimeMs = Number(argv[++i]) * 1000; break;
       case '--connect-timeout': flags.maxTimeMs = Number(argv[++i]) * 1000; break;
+      case '-H': case '--header': {
+        const header = argv[++i] ?? '';
+        const match = /^\s*host\s*:\s*(\S+)\s*$/i.exec(header);
+        if (match) flags.hostHeader = match[1];
+        break;
+      }
+      case '--resolve': {
+        // host:port:address
+        const parts = (argv[++i] ?? '').split(':');
+        if (parts.length >= 3) {
+          flags.resolveTo.push({ host: parts[0], port: Number(parts[1]), address: parts[2] });
+        }
+        break;
+      }
       case '-k': case '--insecure': break;
       case '-L': case '--location': break;
       default:
@@ -104,6 +125,11 @@ function curl(argv: string[], options: NetToolsOptions): CommandResult {
   if (!target) return { stderr: `curl: (3) URL rejected: Bad hostname\n`, code: 3 };
   if (flags.method) target.method = flags.method;
   if (flags.headOnly) target.method = 'HEAD';
+  if (flags.hostHeader) target.headerHost = flags.hostHeader;
+  const override = flags.resolveTo.find(
+    (entry) => entry.host === target.host && entry.port === target.port
+  );
+  if (override) target.address = override.address;
 
   const result = options.network.connect(options.source(), target);
   const spent = flags.maxTimeMs !== undefined

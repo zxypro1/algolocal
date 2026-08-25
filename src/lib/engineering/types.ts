@@ -241,6 +241,17 @@ export interface OpsWorldSpec {
   /** 集群外的名字：`git.corp.internal` -> ['10.10.0.30'] */
   externalHosts?: Record<string, string[]>;
   /**
+   * 负载均衡地址池。
+   *
+   * `loadBalancerClass` 决定从哪个池子分地址，也决定这个地址能被谁访问到。
+   * 「内网入口」与「公网入口」的分野在这里。
+   */
+  addressPools?: Array<{
+    loadBalancerClass: string;
+    cidrPrefix: string;
+    zones: Array<'office' | 'internet'>;
+  }>;
+  /**
    * 哪些主机名解析得到 apiserver。
    *
    * 不填就是 `apiserver.opslab`。写错 server 的 kubeconfig 应该连不上，

@@ -27,7 +27,10 @@ import {
   SchedulerController,
 } from './workloads';
 import type { ImageBehavior, RegistryAuth } from './runtime';
-import { Network, createNetwork } from '../net';
+import { Network, createNetwork, type Zone } from '../net';
+import {
+  AddressPool, GATEWAY_RESOURCES, GatewayController, LoadBalancerController, resolveGateway,
+} from '../gateway';
 
 export interface NodeSpec {
   name: string;
@@ -53,8 +56,13 @@ export interface ClusterOptions {
   resolveImage?: (image: string) => ImageSpec | undefined;
   /** 集群外的名字，`harbor.corp.internal` 之类 */
   externalHosts?: Record<string, string[]>;
-  /** 哪些地址暴露到了哪些分区（Gateway / LoadBalancer 往这里加） */
-  exposure?: (address: string) => import('../net').Zone[];
+  /**
+   * 负载均衡地址池。
+   *
+   * `loadBalancerClass` 决定从哪个池子分地址，也决定这个地址被暴露到哪个网段。
+   * 内网入口与公网入口的分野在这里，不在 Gateway 自己身上。
+   */
+  addressPools?: AddressPool[];
   /**
    * 集群「已经跑了多久」。
    *
@@ -65,6 +73,11 @@ export interface ClusterOptions {
   clusterAgeMs?: number;
   extraResources?: ResourceDefinition[];
 }
+
+/** 不声明地址池时，只有一个内网池 —— 默认不该把东西暴露到公网 */
+const DEFAULT_POOLS: AddressPool[] = [
+  { loadBalancerClass: 'corp.internal/office-lb', cidrPrefix: '10.10.8', zones: ['office'] },
+];
 
 export class Cluster {
   readonly kernel: Kernel;
@@ -88,7 +101,9 @@ export class Cluster {
     const now = () => startTime + this.kernel.now() - this.backdate;
 
     this.store = createStore();
-    this.scheme = createScheme([...CORE_RESOURCES, ...(options.extraResources ?? [])]);
+    this.scheme = createScheme([
+      ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...(options.extraResources ?? []),
+    ]);
     this.registry = new Registry({
       store: this.store,
       scheme: this.scheme,
@@ -100,12 +115,35 @@ export class Cluster {
       registry: this.registry,
       scheme: this.scheme,
       externalHosts: options.externalHosts,
-      exposure: options.exposure,
+      exposure: (address) => this.zonesOf(address),
+      gatewayRoute: (address, request) =>
+        resolveGateway({ registry: this.registry, scheme: this.scheme }, address, request),
       imageOf: (image) => this.imageBehaviorOf(image),
       now,
     });
 
     this.seed();
+  }
+
+  /**
+   * 这个地址被暴露到了哪些网段。
+   *
+   * 读的是 LoadBalancer Service 的 `spec.loadBalancerClass` —— 也就是说
+   * 「内网还是公网」是集群里的一个对象说了算的，不是宿主写死的。
+   */
+  private zonesOf(address: string): Zone[] {
+    const services = this.scheme.get({ group: '', version: 'v1', resource: 'services' });
+    if (!services) return [];
+    for (const service of this.registry.list(services).items) {
+      const ingress = ((service.status ?? {}) as any)?.loadBalancer?.ingress ?? [];
+      if (!ingress.some((entry: any) => entry.ip === address)) continue;
+      const className = ((service.spec ?? {}) as any).loadBalancerClass;
+      const pool = (this.options.addressPools ?? []).find(
+        (item) => item.loadBalancerClass === className
+      ) ?? (this.options.addressPools ?? [])[0];
+      return (pool?.zones ?? ['office']) as Zone[];
+    }
+    return [];
   }
 
   /** 这个镜像的运行时行为：端口、路由、内存。网络与 kubelet 共用同一份。 */
@@ -246,6 +284,9 @@ export class Cluster {
       new ReplicaSetController(context),
       new DeploymentController(context),
       new EndpointsController(context),
+      // 入口：控制器自己是集群里的一个工作负载，卸载掉 Gateway 就不再被 program
+      new GatewayController(context),
+      new LoadBalancerController(context, this.options.addressPools ?? DEFAULT_POOLS),
       ...this.nodeSpecs.flatMap((node) => [
         new KubeletController(context, node.name, {
           images: this.options.images,

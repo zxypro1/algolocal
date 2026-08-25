@@ -475,6 +475,20 @@ describe('网络工具的输出与退出码', () => {
     expect(result.stderr).toContain('nc -z');
   });
 
+  it('curl --resolve 跳过 DNS，-H Host 改的是 Host 头', async () => {
+    const world = await jumpHost();
+    // DNS 里没有这个名字，但 --resolve 指定了地址就不查 DNS 了
+    const resolved = await world.run(
+      'curl -s --resolve portal.corp.internal:80:10.96.1.10 http://portal.corp.internal/'
+    );
+    // 办公网到不了 ClusterIP，所以是 no route 而不是解析失败 —— 说明确实跳过了 DNS
+    expect(resolved.code).toBe(7);
+    expect(resolved.stderr).toContain('No route to host');
+
+    const unresolved = await world.run('curl -s http://portal.corp.internal/');
+    expect(unresolved.code).toBe(6);
+  });
+
   it('curl -w %{http_code} 与 -o /dev/null', async () => {
     const world = await jumpHost();
     // 办公网到不了集群，但格式本身要对：先验一个能到的外部地址上的失败路径
