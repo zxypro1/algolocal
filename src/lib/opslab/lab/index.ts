@@ -12,3 +12,5 @@ export {
 
 export { toolchainFor, baseImageOf, type ToolchainName } from './toolchains';
 export { createExecHandler, normalizeCommand } from './podshell';
+export { buildPacketPath, buildPacketPaths } from './view';
+export type { PacketPath, PacketStep } from './view';

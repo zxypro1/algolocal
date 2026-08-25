@@ -14,7 +14,7 @@ import {
 } from '@mantine/core';
 import {
   IconAlertTriangle, IconDeviceDesktop, IconFileCode, IconPlayerPlay,
-  IconRefresh, IconSitemap, IconTimeline,
+  IconRefresh, IconRoute, IconSitemap, IconTimeline,
 } from '@tabler/icons-react';
 import { useMantineColorScheme } from '@mantine/core';
 import Editor from '@monaco-editor/react';
@@ -33,6 +33,7 @@ import type { StageRunReport } from '../../lib/engineering/types';
 
 const OpsTerminal = dynamic(() => import('./OpsTerminal'), { ssr: false });
 const TopologyView = dynamic(() => import('./TopologyView'), { ssr: false });
+const PacketPathPanel = dynamic(() => import('./PacketPathPanel'), { ssr: false });
 
 export interface OpsWorkspaceProps {
   session: ProjectSession;
@@ -79,6 +80,13 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
   const [report, setReport] = useState<StageRunReport | null>(null);
   const [running, setRunning] = useState(false);
   const [rightTab, setRightTab] = useState<string>('topology');
+  /**
+   * 包路径选中的那一跳对应的拓扑节点。
+   *
+   * 存在这里而不是各自面板里：两个面板在同一个位置轮换，切回拓扑时
+   * 那一跳还该是圈着的 —— 不然「先看路径、再切回图上找它」这个动作就断了。
+   */
+  const [highlight, setHighlight] = useState<string | undefined>();
   const insertRef = useRef<((command: string) => void) | null>(null);
 
   // 换关卡 / 重置时把结果清掉，和代码形态一样
@@ -331,6 +339,7 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                     data={[
                       { value: 'topology', label: <Group gap={4} wrap="nowrap"><IconSitemap size={12} />拓扑</Group> },
                       { value: 'changes', label: <Group gap={4} wrap="nowrap"><IconTimeline size={12} />事件与变更</Group> },
+                      { value: 'packets', label: <Group gap={4} wrap="nowrap"><IconRoute size={12} />包路径</Group> },
                     ]}
                   />
                   <Group gap="xs">
@@ -354,9 +363,15 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                 </Group>
                 <div style={{ flex: 1, minHeight: 0 }}>
                   <ErrorBoundary fallback={renderPanelError}>
-                    {rightTab === 'topology'
-                      ? <TopologyView graph={ops.topology} onInspect={handleInspect} />
-                      : <ChangeStream changes={ops.changes} events={ops.events} />}
+                    {rightTab === 'topology' && (
+                      <TopologyView graph={ops.topology} onInspect={handleInspect} highlight={highlight} />
+                    )}
+                    {rightTab === 'changes' && (
+                      <ChangeStream changes={ops.changes} events={ops.events} />
+                    )}
+                    {rightTab === 'packets' && (
+                      <PacketPathPanel paths={ops.packetPaths} onHighlight={setHighlight} />
+                    )}
                   </ErrorBoundary>
                 </div>
               </div>

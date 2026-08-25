@@ -16,3 +16,4 @@ export {
   readFrame, writeFrame, OPCODE,
   type UpgradeRequest, type StreamSession, type StreamServer, type Frame,
 } from './websocket';
+export type { ConnectTrace } from './network';

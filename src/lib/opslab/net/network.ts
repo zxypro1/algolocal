@@ -81,8 +81,37 @@ export interface NetworkDeps {
 const LATENCY = { dns: 2, hop: 1, app: 8 };
 export const CONNECT_TIMEOUT_MS = 30_000;
 
+/** 一次连接留下的记录。面板拿它回放包走过的路。 */
+export interface ConnectTrace {
+  id: number;
+  /** 虚拟墙钟 */
+  at: number;
+  source: Source;
+  target: Target;
+  result: ConnectResult;
+}
+
+/** 留最近这么多条。再多面板也看不过来，而且会拖住快照。 */
+const TRACE_LIMIT = 24;
+
 export class Network {
   constructor(private readonly deps: NetworkDeps) {}
+
+  /**
+   * 最近几次连接。
+   *
+   * 排查网络问题时最缺的东西是「这个包到底走到哪一步被拦下的」。
+   * 每次 connect 都记一条，面板可以逐跳回放 —— 不用学员自己脑补。
+   */
+  readonly traces: ConnectTrace[] = [];
+  private traceSeq = 0;
+
+  private record(source: Source, target: Target, result: ConnectResult): ConnectResult {
+    this.traceSeq += 1;
+    this.traces.push({ id: this.traceSeq, at: this.deps.now(), source, target, result });
+    if (this.traces.length > TRACE_LIMIT) this.traces.shift();
+    return result;
+  }
 
   /** Pod 的 resolv.conf，`kubectl exec ... cat /etc/resolv.conf` 就该打这个 */
   resolvConfOf(namespace: string): string {
@@ -103,8 +132,14 @@ export class Network {
    * 连一次。
    *
    * 返回的 hops 是完整的包路径，拓扑的数据面层与 Hubble 的流日志都读它。
+   * 每次连接都会留一条 trace，面板据此逐跳回放。
    */
   connect(source: Source, target: Target): ConnectResult {
+    return this.record(source, target, this.route(source, target));
+  }
+
+  /** connect 的本体。分出来只是为了让每条返回路径都被记上。 */
+  private route(source: Source, target: Target): ConnectResult {
     const hops: Hop[] = [];
     let elapsed = 0;
 
