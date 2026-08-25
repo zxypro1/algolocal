@@ -66,7 +66,9 @@ export function createGitCommand(options: GitCommandOptions): CommandHandler {
       case 'add': {
         const repository = open();
         if (!repository) return notARepo;
-        const paths = rest.filter((entry) => !entry.startsWith('-'));
+        // `-A` / `--all` / `-u` 都是「整棵树」，包括删除
+        const all = rest.some((entry) => entry === '-A' || entry === '--all' || entry === '-u');
+        const paths = all ? ['.'] : rest.filter((entry) => !entry.startsWith('-'));
         if (paths.length === 0) return { stderr: 'Nothing specified, nothing added.\n', code: 1 };
         const { missing } = repository.add(paths);
         if (missing.length > 0) {
@@ -416,6 +418,7 @@ function push(repository: Repository | undefined, argv: string[], options: GitCo
 
   repository.objects.copyTo(bare.repository.objects, hash);
   bare.repository.refs[branch] = hash;
+  options.network.notifyPush(url);
   const range = before ? `${before.slice(0, 7)}..${hash.slice(0, 7)}` : `[new branch]      ${branch}`;
   return {
     stderr: `To ${url}\n   ${range}  ${branch} -> ${branch}\n`,

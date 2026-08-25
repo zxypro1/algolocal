@@ -5616,7 +5616,8 @@
           "analytics",
           "envoy-gateway-system",
           "ingress-nginx",
-          "cert-manager"
+          "cert-manager",
+          "argocd"
         ],
         "images": {
           "harbor.corp.internal/team/portal:1.4.0": {
@@ -5678,6 +5679,14 @@
               9962
             ],
             "enforcesNetworkPolicy": true
+          },
+          "quay.io/argoproj/argocd:v3.2.4": {
+            "pullMs": 500,
+            "startupMs": 700,
+            "readyAfterMs": 300,
+            "listens": [
+              8080
+            ]
           },
           "harbor.corp.internal/team/reports:2.1.0": {
             "pullMs": 500,
@@ -5755,6 +5764,18 @@
               "library"
             ],
             "anonymousPull": false
+          }
+        ],
+        "gitRepositories": [
+          {
+            "url": "https://git.corp.internal/platform/apps",
+            "branch": "main",
+            "message": "bootstrap platform repo",
+            "files": {
+              "README.md": "# platform/apps\n\n集群里跑什么，以这个仓库为准。\n手工 kubectl apply 出来的东西迟早会被同步回来。\n",
+              "apps/portal/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: portal\n  template:\n    metadata:\n      labels:\n        app: portal\n    spec:\n      containers:\n      - name: web\n        image: harbor.corp.internal/team/portal:1.4.0\n        ports:\n        - containerPort: 8080\n",
+              "apps/portal/service.yaml": "apiVersion: v1\nkind: Service\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  clusterIP: 10.96.1.10\n  selector:\n    app: portal\n  ports:\n  - port: 80\n    targetPort: 8080\n"
+            }
           }
         ],
         "endpoints": [
@@ -7496,6 +7517,481 @@
         "primer": {
           "zh": "集群里的 Pod 默认可以互相访问，不分命名空间。`NetworkPolicy` 是收紧这件事的对象：它按标签选中一批 Pod，然后声明这批 Pod 的入向（`ingress`）和出向（`egress`）允许什么。没有任何策略选中某个 Pod 时，这个 Pod 完全开放；一旦被选中，对应方向就变成默认拒绝，只有明确写出来的才放行。\n\n有两件事经常被搞混。第一，`policyTypes` 决定这条策略管哪个方向：写了 `Egress` 却不写任何 egress 规则，等于「这批 Pod 什么都出不去」，包括查 DNS。第二，`from` 和 `to` 里的每一个元素是「或」的关系，但同一个元素内部的 `podSelector` 和 `namespaceSelector` 是「与」。写成两个元素就是「这个命名空间的所有 Pod，或者任何命名空间里叫这个名字的 Pod」，比想要的宽得多。另外，只写 `podSelector` 不写 `namespaceSelector` 时，它只在策略自己所在的命名空间里找。\n\n最关键、也最容易踩的一点：`NetworkPolicy` 只是一个被 apiserver 收下的对象，真正拦不拦包取决于 CNI。flannel 这类只做网络连通的插件根本不看这些对象，策略写得再对也是一张废纸；Cilium、Calico 这类才会把它翻译成数据面规则。所以「加了策略但行为没变」时，第一个要确认的不是策略写得对不对，而是集群里到底有没有人在执行它。\n\n被策略拒绝的连接表现为`超时`，不是`拒绝`。丢包意味着对端不会回 RST，客户端只能等到自己的超时时间。这个区别很有用：`Connection refused` 说明包已经到了对端而那里没有进程在听，和策略无关；`timeout` 才值得去看策略、路由和防火墙。",
           "en": "Pods can reach each other freely by default, across namespaces. `NetworkPolicy` is how you tighten that: it selects pods by label and declares what their inbound (`ingress`) and outbound (`egress`) traffic may be. A pod that no policy selects stays fully open; once selected, that direction becomes deny-by-default and only what you spell out gets through.\n\nTwo details cause most of the confusion. First, `policyTypes` decides which directions the policy governs: listing `Egress` without writing any egress rule means \"these pods may not reach anything\", DNS lookups included. Second, entries in `from` and `to` are ORed together, but `podSelector` and `namespaceSelector` inside a single entry are ANDed. Writing them as two entries means \"every pod in that namespace, or any pod with that label in any namespace\", which is far wider than intended. And a bare `podSelector` with no `namespaceSelector` only matches within the policy own namespace.\n\nThe most important point, and the easiest to miss: a `NetworkPolicy` is only an object the apiserver accepts. Whether packets get dropped depends on the CNI. Plugins like flannel provide connectivity and never read these objects, so a perfectly correct policy does nothing at all; Cilium and Calico translate them into real data plane rules. When a policy changes no behaviour, the first thing to check is not the policy but whether anything is enforcing it.\n\nA connection denied by policy shows up as a `timeout`, not a `refusal`. Dropping a packet means no RST comes back, so the client waits out its own deadline. That distinction is useful: `Connection refused` means the packet arrived and no process was listening, which has nothing to do with policy, while a `timeout` is what sends you looking at policies, routing, and firewalls."
+        }
+      },
+      {
+        "id": "gitops-with-argocd",
+        "title": {
+          "zh": "GitOps：让仓库说了算",
+          "en": "GitOps: Let the Repository Decide"
+        },
+        "goal": {
+          "zh": "平台组要求所有服务改走 GitOps：集群里跑什么，以仓库\n`https://git.corp.internal/platform/apps` 为准。Argo CD 已经装好了。\n\n现在的状况是：仓库里门户写的是 2 个副本，集群里跑着 5 个 ——\n某次大促前任手工 `kubectl scale` 上去的，没回写仓库。谁也说不清\n还有多少这种改动。\n\n`/root/infra/application.yaml` 里是一份 Application 的草稿。\n\n## 通关标准\n\n1. 门户由 Argo CD 管起来，`kubectl get app -n argocd` 里 `Synced` + `Healthy`；\n2. 集群里的副本数回到仓库写的那个；\n3. 之后再有人手工改，会被自己改回来（不需要人介入）；\n4. 想把副本数改成 3，得**通过仓库**改 —— 直接 kubectl 不算；\n5. 仓库里删掉的东西，集群里也要跟着消失。\n\n## 会用到的命令\n\n```bash\ngit clone https://git.corp.internal/platform/apps\nkubectl apply -f /root/infra/application.yaml\nkubectl get app -n argocd\nkubectl describe app portal -n argocd\nkubectl patch app portal -n argocd --type merge -p '{\"operation\":{\"sync\":{}}}'\n```\n",
+          "en": "The platform team wants every service on GitOps: what runs in the cluster is\nwhatever `https://git.corp.internal/platform/apps` says. Argo CD is already\ninstalled.\n\nRight now the repository says two replicas for the portal and the cluster runs\nfive, hand-scaled before a sale and never written back. Nobody knows how many\nother changes like that are out there.\n\n`/root/infra/application.yaml` holds a draft Application.\n\n## Done when\n\n1. the portal is managed by Argo CD and `kubectl get app -n argocd` shows\n   `Synced` and `Healthy`;\n2. the live replica count matches what the repository says;\n3. later hand edits get reverted automatically, with nobody in the loop;\n4. changing the count to three happens **through the repository**, not with\n   kubectl;\n5. what is deleted from the repository disappears from the cluster.\n\n## Commands you will need\n\n```bash\ngit clone https://git.corp.internal/platform/apps\nkubectl apply -f /root/infra/application.yaml\nkubectl get app -n argocd\nkubectl describe app portal -n argocd\nkubectl patch app portal -n argocd --type merge -p '{\"operation\":{\"sync\":{}}}'\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "Application 建起来，Synced + Healthy",
+            "en": "Application created, Synced and Healthy"
+          },
+          {
+            "zh": "漂移被纠正，而且以后会自己纠正",
+            "en": "Drift corrected, and stays corrected on its own"
+          },
+          {
+            "zh": "改配置走仓库这条路",
+            "en": "Configuration changes go through the repository"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "光建一个 Application 只会让它去**比对**，不会动手。`kubectl get app` 会显示 OutOfSync —— 那说明它看见了差异，在等你发话。",
+            "en": "Creating an Application only makes Argo CD **compare**; it will not act. `kubectl get app` shows OutOfSync, meaning it sees the difference and is waiting for you."
+          },
+          {
+            "zh": "自动同步分两层：`syncPolicy.automated` 让它在仓库变化时自己 apply；再加 `selfHeal: true` 才会把集群里的手改拉回来；`prune: true` 才会删掉仓库里已经没有的对象。三个开关管三件事。",
+            "en": "Automated sync has layers: `syncPolicy.automated` applies repository changes; `selfHeal: true` also pulls hand edits back; `prune: true` deletes objects that no longer exist in the repository. Three switches, three behaviours."
+          },
+          {
+            "zh": "Argo CD 看的是**远端仓库**。在跳板机上改完不 push，它什么都看不到。",
+            "en": "Argo CD reads the **remote** repository. Edits on the jump host that are not pushed are invisible to it."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "把副本数用 `kubectl scale` 改成 3 就交差。开了 selfHeal 之后这个改动活不过一轮同步；没开的话它会一直挂着 OutOfSync，下一个人看到的仍然是「仓库和现实不一致」。GitOps 的意思就是这条路被堵死了。",
+            "en": "Scaling to three with `kubectl scale` and calling it done. With selfHeal on, the change does not survive one sync; with it off, the app sits OutOfSync and the next person still sees \"repository and reality disagree\". GitOps means that path is closed."
+          },
+          {
+            "zh": "在本地 commit 了但没 push。Argo CD 连的是远端 —— 本地仓库里的提交对它不存在。这个错很难自查，因为 `git log` 看起来一切正常。",
+            "en": "Committing locally without pushing. Argo CD talks to the remote, so a local commit does not exist as far as it is concerned. It is hard to spot because `git log` looks perfectly fine."
+          },
+          {
+            "zh": "看到 OutOfSync 就当成故障。它只说明现状和仓库不一致，服务可能好好的 —— 健康与否是 `status.health` 那一栏。两栏分别代表两件事，混在一起看会把「配置漂移」当成「服务挂了」。",
+            "en": "Treating OutOfSync as an outage. It only means live state differs from the repository; the service may be perfectly fine. Health is a separate column, and conflating the two turns \"configuration drift\" into \"the service is down\"."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "cilium",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cilium"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cilium"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cilium"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "cilium-agent",
+                        "image": "quay.io/cilium/cilium:v1.19.2",
+                        "ports": [
+                          {
+                            "containerPort": 9962
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "Certificate",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "secretName": "portal-tls",
+                "duration": "2160h",
+                "renewBefore": "720h",
+                "commonName": "portal.corp.internal",
+                "dnsNames": [
+                  "portal.corp.internal"
+                ],
+                "issuerRef": {
+                  "name": "corp-ca",
+                  "kind": "ClusterIssuer"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "Gateway",
+              "metadata": {
+                "name": "corp-gw",
+                "namespace": "payments"
+              },
+              "spec": {
+                "gatewayClassName": "envoy-internal",
+                "listeners": [
+                  {
+                    "name": "https",
+                    "port": 443,
+                    "protocol": "HTTPS",
+                    "hostname": "portal.corp.internal",
+                    "tls": {
+                      "mode": "Terminate",
+                      "certificateRefs": [
+                        {
+                          "name": "portal-tls"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "http",
+                    "port": 80,
+                    "protocol": "HTTP",
+                    "hostname": "portal.corp.internal"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "argocd-application-controller",
+                "namespace": "argocd",
+                "labels": {
+                  "app.kubernetes.io/name": "argocd-application-controller"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "argocd-application-controller"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "argocd-application-controller"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/argoproj/argocd:v3.2.4",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "AppProject",
+              "metadata": {
+                "name": "default",
+                "namespace": "argocd"
+              },
+              "spec": {
+                "sourceRepos": [
+                  "*"
+                ],
+                "destinations": [
+                  {
+                    "namespace": "*",
+                    "server": "https://kubernetes.default.svc"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 5,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.corp.internal"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "files": {
+            "/root/infra/application.yaml": "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: portal\n  namespace: argocd\nspec:\n  project: default\n  source:\n    repoURL: https://git.corp.internal/platform/apps\n    path: apps/portal\n    targetRevision: main\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: payments\n"
+          },
+          "referenceFiles": {
+            "/root/infra/application.yaml": "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: portal\n  namespace: argocd\nspec:\n  project: default\n  source:\n    repoURL: https://git.corp.internal/platform/apps\n    path: apps/portal\n    targetRevision: main\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: payments\n  syncPolicy:\n    automated:\n      prune: true\n      selfHeal: true\n"
+          },
+          "referenceCommands": [
+            "kubectl apply -f /root/infra/application.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "gitops-with-argocd.spec.ts",
+            "content": "import { get, list, sh } from '@ops/lab';\n\nconst REPO = 'https://git.corp.internal/platform/apps';\n\ndescribe('GitOps', () => {\n  it('门户归 Argo CD 管，Synced + Healthy', () => {\n    const application = get('Application', 'portal', 'argocd');\n    expect(application).toBeTruthy();\n    expect(application.status.sync.status).toBe('Synced');\n    expect(application.status.health.status).toBe('Healthy');\n  });\n\n  it('集群里的副本数和仓库一致', async () => {\n    const cloned = await sh('rm -rf /tmp/check && git clone ' + REPO + ' /tmp/check');\n    expect(cloned.code).toBe(0);\n    const manifest = await sh('grep -E \"^  replicas:\" /tmp/check/apps/portal/deployment.yaml');\n    const wanted = Number(manifest.stdout.split(':')[1].trim());\n\n    const deployment = get('Deployment', 'portal', 'payments');\n    expect(deployment.spec.replicas).toBe(wanted);\n  });\n\n  it('手改会被改回去 —— 不需要人介入', async () => {\n    await sh('kubectl scale deploy/portal -n payments --replicas=11');\n    const deployment = get('Deployment', 'portal', 'payments');\n    expect(deployment.spec.replicas).not.toBe(11);\n  });\n\n  it('仓库里删掉的对象，集群里也会消失', async () => {\n    await sh('rm -rf /tmp/prune && git clone ' + REPO + ' /tmp/prune');\n    await sh('cd /tmp/prune && rm apps/portal/service.yaml && git add -A'\n      + ' && git commit -m \"drop the service\" && git push origin main');\n\n    const services = list('Service', { namespace: 'payments' })\n      .map((item) => item.metadata.name);\n    expect(services).not.toContain('portal');\n  });\n\n  it('Argo CD 认的是远端仓库，不是跳板机上那个克隆', () => {\n    const application = get('Application', 'portal', 'argocd');\n    expect(application.spec.source.repoURL).toBe(REPO);\n    // revision 是一个真的 commit sha，不是分支名\n    expect(application.status.sync.revision).toMatch(/^[0-9a-f]{40}$/);\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "maintainability"
+        ],
+        "extension": {
+          "zh": "GitOps 真正改变的不是部署方式，是**「现在到底跑着什么」这个问题的答案从哪里来**。\n在此之前答案只能从集群里问，而集群会被任何一个有权限的人改动，改动不留痕；\n之后答案在仓库里，有历史、有审核、能回滚。\n\n代价是那条手工通道被堵死了。开了 selfHeal 之后，`kubectl edit` 改的东西\n活不过一轮同步 —— 这对救火的人是个不小的调整。真集群里的做法是给\nApplication 加 `ignoreDifferences`（哪些字段不比对，比如 HPA 管的副本数），\n而不是把 selfHeal 关掉。\n\n还有一个容易忽略的点：Argo CD 自己也应该由 Argo CD 管（app-of-apps）。\n不然升级 Argo CD 这件事本身就还是手工的，而它恰恰是最不该漂移的组件。\n",
+          "en": "What GitOps really changes is not how you deploy but **where the answer to\n\"what is running right now\" comes from**. Before, you could only ask the\ncluster, and the cluster can be changed by anyone with access, leaving no trace.\nAfter, the answer lives in a repository with history, review, and rollback.\n\nThe price is that the manual path is closed. With selfHeal on, anything\n`kubectl edit` changes does not survive a sync, which is a real adjustment for\nwhoever is firefighting. The production answer is to add\n`ignoreDifferences` to the Application for fields owned by something else\n(replica counts managed by an HPA, for instance) rather than turning selfHeal\noff.\n\nOne more thing that is easy to miss: Argo CD should manage Argo CD (app of\napps). Otherwise upgrading it stays a manual operation, and it is exactly the\ncomponent that should never drift.\n"
+        },
+        "primer": {
+          "zh": "`GitOps` 把「集群里应该跑什么」这个答案从集群搬到了仓库。一个 Git 仓库存着全部 manifest，一个控制器不停地把仓库和集群比对，不一致就补齐。改配置的方式从「敲 kubectl」变成「提交一次代码」，于是每一次变更天然有作者、有时间、有 review、能回滚。\n\n`Argo CD` 是最常见的实现。它的核心对象是 `Application`：`spec.source` 指到仓库的某个路径与某个分支，`spec.destination` 指到集群的某个命名空间。控制器把那个路径下的 YAML 渲染出来，和集群里的现状比一比，结果写进 `status`。要强调的是它读的是**远端仓库**：本地 commit 了没 push，对它来说等于什么都没发生。\n\n`status` 里有两栏，代表两件完全不同的事，混在一起看会误判。`sync.status` 是 `Synced` 还是 `OutOfSync`，说的是「现状和仓库一不一致」；`health.status` 是 `Healthy` / `Progressing` / `Degraded`，说的是「服务好不好」。一个刚被人手工扩容过的服务是 OutOfSync 但 Healthy；一个刚同步完但镜像拉不下来的服务是 Synced 但 Degraded。\n\n同步行为由 `syncPolicy` 上三个独立的开关决定，各管各的：不写 `automated` 时它只比对、只报告，什么都不动；写了 `automated` 之后仓库一变就自动 apply；再加 `selfHeal: true`，集群里的手工改动也会被拉回仓库的样子；再加 `prune: true`，仓库里删掉的对象才会在集群里被删除。想手动触发一次同步，写 `operation` 字段就行，`argocd app sync` 做的正是这件事。",
+          "en": "`GitOps` moves the answer to \"what should be running\" out of the cluster and into a repository. One Git repository holds all the manifests, a controller continuously compares repository against cluster, and reconciles any difference. Changing configuration becomes committing code, so every change comes with an author, a timestamp, a review, and a way back.\n\n`Argo CD` is the common implementation. Its central object is the `Application`: `spec.source` points at a path and revision in a repository, `spec.destination` at a namespace in a cluster. The controller renders the YAML under that path, compares it with live state, and writes the outcome into `status`. Note that it reads the **remote** repository: a local commit that was never pushed may as well not exist.\n\nTwo fields in `status` mean two entirely different things, and conflating them causes misdiagnosis. `sync.status` (`Synced` or `OutOfSync`) says whether live state matches the repository. `health.status` (`Healthy`, `Progressing`, `Degraded`) says whether the workload is well. A service someone just hand-scaled is OutOfSync but Healthy; a freshly synced service whose image will not pull is Synced but Degraded.\n\nSync behaviour comes from three independent switches under `syncPolicy`. Without `automated`, the controller only compares and reports, never acts. With `automated`, repository changes get applied. Adding `selfHeal: true` also pulls hand edits in the cluster back to what the repository says. Adding `prune: true` deletes objects that no longer exist in the repository. To trigger one sync by hand, write the `operation` field, which is exactly what `argocd app sync` does."
         }
       }
     ]

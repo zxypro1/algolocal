@@ -14,7 +14,7 @@
  *    只要重新起控制器就能收敛的原因。
  */
 import { Kernel, Priority } from '../kernel';
-import { ApiError, KubeObject, Registry, ResourceDefinition } from '../apiserver';
+import { ApiError, KubeObject, Registry, ResourceDefinition, Scheme } from '../apiserver';
 
 /** 对象在队列里的身份：`namespace/name`，集群级资源就是 `name` */
 export function objectKey(object: KubeObject): string {
@@ -264,6 +264,14 @@ export class WorkQueue {
 export interface ControllerContext {
   kernel: Kernel;
   registry: Registry;
+  /**
+   * 类型表。
+   *
+   * 多数控制器只认自己那几种资源，用不上它；但像 Argo CD 这种
+   * 「仓库里写什么就 apply 什么」的控制器，必须能在运行时把
+   * apiVersion/kind 映射到资源。
+   */
+  scheme: Scheme;
   /** 世界的墙钟（起始时刻 + 虚拟流逝），写进对象时间戳用 —— 内核的 now() 是从 0 开始的 */
   now: () => number;
   /** 记一条 Event，学员在 describe 里能看到 */

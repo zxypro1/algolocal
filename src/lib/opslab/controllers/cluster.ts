@@ -18,6 +18,7 @@ import {
 import { Controller, ControllerContext } from './framework';
 import { createServiceIpDefaulter } from './serviceip';
 import { DaemonSetController } from './daemonset';
+import { ARGOCD_RESOURCES, ArgoCdController } from '../argocd';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
@@ -60,6 +61,15 @@ export interface ClusterOptions {
   resolveImage?: (image: string) => ImageSpec | undefined;
   /** 集群外的名字，`harbor.corp.internal` 之类 */
   externalHosts?: Record<string, string[]>;
+  /**
+   * Argo CD 去哪儿取仓库内容。
+   *
+   * 集群自己不认识 Git —— 这条由世界注入，和镜像解析、信任库一样。
+   * 不给就是这个集群没装 GitOps。
+   */
+  gitSource?: import('../argocd').RepoResolver;
+  /** 仓库有新提交时叫一声（webhook）。 */
+  gitSubscribe?: (listener: () => void) => void;
   /** Service 的 VIP 从哪个网段分。默认 10.96.0.0/12，和真集群一样。 */
   serviceCidr?: string;
   /** `kubectl exec` 落到哪。不给就是这个集群不支持 exec。 */
@@ -114,7 +124,7 @@ export class Cluster {
 
     this.store = createStore();
     this.scheme = createScheme([
-      ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES,
+      ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES, ...ARGOCD_RESOURCES,
       ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
@@ -259,6 +269,7 @@ export class Cluster {
     return {
       kernel: this.kernel,
       registry: this.registry,
+      scheme: this.scheme,
       now: () => this.wallClock(),
       recordEvent: (input) => this.recordEvent(input),
     };
@@ -388,6 +399,13 @@ export class Cluster {
       new GatewayController(context),
       // 内网 PKI：同样是集群里的一个工作负载，卸载掉就不再签发
       new CertManagerController(context),
+      // GitOps：仓库里那份 YAML 才是期望状态，集群里的对象是它的投影
+      ...(this.options.gitSource
+        ? [new ArgoCdController(context, {
+            source: this.options.gitSource,
+            subscribe: this.options.gitSubscribe,
+          })]
+        : []),
       new LoadBalancerController(context, this.options.addressPools ?? DEFAULT_POOLS),
       ...this.nodeSpecs.flatMap((node) => [
         new KubeletController(context, node.name, {

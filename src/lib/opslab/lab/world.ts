@@ -20,7 +20,7 @@ import { createNetTools } from '../net';
 import { parseChain } from '../crypto';
 import { createOpensslCommand } from './openssl';
 import { materializePki } from './pki';
-import { GitNetwork, createGitCommand, seedRepository } from '../git';
+import { GitNetwork, createGitCommand, parseCommit, readTree, seedRepository } from '../git';
 import { createExecHandler } from './podshell';
 import { CliRuntime, installClusterCli } from '../wasm';
 import type { KubeObject } from '../apiserver';
@@ -99,6 +99,23 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     resolveImage: (image) => lookupPushedImage(image),
     externalHosts,
     addressPools: spec.addressPools,
+    /**
+     * Argo CD 从这里取仓库内容。
+     *
+     * 取的是**远端**而不是跳板机上那个克隆 —— GitOps 的期望状态住在
+     * 远端仓库里，学员在本地改了不 push，集群就不该看见。
+     */
+    gitSubscribe: (listener) => git.onPush(() => listener()),
+    gitSource: (url, revision) => {
+      const bare = git.get(url);
+      if (!bare) return { error: `repository not accessible: ${url}` };
+      const branch = !revision || revision === 'HEAD' ? bare.head : revision;
+      const head = bare.refs[branch];
+      if (!head) return { error: `Unable to resolve '${revision}' to a commit SHA` };
+      const commit = bare.objects.get(head);
+      if (!commit || commit.type !== 'commit') return { error: `object not found: ${head}` };
+      return { revision: head, files: readTree(bare.objects, parseCommit(commit.body).tree) };
+    },
     /**
      * 跳板机信任哪些根。
      *

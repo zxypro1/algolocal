@@ -20,6 +20,21 @@ export interface BareRepository {
 
 export class GitNetwork {
   private readonly repositories = new Map<string, BareRepository>();
+  private readonly listeners: Array<(url: string) => void> = [];
+
+  /**
+   * 有人推了新提交。
+   *
+   * 真集群里这是 Git 服务打过来的 webhook —— 没有它，Argo CD 要等下一轮
+   * 轮询（默认三分钟）才会发现。这个世界里两条路都有。
+   */
+  onPush(listener: (url: string) => void): void {
+    this.listeners.push(listener);
+  }
+
+  notifyPush(url: string): void {
+    for (const listener of this.listeners) listener(GitNetwork.normalize(url));
+  }
 
   /** URL 归一化：去掉结尾的斜杠与 `.git` */
   static normalize(url: string): string {

@@ -25,6 +25,7 @@ const LEDGER_IMAGE = 'harbor.corp.internal/team/ledger:3.2.1';
 // 集群现在的 CNI。它不实现 NetworkPolicy —— 第 10 关整关都建立在这一点上。
 const FLANNEL_IMAGE = 'docker.io/flannel/flannel:v0.28.0';
 const CILIUM_IMAGE = 'quay.io/cilium/cilium:v1.19.2';
+const ARGOCD_IMAGE = 'quay.io/argoproj/argocd:v3.2.4';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -81,6 +82,45 @@ const HANDOVER = code`
   第一件事：确认三台节点都是 Ready，把结果记到 handover/nodes.txt 里。
 `;
 
+/** 平台仓库里门户的那份 manifest。集群里跑的应该和它一致。 */
+const PORTAL_GITOPS_MANIFEST = code`
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    replicas: 2
+    selector:
+      matchLabels:
+        app: portal
+    template:
+      metadata:
+        labels:
+          app: portal
+      spec:
+        containers:
+        - name: web
+          image: ${PORTAL_IMAGE}
+          ports:
+          - containerPort: 8080
+`;
+
+const PORTAL_GITOPS_SERVICE = code`
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    clusterIP: 10.96.1.10
+    selector:
+      app: portal
+    ports:
+    - port: 80
+      targetPort: 8080
+`;
+
 const WORLD = {
   seed: 1,
   startTime: '2026-03-02T09:00:00Z',
@@ -91,7 +131,7 @@ const WORLD = {
   ],
   namespaces: [
     'default', 'kube-system', 'payments', 'analytics',
-    'envoy-gateway-system', 'ingress-nginx', 'cert-manager',
+    'envoy-gateway-system', 'ingress-nginx', 'cert-manager', 'argocd',
   ],
   images: {
     [PORTAL_IMAGE]: {
@@ -123,6 +163,7 @@ const WORLD = {
       listens: [9962],
       enforcesNetworkPolicy: true,
     },
+    [ARGOCD_IMAGE]: { pullMs: 500, startupMs: 700, readyAfterMs: 300, listens: [8080] },
     // 财务的报表任务：吃 900Mi，limits 写小了就会被 OOMKill
     [REPORTS_IMAGE]: {
       pullMs: 500, startupMs: 800, readyAfterMs: 200,
@@ -161,6 +202,25 @@ const WORLD = {
       users: { ci: 'Harbor@2026' },
       projects: ['team', 'library'],
       anonymousPull: false,
+    },
+  ],
+  // 内网的 Git 服务。平台仓库是「本来就在」的东西，第 11 关往后都从它来。
+  gitRepositories: [
+    {
+      url: 'https://git.corp.internal/platform/apps',
+      branch: 'main',
+      message: 'bootstrap platform repo',
+      files: {
+        'README.md': [
+          '# platform/apps',
+          '',
+          '集群里跑什么，以这个仓库为准。',
+          '手工 kubectl apply 出来的东西迟早会被同步回来。',
+          '',
+        ].join('\n'),
+        'apps/portal/deployment.yaml': PORTAL_GITOPS_MANIFEST,
+        'apps/portal/service.yaml': PORTAL_GITOPS_SERVICE,
+      },
     },
   ],
   // 只有生产那套解析得到；legacy 与 staging 会像真的 DNS 失败一样连不上
@@ -538,6 +598,49 @@ const PREDECESSOR_POLICY = {
     egress: [],
   },
 };
+
+/** 第 10 关之后集群里跑的是 Cilium */
+const CNI_CILIUM = {
+  apiVersion: 'apps/v1', kind: 'DaemonSet',
+  metadata: {
+    name: 'cilium', namespace: 'kube-system',
+    labels: { 'app.kubernetes.io/name': 'cilium' },
+  },
+  spec: {
+    selector: { matchLabels: { 'app.kubernetes.io/name': 'cilium' } },
+    template: {
+      metadata: { labels: { 'app.kubernetes.io/name': 'cilium' } },
+      spec: { containers: [{ name: 'cilium-agent', image: CILIUM_IMAGE, ports: [{ containerPort: 9962 }] }] },
+    },
+  },
+};
+
+/** Argo CD：application controller 同样是集群里的一个工作负载 */
+const ARGOCD_PLATFORM = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: {
+      name: 'argocd-application-controller', namespace: 'argocd',
+      labels: { 'app.kubernetes.io/name': 'argocd-application-controller' },
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'argocd-application-controller' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'argocd-application-controller' } },
+        spec: { containers: [{ name: 'controller', image: ARGOCD_IMAGE, ports: [{ containerPort: 8080 }] }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'argoproj.io/v1alpha1', kind: 'AppProject',
+    metadata: { name: 'default', namespace: 'argocd' },
+    spec: {
+      sourceRepos: ['*'],
+      destinations: [{ namespace: '*', server: 'https://kubernetes.default.svc' }],
+    },
+  },
+];
 
 /* ------------------------------------------------------------------ */
 /* 第 2 关                                                             */
@@ -2785,6 +2888,265 @@ const stage10 = {
   ),
 };
 
+
+/* ------------------------------------------------------------------ */
+/* 第 11 关                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 前任手工改的那份：副本数被临时调到 5，从来没回写仓库 */
+const DRIFTED_PORTAL = {
+  apiVersion: 'apps/v1', kind: 'Deployment',
+  metadata: { name: 'portal', namespace: 'payments' },
+  spec: {
+    replicas: 5,
+    selector: { matchLabels: { app: 'portal' } },
+    template: {
+      metadata: { labels: { app: 'portal' } },
+      spec: { containers: [{ name: 'web', image: PORTAL_IMAGE, ports: [{ containerPort: 8080 }] }] },
+    },
+  },
+};
+
+const APPLICATION_STARTER = code`
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: portal
+    namespace: argocd
+  spec:
+    project: default
+    source:
+      repoURL: https://git.corp.internal/platform/apps
+      path: apps/portal
+      targetRevision: main
+    destination:
+      server: https://kubernetes.default.svc
+      namespace: payments
+`;
+
+const APPLICATION_REFERENCE = code`
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: portal
+    namespace: argocd
+  spec:
+    project: default
+    source:
+      repoURL: https://git.corp.internal/platform/apps
+      path: apps/portal
+      targetRevision: main
+    destination:
+      server: https://kubernetes.default.svc
+      namespace: payments
+    syncPolicy:
+      automated:
+        prune: true
+        selfHeal: true
+`;
+
+const stage11 = {
+  id: 'gitops-with-argocd',
+  title: t('GitOps：让仓库说了算', 'GitOps: Let the Repository Decide'),
+  goal: t(
+    code`
+      平台组要求所有服务改走 GitOps：集群里跑什么，以仓库
+      \`https://git.corp.internal/platform/apps\` 为准。Argo CD 已经装好了。
+
+      现在的状况是：仓库里门户写的是 2 个副本，集群里跑着 5 个 ——
+      某次大促前任手工 \`kubectl scale\` 上去的，没回写仓库。谁也说不清
+      还有多少这种改动。
+
+      \`/root/infra/application.yaml\` 里是一份 Application 的草稿。
+
+      ## 通关标准
+
+      1. 门户由 Argo CD 管起来，\`kubectl get app -n argocd\` 里 \`Synced\` + \`Healthy\`；
+      2. 集群里的副本数回到仓库写的那个；
+      3. 之后再有人手工改，会被自己改回来（不需要人介入）；
+      4. 想把副本数改成 3，得**通过仓库**改 —— 直接 kubectl 不算；
+      5. 仓库里删掉的东西，集群里也要跟着消失。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      git clone https://git.corp.internal/platform/apps
+      kubectl apply -f /root/infra/application.yaml
+      kubectl get app -n argocd
+      kubectl describe app portal -n argocd
+      kubectl patch app portal -n argocd --type merge -p '{"operation":{"sync":{}}}'
+      \`\`\`
+    `,
+    code`
+      The platform team wants every service on GitOps: what runs in the cluster is
+      whatever \`https://git.corp.internal/platform/apps\` says. Argo CD is already
+      installed.
+
+      Right now the repository says two replicas for the portal and the cluster runs
+      five, hand-scaled before a sale and never written back. Nobody knows how many
+      other changes like that are out there.
+
+      \`/root/infra/application.yaml\` holds a draft Application.
+
+      ## Done when
+
+      1. the portal is managed by Argo CD and \`kubectl get app -n argocd\` shows
+         \`Synced\` and \`Healthy\`;
+      2. the live replica count matches what the repository says;
+      3. later hand edits get reverted automatically, with nobody in the loop;
+      4. changing the count to three happens **through the repository**, not with
+         kubectl;
+      5. what is deleted from the repository disappears from the cluster.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      git clone https://git.corp.internal/platform/apps
+      kubectl apply -f /root/infra/application.yaml
+      kubectl get app -n argocd
+      kubectl describe app portal -n argocd
+      kubectl patch app portal -n argocd --type merge -p '{"operation":{"sync":{}}}'
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('Application 建起来，Synced + Healthy', 'Application created, Synced and Healthy'),
+    t('漂移被纠正，而且以后会自己纠正', 'Drift corrected, and stays corrected on its own'),
+    t('改配置走仓库这条路', 'Configuration changes go through the repository'),
+  ],
+  hints: [
+    t(
+      '光建一个 Application 只会让它去**比对**，不会动手。\`kubectl get app\` 会显示 OutOfSync —— 那说明它看见了差异，在等你发话。',
+      'Creating an Application only makes Argo CD **compare**; it will not act. `kubectl get app` shows OutOfSync, meaning it sees the difference and is waiting for you.'
+    ),
+    t(
+      '自动同步分两层：\`syncPolicy.automated\` 让它在仓库变化时自己 apply；再加 \`selfHeal: true\` 才会把集群里的手改拉回来；\`prune: true\` 才会删掉仓库里已经没有的对象。三个开关管三件事。',
+      'Automated sync has layers: `syncPolicy.automated` applies repository changes; `selfHeal: true` also pulls hand edits back; `prune: true` deletes objects that no longer exist in the repository. Three switches, three behaviours.'
+    ),
+    t(
+      'Argo CD 看的是**远端仓库**。在跳板机上改完不 push，它什么都看不到。',
+      'Argo CD reads the **remote** repository. Edits on the jump host that are not pushed are invisible to it.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '把副本数用 \`kubectl scale\` 改成 3 就交差。开了 selfHeal 之后这个改动活不过一轮同步；没开的话它会一直挂着 OutOfSync，下一个人看到的仍然是「仓库和现实不一致」。GitOps 的意思就是这条路被堵死了。',
+      'Scaling to three with `kubectl scale` and calling it done. With selfHeal on, the change does not survive one sync; with it off, the app sits OutOfSync and the next person still sees "repository and reality disagree". GitOps means that path is closed.'
+    ),
+    t(
+      '在本地 commit 了但没 push。Argo CD 连的是远端 —— 本地仓库里的提交对它不存在。这个错很难自查，因为 \`git log\` 看起来一切正常。',
+      'Committing locally without pushing. Argo CD talks to the remote, so a local commit does not exist as far as it is concerned. It is hard to spot because `git log` looks perfectly fine.'
+    ),
+    t(
+      '看到 OutOfSync 就当成故障。它只说明现状和仓库不一致，服务可能好好的 —— 健康与否是 \`status.health\` 那一栏。两栏分别代表两件事，混在一起看会把「配置漂移」当成「服务挂了」。',
+      'Treating OutOfSync as an outage. It only means live state differs from the repository; the service may be perfectly fine. Health is a separate column, and conflating the two turns "configuration drift" into "the service is down".'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      CNI_CILIUM,
+      ...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...TLS_PLATFORM, ...ARGOCD_PLATFORM,
+      DRIFTED_PORTAL,
+      {
+        apiVersion: 'v1', kind: 'Service',
+        metadata: { name: 'portal', namespace: 'payments' },
+        spec: { clusterIP: '10.96.1.10', selector: { app: 'portal' }, ports: [{ port: 80, targetPort: 8080 }] },
+      },
+      PORTAL_ROUTE,
+    ],
+    files: {
+      '/root/infra/application.yaml': APPLICATION_STARTER,
+    },
+    referenceFiles: { '/root/infra/application.yaml': APPLICATION_REFERENCE },
+    referenceCommands: [
+      'kubectl apply -f /root/infra/application.yaml',
+    ],
+  },
+  specs: [
+    spec('gitops-with-argocd.spec.ts', code`
+      import { get, list, sh } from '@ops/lab';
+
+      const REPO = 'https://git.corp.internal/platform/apps';
+
+      describe('GitOps', () => {
+        it('门户归 Argo CD 管，Synced + Healthy', () => {
+          const application = get('Application', 'portal', 'argocd');
+          expect(application).toBeTruthy();
+          expect(application.status.sync.status).toBe('Synced');
+          expect(application.status.health.status).toBe('Healthy');
+        });
+
+        it('集群里的副本数和仓库一致', async () => {
+          const cloned = await sh('rm -rf /tmp/check && git clone ' + REPO + ' /tmp/check');
+          expect(cloned.code).toBe(0);
+          const manifest = await sh('grep -E "^  replicas:" /tmp/check/apps/portal/deployment.yaml');
+          const wanted = Number(manifest.stdout.split(':')[1].trim());
+
+          const deployment = get('Deployment', 'portal', 'payments');
+          expect(deployment.spec.replicas).toBe(wanted);
+        });
+
+        it('手改会被改回去 —— 不需要人介入', async () => {
+          await sh('kubectl scale deploy/portal -n payments --replicas=11');
+          const deployment = get('Deployment', 'portal', 'payments');
+          expect(deployment.spec.replicas).not.toBe(11);
+        });
+
+        it('仓库里删掉的对象，集群里也会消失', async () => {
+          await sh('rm -rf /tmp/prune && git clone ' + REPO + ' /tmp/prune');
+          await sh('cd /tmp/prune && rm apps/portal/service.yaml && git add -A'
+            + ' && git commit -m "drop the service" && git push origin main');
+
+          const services = list('Service', { namespace: 'payments' })
+            .map((item) => item.metadata.name);
+          expect(services).not.toContain('portal');
+        });
+
+        it('Argo CD 认的是远端仓库，不是跳板机上那个克隆', () => {
+          const application = get('Application', 'portal', 'argocd');
+          expect(application.spec.source.repoURL).toBe(REPO);
+          // revision 是一个真的 commit sha，不是分支名
+          expect(application.status.sync.revision).toMatch(/^[0-9a-f]{40}$/);
+        });
+      });
+    `),
+  ],
+  focus: ['correctness', 'maintainability'],
+  extension: t(
+    code`
+      GitOps 真正改变的不是部署方式，是**「现在到底跑着什么」这个问题的答案从哪里来**。
+      在此之前答案只能从集群里问，而集群会被任何一个有权限的人改动，改动不留痕；
+      之后答案在仓库里，有历史、有审核、能回滚。
+
+      代价是那条手工通道被堵死了。开了 selfHeal 之后，\`kubectl edit\` 改的东西
+      活不过一轮同步 —— 这对救火的人是个不小的调整。真集群里的做法是给
+      Application 加 \`ignoreDifferences\`（哪些字段不比对，比如 HPA 管的副本数），
+      而不是把 selfHeal 关掉。
+
+      还有一个容易忽略的点：Argo CD 自己也应该由 Argo CD 管（app-of-apps）。
+      不然升级 Argo CD 这件事本身就还是手工的，而它恰恰是最不该漂移的组件。
+    `,
+    code`
+      What GitOps really changes is not how you deploy but **where the answer to
+      "what is running right now" comes from**. Before, you could only ask the
+      cluster, and the cluster can be changed by anyone with access, leaving no trace.
+      After, the answer lives in a repository with history, review, and rollback.
+
+      The price is that the manual path is closed. With selfHeal on, anything
+      \`kubectl edit\` changes does not survive a sync, which is a real adjustment for
+      whoever is firefighting. The production answer is to add
+      \`ignoreDifferences\` to the Application for fields owned by something else
+      (replica counts managed by an HPA, for instance) rather than turning selfHeal
+      off.
+
+      One more thing that is easy to miss: Argo CD should manage Argo CD (app of
+      apps). Otherwise upgrading it stays a manual operation, and it is exactly the
+      component that should never drift.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -2827,5 +3189,8 @@ module.exports = {
   ),
   workspace: { kind: 'ops', world: WORLD },
   files: [],
-  stages: [stage1, stage2, stage3, stage4, stage5, stage6, stage7, stage8, stage9, stage10],
+  stages: [
+    stage1, stage2, stage3, stage4, stage5, stage6,
+    stage7, stage8, stage9, stage10, stage11,
+  ],
 };
