@@ -42,6 +42,11 @@ class TestRunner {
         description: 'Structural validation, stage verification and the save path for generated projects'
       },
       {
+        name: 'Opslab Deterministic Kernel',
+        file: 'tests/opslab',
+        description: 'Virtual clock ordering, settle/deadlock detection, snapshots, and byte-identical replay of dozens of concurrent entities'
+      },
+      {
         name: 'Desktop Menus',
         file: 'tests/desktop',
         description: 'Application and context menus, including the edit roles that ⌘V depends on'
