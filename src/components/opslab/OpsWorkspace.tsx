@@ -26,7 +26,7 @@ import { RunReportPanel } from '../engineering/ResultPanels';
 import ChangeStream from './ChangeStream';
 import MachineFiles from './MachineFiles';
 import { useOpsWorkspace } from '../../hooks/useOpsWorkspace';
-import { runOpsStage } from '../../lib/opslab/lab';
+import { emptyMetrics, runOpsStage } from '../../lib/opslab/lab';
 import { resolveTranspiler } from '../../lib/engineering/transpile';
 import type { ProjectSession, ResultScope } from '../../hooks/useProjectSession';
 import type { StageRunReport } from '../../lib/engineering/types';
@@ -102,8 +102,9 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
 
   const machineFiles = useMemo(
     () => ops.world?.machine.vfs.toFileMap('/root') ?? {},
+    // revision 是世界变过的信号：敲命令、编辑器写盘都会 +1
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [ops.world, ops.history.length, activePath, report]
+    [ops.world, ops.revision]
   );
 
   // 默认打开这一关的主文件
@@ -154,11 +155,7 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
         status: 'error',
         totals: { total: 0, passed: 0, failed: 0 },
         cases: [], gates: [],
-        metrics: {
-          virtualElapsedMs: 0, maxConcurrency: 0, concurrencyTimeline: [],
-          requests: { total: 0, ok: 0, failed: 0, throttled: 0, retries: 0, duplicated: 0, byUrl: {} },
-          samples: [], counters: {},
-        },
+        metrics: emptyMetrics(0),
         console: [],
         wallClockMs: 0,
         error: error instanceof Error ? error.message : String(error),

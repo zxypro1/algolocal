@@ -13,8 +13,6 @@ import type { ChangeEntry } from '../../lib/opslab/lab';
 export interface ChangeStreamProps {
   changes: ChangeEntry[];
   events: KubeObject[];
-  /** 世界的起始时刻，用来把绝对时间显示成相对的 */
-  startedAt?: number;
 }
 
 const CHANGE_ICON = {

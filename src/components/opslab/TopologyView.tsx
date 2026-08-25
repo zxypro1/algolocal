@@ -12,7 +12,7 @@ import {
   Background, Controls, Handle, MiniMap, Position, ReactFlow, useEdgesState, useNodesState,
   type Edge, type Node, type NodeProps,
 } from '@xyflow/react';
-import { Badge, Group, Stack, Text } from '@mantine/core';
+import { Group, Stack, Text } from '@mantine/core';
 import type { TopologyGraph, TopologyStatus } from '../../lib/opslab/lab';
 
 import '@xyflow/react/dist/style.css';
@@ -119,15 +119,8 @@ export default function TopologyView({ graph, onInspect }: TopologyViewProps) {
   }
 
   return (
-    <div style={{ height: '100%', width: '100%', position: 'relative' }}>
-      <Group
-        gap={6}
-        style={{ position: 'absolute', top: 8, left: 8, zIndex: 5, pointerEvents: 'none' }}
-      >
-        {graph.lanes.map((lane) => (
-          <Badge key={lane.id} size="xs" variant="light" color="gray">{lane.title}</Badge>
-        ))}
-      </Group>
+    <div style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ flex: 1, minHeight: 0 }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -147,6 +140,16 @@ export default function TopologyView({ graph, onInspect }: TopologyViewProps) {
         <Controls showInteractive={false} />
         <MiniMap pannable zoomable style={{ height: 72, width: 120 }} />
       </ReactFlow>
+      </div>
+      {/* 图例放在画布外面。浮在上面会压住第一排节点，而第一排恰好是入口层。 */}
+      <Group gap={10} px="sm" py={4} style={{ borderTop: '1px solid var(--app-border)', flexShrink: 0 }}>
+        {graph.lanes.map((lane, index) => (
+          <Text key={lane.id} size="10px" c="dimmed">
+            {index + 1}. {lane.title}
+          </Text>
+        ))}
+        <Text size="10px" c="dimmed" ml="auto">点节点插入只读命令</Text>
+      </Group>
     </div>
   );
 }

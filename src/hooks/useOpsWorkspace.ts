@@ -30,6 +30,13 @@ export interface UseOpsWorkspaceOptions {
 
 export interface OpsWorkspaceState {
   world: OpsWorld | null;
+  /**
+   * 世界变过几次。
+   *
+   * 世界是个可变对象，React 看不见它内部的变化 —— 面板要重算什么，
+   * 就把这个数放进依赖里。
+   */
+  revision: number;
   status: OpsBootStatus;
   error?: string;
   /** 装上的真 CLI */
@@ -161,6 +168,7 @@ export function useOpsWorkspace(options: UseOpsWorkspaceOptions): OpsWorkspaceSt
 
   return {
     world,
+    revision,
     status,
     error,
     applets,

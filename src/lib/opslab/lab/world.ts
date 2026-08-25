@@ -73,7 +73,6 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     clusterAgeMs,
     resolveImage: (image) => lookupPushedImage(image),
   });
-  cluster.start();
 
   const machineSpec = spec.machine ?? {};
   const machine = createMachine({
@@ -126,6 +125,9 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
       return undefined;
     }
   };
+
+  // 镜像解析装好之后才让控制器跑起来，免得先起来的 kubelet 查到一张空表
+  cluster.start();
 
   const applets = options.runtime
     ? await installClusterCli({
