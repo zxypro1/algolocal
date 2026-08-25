@@ -16,6 +16,7 @@ import {
 } from '../machine/oci';
 import type { ImageBehavior } from '../controllers';
 import { baseImageOf, toolchainFor } from './toolchains';
+import { createNetTools } from '../net';
 import { CliRuntime, installClusterCli } from '../wasm';
 import type { KubeObject } from '../apiserver';
 
@@ -72,6 +73,13 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     ])),
     clusterAgeMs,
     resolveImage: (image) => lookupPushedImage(image),
+    externalHosts: {
+      // 私有仓库这些内网服务，办公网与集群都该解析得到
+      ...Object.fromEntries((spec.registries ?? []).map((registry, index) => [
+        registry.host, [`10.10.0.${20 + index}`],
+      ])),
+      ...(spec.externalHosts ?? {}),
+    },
   });
 
   const machineSpec = spec.machine ?? {};
@@ -98,6 +106,15 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
   for (const [reference, toolchain] of Object.entries(spec.baseImages ?? {})) {
     images.add(baseImageOf(reference, toolchain, new Date(cluster.wallClock()).toISOString()));
     toolchains[normalizeReference(reference)] = toolchainFor(toolchain);
+  }
+
+  // 网络工具。跳板机在办公网，够不到 Pod 网段与 ClusterIP —— 这是分区的意义。
+  for (const [name, handler] of Object.entries(createNetTools({
+    network: cluster.network,
+    source: () => ({ zone: 'office', label: machineSpec.hostname ?? 'jump-01', ip: '10.10.1.5' }),
+    advance: (ms) => { void cluster.advanceBy(ms); },
+  }))) {
+    machine.install(name, handler);
   }
 
   machine.install('docker', createDockerCommand({
