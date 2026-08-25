@@ -241,6 +241,13 @@ export interface OpsWorldSpec {
   /** 集群外的名字：`git.corp.internal` -> ['10.10.0.30'] */
   externalHosts?: Record<string, string[]>;
   /**
+   * 内网 PKI 的初态。
+   *
+   * 题目只声明「有哪些 CA、谁签谁、哪张证书故意做坏了」，真正的密钥与 DER
+   * 由运行时用真 RSA 生成 —— 学员导出来的 PEM 是货真价实的。
+   */
+  pki?: OpsPkiSpec;
+  /**
    * 负载均衡地址池。
    *
    * `loadBalancerClass` 决定从哪个池子分地址，也决定这个地址能被谁访问到。
@@ -260,6 +267,37 @@ export interface OpsWorldSpec {
   endpoints?: string[];
   /** 开局就存在的集群对象 */
   objects?: Record<string, unknown>[];
+}
+
+/** 内网 PKI 的初态 */
+export interface OpsPkiSpec {
+  /** 自签的根 CA */
+  roots?: Array<{ name: string; namespace: string; commonName: string; days?: number }>;
+  /** 由某个根签出来的中间 CA。`signedBy` 写根的 Secret 名。 */
+  intermediates?: Array<{
+    name: string; namespace: string; commonName: string; signedBy: string; days?: number;
+  }>;
+  /** 预先造好的服务器证书。用来布置现场，包括故意做坏的那些。 */
+  serverCertificates?: Array<{
+    name: string;
+    namespace: string;
+    commonName: string;
+    dnsNames?: string[];
+    /** 由哪个 CA 的 Secret 签 */
+    signedBy: string;
+    days?: number;
+    /**
+     * 只把叶子放进 tls.crt，不带签发链。
+     *
+     * 这是「中间证书没带全」那个经典坑：浏览器有时候能打开（缓存过中间证书），
+     * 服务之间的调用一定失败。
+     */
+    leafOnly?: boolean;
+    /** 签成已经过期的，`expiredDaysAgo` 天前就到期了 */
+    expiredDaysAgo?: number;
+  }>;
+  /** 哪些根装进跳板机的信任库 */
+  trust?: string[];
 }
 
 /**

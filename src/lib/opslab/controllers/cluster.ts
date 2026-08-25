@@ -31,6 +31,8 @@ import { Network, createNetwork, type Zone } from '../net';
 import {
   AddressPool, GATEWAY_RESOURCES, GatewayController, LoadBalancerController, resolveGateway,
 } from '../gateway';
+import { CERT_RESOURCES, CertManagerController } from '../certs';
+import { parseChain, type Certificate } from '../crypto';
 
 export interface NodeSpec {
   name: string;
@@ -56,6 +58,8 @@ export interface ClusterOptions {
   resolveImage?: (image: string) => ImageSpec | undefined;
   /** 集群外的名字，`harbor.corp.internal` 之类 */
   externalHosts?: Record<string, string[]>;
+  /** 客户端信任哪些根。办公网的机器读自己的 ca-certificates.crt。 */
+  trustBundle?: (source: import('../net').Source) => Certificate[];
   /**
    * 负载均衡地址池。
    *
@@ -102,7 +106,8 @@ export class Cluster {
 
     this.store = createStore();
     this.scheme = createScheme([
-      ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...(options.extraResources ?? []),
+      ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES,
+      ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
       store: this.store,
@@ -118,11 +123,55 @@ export class Cluster {
       exposure: (address) => this.zonesOf(address),
       gatewayRoute: (address, request) =>
         resolveGateway({ registry: this.registry, scheme: this.scheme }, address, request),
+      serverChain: (input) => this.serverChainOf(input),
+      trustBundle: (source) => options.trustBundle?.(source) ?? [],
       imageOf: (image) => this.imageBehaviorOf(image),
       now,
     });
 
     this.seed();
+  }
+
+  /**
+   * 这个端口上出示什么证书链。
+   *
+   * 从 Gateway 的 HTTPS listener 找到 `tls.certificateRefs` 指的 Secret，
+   * 把 `tls.crt` 解出来。也就是说「证书配没配对」这件事完全由集群里的对象决定。
+   */
+  private serverChainOf(input: { address: string; port: number; host: string }): Certificate[] | undefined {
+    const services = this.scheme.get({ group: '', version: 'v1', resource: 'services' });
+    const gateways = this.scheme.get({
+      group: 'gateway.networking.k8s.io', version: 'v1', resource: 'gateways',
+    });
+    const secrets = this.scheme.get({ group: '', version: 'v1', resource: 'secrets' });
+    if (!services || !gateways || !secrets) return undefined;
+
+    const owner = this.registry.list(services).items.find((service) =>
+      ((service.status ?? {}) as any)?.loadBalancer?.ingress?.some((entry: any) => entry.ip === input.address)
+      && service.metadata.labels?.['gateway.envoyproxy.io/owning-gateway-name']);
+    if (!owner) return undefined;
+
+    const gateway = this.registry.list(gateways).items.find(
+      (item) => item.metadata.name === owner.metadata.labels!['gateway.envoyproxy.io/owning-gateway-name']
+        && item.metadata.namespace === owner.metadata.labels!['gateway.envoyproxy.io/owning-gateway-namespace']
+    );
+    if (!gateway) return undefined;
+
+    const listener = ((gateway.spec ?? {}) as any).listeners?.find(
+      (entry: any) => Number(entry.port) === input.port && entry.protocol === 'HTTPS'
+    );
+    const reference = listener?.tls?.certificateRefs?.[0];
+    if (!reference) return undefined;
+
+    try {
+      const secret = this.registry.get(
+        secrets, reference.namespace ?? gateway.metadata.namespace, reference.name
+      );
+      const pem = atob((((secret as any).data ?? {})['tls.crt']) ?? '');
+      return parseChain(pem);
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -286,6 +335,8 @@ export class Cluster {
       new EndpointsController(context),
       // 入口：控制器自己是集群里的一个工作负载，卸载掉 Gateway 就不再被 program
       new GatewayController(context),
+      // 内网 PKI：同样是集群里的一个工作负载，卸载掉就不再签发
+      new CertManagerController(context),
       new LoadBalancerController(context, this.options.addressPools ?? DEFAULT_POOLS),
       ...this.nodeSpecs.flatMap((node) => [
         new KubeletController(context, node.name, {

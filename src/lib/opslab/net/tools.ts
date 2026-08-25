@@ -50,12 +50,13 @@ interface CurlFlags {
   hostHeader?: string;
   /** `--resolve host:port:addr` */
   resolveTo: Array<{ host: string; port: number; address: string }>;
+  insecure: boolean;
 }
 
 function parseCurl(argv: string[]): CurlFlags {
   const flags: CurlFlags = {
     silent: false, headOnly: false, failOnError: false, include: false, verbose: false,
-    resolveTo: [],
+    resolveTo: [], insecure: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -85,7 +86,7 @@ function parseCurl(argv: string[]): CurlFlags {
         }
         break;
       }
-      case '-k': case '--insecure': break;
+      case '-k': case '--insecure': flags.insecure = true; break;
       case '-L': case '--location': break;
       default:
         if (arg.startsWith('-s') && /^-[a-zA-Z]+$/.test(arg)) {
@@ -97,6 +98,7 @@ function parseCurl(argv: string[]): CurlFlags {
             if (letter === 'I') flags.headOnly = true;
             if (letter === 'i') flags.include = true;
             if (letter === 'v') flags.verbose = true;
+            if (letter === 'k') flags.insecure = true;
           }
           break;
         }
@@ -126,6 +128,7 @@ function curl(argv: string[], options: NetToolsOptions): CommandResult {
   if (flags.method) target.method = flags.method;
   if (flags.headOnly) target.method = 'HEAD';
   if (flags.hostHeader) target.headerHost = flags.hostHeader;
+  if (flags.insecure) target.insecure = true;
   const override = flags.resolveTo.find(
     (entry) => entry.host === target.host && entry.port === target.port
   );
@@ -160,8 +163,28 @@ function curl(argv: string[], options: NetToolsOptions): CommandResult {
         stderr: `curl: (7) Failed to connect to ${place} after ${Math.round(spent)} ms: Connection refused\n`,
         code: 7,
       };
-    case 'reset':
-      return { stderr: `curl: (56) Recv failure: Connection reset by peer\n`, code: 56 };
+    case 'reset': {
+      /**
+       * TLS 的失败在 curl 里是 60，不是连接层的 56。
+       *
+       * 报错第二行「More details here: ...」是 curl 真的会打的，
+       * 学员照着搜就能搜到正确的答案。
+       */
+      const tls = result.blockedBy?.startsWith('x509:');
+      if (tls) {
+        return {
+          stderr: `curl: (60) SSL certificate problem: ${sslReason(result.blockedBy!)}\n`
+            + 'More details here: https://curl.se/docs/sslcerts.html\n\n'
+            + 'curl failed to verify the legitimacy of the server and therefore could not\n'
+            + 'establish a secure connection to it.\n',
+          code: 60,
+        };
+      }
+      return {
+        stderr: `curl: (35) OpenSSL/3.4.0: error:0A00010B:SSL routines::${result.blockedBy ?? 'wrong version number'}\n`,
+        code: 35,
+      };
+    }
     default:
       break;
   }
@@ -194,6 +217,15 @@ function renderWriteOut(format: string, status: number, elapsedMs: number): stri
     .replace(/%\{http_code\}/g, String(status))
     .replace(/%\{time_total\}/g, (elapsedMs / 1000).toFixed(6))
     .replace(/\\n/g, '\n');
+}
+
+/** 把 Go 风格的 x509 报错翻成 curl/OpenSSL 的说法 */
+function sslReason(error: string): string {
+  if (error.includes('unknown authority')) return 'unable to get local issuer certificate';
+  if (error.includes('has expired')) return 'certificate has expired';
+  if (error.includes('is valid for')) return `subjectAltName does not match（${error.replace('x509: ', '')}）`;
+  if (error.includes('legacy Common Name')) return 'certificate has no subjectAltName';
+  return error.replace('x509: ', '');
 }
 
 function reasonOf(status: number): string {

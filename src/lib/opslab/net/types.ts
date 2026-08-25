@@ -75,6 +75,8 @@ export interface Target {
   address?: string;
   /** Host 头。Gateway 与 HTTPRoute 匹配的是它，不是连过去的那个地址。 */
   headerHost?: string;
+  /** `curl -k`：跳过证书校验 */
+  insecure?: boolean;
 }
 
 /** DNS 查出来的东西 */
