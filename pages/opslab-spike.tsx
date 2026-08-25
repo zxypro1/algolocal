@@ -11,13 +11,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { AppShell, Badge, Code, Group, Stack, Text } from '@mantine/core';
 import { AppHeader, HEADER_HEIGHT } from '../src/components/AppHeader';
-import { createAPIServer } from '../src/lib/opslab/miniApiServer';
+import { createStore } from '../src/lib/opslab/store';
+import { createApiServer, createScheme, Registry } from '../src/lib/opslab/apiserver';
 import { runKubectl } from '../src/lib/opslab/kubectlWasm';
 
 const OpsTerminal = dynamic(() => import('../src/components/opslab/OpsTerminal'), { ssr: false });
 
-/** 世界时间固定，输出才可复现 —— 正式版里这里接虚拟时钟 */
+/** 世界时间固定，输出才可复现 —— 正式版里这里接确定性内核的虚拟时钟 */
 const VIRTUAL_NOW = Date.parse('2026-01-01T04:12:00Z');
+const CREATED_AT = Date.parse('2026-01-01T00:00:00Z');
 
 const LEDGER_YAML = `apiVersion: apps/v1
 kind: Deployment
@@ -41,36 +43,44 @@ spec:
         image: registry.corp.internal/ledger:0.9
 `;
 
+/**
+ * 起一个小世界：真 registry + 真 HTTP 层，不再是 spike 时手搓的那个 miniApiServer。
+ * 时间固定住，输出才可复现；正式版里这里接确定性内核的虚拟时钟。
+ */
 function seedWorld() {
-  return createAPIServer(
-    {
-      '/v1/namespaces': [
-        { apiVersion: 'v1', kind: 'Namespace', metadata: { name: 'default' }, status: { phase: 'Active' } },
-        { apiVersion: 'v1', kind: 'Namespace', metadata: { name: 'prod' }, status: { phase: 'Active' } },
-      ],
-      '/v1/pods': [
-        {
-          apiVersion: 'v1', kind: 'Pod',
-          metadata: { name: 'payments-7f4-2xk', namespace: 'default', labels: { app: 'payments' } },
-          spec: { nodeName: 'node-1', containers: [{ name: 'app', image: 'registry.corp.internal/payments:1.4' }] },
-          status: {
-            phase: 'Running', podIP: '10.42.1.7',
-            containerStatuses: [{ name: 'app', ready: true, restartCount: 0, state: { running: { startedAt: '2026-01-01T00:00:00Z' } } }],
-          },
-        },
-        {
-          apiVersion: 'v1', kind: 'Pod',
-          metadata: { name: 'portal-6c9-abc', namespace: 'default', labels: { app: 'portal' } },
-          spec: { nodeName: 'node-2', containers: [{ name: 'app', image: 'registry.corp.internal/portal:2.1' }] },
-          status: {
-            phase: 'Running', podIP: '10.42.2.3',
-            containerStatuses: [{ name: 'app', ready: true, restartCount: 2, state: { running: { startedAt: '2026-01-01T00:00:00Z' } } }],
-          },
-        },
-      ],
-    },
-    { now: () => VIRTUAL_NOW }
-  );
+  const store = createStore();
+  const scheme = createScheme([
+    { group: '', version: 'v1', resource: 'namespaces', singular: 'namespace', kind: 'Namespace', namespaced: false, shortNames: ['ns'] },
+    { group: '', version: 'v1', resource: 'pods', singular: 'pod', kind: 'Pod', namespaced: true, shortNames: ['po'], subresources: ['status'] },
+    { group: 'apps', version: 'v1', resource: 'deployments', singular: 'deployment', kind: 'Deployment', namespaced: true, shortNames: ['deploy'], subresources: ['status', 'scale'] },
+  ]);
+  let uid = 0;
+  const registry = new Registry({
+    store,
+    scheme,
+    now: () => CREATED_AT,
+    uid: () => `uid-${++uid}`,
+  });
+
+  const ns = scheme.mustGet({ group: '', version: 'v1', resource: 'namespaces' });
+  const pods = scheme.mustGet({ group: '', version: 'v1', resource: 'pods' });
+  for (const name of ['default', 'prod']) {
+    registry.create(ns, undefined, { apiVersion: 'v1', kind: 'Namespace', metadata: { name }, status: { phase: 'Active' } });
+  }
+  registry.create(pods, 'default', {
+    apiVersion: 'v1', kind: 'Pod',
+    metadata: { name: 'payments-7f4-2xk', labels: { app: 'payments' } },
+    spec: { nodeName: 'node-1', containers: [{ name: 'app', image: 'registry.corp.internal/payments:1.4' }] },
+    status: { phase: 'Running', podIP: '10.42.1.7', containerStatuses: [{ name: 'app', ready: true, restartCount: 0 }] },
+  });
+  registry.create(pods, 'default', {
+    apiVersion: 'v1', kind: 'Pod',
+    metadata: { name: 'portal-6c9-abc', labels: { app: 'portal' } },
+    spec: { nodeName: 'node-2', containers: [{ name: 'app', image: 'registry.corp.internal/portal:2.1' }] },
+    status: { phase: 'Running', podIP: '10.42.2.3', containerStatuses: [{ name: 'app', ready: true, restartCount: 2 }] },
+  });
+
+  return createApiServer({ registry, scheme, now: () => VIRTUAL_NOW });
 }
 
 const BANNER = [
@@ -131,7 +141,8 @@ export default function OpsLabSpikePage() {
           <Stack gap={4} px="md" py={8} style={{ borderBottom: '1px solid var(--app-border)', flexShrink: 0 }}>
             <Text size="xs" c="dimmed">
               终端里跑的是<strong>真的 kubectl</strong>（编译成 WebAssembly），它通过被拦截的 fetch
-              访问一个内存里的 mini apiserver（三个 GVK：Namespace / Pod / Deployment）。
+              访问内存里的 apiserver —— etcd 语义存储 + REST 语义层 + 服务端表格渲染，
+              三个 GVK：Namespace / Pod / Deployment。
             </Text>
             <Text size="xs" c="dimmed">
               产物不在仓库里：先运行 <Code>bash scripts/build-opslab-wasm.sh</Code> 生成{' '}
