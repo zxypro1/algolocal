@@ -114,6 +114,10 @@ module.exports = {
     // 需要直接文件访问的资源
     'public/problems.json',
     'public/projects.json',
+    // opslab 的 WebAssembly 制品（真 kubectl 等）必须解包：
+    // 一百多 MB 的文件留在 asar 里，WebAssembly.compileStreaming 读不到真实文件，
+    // 只能整份读进内存再编译，启动慢一倍、峰值内存也翻倍。
+    'public/opslab/*.wasm',
     'public/icon.png',
     'public/favicon.ico'
   ],
