@@ -17,6 +17,7 @@ import {
 } from '../apiserver';
 import { Controller, ControllerContext } from './framework';
 import { createServiceIpDefaulter } from './serviceip';
+import { DaemonSetController } from './daemonset';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
@@ -139,6 +140,7 @@ export class Cluster {
       serverChain: (input) => this.serverChainOf(input),
       trustBundle: (source) => options.trustBundle?.(source) ?? [],
       imageOf: (image) => this.imageBehaviorOf(image),
+      policyEnforced: () => this.policyEnforced(),
       now,
     });
 
@@ -215,6 +217,34 @@ export class Cluster {
   }
 
   /** 这个镜像的运行时行为：端口、路由、内存。网络与 kubelet 共用同一份。 */
+  /**
+   * 集群里有没有一个跑着的、会执行 NetworkPolicy 的 CNI。
+   *
+   * 判断依据是**镜像声明了什么**（`enforcesNetworkPolicy`），不是名字里有没有
+   * cilium —— 宿主不认识任何具体的 CNI，和 Envoy Gateway、cert-manager 一样，
+   * 它就是集群里的一个工作负载，卸载掉策略立刻失效。
+   */
+  policyEnforced(): boolean {
+    /**
+     * 世界压根没提过 CNI 就别管这件事。
+     *
+     * 只有当关卡的镜像表里出现 `enforcesNetworkPolicy` 时，「CNI 执不执行策略」
+     * 才成为这个世界的一个维度；否则策略照常生效，前九关不用为此各装一个 CNI。
+     */
+    const modelsCni = Object.values(this.options.images ?? {})
+      .some((behavior) => behavior?.enforcesNetworkPolicy !== undefined);
+    if (!modelsCni) return true;
+
+    const pods = this.scheme.get({ group: '', version: 'v1', resource: 'pods' });
+    if (!pods) return false;
+    return this.registry.list(pods).items.some((pod) => {
+      if (((pod.status ?? {}) as any).phase !== 'Running') return false;
+      const containers = ((pod.spec ?? {}) as any).containers ?? [];
+      return containers.some((container: any) =>
+        this.imageBehaviorOf(container.image)?.enforcesNetworkPolicy);
+    });
+  }
+
   imageBehaviorOf(image: string | undefined): ImageBehavior | undefined {
     if (!image) return undefined;
     return this.options.images?.[image] ?? this.options.resolveImage?.(image);
@@ -351,6 +381,8 @@ export class Cluster {
       new SchedulerController(context),
       new ReplicaSetController(context),
       new DeploymentController(context),
+      // 每个节点一份：CNI 的 agent、日志采集都是这个形状
+      new DaemonSetController(context),
       new EndpointsController(context),
       // 入口：控制器自己是集群里的一个工作负载，卸载掉 Gateway 就不再被 program
       new GatewayController(context),

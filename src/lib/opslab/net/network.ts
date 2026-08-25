@@ -36,6 +36,12 @@ export interface NetworkDeps {
    */
   exposure?(address: string): Zone[];
   /**
+   * 集群里现在有没有一个会执行 NetworkPolicy 的 CNI。
+   *
+   * 不给就当作「有」（单元测试里不必每次都装一个 CNI）。
+   */
+  policyEnforced?(): boolean;
+  /**
    * 这个地址归不归某个 Gateway 管、这个请求该转到哪。
    *
    * 由集群注入，网络层自己不认识 Gateway 的 CRD —— 数据面只管「转给谁」。
@@ -58,6 +64,14 @@ export interface NetworkDeps {
     gateway: string;
     route?: string;
     backend?: { namespace: string; name: string; port: number };
+    /**
+     * 转发这一跳的数据面 Pod。
+     *
+     * Gateway 后面那段流量的源头不是办公网，而是 envoy 自己的 Pod ——
+     * NetworkPolicy 看到的就是它。少了这一条，「只允许 Gateway 访问」
+     * 这种再常见不过的策略在这里就写不出来。
+     */
+    proxyPod?: { namespace: string; name: string };
     status?: number;
     detail: string;
   } | undefined;
@@ -148,6 +162,7 @@ export class Network {
     });
     let serviceOverride: KubeObject | undefined;
     let portOverride: number | undefined;
+    let policySource: Source = source;
     if (gateway) {
       elapsed += LATENCY.hop;
       hops.push({
@@ -168,6 +183,15 @@ export class Network {
       }
       serviceOverride = this.serviceByName(gateway.backend.namespace, gateway.backend.name);
       portOverride = gateway.backend.port;
+      // 过了 Gateway 之后，这条连接的源头是 envoy 的 Pod
+      if (gateway.proxyPod) {
+        policySource = {
+          zone: 'cluster',
+          namespace: gateway.proxyPod.namespace,
+          podName: gateway.proxyPod.name,
+          label: gateway.proxyPod.name,
+        };
+      }
       if (!serviceOverride) {
         return {
           kind: 'ok', status: 503,
@@ -211,7 +235,7 @@ export class Network {
     // 5. 网络策略。两端都要放行，被拒绝表现为丢包 -> 超时。
     const chosen = backends[0];
     const decision = evaluate(this.policies(), {
-      source: this.peerOf(source),
+      source: this.peerOf(policySource),
       destination: this.peerOfPod(chosen.pod),
       port: chosen.port,
       protocol: 'TCP',
@@ -360,7 +384,15 @@ export class Network {
     return this.deps.registry.list(definition, { namespace }).items;
   }
 
+  /**
+   * 生效中的 NetworkPolicy。
+   *
+   * 注意是「生效中的」：没有会执行策略的 CNI 时，这里返回空 ——
+   * 对象还在 apiserver 里，`kubectl get netpol` 照样看得见，但一个包都不拦。
+   * 真集群里这正是最难查的一类问题：你以为加了防护，其实什么都没发生。
+   */
   policies(): KubeObject[] {
+    if (this.deps.policyEnforced && !this.deps.policyEnforced()) return [];
     const definition = this.deps.scheme.get({
       group: 'networking.k8s.io', version: 'v1', resource: 'networkpolicies',
     });

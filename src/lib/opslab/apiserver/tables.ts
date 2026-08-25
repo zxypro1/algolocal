@@ -116,6 +116,47 @@ export const TABLE_PRINTERS: Record<string, TablePrinter> = {
       ];
     },
   },
+  daemonsets: {
+    columns: [
+      NAME_COLUMN,
+      col('Desired', 'The desired number of pods.'),
+      col('Current', 'The number of currently running pods.'),
+      col('Ready', 'The number of ready pods.'),
+      col('Up-to-date', 'The number of pods updated to the latest spec.'),
+      col('Available', 'The number of available pods.'),
+      col('Node Selector', 'The node selector of this daemonset.'),
+      AGE_COLUMN,
+      col('Containers', 'Names of each container in the template.', 1),
+      col('Images', 'Images referenced by each container in the template.', 1),
+      col('Selector', 'The label selector of this daemonset.', 1),
+    ],
+    cells: (object, age) => {
+      const spec = (object.spec ?? {}) as any;
+      const status = (object.status ?? {}) as any;
+      const containers: any[] = spec.template?.spec?.containers ?? [];
+      const nodeSelector = Object.entries(spec.template?.spec?.nodeSelector ?? {})
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([k, v]) => `${k}=${v}`)
+        .join(',');
+      const selector = Object.entries(spec.selector?.matchLabels ?? {})
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([k, v]) => `${k}=${v}`)
+        .join(',');
+      return [
+        object.metadata.name,
+        String(status.desiredNumberScheduled ?? 0),
+        String(status.currentNumberScheduled ?? 0),
+        String(status.numberReady ?? 0),
+        String(status.updatedNumberScheduled ?? 0),
+        String(status.numberAvailable ?? 0),
+        nodeSelector || '<none>',
+        age,
+        containers.map((c) => c.name).join(',') || '<none>',
+        containers.map((c) => c.image).join(',') || '<none>',
+        selector || '<none>',
+      ];
+    },
+  },
   namespaces: {
     columns: [NAME_COLUMN, col('Status', 'The status of the namespace.'), AGE_COLUMN],
     cells: (object, age) => [

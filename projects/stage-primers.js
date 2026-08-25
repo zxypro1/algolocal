@@ -1177,6 +1177,21 @@ const primers = {
       )
     ),
 
+    'network-policy': t(
+      p(
+        '集群里的 Pod 默认可以互相访问，不分命名空间。`NetworkPolicy` 是收紧这件事的对象：它按标签选中一批 Pod，然后声明这批 Pod 的入向（`ingress`）和出向（`egress`）允许什么。没有任何策略选中某个 Pod 时，这个 Pod 完全开放；一旦被选中，对应方向就变成默认拒绝，只有明确写出来的才放行。',
+        '有两件事经常被搞混。第一，`policyTypes` 决定这条策略管哪个方向：写了 `Egress` 却不写任何 egress 规则，等于「这批 Pod 什么都出不去」，包括查 DNS。第二，`from` 和 `to` 里的每一个元素是「或」的关系，但同一个元素内部的 `podSelector` 和 `namespaceSelector` 是「与」。写成两个元素就是「这个命名空间的所有 Pod，或者任何命名空间里叫这个名字的 Pod」，比想要的宽得多。另外，只写 `podSelector` 不写 `namespaceSelector` 时，它只在策略自己所在的命名空间里找。',
+        '最关键、也最容易踩的一点：`NetworkPolicy` 只是一个被 apiserver 收下的对象，真正拦不拦包取决于 CNI。flannel 这类只做网络连通的插件根本不看这些对象，策略写得再对也是一张废纸；Cilium、Calico 这类才会把它翻译成数据面规则。所以「加了策略但行为没变」时，第一个要确认的不是策略写得对不对，而是集群里到底有没有人在执行它。',
+        '被策略拒绝的连接表现为`超时`，不是`拒绝`。丢包意味着对端不会回 RST，客户端只能等到自己的超时时间。这个区别很有用：`Connection refused` 说明包已经到了对端而那里没有进程在听，和策略无关；`timeout` 才值得去看策略、路由和防火墙。'
+      ),
+      p(
+        'Pods can reach each other freely by default, across namespaces. `NetworkPolicy` is how you tighten that: it selects pods by label and declares what their inbound (`ingress`) and outbound (`egress`) traffic may be. A pod that no policy selects stays fully open; once selected, that direction becomes deny-by-default and only what you spell out gets through.',
+        'Two details cause most of the confusion. First, `policyTypes` decides which directions the policy governs: listing `Egress` without writing any egress rule means "these pods may not reach anything", DNS lookups included. Second, entries in `from` and `to` are ORed together, but `podSelector` and `namespaceSelector` inside a single entry are ANDed. Writing them as two entries means "every pod in that namespace, or any pod with that label in any namespace", which is far wider than intended. And a bare `podSelector` with no `namespaceSelector` only matches within the policy own namespace.',
+        'The most important point, and the easiest to miss: a `NetworkPolicy` is only an object the apiserver accepts. Whether packets get dropped depends on the CNI. Plugins like flannel provide connectivity and never read these objects, so a perfectly correct policy does nothing at all; Cilium and Calico translate them into real data plane rules. When a policy changes no behaviour, the first thing to check is not the policy but whether anything is enforcing it.',
+        'A connection denied by policy shows up as a `timeout`, not a `refusal`. Dropping a packet means no RST comes back, so the client waits out its own deadline. That distinction is useful: `Connection refused` means the packet arrived and no process was listening, which has nothing to do with policy, while a `timeout` is what sends you looking at policies, routing, and firewalls.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',

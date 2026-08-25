@@ -20,6 +20,13 @@ export interface GatewayDecision {
   route?: string;
   /** 转给哪个 Service */
   backend?: { namespace: string; name: string; port: number };
+  /**
+   * 做这一跳转发的 envoy Pod。
+   *
+   * 过了 Gateway 之后那段流量的源头是它，不是外面的客户端 ——
+   * NetworkPolicy 判的就是这个源。
+   */
+  proxyPod?: { namespace: string; name: string };
   /** 没有路由匹配，或者后端解析不了 */
   status?: number;
   detail: string;
@@ -30,6 +37,17 @@ export interface GatewayDecision {
  *
  * 返回 undefined 表示「这个地址不归任何 Gateway 管」，调用方按普通地址处理。
  */
+function proxyPodOf(lookup: GatewayLookup, gatewayName: string): { namespace: string; name: string } | undefined {
+  const pods = list(lookup, { group: '', version: 'v1', resource: 'pods' })
+    .filter((pod) =>
+      pod.metadata.namespace === 'envoy-gateway-system'
+      && pod.metadata.labels?.['gateway.envoyproxy.io/owning-gateway-name'] === gatewayName
+      && ((pod.status ?? {}) as any).phase === 'Running')
+    .sort((a, b) => (a.metadata.name! < b.metadata.name! ? -1 : 1));
+  const pod = pods[0];
+  return pod ? { namespace: pod.metadata.namespace!, name: pod.metadata.name! } : undefined;
+}
+
 export function resolveGateway(
   lookup: GatewayLookup,
   address: string,
@@ -45,6 +63,8 @@ export function resolveGateway(
   const gatewayName = owner.metadata.labels!['gateway.envoyproxy.io/owning-gateway-name'];
   const gatewayNamespace = owner.metadata.labels!['gateway.envoyproxy.io/owning-gateway-namespace'];
   const reference = `gateway/${gatewayNamespace}/${gatewayName}`;
+  // 转发这一跳由哪个 envoy Pod 做。NetworkPolicy 看到的源就是它。
+  const proxyPod = proxyPodOf(lookup, gatewayName);
 
   let gateway: KubeObject;
   try {
@@ -95,6 +115,7 @@ export function resolveGateway(
           name: backend.name,
           port: Number(backend.port),
         },
+        proxyPod,
         detail: `${request.path} -> ${backend.name}:${backend.port}`,
       };
     }

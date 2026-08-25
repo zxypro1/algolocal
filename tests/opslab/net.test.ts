@@ -4,7 +4,7 @@
  * 这一套用例的组织方式就是那张排查表：每一条对应一种症状，
  * 断言的是「这种情况下学员看到的是什么」。
  */
-import { createCluster } from '../../src/lib/opslab/controllers';
+import { createCluster, type Cluster, DAEMONSETS, DEPLOYMENTS, NAMESPACES, PODS } from '../../src/lib/opslab/controllers';
 import { candidatesFor, evaluate, inCidr, isIpv4 } from '../../src/lib/opslab/net';
 import type { KubeObject } from '../../src/lib/opslab/apiserver';
 import type { Source } from '../../src/lib/opslab/net';
@@ -517,5 +517,98 @@ describe('网络工具的输出与退出码', () => {
     expect(result.kind).toBe('timeout');
     expect(world.now()).toBe(before);   // connect 自己不推时间，是工具推的
     expect(result.elapsedMs).toBeGreaterThanOrEqual(30_000);
+  });
+});
+
+/**
+ * NetworkPolicy 要有人执行才算数
+ *
+ * 这是真集群里最难自查的一类问题：对象被 apiserver 收下了，
+ * `kubectl get netpol` 看得见，`describe` 也漂亮，就是一个包都不拦。
+ */
+describe('CNI 决定策略生不生效', () => {
+  const APP = 'registry.corp.internal/app:1.0';
+  const FLANNEL = 'docker.io/flannel/flannel:v0.28.0';
+  const CILIUM = 'quay.io/cilium/cilium:v1.19.2';
+
+  const IMAGES = {
+    [APP]: { pullMs: 10, startupMs: 10, readyAfterMs: 10, listens: [8080] },
+    [FLANNEL]: { pullMs: 10, startupMs: 10, readyAfterMs: 10, enforcesNetworkPolicy: false },
+    [CILIUM]: { pullMs: 10, startupMs: 10, readyAfterMs: 10, enforcesNetworkPolicy: true },
+  };
+
+  function workload(name: string, namespace: string) {
+    return {
+      apiVersion: 'apps/v1', kind: 'Deployment',
+      metadata: { name, namespace },
+      spec: {
+        replicas: 1,
+        selector: { matchLabels: { app: name } },
+        template: {
+          metadata: { labels: { app: name } },
+          spec: { containers: [{ name: 'app', image: APP, ports: [{ containerPort: 8080 }] }] },
+        },
+      },
+    };
+  }
+
+  function cni(image: string) {
+    return {
+      apiVersion: 'apps/v1', kind: 'DaemonSet',
+      metadata: { name: 'cni', namespace: 'kube-system' },
+      spec: {
+        selector: { matchLabels: { app: 'cni' } },
+        template: {
+          metadata: { labels: { app: 'cni' } },
+          spec: { containers: [{ name: 'agent', image }] },
+        },
+      },
+    };
+  }
+
+  const DENY_ALL = {
+    apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy',
+    metadata: { name: 'deny-all', namespace: 'shop' },
+    spec: { podSelector: {}, policyTypes: ['Ingress'] },
+  };
+
+  async function build(cniImage: string) {
+    const cluster = createCluster({ images: IMAGES });
+    cluster.start();
+    cluster.registry.create(NAMESPACES, undefined, {
+      apiVersion: 'v1', kind: 'Namespace', metadata: { name: 'shop' }, status: { phase: 'Active' },
+    } as never);
+    cluster.registry.create(DAEMONSETS, 'kube-system', cni(cniImage) as never);
+    cluster.registry.create(DEPLOYMENTS, 'shop', workload('server', 'shop') as never);
+    cluster.registry.create(DEPLOYMENTS, 'shop', workload('client', 'shop') as never);
+    cluster.registry.create(
+      cluster.scheme.mustGet({ group: 'networking.k8s.io', version: 'v1', resource: 'networkpolicies' }),
+      'shop', DENY_ALL as never
+    );
+    await cluster.settle();
+    return cluster;
+  }
+
+  async function connect(cluster: Cluster) {
+    const pods = cluster.registry.list(PODS, { namespace: 'shop' }).items;
+    const client = pods.find((pod) => pod.metadata.labels?.app === 'client')!;
+    const server = pods.find((pod) => pod.metadata.labels?.app === 'server')!;
+    return cluster.network.connect(
+      { zone: 'cluster', namespace: 'shop', podName: client.metadata.name, label: 'client' },
+      { host: (server.status as any).podIP, port: 8080 }
+    );
+  }
+
+  it('flannel 下面策略是一张废纸 —— 对象在，包照过', async () => {
+    const cluster = await build(FLANNEL);
+    const result = await connect(cluster);
+    expect(result.kind).toBe('ok');
+  });
+
+  it('换成 Cilium，同一条策略立刻开始拦包（表现为超时）', async () => {
+    const cluster = await build(CILIUM);
+    const result = await connect(cluster);
+    expect(result.kind).toBe('timeout');
+    expect(result.blockedBy).toContain('deny-all');
   });
 });

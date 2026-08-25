@@ -21,6 +21,10 @@ const ENVOY_IMAGE = 'registry.k8s.io/gateway-api/envoy-gateway:v1.6.2';
 const CERT_MANAGER_IMAGE = 'quay.io/jetstack/cert-manager-controller:v1.19.1';
 /** 已经从仓库里下架的镜像，拉不到 —— ingress-nginx 2026-03-24 退役 */
 const RETIRED_NGINX_IMAGE = 'registry.k8s.io/ingress-nginx/controller:v1.13.0';
+const LEDGER_IMAGE = 'harbor.corp.internal/team/ledger:3.2.1';
+// 集群现在的 CNI。它不实现 NetworkPolicy —— 第 10 关整关都建立在这一点上。
+const FLANNEL_IMAGE = 'docker.io/flannel/flannel:v0.28.0';
+const CILIUM_IMAGE = 'quay.io/cilium/cilium:v1.19.2';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -86,7 +90,7 @@ const WORLD = {
     { name: 'node-b1', cpu: '4', memory: '8Gi', labels: { 'topology.kubernetes.io/zone': 'b' } },
   ],
   namespaces: [
-    'default', 'kube-system', 'payments',
+    'default', 'kube-system', 'payments', 'analytics',
     'envoy-gateway-system', 'ingress-nginx', 'cert-manager',
   ],
   images: {
@@ -102,6 +106,23 @@ const WORLD = {
     // 平台组装的入口控制器与 PKI
     [ENVOY_IMAGE]: { pullMs: 300, startupMs: 400, readyAfterMs: 200, listens: [18000] },
     [CERT_MANAGER_IMAGE]: { pullMs: 300, startupMs: 400, readyAfterMs: 200, listens: [9402] },
+    // 支付核心。安全评审要求它只对门户开放。
+    [LEDGER_IMAGE]: {
+      pullMs: 400, startupMs: 700, readyAfterMs: 300,
+      listens: [8080],
+      routes: { '/': 200, '/healthz': 200 },
+      memoryUsage: '240Mi',
+    },
+    // CNI。flannel 收下 NetworkPolicy 但一个包都不拦，Cilium 才真的执行。
+    [FLANNEL_IMAGE]: {
+      pullMs: 200, startupMs: 300, readyAfterMs: 100,
+      enforcesNetworkPolicy: false,
+    },
+    [CILIUM_IMAGE]: {
+      pullMs: 600, startupMs: 900, readyAfterMs: 400,
+      listens: [9962],
+      enforcesNetworkPolicy: true,
+    },
     // 财务的报表任务：吃 900Mi，limits 写小了就会被 OOMKill
     [REPORTS_IMAGE]: {
       pullMs: 500, startupMs: 800, readyAfterMs: 200,
@@ -417,6 +438,106 @@ const PORTAL_WORKLOAD = [
     spec: { clusterIP: '10.96.1.10', selector: { app: 'portal' }, ports: [{ port: 80, targetPort: 8080 }] },
   },
 ];
+
+/** 集群现在的 CNI。收下 NetworkPolicy，但从不执行。 */
+const CNI_FLANNEL = {
+  apiVersion: 'apps/v1', kind: 'DaemonSet',
+  metadata: {
+    name: 'kube-flannel-ds', namespace: 'kube-system',
+    labels: { 'app.kubernetes.io/name': 'flannel' },
+  },
+  spec: {
+    selector: { matchLabels: { 'app.kubernetes.io/name': 'flannel' } },
+    template: {
+      metadata: { labels: { 'app.kubernetes.io/name': 'flannel' } },
+      spec: { containers: [{ name: 'kube-flannel', image: FLANNEL_IMAGE }] },
+    },
+  },
+};
+
+/** 上一关的结果：cert-manager 签的证书 + 用上它的 Gateway */
+const TLS_PLATFORM = [
+  {
+    apiVersion: 'cert-manager.io/v1', kind: 'Certificate',
+    metadata: { name: 'portal', namespace: 'payments' },
+    spec: {
+      secretName: 'portal-tls', duration: '2160h', renewBefore: '720h',
+      commonName: 'portal.corp.internal', dnsNames: ['portal.corp.internal'],
+      issuerRef: { name: 'corp-ca', kind: 'ClusterIssuer' },
+    },
+  },
+  {
+    apiVersion: 'gateway.networking.k8s.io/v1', kind: 'Gateway',
+    metadata: { name: 'corp-gw', namespace: 'payments' },
+    spec: {
+      gatewayClassName: 'envoy-internal',
+      listeners: [
+        {
+          name: 'https', port: 443, protocol: 'HTTPS', hostname: 'portal.corp.internal',
+          tls: { mode: 'Terminate', certificateRefs: [{ name: 'portal-tls' }] },
+        },
+        { name: 'http', port: 80, protocol: 'HTTP', hostname: 'portal.corp.internal' },
+      ],
+    },
+  },
+];
+
+/** 支付核心 */
+const LEDGER_WORKLOAD = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: 'ledger', namespace: 'payments' },
+    spec: {
+      replicas: 2,
+      selector: { matchLabels: { app: 'ledger' } },
+      template: {
+        metadata: { labels: { app: 'ledger' } },
+        spec: { containers: [{ name: 'app', image: LEDGER_IMAGE, ports: [{ containerPort: 8080 }] }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'v1', kind: 'Service',
+    metadata: { name: 'ledger', namespace: 'payments' },
+    spec: { selector: { app: 'ledger' }, ports: [{ port: 80, targetPort: 8080 }] },
+  },
+];
+
+/** 财务的报表任务，跑在自己的命名空间里 */
+const ANALYTICS_WORKLOAD = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: 'reports', namespace: 'analytics' },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { app: 'reports' } },
+      template: {
+        metadata: { labels: { app: 'reports' } },
+        spec: {
+          containers: [{
+            name: 'app', image: REPORTS_IMAGE,
+            ports: [{ containerPort: 9090 }],
+            resources: { requests: { memory: '256Mi' }, limits: { memory: '1Gi' } },
+          }],
+        },
+      },
+    },
+  },
+];
+
+/** 前任写的那条策略。粗到会把门户自己也关在外面。 */
+const PREDECESSOR_POLICY = {
+  apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy',
+  metadata: { name: 'payments-lockdown', namespace: 'payments' },
+  spec: {
+    // 选中整个命名空间，包括门户自己
+    podSelector: {},
+    policyTypes: ['Ingress', 'Egress'],
+    ingress: [{ from: [{ podSelector: { matchLabels: { app: 'portal' } } }] }],
+    // egress 一条都没写 = 什么都出不去，连 DNS 都不行
+    egress: [],
+  },
+};
 
 /* ------------------------------------------------------------------ */
 /* 第 2 关                                                             */
@@ -2342,6 +2463,333 @@ const stage9 = {
   ),
 };
 
+
+/* ------------------------------------------------------------------ */
+/* 第 10 关                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 平台组准备好的 Cilium。装上它，NetworkPolicy 才真的拦包。 */
+const CILIUM_MANIFEST = code`
+  apiVersion: apps/v1
+  kind: DaemonSet
+  metadata:
+    name: cilium
+    namespace: kube-system
+    labels:
+      app.kubernetes.io/name: cilium
+  spec:
+    selector:
+      matchLabels:
+        app.kubernetes.io/name: cilium
+    template:
+      metadata:
+        labels:
+          app.kubernetes.io/name: cilium
+      spec:
+        containers:
+        - name: cilium-agent
+          image: ${CILIUM_IMAGE}
+          ports:
+          - containerPort: 9962
+`;
+
+/** 前任那条策略，原样导出来放在这里给你改 */
+const NETPOL_STARTER = code`
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: payments-lockdown
+    namespace: payments
+  spec:
+    podSelector: {}
+    policyTypes:
+    - Ingress
+    - Egress
+    ingress:
+    - from:
+      - podSelector:
+          matchLabels:
+            app: portal
+    egress: []
+`;
+
+const NETPOL_REFERENCE = code`
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    podSelector:
+      matchLabels:
+        app: portal
+    policyTypes:
+    - Ingress
+    - Egress
+    ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: envoy-gateway-system
+    egress:
+    - to:
+      - podSelector:
+          matchLabels:
+            app: ledger
+    - to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+      ports:
+      - protocol: UDP
+        port: 53
+  ---
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: ledger
+    namespace: payments
+  spec:
+    podSelector:
+      matchLabels:
+        app: ledger
+    policyTypes:
+    - Ingress
+    - Egress
+    ingress:
+    - from:
+      - podSelector:
+          matchLabels:
+            app: portal
+    egress:
+    - to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+      ports:
+      - protocol: UDP
+        port: 53
+`;
+
+const stage10 = {
+  id: 'network-policy',
+  title: t('网络策略：让它真的生效', 'Network Policy: Make It Actually Apply'),
+  goal: t(
+    code`
+      安全评审提了一条：支付核心 \`ledger\` 只能被门户访问。前任在交接里写着
+      「已加 NetworkPolicy」，\`kubectl get netpol -n payments\` 也确实看得见一条
+      \`payments-lockdown\`。但审计的人从 \`analytics\` 命名空间的报表机上
+      curl 了一下 ledger，通了。
+
+      集群现在的 CNI 是 flannel。平台组把 Cilium 的清单放在
+      \`/root/infra/cilium.yaml\` 了。
+
+      **先把话说在前面**：策略一旦真的开始执行，前任那条会立刻生效 ——
+      而它选中的是整个命名空间。装之前先读一遍它写了什么。
+
+      ## 通关标准
+
+      1. Cilium 装上，每个节点一份，全部 Ready；
+      2. 从跳板机 \`curl https://portal.corp.internal/\` 仍然返回 200；
+      3. 从门户的 Pod 里访问 \`http://ledger\` 通；
+      4. 从 analytics 的报表 Pod 里访问 ledger **连不上**；
+      5. ledger 的 Pod 里 DNS 还能用。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl get netpol -A
+      kubectl get ds -n kube-system
+      kubectl apply -f /root/infra/cilium.yaml
+      kubectl exec -n payments deploy/portal -- curl -s -m 5 http://ledger
+      kubectl exec -n analytics deploy/reports -- curl -s -m 5 http://ledger.payments.svc.cluster.local
+      kubectl exec -n payments deploy/ledger -- nslookup portal
+      \`\`\`
+    `,
+    code`
+      A security review says the payment core \`ledger\` must only be reachable from
+      the portal. The handover claims "NetworkPolicy added", and
+      \`kubectl get netpol -n payments\` does show a \`payments-lockdown\`. Yet the
+      auditor curled ledger from the reports machine in the \`analytics\` namespace
+      and it answered.
+
+      The cluster currently runs flannel as its CNI. The platform team left a Cilium
+      manifest at \`/root/infra/cilium.yaml\`.
+
+      **Fair warning**: the moment policies actually get enforced, your predecessor's
+      policy takes effect too, and it selects the whole namespace. Read it before you
+      install anything.
+
+      ## Done when
+
+      1. Cilium is installed, one pod per node, all Ready;
+      2. \`curl https://portal.corp.internal/\` from the jump host still returns 200;
+      3. the portal's pods can reach \`http://ledger\`;
+      4. the reports pod in analytics **cannot** reach ledger;
+      5. DNS still works from ledger's pods.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl get netpol -A
+      kubectl get ds -n kube-system
+      kubectl apply -f /root/infra/cilium.yaml
+      kubectl exec -n payments deploy/portal -- curl -s -m 5 http://ledger
+      kubectl exec -n analytics deploy/reports -- curl -s -m 5 http://ledger.payments.svc.cluster.local
+      kubectl exec -n payments deploy/ledger -- nslookup portal
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('Cilium 装上，策略开始被执行', 'Cilium installed and policies enforced'),
+    t('门户对外照常，ledger 只对门户开放', 'Portal still serves; ledger only accepts the portal'),
+    t('DNS 没被 egress 规则误伤', 'DNS survives the egress rules'),
+  ],
+  hints: [
+    t(
+      '策略没生效不代表策略写错了。NetworkPolicy 是 apiserver 收下就完事的对象，拦不拦包看 CNI —— flannel 不做这件事，所以那条策略从写下去那天起就是一张废纸。',
+      'A policy that does nothing is not necessarily a wrong policy. NetworkPolicy is just an object the apiserver accepts; whether packets get dropped is up to the CNI, and flannel does not implement it. That policy has been inert since the day it was written.'
+    ),
+    t(
+      '`podSelector: {}` 选中的是命名空间里的**每一个** Pod，门户也在里面。门户的入向流量来自 Gateway 的数据面 Pod（在 \`envoy-gateway-system\` 里），不是 app=portal 的 Pod。',
+      '`podSelector: {}` selects **every** pod in the namespace, the portal included. The portal’s inbound traffic comes from the Gateway’s data plane pods in \`envoy-gateway-system\`, not from pods labelled app=portal.'
+    ),
+    t(
+      '一旦某个 Pod 被带 Egress 的策略选中，它的出向就变成默认拒绝 —— 包括查 DNS。放行 kube-system 的 53/UDP 几乎是每条 egress 策略都要写的一行。',
+      'Once a pod is selected by any policy with Egress, its egress becomes default-deny, DNS included. Allowing UDP/53 to kube-system is a line almost every egress policy needs.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '被拒绝的连接表现为**超时**，不是拒绝。策略是丢包，对面不会回 RST，所以 curl 会卡到超时才报错。看到 `Connection refused` 说明包到了对端而对端没在听，那是另一回事 —— 别拿它去查策略。',
+      'A denied connection shows up as a **timeout**, not a refusal. Policies drop packets, so nothing sends an RST and curl hangs until it gives up. `Connection refused` means the packet arrived and nobody was listening, which is a different problem entirely; do not go looking at policies for it.'
+    ),
+    t(
+      '为了让门户能通就把 `payments-lockdown` 的 ingress 加成 `from: []`（或者干脆删掉 policyTypes 里的 Ingress）。那等于把整个命名空间重新打开，ledger 又回到评审之前的样子。',
+      'Opening the portal back up by giving `payments-lockdown` an empty `from` (or dropping Ingress from policyTypes). That reopens the entire namespace and puts ledger back where it was before the review.'
+    ),
+    t(
+      '在 `analytics` 那边加一条 egress 策略来「禁止访问 ledger」。方向反了：那台机器不归你管，也随时可以被绕过。拒绝要写在**被保护的一侧**，ingress 上。',
+      'Adding an egress policy in `analytics` to "forbid access to ledger". That is the wrong side: you do not control that namespace and the rule is trivially bypassed. Denial belongs on the **protected** side, in ingress.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      CNI_FLANNEL,
+      ...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...TLS_PLATFORM,
+      ...PORTAL_WORKLOAD, PORTAL_ROUTE,
+      ...LEDGER_WORKLOAD, ...ANALYTICS_WORKLOAD,
+      PREDECESSOR_POLICY,
+    ],
+    files: {
+      '/root/infra/cilium.yaml': CILIUM_MANIFEST,
+      '/root/infra/netpol.yaml': NETPOL_STARTER,
+    },
+    referenceFiles: { '/root/infra/netpol.yaml': NETPOL_REFERENCE },
+    referenceCommands: [
+      'kubectl apply -f /root/infra/cilium.yaml',
+      'kubectl delete netpol payments-lockdown -n payments',
+      'kubectl apply -f /root/infra/netpol.yaml',
+    ],
+  },
+  specs: [
+    spec('network-policy.spec.ts', code`
+      import { list, sh } from '@ops/lab';
+
+      describe('网络策略', () => {
+        it('Cilium 每个节点一份，全部 Ready', () => {
+          const nodes = list('Node').length;
+          const enforcing = list('DaemonSet', { namespace: 'kube-system' })
+            .filter((item) => item.spec.template.spec.containers
+              .some((container) => container.image.includes('cilium')));
+          expect(enforcing.length).toBe(1);
+          expect(enforcing[0].status.desiredNumberScheduled).toBe(nodes);
+          expect(enforcing[0].status.numberReady).toBe(nodes);
+        });
+
+        it('门户对外照常 —— 策略没把入口打死', async () => {
+          const gateway = list('Gateway', { namespace: 'payments' })[0];
+          const address = gateway.status.addresses[0].value;
+          const result = await sh(
+            'curl -s -o /dev/null -w %{http_code} --resolve portal.corp.internal:443:' + address
+            + ' https://portal.corp.internal/'
+          );
+          expect(result.stdout).toBe('200');
+        });
+
+        it('门户访问得到 ledger', async () => {
+          const result = await sh(
+            'kubectl exec -n payments deploy/portal -- curl -s -m 5 -o /dev/null -w %{http_code} http://ledger'
+          );
+          expect(result.stdout).toBe('200');
+        });
+
+        it('analytics 的报表机访问不到 ledger', async () => {
+          const result = await sh(
+            'kubectl exec -n analytics deploy/reports -- '
+            + 'curl -s -m 5 -o /dev/null -w %{http_code} http://ledger.payments.svc.cluster.local'
+          );
+          expect(result.stdout).not.toBe('200');
+          // 策略是丢包：应该卡到超时（28），而不是被拒绝（7）
+          expect(result.stderr).toContain('curl: (28)');
+        });
+
+        it('ledger 的 DNS 还能用', async () => {
+          const result = await sh('kubectl exec -n payments deploy/ledger -- nslookup portal');
+          expect(result.code).toBe(0);
+        });
+
+        it('没有靠把命名空间重新打开来蒙过去', () => {
+          const policies = list('NetworkPolicy', { namespace: 'payments' });
+          const protecting = policies.filter((policy) => {
+            const types = policy.spec.policyTypes || [];
+            if (!types.includes('Ingress')) return false;
+            const selector = policy.spec.podSelector || {};
+            const labels = selector.matchLabels || {};
+            return labels.app === 'ledger';
+          });
+          expect(protecting.length).toBeGreaterThan(0);
+          for (const policy of protecting) {
+            for (const rule of policy.spec.ingress || []) {
+              // from 为空 = 谁都能进，那就没保护到
+              expect((rule.from || []).length).toBeGreaterThan(0);
+            }
+          }
+        });
+      });
+    `),
+  ],
+  focus: ['correctness', 'resilience'],
+  extension: t(
+    code`
+      「加了策略但什么都没变」在真集群里非常常见，而且极难自查 ——
+      apiserver 收下了对象，\`kubectl get netpol\` 看得见，\`describe\` 也漂亮，
+      唯一缺的是那个会执行它的东西。判断的办法不是读策略，是发一个包：
+      从一个**本该被拒绝**的地方连一次，看它是超时还是通。通了就说明没人执行。
+
+      反过来，策略真的生效之后，第一个被打挂的往往不是攻击者而是自己。
+      \`podSelector: {}\` 加 \`policyTypes: [Egress]\` 是一条能让整个命名空间
+      连不上 DNS 的策略，而它看起来只是「先默认拒绝，再慢慢放行」。
+      所以上线顺序应该反过来：先写放行规则，确认业务正常，最后才收紧默认。
+    `,
+    code`
+      "We added a policy and nothing changed" is common in real clusters and very hard
+      to self-diagnose: the apiserver accepted the object, \`kubectl get netpol\` shows
+      it, \`describe\` looks fine, and the only missing piece is something that
+      enforces it. The way to check is not to read the policy but to send a packet:
+      connect from somewhere that **should** be denied and see whether it times out or
+      answers. If it answers, nobody is enforcing.
+
+      Conversely, once policies do take effect, the first thing they break is usually
+      you. \`podSelector: {}\` with \`policyTypes: [Egress]\` is a policy that cuts an
+      entire namespace off from DNS, and it reads like a reasonable "deny by default,
+      allow later". So reverse the rollout order: write the allow rules first, confirm
+      the workloads still work, and tighten the default last.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -2384,5 +2832,5 @@ module.exports = {
   ),
   workspace: { kind: 'ops', world: WORLD },
   files: [],
-  stages: [stage1, stage2, stage3, stage4, stage5, stage6, stage7, stage8, stage9],
+  stages: [stage1, stage2, stage3, stage4, stage5, stage6, stage7, stage8, stage9, stage10],
 };

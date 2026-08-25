@@ -7,7 +7,7 @@
 export { Controller, Informer, WorkQueue, objectKey, splitKey, isConflict, isNotFound } from './framework';
 export type { ControllerContext, WorkQueueOptions } from './framework';
 export {
-  CORE_RESOURCES, CONFIGMAPS, DEPLOYMENTS, ENDPOINTS, EVENTS, INGRESSCLASSES, INGRESSES,
+  CORE_RESOURCES, CONFIGMAPS, DAEMONSETS, DEPLOYMENTS, ENDPOINTS, EVENTS, INGRESSCLASSES, INGRESSES,
   NAMESPACES, NETWORKPOLICIES, NODES, PODS,
   REPLICASETS, SECRETS, SERVICEACCOUNTS, SERVICES, POD_TEMPLATE_HASH,
   matchesSelector, templateHash,
@@ -27,3 +27,4 @@ export type {
 export { Cluster, createCluster } from './cluster';
 export type { ClusterOptions, NodeSpec } from './cluster';
 export { createServiceIpDefaulter, DEFAULT_SERVICE_CIDR } from './serviceip';
+export { DaemonSetController } from './daemonset';
