@@ -520,7 +520,9 @@
       "saveNow": "立即保存",
       "saving": "保存中…",
       "language": "编程语言",
-      "languageHint": "切换语言会换一套初始文件与用例，两边的代码各自保存"
+      "languageHint": "切换语言会换一套初始文件与用例，两边的代码各自保存",
+      "unsupportedKind": "这个版本还不支持这种工作台",
+      "unsupportedKindBody": "这个项目需要一种当前版本没有内置的工作台形态。升级到支持它的版本后即可打开。"
     },
     "tabs": {
       "stage": "本关任务",

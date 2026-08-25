@@ -5,8 +5,19 @@ import type {
   EngineeringProject,
   ProjectStage,
   WorkspaceFile,
+  WorkspaceKind,
   WorkspaceLanguage,
 } from './types';
+
+/**
+ * 这个工程用哪种工作台。
+ *
+ * 不声明就是 'code'，也就是现有的「任务描述 + IDE + 结果面板」。
+ * 所有既有项目（以及 AI 生成的项目，coerceProject 不产出这个字段）都落在这一支上。
+ */
+export function workspaceKindOf(project: Pick<EngineeringProject, 'workspace'>): WorkspaceKind {
+  return project.workspace?.kind ?? 'code';
+}
 
 /** 这个工程可以用哪些语言来做 */
 export function availableLanguages(project: EngineeringProject): WorkspaceLanguage[] {
