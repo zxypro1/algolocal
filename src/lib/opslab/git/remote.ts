@@ -56,11 +56,20 @@ export class GitNetwork {
   }
 }
 
-/** 往裸仓库里塞一份初始内容，返回 commit id */
+/**
+ * 往裸仓库里塞一次提交，返回 commit id。
+ *
+ * 分支上已经有东西时默认接在它后面 —— 不然造出来的是一次根提交，
+ * 对面 pull 下来会被判成分叉。
+ */
 export function seedRepository(
   repository: BareRepository,
   files: FileMap,
-  options: { branch?: string; message?: string; author?: string; timestamp?: number } = {}
+  options: {
+    branch?: string; message?: string; author?: string; timestamp?: number;
+    /** 接在哪次提交后面。不给就是一次根提交。 */
+    parent?: string;
+  } = {}
 ): string {
   // 这里刻意不复用 Repository：裸仓库没有工作树，只有对象与引用
   const store = repository.objects;
@@ -68,8 +77,10 @@ export function seedRepository(
   const branch = options.branch ?? repository.head;
   const author = options.author ?? 'Platform Team <platform@corp.internal>';
   const timestamp = Math.floor((options.timestamp ?? 0) / 1000);
+  const parent = options.parent ?? repository.refs[branch];
   const body = [
     `tree ${tree}`,
+    ...(parent ? [`parent ${parent}`] : []),
     `author ${author} ${timestamp} +0000`,
     `committer ${author} ${timestamp} +0000`,
     '',

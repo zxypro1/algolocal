@@ -372,9 +372,19 @@ function collectRedirects(node: TsNode): Redirect[] {
   return redirects;
 }
 
-/** 把重定向挂到该挂的地方：单命令直接包一层，管道分别挂在首尾两段 */
+/**
+ * 把重定向挂到该挂的地方。
+ *
+ * 单命令直接包一层；管道分别挂在首尾两段；`a && b > f` 只重定向 `b`。
+ * 最后这条不是吹毛求疵：整段包起来的话，重定向的目标路径会在 `a` 跑之前
+ * 就解析掉，于是 `cd sub && echo x > f` 把文件写到了 cd 之前的目录里 ——
+ * 命令全部成功，文件出现在错误的地方，没有任何报错。
+ */
 function attachRedirects(body: Node, redirects: Redirect[]): Node {
   if (redirects.length === 0) return body;
+  if (body.type === 'list') {
+    return { ...body, right: attachRedirects(body.right, redirects) };
+  }
   if (body.type === 'pipeline' && body.commands.length > 0) {
     const commands = [...body.commands];
     const inbound = redirects.filter((r) => r.kind === 'in' || r.kind === 'heredoc');

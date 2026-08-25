@@ -161,6 +161,12 @@ export class Repository {
     return commit ? readTree(this.objects, commit.tree) : {};
   }
 
+  /**
+   * `git add`
+   *
+   * 只动 pathspec 覆盖到的那些路径。删除同样要进暂存区，但**也只限这些路径** ——
+   * `git add b.yaml` 不该顺手把别处删掉的文件也暂存了。
+   */
   add(paths: string[]): { added: string[]; missing: string[] } {
     const worktree = this.worktree();
     const index = this.index();
@@ -168,21 +174,35 @@ export class Repository {
     const missing: string[] = [];
     for (const raw of paths) {
       const wanted = raw === '.' || raw === './' ? '' : raw.replace(/^\.\//, '').replace(/\/$/, '');
-      const matched = Object.keys(worktree).filter(
-        (file) => wanted === '' || file === wanted || file.startsWith(`${wanted}/`)
-      );
-      if (matched.length === 0) { missing.push(raw); continue; }
+      const covers = (file: string) => wanted === '' || file === wanted || file.startsWith(`${wanted}/`);
+      const matched = Object.keys(worktree).filter(covers);
+      const removed = Object.keys(index).filter((file) => covers(file) && !(file in worktree));
+      if (matched.length === 0 && removed.length === 0) { missing.push(raw); continue; }
       for (const file of matched) {
         index[file] = this.objects.put('blob', worktree[file]);
         added.push(file);
       }
-    }
-    // 暂存过、现在工作树里没有了 = 删除也要进暂存区
-    for (const file of Object.keys(index)) {
-      if (!(file in worktree)) delete index[file];
+      for (const file of removed) delete index[file];
     }
     this.writeIndex(index);
     return { added, missing };
+  }
+
+  /** `git commit -a`：只重新暂存已跟踪的文件，不碰未跟踪的 */
+  restageTracked(): void {
+    this.add(Object.keys(this.index()));
+  }
+
+  /** ancestor 是不是 descendant 的祖先（快进判断） */
+  isAncestor(ancestor: string, descendant: string): boolean {
+    let cursor: string | undefined = descendant;
+    const seen = new Set<string>();
+    while (cursor && !seen.has(cursor)) {
+      if (cursor === ancestor) return true;
+      seen.add(cursor);
+      cursor = this.commit(cursor)?.parents[0];
+    }
+    return false;
   }
 
   /** 暂存区的内容（路径 -> 内容） */

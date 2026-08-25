@@ -242,6 +242,53 @@ describe('git 命令', () => {
     expect(w.machine.vfs.readFile('/root/apps/apps/portal.yaml')).toContain('replicas: 5');
   });
 
+  it('别人先推了、你手上是旧的 —— push 要被拒，不能悄悄覆盖', async () => {
+    const w = await world();
+    await w.run('git clone https://git.corp.internal/platform/apps');
+    // 你在本地改了一版
+    await w.run("cd /root/apps && sed -i 's/replicas: 2/replicas: 3/' apps/portal.yaml");
+    await w.run("cd /root/apps && git add . && git commit -m 'mine'");
+    // 与此同时平台组推了另一版
+    const bare = w.git.get('https://git.corp.internal/platform/apps')!;
+    seedRepository(bare, { 'apps/portal.yaml': 'kind: Deployment\nreplicas: 9\n' }, {
+      message: 'theirs', timestamp: w.now(),
+    });
+
+    const pushed = await w.run('cd /root/apps && git push origin main');
+    expect(pushed.code).toBe(1);
+    expect(pushed.stderr).toContain('[rejected]');
+    expect(pushed.stderr).toContain('fetch first');
+    // 远端那次提交没被抹掉
+    const tree = parseCommit(bare.objects.get(bare.refs.main)!.body).tree;
+    expect(readTree(bare.objects, tree)['apps/portal.yaml']).toContain('replicas: 9');
+  });
+
+  it('分叉之后 pull 如实说分叉了，不假装 merge 成功', async () => {
+    const w = await world();
+    await w.run('git clone https://git.corp.internal/platform/apps');
+    await w.run("cd /root/apps && sed -i 's/replicas: 2/replicas: 3/' apps/portal.yaml");
+    await w.run("cd /root/apps && git add . && git commit -m 'mine'");
+    const bare = w.git.get('https://git.corp.internal/platform/apps')!;
+    seedRepository(bare, { 'apps/portal.yaml': 'kind: Deployment\nreplicas: 9\n' }, {
+      message: 'theirs', timestamp: w.now(),
+    });
+
+    const pulled = await w.run('cd /root/apps && git pull origin main');
+    expect(pulled.code).toBe(128);
+    expect(pulled.stderr).toContain('diverged');
+  });
+
+  it('git add 只动指到的路径 —— 别处删掉的文件不该被顺手暂存', async () => {
+    const w = await world();
+    await w.run('git clone https://git.corp.internal/platform/apps');
+    await w.run('cd /root/apps && rm README.md && echo x > new.yaml');
+    await w.run('cd /root/apps && git add new.yaml');
+    const status = await w.run('cd /root/apps && git status --porcelain');
+    expect(status.stdout).toContain('A  new.yaml');
+    // README.md 的删除还留在工作区，没有被带进暂存区
+    expect(status.stdout).toContain(' D README.md');
+  });
+
   it('git log --oneline 与 rev-parse HEAD 对得上', async () => {
     const w = await world();
     await w.run('git clone https://git.corp.internal/platform/apps');

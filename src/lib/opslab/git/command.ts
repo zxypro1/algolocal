@@ -85,7 +85,7 @@ export function createGitCommand(options: GitCommandOptions): CommandHandler {
       case 'commit': {
         const repository = open();
         if (!repository) return notARepo;
-        if (rest.includes('-a') || rest.includes('--all')) repository.add(['.']);
+        if (rest.includes('-a') || rest.includes('--all')) repository.restageTracked();
         const message = messageOf(rest);
         if (!message) {
           return { stderr: 'Aborting commit due to empty commit message.\n', code: 1 };
@@ -398,6 +398,21 @@ function push(repository: Repository | undefined, argv: string[], options: GitCo
   if (!hash) return { stderr: `error: src refspec ${branch} does not match any\n`, code: 1 };
   const before = bare.repository.refs[branch];
   if (before === hash) return { stdout: 'Everything up-to-date\n' };
+  /**
+   * 非快进的推送要拒。
+   *
+   * 别人先推了一版而你手上是旧的，直接覆盖等于把那次提交抹掉 ——
+   * 真 git 在这里拦一道，GitOps 里这一拦尤其重要：远端就是期望状态。
+   */
+  if (before && !repository.isAncestor(before, hash)) {
+    return {
+      stderr: `To ${url}\n ! [rejected]        ${branch} -> ${branch} (fetch first)\n`
+        + `error: failed to push some refs to '${url}'\n`
+        + `hint: Updates were rejected because the remote contains work that you do not\n`
+        + `hint: have locally. Integrate the remote changes before pushing again.\n`,
+      code: 1,
+    };
+  }
 
   repository.objects.copyTo(bare.repository.objects, hash);
   bare.repository.refs[branch] = hash;
@@ -425,9 +440,18 @@ function pull(
 
   const hash = bare.repository.refs[branch];
   if (!hash) return { stderr: `fatal: couldn't find remote ref ${branch}\n`, code: 128 };
-  if (repository.ref(branch) === hash) return { stdout: 'Already up to date.\n' };
+  const local = repository.ref(branch);
+  if (local === hash) return { stdout: 'Already up to date.\n' };
 
   bare.repository.objects.copyTo(repository.objects, hash);
+  // 本地有远端没有的提交 = 分叉了。这里不做 merge，如实说出来。
+  if (local && !repository.isAncestor(local, hash)) {
+    return {
+      stderr: `fatal: Not possible to fast-forward, and merging is not supported here.\n`
+        + `hint: ${branch} has diverged from ${remoteName}/${branch}.\n`,
+      code: 128,
+    };
+  }
   repository.setRef(branch, hash);
   if (checkout && repository.currentBranch() === branch) repository.restoreWorktree(hash);
   return { stdout: `Updating ${branch}\nFast-forward\n` };
