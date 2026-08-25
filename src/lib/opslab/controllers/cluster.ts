@@ -19,6 +19,10 @@ import { Controller, ControllerContext } from './framework';
 import { createServiceIpDefaulter } from './serviceip';
 import { DaemonSetController } from './daemonset';
 import { ARGOCD_RESOURCES, ArgoCdController } from '../argocd';
+import {
+  ISTIOD_LABEL, MESH_RESOURCES, WAYPOINT_CLASS, ZTUNNEL_LABEL, isAmbient, traverseMesh,
+  type MeshPeer, type MeshView,
+} from '../mesh';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
@@ -30,7 +34,7 @@ import {
   SchedulerController,
 } from './workloads';
 import type { ImageBehavior, RegistryAuth } from './runtime';
-import { Network, createNetwork, type Zone } from '../net';
+import { Network, createNetwork, type Source, type Zone } from '../net';
 import {
   AddressPool, GATEWAY_RESOURCES, GatewayController, LoadBalancerController, resolveGateway,
 } from '../gateway';
@@ -125,6 +129,7 @@ export class Cluster {
     this.store = createStore();
     this.scheme = createScheme([
       ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES, ...ARGOCD_RESOURCES,
+      ...MESH_RESOURCES,
       ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
@@ -151,6 +156,7 @@ export class Cluster {
       trustBundle: (source) => options.trustBundle?.(source) ?? [],
       imageOf: (image) => this.imageBehaviorOf(image),
       policyEnforced: () => this.policyEnforced(),
+      mesh: (input) => this.meshDecision(input),
       now,
     });
 
@@ -253,6 +259,107 @@ export class Cluster {
       return containers.some((container: any) =>
         this.imageBehaviorOf(container.image)?.enforcesNetworkPolicy);
     });
+  }
+
+  /**
+   * 一条连接过网格时发生了什么。
+   *
+   * 网络层不认识 Istio 的 CRD —— 它只拿到一句话和一个「拦没拦」。
+   * 和 Envoy Gateway、cert-manager 一样，网格的控制面与数据面都是集群里的
+   * 工作负载：istiod 或 ztunnel 不可用，这里直接返回 off。
+   */
+  private meshDecision(input: {
+    source: Source; destination: KubeObject; port: number; method?: string; path?: string;
+  }): { kind: string; detail: string; blocked?: boolean } | undefined {
+    const view = this.meshView();
+    if (!view) return undefined;
+    const outcome = traverseMesh(view, this.meshPeerOf(input.source), this.meshPeerOfPod(input.destination), {
+      port: input.port, method: input.method, path: input.path,
+    });
+    return {
+      kind: outcome.kind,
+      detail: outcome.detail,
+      blocked: outcome.kind === 'denied' || outcome.kind === 'plaintext-rejected',
+    };
+  }
+
+  /** 给 istioctl 用的只读视图。命令不改任何东西。 */
+  istioView() {
+    const mesh = this.meshView();
+    if (!mesh) return undefined;
+    const pods = this.scheme.get({ group: '', version: 'v1', resource: 'pods' })!;
+    const namespaces = this.scheme.get({ group: '', version: 'v1', resource: 'namespaces' })!;
+    const services = this.scheme.get({ group: '', version: 'v1', resource: 'services' })!;
+    return {
+      mesh,
+      pods: (namespace?: string) => this.registry.list(pods, { namespace }).items,
+      namespaces: () => this.registry.list(namespaces).items,
+      services: (namespace?: string) => this.registry.list(services, { namespace }).items,
+      peerOf: (pod: KubeObject) => this.meshPeerOfPod(pod),
+    };
+  }
+
+  private meshView(): MeshView | undefined {
+    const peerAuth = this.scheme.get({
+      group: 'security.istio.io', version: 'v1', resource: 'peerauthentications',
+    });
+    const authz = this.scheme.get({
+      group: 'security.istio.io', version: 'v1', resource: 'authorizationpolicies',
+    });
+    if (!peerAuth || !authz) return undefined;
+    return {
+      installed: () => this.meshInstalled(),
+      hasWaypoint: (namespace) => this.hasWaypoint(namespace),
+      peerAuthentications: () => this.registry.list(peerAuth).items,
+      authorizationPolicies: () => this.registry.list(authz).items,
+    };
+  }
+
+  /** istiod 与 ztunnel 都得在跑 —— 少一个网格就不成立 */
+  private meshInstalled(): boolean {
+    const deployments = this.scheme.get({ group: 'apps', version: 'v1', resource: 'deployments' });
+    const daemonSets = this.scheme.get({ group: 'apps', version: 'v1', resource: 'daemonsets' });
+    if (!deployments || !daemonSets) return false;
+    const istiod = this.registry.list(deployments).items.some((item) =>
+      item.metadata.labels?.[ISTIOD_LABEL.key] === ISTIOD_LABEL.value
+      && (((item.status ?? {}) as any).availableReplicas ?? 0) > 0);
+    const ztunnel = this.registry.list(daemonSets).items.some((item) =>
+      item.metadata.labels?.[ZTUNNEL_LABEL.key] === ZTUNNEL_LABEL.value
+      && (((item.status ?? {}) as any).numberReady ?? 0) > 0);
+    return istiod && ztunnel;
+  }
+
+  /** 这个命名空间挂了 waypoint 没有。挂上才有 L7。 */
+  private hasWaypoint(namespace: string): boolean {
+    const gateways = this.scheme.get({
+      group: 'gateway.networking.k8s.io', version: 'v1', resource: 'gateways',
+    });
+    if (!gateways) return false;
+    return this.registry.list(gateways, { namespace }).items.some((gateway) =>
+      ((gateway.spec ?? {}) as any).gatewayClassName === WAYPOINT_CLASS);
+  }
+
+  private meshPeerOf(source: Source): MeshPeer | undefined {
+    if (source.zone !== 'cluster' || !source.podName || !source.namespace) return undefined;
+    const pods = this.scheme.get({ group: '', version: 'v1', resource: 'pods' });
+    if (!pods) return undefined;
+    const pod = this.registry.list(pods, { namespace: source.namespace }).items
+      .find((item) => item.metadata.name === source.podName);
+    return pod ? this.meshPeerOfPod(pod) : undefined;
+  }
+
+  private meshPeerOfPod(pod: KubeObject): MeshPeer {
+    const namespace = pod.metadata.namespace ?? 'default';
+    const namespaces = this.scheme.get({ group: '', version: 'v1', resource: 'namespaces' });
+    const object = namespaces
+      ? this.registry.list(namespaces).items.find((item) => item.metadata.name === namespace)
+      : undefined;
+    return {
+      namespace,
+      labels: pod.metadata.labels ?? {},
+      serviceAccount: ((pod.spec ?? {}) as any).serviceAccountName ?? 'default',
+      enrolled: isAmbient(object),
+    };
   }
 
   imageBehaviorOf(image: string | undefined): ImageBehavior | undefined {

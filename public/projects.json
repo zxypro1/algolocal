@@ -5617,7 +5617,8 @@
           "envoy-gateway-system",
           "ingress-nginx",
           "cert-manager",
-          "argocd"
+          "argocd",
+          "istio-system"
         ],
         "images": {
           "harbor.corp.internal/team/portal:1.4.0": {
@@ -5699,6 +5700,22 @@
               "/metrics": 200
             },
             "memoryUsage": "120Mi"
+          },
+          "docker.io/istio/pilot:1.28.1": {
+            "pullMs": 600,
+            "startupMs": 900,
+            "readyAfterMs": 400,
+            "listens": [
+              15012
+            ]
+          },
+          "docker.io/istio/ztunnel:1.28.1": {
+            "pullMs": 400,
+            "startupMs": 500,
+            "readyAfterMs": 200,
+            "listens": [
+              15008
+            ]
           },
           "harbor.corp.internal/team/sessions:1.8.0": {
             "pullMs": 300,
@@ -9433,6 +9450,631 @@
         "primer": {
           "zh": "排查网络问题最费时间的从来不是修，是在错误的层里找。而现象本身已经把层次说清楚了，只要认得出来。一条 TCP 连接从发起到拿到响应，要顺次经过：名字解析、路由可达、目标端口有没有人听、中间有没有人丢包、TLS 握手、最后才是应用的回答。每一层失败的样子都不一样。\n\n`Connection refused` 说明包**到了**对端，而那里没有进程在听。Kubernetes 里最常见的成因是 Service 的 selector 没选中任何 Pod：Endpoints 为空，kube-proxy 直接回 RST。注意 `kubectl get svc` 这时看上去完全正常，有 ClusterIP、有端口；要看的是 `kubectl get endpoints`。\n\n`timeout` 说明包被**丢**了，对端不回任何东西。防火墙、安全组、路由不通、NetworkPolicy 都长这样。这也是为什么策略拒绝表现为卡住而不是立刻失败：丢包的一方按定义不会告诉你它丢了。看到超时，该问的是「谁在丢包」，而不是「服务是不是挂了」。\n\n`404`、`502`、`503` 这类 HTTP 状态码意味着**连接是成功的**。这是应用或者代理给的回答，说明下面每一层都通了。Gateway 回 404 是「我活着，但没有路由认领这个域名或路径」，去看 HTTPRoute 的 `hostnames` 与 `rules`；连不上才是 Gateway 本身的问题。再往前一层，如果连 DNS 都没解析出来，那连接压根没发起过，`dig` 和 `/etc/resolv.conf` 才是现场。",
           "en": "The expensive part of debugging a network problem is never the fix, it is searching in the wrong layer. The symptom already tells you the layer, if you can read it. A TCP connection passes through name resolution, route reachability, something listening on the target port, nobody dropping the packet, a TLS handshake, and only then the application answer. Each layer fails differently.\n\n`Connection refused` means the packet **arrived** and no process was listening. In Kubernetes the usual cause is a Service selector matching no pods: Endpoints is empty and kube-proxy resets the connection. Note that `kubectl get svc` looks perfectly healthy at that moment, with a ClusterIP and ports; the thing to read is `kubectl get endpoints`.\n\n`timeout` means the packet was **dropped** with no reply. Firewalls, security groups, missing routes, and NetworkPolicy all look like this. It is also why a policy denial hangs instead of failing fast: whoever drops the packet, by definition, does not tell you. A timeout should prompt \"who is dropping packets\", not \"is the service down\".\n\nHTTP status codes such as `404`, `502`, and `503` mean the **connection succeeded**. They are an answer from the application or the proxy, which means every layer below worked. A Gateway returning 404 is saying \"I am alive and no route claimed this hostname or path\", so read the HTTPRoute `hostnames` and `rules`; a Gateway that is actually broken refuses the connection instead. One layer earlier, if DNS never resolved, no connection was attempted at all and the scene of the crime is `dig` and `/etc/resolv.conf`."
+        }
+      },
+      {
+        "id": "service-mesh-ambient",
+        "title": {
+          "zh": "服务网格：谁在用什么身份访问谁",
+          "en": "Service Mesh: Who Is Calling Whom, As Whom"
+        },
+        "goal": {
+          "zh": "安全评审又提了一条，这次是关于**身份**的：`ledger` 只允许门户访问，\n而且要能证明「访问它的确实是门户」，不是谁都能伪造的 IP 或标签。\nNetworkPolicy 按 IP 与标签判，标签是能改的；网格按**证书身份**判。\n\n平台组已经把 Istio ambient 装好了（istiod + ztunnel），命名空间还没接进去。\n`/root/infra/mesh.yaml` 里是前任写到一半的一条授权策略。\n\n## 通关标准\n\n1. `payments` 接进网格，里面的工作负载走 mTLS；\n2. 明文直连被拒 —— `analytics` 的报表机连不上 `ledger`；\n3. 门户访问得到 `ledger`，而且判定看的是 SPIFFE 身份不是 IP；\n4. `istioctl analyze` 干净（没有「策略写了但不生效」这类告警）；\n5. 网格外的入口照常：从跳板机访问门户仍然 200。\n\n## 会用到的命令\n\n```bash\nkubectl label namespace payments istio.io/dataplane-mode=ambient\nistioctl ztunnel-config workload\nistioctl x describe pod <pod> -n payments\nistioctl analyze -n payments\nkubectl apply -f /root/infra/mesh.yaml\nkubectl exec -n analytics deploy/reports -- curl -s -m 5 http://ledger.payments.svc.cluster.local\n```\n",
+          "en": "Another security review, this time about **identity**: only the portal may reach\n`ledger`, and it must be provable that the caller really is the portal, not\nsomething that borrowed an IP or a label. NetworkPolicy judges by IP and labels,\nand labels can be edited. A mesh judges by **certificate identity**.\n\nThe platform team already installed Istio ambient (istiod plus ztunnel); no\nnamespace is enrolled yet. `/root/infra/mesh.yaml` holds a half-written\nauthorization policy your predecessor left behind.\n\n## Done when\n\n1. `payments` is enrolled and its workloads talk over mTLS;\n2. plaintext is refused: the reports pod in `analytics` cannot reach `ledger`;\n3. the portal can reach `ledger`, and the decision is based on SPIFFE identity\n   rather than an IP;\n4. `istioctl analyze` is clean, with no \"written but not enforced\" warnings;\n5. the outside entrance still works: the portal answers 200 from the jump host.\n\n## Commands you will need\n\n```bash\nkubectl label namespace payments istio.io/dataplane-mode=ambient\nistioctl ztunnel-config workload\nistioctl x describe pod <pod> -n payments\nistioctl analyze -n payments\nkubectl apply -f /root/infra/mesh.yaml\nkubectl exec -n analytics deploy/reports -- curl -s -m 5 http://ledger.payments.svc.cluster.local\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "命名空间接进网格，mTLS 生效",
+            "en": "Namespace enrolled, mTLS in effect"
+          },
+          {
+            "zh": "按身份授权，明文被拒",
+            "en": "Authorization by identity, plaintext refused"
+          },
+          {
+            "zh": "L7 规则真的被求值",
+            "en": "The L7 rules are actually evaluated"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "ambient 靠命名空间上的一个标签接管：`istio.io/dataplane-mode=ambient`。接没接进去用 `istioctl ztunnel-config workload` 看 PROTOCOL 那一列，HBONE 才算数。",
+            "en": "Ambient enrolls by a namespace label: `istio.io/dataplane-mode=ambient`. Check with `istioctl ztunnel-config workload` and read the PROTOCOL column: HBONE means enrolled."
+          },
+          {
+            "zh": "ztunnel 只做 L4 —— 身份、端口。要按 HTTP 方法或路径授权，得给命名空间挂一个 waypoint（一个 `gatewayClassName: istio-waypoint` 的 Gateway）。没有它，那些规则不会被求值，`istioctl analyze` 会直说。",
+            "en": "ztunnel only does L4: identity and ports. Authorizing by HTTP method or path needs a waypoint for the namespace (a Gateway with `gatewayClassName: istio-waypoint`). Without one those rules are never evaluated, and `istioctl analyze` says so."
+          },
+          {
+            "zh": "principal 的写法是完整的 SPIFFE ID：`spiffe://cluster.local/ns/<ns>/sa/<sa>`。写成 `cluster.local/ns/...`（少了 scheme）不会报错，只会永远匹配不上。",
+            "en": "A principal is a full SPIFFE ID: `spiffe://cluster.local/ns/<ns>/sa/<sa>`. Writing `cluster.local/ns/...` without the scheme raises no error and simply never matches."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "以为加了一条 ALLOW 就只是「多放行一个来源」。恰恰相反：一旦有 ALLOW 策略选中某个工作负载，**没被任何一条 rule 命中的访问全部被拒**。上线前先确认自己知道有哪些调用方。",
+            "en": "Assuming an ALLOW policy merely permits one more caller. The opposite is true: once any ALLOW policy selects a workload, **everything not matched by some rule is denied**. Know your callers before shipping one."
+          },
+          {
+            "zh": "把 NetworkPolicy 删掉，觉得「有网格了就不需要它」。两者判的不是一回事：网格判身份，NetworkPolicy 判网络可达性，而且网格只覆盖接进来的命名空间。它们是叠加的，不是替代的。",
+            "en": "Deleting NetworkPolicies because \"the mesh handles it now\". They answer different questions: the mesh judges identity, NetworkPolicy judges reachability, and the mesh only covers enrolled namespaces. They stack, they do not replace each other."
+          },
+          {
+            "zh": "被网格拒绝表现为**连接被重置**，不是超时。ztunnel 会明确回一个 RST。看到超时该去查 NetworkPolicy，看到 reset 才该来查网格 —— 两者指向不同的层。",
+            "en": "A mesh denial shows up as a **connection reset**, not a timeout: ztunnel answers with an RST. A timeout points at NetworkPolicy; a reset points at the mesh. Different layers."
+          },
+          {
+            "zh": "只把业务的命名空间接进网格，忘了入口。开了 STRICT 之后，Gateway 的数据面是从网格外发起明文连接的，于是它自己第一个被挡在外面 —— 门户对外直接不可用。入口所在的命名空间也要有身份。",
+            "en": "Enrolling only the application namespace and forgetting the entrance. Once STRICT is on, the Gateway data plane is calling in as plaintext from outside the mesh, so it is the first thing refused and the portal goes dark from outside. The entrance namespace needs an identity too."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "cilium",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cilium"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cilium"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cilium"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "cilium-agent",
+                        "image": "quay.io/cilium/cilium:v1.19.2",
+                        "ports": [
+                          {
+                            "containerPort": 9962
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "Certificate",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "secretName": "portal-tls",
+                "duration": "2160h",
+                "renewBefore": "720h",
+                "commonName": "portal.corp.internal",
+                "dnsNames": [
+                  "portal.corp.internal"
+                ],
+                "issuerRef": {
+                  "name": "corp-ca",
+                  "kind": "ClusterIssuer"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "Gateway",
+              "metadata": {
+                "name": "corp-gw",
+                "namespace": "payments"
+              },
+              "spec": {
+                "gatewayClassName": "envoy-internal",
+                "listeners": [
+                  {
+                    "name": "https",
+                    "port": 443,
+                    "protocol": "HTTPS",
+                    "hostname": "portal.corp.internal",
+                    "tls": {
+                      "mode": "Terminate",
+                      "certificateRefs": [
+                        {
+                          "name": "portal-tls"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "http",
+                    "port": 80,
+                    "protocol": "HTTP",
+                    "hostname": "portal.corp.internal"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "istiod",
+                "namespace": "istio-system",
+                "labels": {
+                  "app": "istiod"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app": "istiod"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "istiod"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "discovery",
+                        "image": "docker.io/istio/pilot:1.28.1",
+                        "ports": [
+                          {
+                            "containerPort": 15012
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "ztunnel",
+                "namespace": "istio-system",
+                "labels": {
+                  "app": "ztunnel"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app": "ztunnel"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "ztunnel"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "ztunnel",
+                        "image": "docker.io/istio/ztunnel:1.28.1",
+                        "ports": [
+                          {
+                            "containerPort": 15008
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "istio-waypoint"
+              },
+              "spec": {
+                "controllerName": "istio.io/mesh-controller"
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "ServiceAccount",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "serviceAccountName": "portal",
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.corp.internal"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "ServiceAccount",
+              "metadata": {
+                "name": "ledger",
+                "namespace": "payments"
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "ledger",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "ledger"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "ledger"
+                    }
+                  },
+                  "spec": {
+                    "serviceAccountName": "ledger",
+                    "containers": [
+                      {
+                        "name": "app",
+                        "image": "harbor.corp.internal/team/ledger:3.2.1",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "ledger",
+                "namespace": "payments"
+              },
+              "spec": {
+                "selector": {
+                  "app": "ledger"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "reports",
+                "namespace": "analytics"
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app": "reports"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "reports"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "app",
+                        "image": "harbor.corp.internal/team/reports:2.1.0",
+                        "ports": [
+                          {
+                            "containerPort": 9090
+                          }
+                        ],
+                        "resources": {
+                          "requests": {
+                            "memory": "256Mi"
+                          },
+                          "limits": {
+                            "memory": "1Gi"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ],
+          "files": {
+            "/root/infra/mesh.yaml": "# 前任写到一半的东西。装上去之前先想清楚它会不会生效。\napiVersion: security.istio.io/v1\nkind: AuthorizationPolicy\nmetadata:\n  name: ledger\n  namespace: payments\nspec:\n  selector:\n    matchLabels:\n      app: ledger\n  action: ALLOW\n  rules:\n  - from:\n    - source:\n        principals:\n        - cluster.local/ns/payments/sa/portal\n    to:\n    - operation:\n        methods:\n        - GET\n        paths:\n        - /balance*\n"
+          },
+          "referenceFiles": {
+            "/root/infra/mesh.yaml": "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: payments\n  labels:\n    istio.io/dataplane-mode: ambient\n---\n# 入口的数据面也得有身份，否则 STRICT 之后它自己就被挡在外面了\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: envoy-gateway-system\n  labels:\n    istio.io/dataplane-mode: ambient\n---\napiVersion: security.istio.io/v1\nkind: PeerAuthentication\nmetadata:\n  name: default\n  namespace: payments\nspec:\n  mtls:\n    mode: STRICT\n---\napiVersion: gateway.networking.k8s.io/v1\nkind: Gateway\nmetadata:\n  name: waypoint\n  namespace: payments\nspec:\n  gatewayClassName: istio-waypoint\n  listeners:\n  - name: mesh\n    port: 15008\n    protocol: HBONE\n---\napiVersion: security.istio.io/v1\nkind: AuthorizationPolicy\nmetadata:\n  name: ledger\n  namespace: payments\nspec:\n  selector:\n    matchLabels:\n      app: ledger\n  action: ALLOW\n  rules:\n  - from:\n    - source:\n        principals:\n        - spiffe://cluster.local/ns/payments/sa/portal\n    to:\n    - operation:\n        methods:\n        - GET\n        paths:\n        - /*\n"
+          },
+          "referenceCommands": [
+            "kubectl apply -f /root/infra/mesh.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "service-mesh-ambient.spec.ts",
+            "content": "import { get, list, sh } from '@ops/lab';\n\nconst LEDGER = 'http://ledger.payments.svc.cluster.local';\n\ndescribe('服务网格', () => {\n  it('payments 接进了网格', async () => {\n    const result = await sh('istioctl ztunnel-config workload');\n    expect(result.code).toBe(0);\n    // 按 NAMESPACE 那一列判断 —— envoy-payments-corp-gw-... 在别的命名空间里\n    const rows = result.stdout.split('\\n').filter((line) => line.startsWith('payments '));\n    expect(rows.length).toBeGreaterThan(0);\n    for (const row of rows) expect(row).toContain('HBONE');\n  });\n\n  it('门户访问得到 ledger', async () => {\n    const result = await sh(\n      'kubectl exec -n payments deploy/portal -- curl -s -m 5 -o /dev/null -w %{http_code} ' + LEDGER\n    );\n    expect(result.stdout).toBe('200');\n  });\n\n  it('网格外的明文直连被拒 —— 而且是 reset 不是超时', async () => {\n    const result = await sh('kubectl exec -n analytics deploy/reports -- curl -s -m 5 ' + LEDGER);\n    expect(result.stdout).toBe('');\n    // 56 = 收到 RST；28 才是超时，那说明拦它的是 NetworkPolicy 不是网格\n    expect(result.stderr).toContain('curl: (56)');\n  });\n\n  it('判的是 SPIFFE 身份，不是 IP 或标签', () => {\n    const policies = list('AuthorizationPolicy', { namespace: 'payments' });\n    expect(policies.length).toBeGreaterThan(0);\n    const principals = policies.flatMap((policy) => (policy.spec.rules || [])\n      .flatMap((rule) => (rule.from || [])\n        .flatMap((entry) => (entry.source || {}).principals || [])));\n    expect(principals.length).toBeGreaterThan(0);\n    for (const principal of principals) {\n      expect(principal.startsWith('spiffe://')).toBe(true);\n    }\n  });\n\n  it('mTLS 是 STRICT', () => {\n    const policies = list('PeerAuthentication', { namespace: 'payments' });\n    expect(policies.some((policy) => policy.spec.mtls.mode === 'STRICT')).toBe(true);\n  });\n\n  it('istioctl analyze 是干净的 —— 没有「写了但不生效」', async () => {\n    const result = await sh('istioctl analyze -n payments');\n    expect(result.stdout).toContain('No validation issues found');\n    expect(result.code).toBe(0);\n  });\n\n  it('网格外的入口照常', async () => {\n    const gateway = list('Gateway', { namespace: 'payments' })\n      .find((item) => item.spec.gatewayClassName !== 'istio-waypoint');\n    const address = gateway.status.addresses[0].value;\n    const result = await sh(\n      'curl -s -o /dev/null -w %{http_code} --resolve portal.corp.internal:443:' + address\n      + ' https://portal.corp.internal/'\n    );\n    expect(result.stdout).toBe('200');\n  });\n\n  it('没有靠删掉报表机来蒙过去', () => {\n    const reports = get('Deployment', 'reports', 'analytics');\n    expect(reports.status.readyReplicas).toBeGreaterThan(0);\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "resilience"
+        ],
+        "extension": {
+          "zh": "网格解决的是 NetworkPolicy 解决不了的那一类问题：**证明调用方是谁**。\nNetworkPolicy 判的是「这个 IP 属于一个带某某标签的 Pod」，而标签是\napiserver 里的一个字段，有权限的人随时能改；网格判的是「对面出示的证书\n属于哪个 ServiceAccount」，那是一次真的 mTLS 双向验证。所以两者不是替代\n关系：一个管网络可达性，一个管身份，叠着用。\n\nambient 相对 sidecar 的变化值得记住：数据面从「每个 Pod 一个 Envoy」变成\n「每个节点一个 ztunnel + 按需的 waypoint」。代价是**分层**：ztunnel 只看\n得到 L4，所以按方法、按路径的授权、重试、熔断这些都需要 waypoint。\n这条分层是 ambient 里最常见的困惑来源 —— 策略写得没错，只是没有人求值。\n\n还有一个容易忽略的点：SPIFFE 身份来自 **ServiceAccount**，不是 Pod 名也\n不是标签。所有工作负载都用 `default` 这个 SA 的集群，网格给不出任何有用的\n区分 —— 上网格之前，先把 ServiceAccount 分开。\n",
+          "en": "A mesh solves the problem NetworkPolicy cannot: **proving who the caller is**.\nNetworkPolicy says \"this IP belongs to a pod carrying that label\", and a label is\na field in the apiserver that anyone with access can change. A mesh says \"the\ncertificate the peer presented belongs to that ServiceAccount\", established by a\nreal mutual TLS handshake. They are not alternatives: one governs reachability,\nthe other identity, and they stack.\n\nThe ambient change worth remembering: the data plane moves from \"an Envoy beside\nevery pod\" to \"one ztunnel per node plus waypoints where needed\". The price is\n**layering**: ztunnel only sees L4, so per-method and per-path authorization,\nretries, and circuit breaking all require a waypoint. That layering is the most\ncommon source of confusion in ambient, because the policy is not wrong, it simply\nhas nobody evaluating it.\n\nOne more thing that is easy to miss: SPIFFE identity comes from the\n**ServiceAccount**, not the pod name or its labels. A cluster where everything\nruns as `default` gets no useful distinction out of a mesh. Split the\nServiceAccounts before you enroll.\n"
+        },
+        "primer": {
+          "zh": "`NetworkPolicy` 判的是「这个 IP 属于一个带某某标签的 Pod」，而标签只是 apiserver 里的一个字段，有权限的人随时能改。服务网格判的是另一件事：**对面出示的证书属于谁**。每个工作负载拿到一张由集群 CA 签发的证书，身份写在 SAN 里，格式是 `SPIFFE`：`spiffe://cluster.local/ns/<命名空间>/sa/<ServiceAccount>`。注意身份来自 ServiceAccount，不是 Pod 名也不是标签；所有服务都用 `default` 这个 SA 的集群，上了网格也分不出谁是谁。\n\n`Istio ambient` 是 2026 年的主流形态，和早年的 sidecar 模式差别很大：不再给每个 Pod 塞一个 Envoy，而是每个节点跑一个 `ztunnel`（DaemonSet）负责 L4：建立 mTLS、校验对端身份、按身份与端口授权。接入方式是给命名空间打一个标签 `istio.io/dataplane-mode=ambient`，Pod 不用改、不用重启。`istioctl ztunnel-config workload` 里 PROTOCOL 那一列是 HBONE 就说明接进来了。\n\n要按 HTTP 方法或路径授权、要重试与熔断，就得再加一层 `waypoint`，也就是一个 `gatewayClassName: istio-waypoint` 的 Gateway，按命名空间或按服务挂。这条分层是 ambient 最常见的困惑来源：带 `methods` 或 `paths` 的 `AuthorizationPolicy` 在没有 waypoint 的时候**根本不会被求值**，而 apiserver 照样收下它。`istioctl analyze` 会把这类问题直接报出来。\n\n`AuthorizationPolicy` 的判定顺序值得单独记：任何一条 DENY 命中就拒绝；没有任何 ALLOW 策略选中这个工作负载则放行；一旦有 ALLOW 策略选中它，只有命中某条 rule 才放行，**其余一律拒绝**。所以给一个服务加第一条 ALLOW 策略，等于同时把「默认拒绝」也打开了，很多人以为自己只是多放行了一个来源。还有一点：被网格拒绝表现为连接被重置（ztunnel 回 RST），而不是超时；超时是丢包，指向 NetworkPolicy 那一层。",
+          "en": "`NetworkPolicy` decides based on \"this IP belongs to a pod carrying that label\", and a label is just a field in the apiserver that anyone with access can change. A service mesh answers a different question: **whose certificate did the peer present**. Each workload gets a certificate from the cluster CA with its identity in the SAN, in `SPIFFE` form: `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`. Identity comes from the ServiceAccount, not the pod name or its labels, so a cluster where everything runs as `default` gains nothing by enrolling.\n\n`Istio ambient` is the mainstream shape in 2026 and differs sharply from the older sidecar model: instead of an Envoy beside every pod, one `ztunnel` per node (a DaemonSet) handles L4, establishing mTLS, verifying peer identity, and authorizing by identity and port. Enrolling is a namespace label, `istio.io/dataplane-mode=ambient`, with no pod changes and no restarts. In `istioctl ztunnel-config workload`, a PROTOCOL of HBONE means enrolled.\n\nAuthorizing by HTTP method or path, or doing retries and circuit breaking, needs one more layer: a `waypoint`, a Gateway with `gatewayClassName: istio-waypoint`, attached per namespace or per service. This layering is the most common confusion in ambient, because an `AuthorizationPolicy` with `methods` or `paths` is **never evaluated** without a waypoint, while the apiserver accepts it happily. `istioctl analyze` reports exactly this class of problem.\n\nThe evaluation order of `AuthorizationPolicy` is worth memorising: any matching DENY refuses; with no ALLOW policy selecting the workload, traffic is permitted; once some ALLOW policy selects it, only traffic matching a rule is permitted and **everything else is refused**. So adding the first ALLOW policy to a service also turns on default-deny, which surprises people who thought they were merely permitting one more caller. One more distinction: a mesh denial arrives as a connection reset, because ztunnel answers with an RST, whereas a timeout means dropped packets and points at the NetworkPolicy layer."
         }
       }
     ]

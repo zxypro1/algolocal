@@ -180,9 +180,23 @@ function curl(argv: string[], options: NetToolsOptions): CommandResult {
           code: 60,
         };
       }
+      /**
+       * 连接层被断开是 56，不是 35。
+       *
+       * 35 是 TLS 握手阶段出的问题（比如拿明文打 HTTPS 端口）。而 ztunnel
+       * 拒绝一条明文连接、或者授权不通过，都是**建连之后收到 RST** ——
+       * curl 报的是 `(56) Recv failure: Connection reset by peer`。
+       * 这两个码指向不同的层，混在一起就白瞎了这条线索。
+       */
+      if (target.tls) {
+        return {
+          stderr: `curl: (35) OpenSSL/3.4.0: error:0A00010B:SSL routines::${result.blockedBy ?? 'wrong version number'}\n`,
+          code: 35,
+        };
+      }
       return {
-        stderr: `curl: (35) OpenSSL/3.4.0: error:0A00010B:SSL routines::${result.blockedBy ?? 'wrong version number'}\n`,
-        code: 35,
+        stderr: `curl: (56) Recv failure: Connection reset by peer\n`,
+        code: 56,
       };
     }
     default:

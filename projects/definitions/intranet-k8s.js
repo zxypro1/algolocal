@@ -31,6 +31,8 @@ const REPORTS_IMAGE_RC = 'harbor.corp.internal/team/reports:2.2.0-rc1';
 const EXPORTER_UPSTREAM = 'quay.io/acme/settlement-exporter:1.4.2';
 const EXPORTER_MIRROR = 'harbor.corp.internal/mirror/settlement-exporter:1.4.2';
 const SESSIONS_IMAGE = 'harbor.corp.internal/team/sessions:1.8.0';
+const ISTIOD_IMAGE = 'docker.io/istio/pilot:1.28.1';
+const ZTUNNEL_IMAGE = 'docker.io/istio/ztunnel:1.28.1';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -136,7 +138,7 @@ const WORLD = {
   ],
   namespaces: [
     'default', 'kube-system', 'payments', 'analytics',
-    'envoy-gateway-system', 'ingress-nginx', 'cert-manager', 'argocd',
+    'envoy-gateway-system', 'ingress-nginx', 'cert-manager', 'argocd', 'istio-system',
   ],
   images: {
     [PORTAL_IMAGE]: {
@@ -175,6 +177,9 @@ const WORLD = {
       pullMs: 300, startupMs: 400, readyAfterMs: 200,
       listens: [9100], routes: { '/metrics': 200 }, memoryUsage: '120Mi',
     },
+    // 服务网格的控制面与数据面
+    [ISTIOD_IMAGE]: { pullMs: 600, startupMs: 900, readyAfterMs: 400, listens: [15012] },
+    [ZTUNNEL_IMAGE]: { pullMs: 400, startupMs: 500, readyAfterMs: 200, listens: [15008] },
     // 会话存储
     [SESSIONS_IMAGE]: {
       pullMs: 300, startupMs: 500, readyAfterMs: 200,
@@ -4238,6 +4243,424 @@ const stage14 = {
   ),
 };
 
+
+/* ------------------------------------------------------------------ */
+/* 第 15 关                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 网格的控制面与数据面，平台组已经装好 */
+const MESH_PLATFORM = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: 'istiod', namespace: 'istio-system', labels: { app: 'istiod' } },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { app: 'istiod' } },
+      template: {
+        metadata: { labels: { app: 'istiod' } },
+        spec: { containers: [{ name: 'discovery', image: ISTIOD_IMAGE, ports: [{ containerPort: 15012 }] }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'apps/v1', kind: 'DaemonSet',
+    metadata: { name: 'ztunnel', namespace: 'istio-system', labels: { app: 'ztunnel' } },
+    spec: {
+      selector: { matchLabels: { app: 'ztunnel' } },
+      template: {
+        metadata: { labels: { app: 'ztunnel' } },
+        spec: { containers: [{ name: 'ztunnel', image: ZTUNNEL_IMAGE, ports: [{ containerPort: 15008 }] }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'gateway.networking.k8s.io/v1', kind: 'GatewayClass',
+    metadata: { name: 'istio-waypoint' },
+    spec: { controllerName: 'istio.io/mesh-controller' },
+  },
+];
+
+/** 支付核心，跑在自己的 ServiceAccount 上 */
+const MESH_LEDGER = [
+  {
+    apiVersion: 'v1', kind: 'ServiceAccount',
+    metadata: { name: 'ledger', namespace: 'payments' },
+  },
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: 'ledger', namespace: 'payments' },
+    spec: {
+      replicas: 2,
+      selector: { matchLabels: { app: 'ledger' } },
+      template: {
+        metadata: { labels: { app: 'ledger' } },
+        spec: {
+          serviceAccountName: 'ledger',
+          containers: [{ name: 'app', image: LEDGER_IMAGE, ports: [{ containerPort: 8080 }] }],
+        },
+      },
+    },
+  },
+  {
+    apiVersion: 'v1', kind: 'Service',
+    metadata: { name: 'ledger', namespace: 'payments' },
+    spec: { selector: { app: 'ledger' }, ports: [{ port: 80, targetPort: 8080 }] },
+  },
+];
+
+/** 门户也换成自己的身份 */
+const MESH_PORTAL = [
+  { apiVersion: 'v1', kind: 'ServiceAccount', metadata: { name: 'portal', namespace: 'payments' } },
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: 'portal', namespace: 'payments' },
+    spec: {
+      replicas: 2,
+      selector: { matchLabels: { app: 'portal' } },
+      template: {
+        metadata: { labels: { app: 'portal' } },
+        spec: {
+          serviceAccountName: 'portal',
+          containers: [{ name: 'web', image: PORTAL_IMAGE, ports: [{ containerPort: 8080 }] }],
+        },
+      },
+    },
+  },
+  {
+    apiVersion: 'v1', kind: 'Service',
+    metadata: { name: 'portal', namespace: 'payments' },
+    spec: { clusterIP: '10.96.1.10', selector: { app: 'portal' }, ports: [{ port: 80, targetPort: 8080 }] },
+  },
+];
+
+/** analytics 里的报表机 —— 它不该访问得到 ledger */
+const MESH_REPORTS = {
+  apiVersion: 'apps/v1', kind: 'Deployment',
+  metadata: { name: 'reports', namespace: 'analytics' },
+  spec: {
+    replicas: 1,
+    selector: { matchLabels: { app: 'reports' } },
+    template: {
+      metadata: { labels: { app: 'reports' } },
+      spec: {
+        containers: [{
+          name: 'app', image: REPORTS_IMAGE, ports: [{ containerPort: 9090 }],
+          resources: { requests: { memory: '256Mi' }, limits: { memory: '1Gi' } },
+        }],
+      },
+    },
+  },
+};
+
+const MESH_STARTER = code`
+  # 前任写到一半的东西。装上去之前先想清楚它会不会生效。
+  apiVersion: security.istio.io/v1
+  kind: AuthorizationPolicy
+  metadata:
+    name: ledger
+    namespace: payments
+  spec:
+    selector:
+      matchLabels:
+        app: ledger
+    action: ALLOW
+    rules:
+    - from:
+      - source:
+          principals:
+          - cluster.local/ns/payments/sa/portal
+      to:
+      - operation:
+          methods:
+          - GET
+          paths:
+          - /balance*
+`;
+
+const MESH_REFERENCE = code`
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: payments
+    labels:
+      istio.io/dataplane-mode: ambient
+  ---
+  # 入口的数据面也得有身份，否则 STRICT 之后它自己就被挡在外面了
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: envoy-gateway-system
+    labels:
+      istio.io/dataplane-mode: ambient
+  ---
+  apiVersion: security.istio.io/v1
+  kind: PeerAuthentication
+  metadata:
+    name: default
+    namespace: payments
+  spec:
+    mtls:
+      mode: STRICT
+  ---
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: Gateway
+  metadata:
+    name: waypoint
+    namespace: payments
+  spec:
+    gatewayClassName: istio-waypoint
+    listeners:
+    - name: mesh
+      port: 15008
+      protocol: HBONE
+  ---
+  apiVersion: security.istio.io/v1
+  kind: AuthorizationPolicy
+  metadata:
+    name: ledger
+    namespace: payments
+  spec:
+    selector:
+      matchLabels:
+        app: ledger
+    action: ALLOW
+    rules:
+    - from:
+      - source:
+          principals:
+          - spiffe://cluster.local/ns/payments/sa/portal
+      to:
+      - operation:
+          methods:
+          - GET
+          paths:
+          - /*
+`;
+
+const stage15 = {
+  id: 'service-mesh-ambient',
+  title: t('服务网格：谁在用什么身份访问谁', 'Service Mesh: Who Is Calling Whom, As Whom'),
+  goal: t(
+    code`
+      安全评审又提了一条，这次是关于**身份**的：\`ledger\` 只允许门户访问，
+      而且要能证明「访问它的确实是门户」，不是谁都能伪造的 IP 或标签。
+      NetworkPolicy 按 IP 与标签判，标签是能改的；网格按**证书身份**判。
+
+      平台组已经把 Istio ambient 装好了（istiod + ztunnel），命名空间还没接进去。
+      \`/root/infra/mesh.yaml\` 里是前任写到一半的一条授权策略。
+
+      ## 通关标准
+
+      1. \`payments\` 接进网格，里面的工作负载走 mTLS；
+      2. 明文直连被拒 —— \`analytics\` 的报表机连不上 \`ledger\`；
+      3. 门户访问得到 \`ledger\`，而且判定看的是 SPIFFE 身份不是 IP；
+      4. \`istioctl analyze\` 干净（没有「策略写了但不生效」这类告警）；
+      5. 网格外的入口照常：从跳板机访问门户仍然 200。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl label namespace payments istio.io/dataplane-mode=ambient
+      istioctl ztunnel-config workload
+      istioctl x describe pod <pod> -n payments
+      istioctl analyze -n payments
+      kubectl apply -f /root/infra/mesh.yaml
+      kubectl exec -n analytics deploy/reports -- curl -s -m 5 http://ledger.payments.svc.cluster.local
+      \`\`\`
+    `,
+    code`
+      Another security review, this time about **identity**: only the portal may reach
+      \`ledger\`, and it must be provable that the caller really is the portal, not
+      something that borrowed an IP or a label. NetworkPolicy judges by IP and labels,
+      and labels can be edited. A mesh judges by **certificate identity**.
+
+      The platform team already installed Istio ambient (istiod plus ztunnel); no
+      namespace is enrolled yet. \`/root/infra/mesh.yaml\` holds a half-written
+      authorization policy your predecessor left behind.
+
+      ## Done when
+
+      1. \`payments\` is enrolled and its workloads talk over mTLS;
+      2. plaintext is refused: the reports pod in \`analytics\` cannot reach \`ledger\`;
+      3. the portal can reach \`ledger\`, and the decision is based on SPIFFE identity
+         rather than an IP;
+      4. \`istioctl analyze\` is clean, with no "written but not enforced" warnings;
+      5. the outside entrance still works: the portal answers 200 from the jump host.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl label namespace payments istio.io/dataplane-mode=ambient
+      istioctl ztunnel-config workload
+      istioctl x describe pod <pod> -n payments
+      istioctl analyze -n payments
+      kubectl apply -f /root/infra/mesh.yaml
+      kubectl exec -n analytics deploy/reports -- curl -s -m 5 http://ledger.payments.svc.cluster.local
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('命名空间接进网格，mTLS 生效', 'Namespace enrolled, mTLS in effect'),
+    t('按身份授权，明文被拒', 'Authorization by identity, plaintext refused'),
+    t('L7 规则真的被求值', 'The L7 rules are actually evaluated'),
+  ],
+  hints: [
+    t(
+      'ambient 靠命名空间上的一个标签接管：\`istio.io/dataplane-mode=ambient\`。接没接进去用 \`istioctl ztunnel-config workload\` 看 PROTOCOL 那一列，HBONE 才算数。',
+      'Ambient enrolls by a namespace label: `istio.io/dataplane-mode=ambient`. Check with `istioctl ztunnel-config workload` and read the PROTOCOL column: HBONE means enrolled.'
+    ),
+    t(
+      'ztunnel 只做 L4 —— 身份、端口。要按 HTTP 方法或路径授权，得给命名空间挂一个 waypoint（一个 \`gatewayClassName: istio-waypoint\` 的 Gateway）。没有它，那些规则不会被求值，\`istioctl analyze\` 会直说。',
+      'ztunnel only does L4: identity and ports. Authorizing by HTTP method or path needs a waypoint for the namespace (a Gateway with `gatewayClassName: istio-waypoint`). Without one those rules are never evaluated, and `istioctl analyze` says so.'
+    ),
+    t(
+      'principal 的写法是完整的 SPIFFE ID：\`spiffe://cluster.local/ns/<ns>/sa/<sa>\`。写成 \`cluster.local/ns/...\`（少了 scheme）不会报错，只会永远匹配不上。',
+      'A principal is a full SPIFFE ID: `spiffe://cluster.local/ns/<ns>/sa/<sa>`. Writing `cluster.local/ns/...` without the scheme raises no error and simply never matches.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '以为加了一条 ALLOW 就只是「多放行一个来源」。恰恰相反：一旦有 ALLOW 策略选中某个工作负载，**没被任何一条 rule 命中的访问全部被拒**。上线前先确认自己知道有哪些调用方。',
+      'Assuming an ALLOW policy merely permits one more caller. The opposite is true: once any ALLOW policy selects a workload, **everything not matched by some rule is denied**. Know your callers before shipping one.'
+    ),
+    t(
+      '把 NetworkPolicy 删掉，觉得「有网格了就不需要它」。两者判的不是一回事：网格判身份，NetworkPolicy 判网络可达性，而且网格只覆盖接进来的命名空间。它们是叠加的，不是替代的。',
+      'Deleting NetworkPolicies because "the mesh handles it now". They answer different questions: the mesh judges identity, NetworkPolicy judges reachability, and the mesh only covers enrolled namespaces. They stack, they do not replace each other.'
+    ),
+    t(
+      '被网格拒绝表现为**连接被重置**，不是超时。ztunnel 会明确回一个 RST。看到超时该去查 NetworkPolicy，看到 reset 才该来查网格 —— 两者指向不同的层。',
+      'A mesh denial shows up as a **connection reset**, not a timeout: ztunnel answers with an RST. A timeout points at NetworkPolicy; a reset points at the mesh. Different layers.'
+    ),
+    t(
+      '只把业务的命名空间接进网格，忘了入口。开了 STRICT 之后，Gateway 的数据面是从网格外发起明文连接的，于是它自己第一个被挡在外面 —— 门户对外直接不可用。入口所在的命名空间也要有身份。',
+      'Enrolling only the application namespace and forgetting the entrance. Once STRICT is on, the Gateway data plane is calling in as plaintext from outside the mesh, so it is the first thing refused and the portal goes dark from outside. The entrance namespace needs an identity too.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      CNI_CILIUM,
+      ...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...TLS_PLATFORM, ...MESH_PLATFORM,
+      ...MESH_PORTAL, PORTAL_ROUTE, ...MESH_LEDGER, MESH_REPORTS,
+    ],
+    files: { '/root/infra/mesh.yaml': MESH_STARTER },
+    referenceFiles: { '/root/infra/mesh.yaml': MESH_REFERENCE },
+    referenceCommands: [
+      'kubectl apply -f /root/infra/mesh.yaml',
+    ],
+  },
+  specs: [
+    spec('service-mesh-ambient.spec.ts', code`
+      import { get, list, sh } from '@ops/lab';
+
+      const LEDGER = 'http://ledger.payments.svc.cluster.local';
+
+      describe('服务网格', () => {
+        it('payments 接进了网格', async () => {
+          const result = await sh('istioctl ztunnel-config workload');
+          expect(result.code).toBe(0);
+          // 按 NAMESPACE 那一列判断 —— envoy-payments-corp-gw-... 在别的命名空间里
+          const rows = result.stdout.split('\\n').filter((line) => line.startsWith('payments '));
+          expect(rows.length).toBeGreaterThan(0);
+          for (const row of rows) expect(row).toContain('HBONE');
+        });
+
+        it('门户访问得到 ledger', async () => {
+          const result = await sh(
+            'kubectl exec -n payments deploy/portal -- curl -s -m 5 -o /dev/null -w %{http_code} ' + LEDGER
+          );
+          expect(result.stdout).toBe('200');
+        });
+
+        it('网格外的明文直连被拒 —— 而且是 reset 不是超时', async () => {
+          const result = await sh('kubectl exec -n analytics deploy/reports -- curl -s -m 5 ' + LEDGER);
+          expect(result.stdout).toBe('');
+          // 56 = 收到 RST；28 才是超时，那说明拦它的是 NetworkPolicy 不是网格
+          expect(result.stderr).toContain('curl: (56)');
+        });
+
+        it('判的是 SPIFFE 身份，不是 IP 或标签', () => {
+          const policies = list('AuthorizationPolicy', { namespace: 'payments' });
+          expect(policies.length).toBeGreaterThan(0);
+          const principals = policies.flatMap((policy) => (policy.spec.rules || [])
+            .flatMap((rule) => (rule.from || [])
+              .flatMap((entry) => (entry.source || {}).principals || [])));
+          expect(principals.length).toBeGreaterThan(0);
+          for (const principal of principals) {
+            expect(principal.startsWith('spiffe://')).toBe(true);
+          }
+        });
+
+        it('mTLS 是 STRICT', () => {
+          const policies = list('PeerAuthentication', { namespace: 'payments' });
+          expect(policies.some((policy) => policy.spec.mtls.mode === 'STRICT')).toBe(true);
+        });
+
+        it('istioctl analyze 是干净的 —— 没有「写了但不生效」', async () => {
+          const result = await sh('istioctl analyze -n payments');
+          expect(result.stdout).toContain('No validation issues found');
+          expect(result.code).toBe(0);
+        });
+
+        it('网格外的入口照常', async () => {
+          const gateway = list('Gateway', { namespace: 'payments' })
+            .find((item) => item.spec.gatewayClassName !== 'istio-waypoint');
+          const address = gateway.status.addresses[0].value;
+          const result = await sh(
+            'curl -s -o /dev/null -w %{http_code} --resolve portal.corp.internal:443:' + address
+            + ' https://portal.corp.internal/'
+          );
+          expect(result.stdout).toBe('200');
+        });
+
+        it('没有靠删掉报表机来蒙过去', () => {
+          const reports = get('Deployment', 'reports', 'analytics');
+          expect(reports.status.readyReplicas).toBeGreaterThan(0);
+        });
+      });
+    `),
+  ],
+  focus: ['correctness', 'resilience'],
+  extension: t(
+    code`
+      网格解决的是 NetworkPolicy 解决不了的那一类问题：**证明调用方是谁**。
+      NetworkPolicy 判的是「这个 IP 属于一个带某某标签的 Pod」，而标签是
+      apiserver 里的一个字段，有权限的人随时能改；网格判的是「对面出示的证书
+      属于哪个 ServiceAccount」，那是一次真的 mTLS 双向验证。所以两者不是替代
+      关系：一个管网络可达性，一个管身份，叠着用。
+
+      ambient 相对 sidecar 的变化值得记住：数据面从「每个 Pod 一个 Envoy」变成
+      「每个节点一个 ztunnel + 按需的 waypoint」。代价是**分层**：ztunnel 只看
+      得到 L4，所以按方法、按路径的授权、重试、熔断这些都需要 waypoint。
+      这条分层是 ambient 里最常见的困惑来源 —— 策略写得没错，只是没有人求值。
+
+      还有一个容易忽略的点：SPIFFE 身份来自 **ServiceAccount**，不是 Pod 名也
+      不是标签。所有工作负载都用 \`default\` 这个 SA 的集群，网格给不出任何有用的
+      区分 —— 上网格之前，先把 ServiceAccount 分开。
+    `,
+    code`
+      A mesh solves the problem NetworkPolicy cannot: **proving who the caller is**.
+      NetworkPolicy says "this IP belongs to a pod carrying that label", and a label is
+      a field in the apiserver that anyone with access can change. A mesh says "the
+      certificate the peer presented belongs to that ServiceAccount", established by a
+      real mutual TLS handshake. They are not alternatives: one governs reachability,
+      the other identity, and they stack.
+
+      The ambient change worth remembering: the data plane moves from "an Envoy beside
+      every pod" to "one ztunnel per node plus waypoints where needed". The price is
+      **layering**: ztunnel only sees L4, so per-method and per-path authorization,
+      retries, and circuit breaking all require a waypoint. That layering is the most
+      common source of confusion in ambient, because the policy is not wrong, it simply
+      has nobody evaluating it.
+
+      One more thing that is easy to miss: SPIFFE identity comes from the
+      **ServiceAccount**, not the pod name or its labels. A cluster where everything
+      runs as \`default\` gets no useful distinction out of a mesh. Split the
+      ServiceAccounts before you enroll.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -4282,6 +4705,6 @@ module.exports = {
   files: [],
   stages: [
     stage1, stage2, stage3, stage4, stage5, stage6,
-    stage7, stage8, stage9, stage10, stage11, stage12, stage13, stage14,
+    stage7, stage8, stage9, stage10, stage11, stage12, stage13, stage14, stage15,
   ],
 };

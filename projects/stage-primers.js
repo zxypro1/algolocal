@@ -1252,6 +1252,21 @@ const primers = {
       )
     ),
 
+    'service-mesh-ambient': t(
+      p(
+        '`NetworkPolicy` 判的是「这个 IP 属于一个带某某标签的 Pod」，而标签只是 apiserver 里的一个字段，有权限的人随时能改。服务网格判的是另一件事：**对面出示的证书属于谁**。每个工作负载拿到一张由集群 CA 签发的证书，身份写在 SAN 里，格式是 `SPIFFE`：`spiffe://cluster.local/ns/<命名空间>/sa/<ServiceAccount>`。注意身份来自 ServiceAccount，不是 Pod 名也不是标签；所有服务都用 `default` 这个 SA 的集群，上了网格也分不出谁是谁。',
+        '`Istio ambient` 是 2026 年的主流形态，和早年的 sidecar 模式差别很大：不再给每个 Pod 塞一个 Envoy，而是每个节点跑一个 `ztunnel`（DaemonSet）负责 L4：建立 mTLS、校验对端身份、按身份与端口授权。接入方式是给命名空间打一个标签 `istio.io/dataplane-mode=ambient`，Pod 不用改、不用重启。`istioctl ztunnel-config workload` 里 PROTOCOL 那一列是 HBONE 就说明接进来了。',
+        '要按 HTTP 方法或路径授权、要重试与熔断，就得再加一层 `waypoint`，也就是一个 `gatewayClassName: istio-waypoint` 的 Gateway，按命名空间或按服务挂。这条分层是 ambient 最常见的困惑来源：带 `methods` 或 `paths` 的 `AuthorizationPolicy` 在没有 waypoint 的时候**根本不会被求值**，而 apiserver 照样收下它。`istioctl analyze` 会把这类问题直接报出来。',
+        '`AuthorizationPolicy` 的判定顺序值得单独记：任何一条 DENY 命中就拒绝；没有任何 ALLOW 策略选中这个工作负载则放行；一旦有 ALLOW 策略选中它，只有命中某条 rule 才放行，**其余一律拒绝**。所以给一个服务加第一条 ALLOW 策略，等于同时把「默认拒绝」也打开了，很多人以为自己只是多放行了一个来源。还有一点：被网格拒绝表现为连接被重置（ztunnel 回 RST），而不是超时；超时是丢包，指向 NetworkPolicy 那一层。'
+      ),
+      p(
+        '`NetworkPolicy` decides based on "this IP belongs to a pod carrying that label", and a label is just a field in the apiserver that anyone with access can change. A service mesh answers a different question: **whose certificate did the peer present**. Each workload gets a certificate from the cluster CA with its identity in the SAN, in `SPIFFE` form: `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`. Identity comes from the ServiceAccount, not the pod name or its labels, so a cluster where everything runs as `default` gains nothing by enrolling.',
+        '`Istio ambient` is the mainstream shape in 2026 and differs sharply from the older sidecar model: instead of an Envoy beside every pod, one `ztunnel` per node (a DaemonSet) handles L4, establishing mTLS, verifying peer identity, and authorizing by identity and port. Enrolling is a namespace label, `istio.io/dataplane-mode=ambient`, with no pod changes and no restarts. In `istioctl ztunnel-config workload`, a PROTOCOL of HBONE means enrolled.',
+        'Authorizing by HTTP method or path, or doing retries and circuit breaking, needs one more layer: a `waypoint`, a Gateway with `gatewayClassName: istio-waypoint`, attached per namespace or per service. This layering is the most common confusion in ambient, because an `AuthorizationPolicy` with `methods` or `paths` is **never evaluated** without a waypoint, while the apiserver accepts it happily. `istioctl analyze` reports exactly this class of problem.',
+        'The evaluation order of `AuthorizationPolicy` is worth memorising: any matching DENY refuses; with no ALLOW policy selecting the workload, traffic is permitted; once some ALLOW policy selects it, only traffic matching a rule is permitted and **everything else is refused**. So adding the first ALLOW policy to a service also turns on default-deny, which surprises people who thought they were merely permitting one more caller. One more distinction: a mesh denial arrives as a connection reset, because ztunnel answers with an RST, whereas a timeout means dropped packets and points at the NetworkPolicy layer.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',

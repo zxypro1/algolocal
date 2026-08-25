@@ -21,6 +21,9 @@ import { parseChain } from '../crypto';
 import { createOpensslCommand } from './openssl';
 import { materializePki } from './pki';
 import { GitNetwork, createGitCommand, parseCommit, readTree, seedRepository } from '../git';
+import { createIstioctlCommand } from '../mesh';
+import { currentNamespaceOf } from './view';
+import { DEFAULT_KUBECONFIG_PATH } from '../wasm';
 import { createExecHandler } from './podshell';
 import { CliRuntime, installClusterCli } from '../wasm';
 import type { KubeObject } from '../apiserver';
@@ -186,6 +189,13 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
   }
 
   machine.install('openssl', createOpensslCommand());
+
+  machine.install('istioctl', createIstioctlCommand({
+    view: () => cluster.istioView(),
+    namespace: () => (machine.vfs.exists(DEFAULT_KUBECONFIG_PATH)
+      ? currentNamespaceOf(machine.vfs.readFile(DEFAULT_KUBECONFIG_PATH))
+      : 'default'),
+  }));
 
   machine.install('git', createGitCommand({
     network: git,
