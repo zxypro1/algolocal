@@ -1207,6 +1207,21 @@ const primers = {
       )
     ),
 
+    'helm-chart': t(
+      p(
+        '同一个服务要在开发、预发、生产各跑一套，manifest 之间只差几个值：副本数、镜像 tag、资源上限。复制粘贴三份是最直接的做法，也是最先坏掉的做法：改一处忘了改另外两处，环境之间就开始漂，而漂到什么程度没人说得清。`Helm` 解决的就是这件事：一份模板，差异全部落在 `values` 里。',
+        '一个 `chart` 是一个目录：`Chart.yaml` 写名字与版本，`values.yaml` 是默认值，`templates/` 下是模板。模板用的是 Go 的 `text/template` 加上 `sprig` 函数库，`{{ .Values.replicaCount }}` 取值，`{{ .Release.Name }}` 取这次安装的名字，`{{ .Chart.Name }}` 取 chart 名。装的时候用 `-f values-prod.yaml` 或 `--set key=value` 覆盖默认值，后者优先级更高。',
+        '有两个细节几乎人人踩一次。第一是`名字`：对象名里必须带 `.Release.Name`，写死的话同一个 chart 装第二个 release 时会去改第一个的对象，而且没有任何报错。惯例是定义一个 `fullname` 辅助模板，所有对象都用它。第二是`缩进`：模板输出的是文本，缩进错了就是 YAML 错。`nindent N` 会先换行再缩进 N 个空格，`{{- ` 和 ` -}}` 吃掉两侧空白，套在 `include` 与 `toYaml` 外面基本就对了。',
+        '排查模板永远从 `helm template <release> <chart> -f <values>` 开始。它只渲染不安装，出来的 YAML 就是最终会被提交的东西，客户端渲染，没有服务端魔法。装上去再看集群是把两类问题混在了一起：模板写错了，和集群拒绝了。另外 Helm 会在集群里记下每次 release 渲染了哪些对象，所以 `helm upgrade` 能删掉上一版有、这一版没有的东西，`helm uninstall` 能收干净一整套。'
+      ),
+      p(
+        'The same service runs in development, staging, and production, and the manifests differ by a handful of values: replica count, image tag, resource limits. Copying the file three times is the obvious move and the first thing to break, because changing one copy and forgetting the others makes environments drift in ways nobody can enumerate. `Helm` exists for exactly this: one template, with every difference living in `values`.',
+        'A `chart` is a directory: `Chart.yaml` names and versions it, `values.yaml` holds defaults, `templates/` holds the templates. Templates are Go `text/template` plus the `sprig` function library. `{{ .Values.replicaCount }}` reads a value, `{{ .Release.Name }}` gives the name of this installation, `{{ .Chart.Name }}` the chart name. At install time `-f values-prod.yaml` or `--set key=value` override the defaults, with `--set` winning.',
+        'Two details catch almost everyone once. First, `naming`: object names must include `.Release.Name`. Hardcode them and installing a second release rewrites the first release objects, silently. The convention is a `fullname` helper template used by every object. Second, `indentation`: templates emit text, so wrong indentation is wrong YAML. `nindent N` emits a newline then indents by N spaces, and `{{- ` / ` -}}` trim surrounding whitespace; wrapping `include` and `toYaml` with those covers most cases.',
+        'Debugging templates always starts at `helm template <release> <chart> -f <values>`. It renders without installing, and the YAML it prints is exactly what would be submitted: rendering is client-side, with no server-side magic. Installing first and then inspecting the cluster conflates two different problems, a wrong template and a rejecting cluster. Helm also records in the cluster which objects each release rendered, which is how `helm upgrade` deletes what the previous revision had and this one does not, and how `helm uninstall` cleans up a whole set.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',

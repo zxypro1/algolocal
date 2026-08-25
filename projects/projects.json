@@ -5688,6 +5688,18 @@
               8080
             ]
           },
+          "harbor.corp.internal/team/reports:2.2.0-rc1": {
+            "pullMs": 500,
+            "startupMs": 800,
+            "readyAfterMs": 200,
+            "listens": [
+              9090
+            ],
+            "routes": {
+              "/healthz": 200
+            },
+            "memoryUsage": "300Mi"
+          },
           "harbor.corp.internal/team/reports:2.1.0": {
             "pullMs": 500,
             "startupMs": 800,
@@ -7992,6 +8004,432 @@
         "primer": {
           "zh": "`GitOps` 把「集群里应该跑什么」这个答案从集群搬到了仓库。一个 Git 仓库存着全部 manifest，一个控制器不停地把仓库和集群比对，不一致就补齐。改配置的方式从「敲 kubectl」变成「提交一次代码」，于是每一次变更天然有作者、有时间、有 review、能回滚。\n\n`Argo CD` 是最常见的实现。它的核心对象是 `Application`：`spec.source` 指到仓库的某个路径与某个分支，`spec.destination` 指到集群的某个命名空间。控制器把那个路径下的 YAML 渲染出来，和集群里的现状比一比，结果写进 `status`。要强调的是它读的是**远端仓库**：本地 commit 了没 push，对它来说等于什么都没发生。\n\n`status` 里有两栏，代表两件完全不同的事，混在一起看会误判。`sync.status` 是 `Synced` 还是 `OutOfSync`，说的是「现状和仓库一不一致」；`health.status` 是 `Healthy` / `Progressing` / `Degraded`，说的是「服务好不好」。一个刚被人手工扩容过的服务是 OutOfSync 但 Healthy；一个刚同步完但镜像拉不下来的服务是 Synced 但 Degraded。\n\n同步行为由 `syncPolicy` 上三个独立的开关决定，各管各的：不写 `automated` 时它只比对、只报告，什么都不动；写了 `automated` 之后仓库一变就自动 apply；再加 `selfHeal: true`，集群里的手工改动也会被拉回仓库的样子；再加 `prune: true`，仓库里删掉的对象才会在集群里被删除。想手动触发一次同步，写 `operation` 字段就行，`argocd app sync` 做的正是这件事。",
           "en": "`GitOps` moves the answer to \"what should be running\" out of the cluster and into a repository. One Git repository holds all the manifests, a controller continuously compares repository against cluster, and reconciles any difference. Changing configuration becomes committing code, so every change comes with an author, a timestamp, a review, and a way back.\n\n`Argo CD` is the common implementation. Its central object is the `Application`: `spec.source` points at a path and revision in a repository, `spec.destination` at a namespace in a cluster. The controller renders the YAML under that path, compares it with live state, and writes the outcome into `status`. Note that it reads the **remote** repository: a local commit that was never pushed may as well not exist.\n\nTwo fields in `status` mean two entirely different things, and conflating them causes misdiagnosis. `sync.status` (`Synced` or `OutOfSync`) says whether live state matches the repository. `health.status` (`Healthy`, `Progressing`, `Degraded`) says whether the workload is well. A service someone just hand-scaled is OutOfSync but Healthy; a freshly synced service whose image will not pull is Synced but Degraded.\n\nSync behaviour comes from three independent switches under `syncPolicy`. Without `automated`, the controller only compares and reports, never acts. With `automated`, repository changes get applied. Adding `selfHeal: true` also pulls hand edits in the cluster back to what the repository says. Adding `prune: true` deletes objects that no longer exist in the repository. To trigger one sync by hand, write the `operation` field, which is exactly what `argocd app sync` does."
+        }
+      },
+      {
+        "id": "helm-chart",
+        "title": {
+          "zh": "把三份复制粘贴收成一个 chart",
+          "en": "Fold Three Copies Into One Chart"
+        },
+        "goal": {
+          "zh": "报表服务现在有三份 manifest：`/root/manifests/` 下的 dev、staging、prod。\n它们是互相复制粘贴出来的，已经漂了 —— prod 的资源限制没跟着调，\n镜像也还停在老版本。每加一个环境就再复制一份，这条路走不下去了。\n\n把它做成一个 Helm chart：一份模板，环境差异全部落在 values 里。\n\n## 通关标准\n\n1. `/root/charts/reports` 是个能过 `helm lint` 的 chart；\n2. 用它装两个 release：`reports-staging`（analytics 命名空间）和\n   `reports-prod`（payments 命名空间），两个都 deployed、Pod 都起来；\n3. 两个 release 的对象**不能撞名字** —— 名字要跟着 release 走；\n4. 副本数、镜像 tag、资源都从 values 来，模板里不许写死\n   （判定会用别的 values 渲染一遍，看值有没有跟着变）；\n5. prod 3 个副本 / 2Gi 上限，staging 1 个副本 / 512Mi 上限。\n\n## 会用到的命令\n\n```bash\nhelm create reports                # 想从脚手架开始的话\nhelm lint ./charts/reports\nhelm template reports-prod ./charts/reports -f ./charts/values-prod.yaml\nhelm install reports-prod ./charts/reports -n payments -f ./charts/values-prod.yaml\nhelm list -A\n```\n",
+          "en": "The reports service has three manifests today: dev, staging, and prod under\n`/root/manifests/`. They were copied from one another and have drifted: prod\nnever got its resource limits updated and still runs an older image. Adding an\nenvironment means copying again, and that road ends here.\n\nTurn it into a Helm chart: one template, with every environment difference\nliving in values.\n\n## Done when\n\n1. `/root/charts/reports` is a chart that passes `helm lint`;\n2. two releases are installed from it: `reports-staging` in the analytics\n   namespace and `reports-prod` in payments, both deployed with running pods;\n3. the two releases' objects **do not collide**: names follow the release;\n4. replica count, image tag, and resources all come from values, with nothing\n   hardcoded in the templates (the grader renders with different values and\n   checks the output follows);\n5. prod runs 3 replicas with a 2Gi limit, staging 1 replica with 512Mi.\n\n## Commands you will need\n\n```bash\nhelm create reports                # if you want the scaffold\nhelm lint ./charts/reports\nhelm template reports-prod ./charts/reports -f ./charts/values-prod.yaml\nhelm install reports-prod ./charts/reports -n payments -f ./charts/values-prod.yaml\nhelm list -A\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "chart 能过 lint，渲染得出正确的对象",
+            "en": "Chart lints clean and renders correct objects"
+          },
+          {
+            "zh": "两个环境各一个 release，互不干扰",
+            "en": "One release per environment, no interference"
+          },
+          {
+            "zh": "环境差异全在 values 里",
+            "en": "Every environment difference lives in values"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "`helm template <release> <chart> -f <values>` 只渲染不安装，先用它把模板调对，再去 install。渲染出来的 YAML 直接读就行。",
+            "en": "`helm template <release> <chart> -f <values>` renders without installing. Get the template right with it first, then install. The rendered YAML is meant to be read."
+          },
+          {
+            "zh": "对象名字里要带 `.Release.Name`。写死成 `reports` 的话，第二个 release 会把第一个的对象改掉 —— 而且 helm 不会拦你。",
+            "en": "Object names must include `.Release.Name`. Hardcode `reports` and the second release rewrites the first release’s objects, and Helm will not stop you."
+          },
+          {
+            "zh": "`{{- ` 和 ` -}}` 是空白控制。`nindent N` 会先换行再按 N 空格缩进，套在 `include` 或 `toYaml` 外面正好。缩进错了 `helm template` 会直接报 YAML 解析失败，那反而是好事。",
+            "en": "`{{- ` and ` -}}` control whitespace. `nindent N` inserts a newline then indents by N, which is exactly what you want around `include` or `toYaml`. Wrong indentation makes `helm template` fail to parse, which is the good outcome."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "把两个环境做成两个 chart。那只是把复制粘贴换了个地方 —— 模板还是两份，还是会漂。差异应该只存在于 values 里。",
+            "en": "Making two charts, one per environment. That just relocates the copy-paste: still two templates, still drifting. The difference belongs in values only."
+          },
+          {
+            "zh": "名字写死。两个 release 装进同一个命名空间时会互相覆盖，装进不同命名空间时看起来没事 —— 直到有人把它们放到一起。判定会用两个不同的 release 名渲染，比较对象名。",
+            "en": "Hardcoded names. Two releases in the same namespace overwrite each other; in different namespaces it looks fine until someone colocates them. The grader renders with two release names and compares."
+          },
+          {
+            "zh": "把值写进模板、只把 `values.yaml` 当摆设。`helm template ... --set replicaCount=7` 出来的还是原来那个数，就说明这条路没通。",
+            "en": "Baking values into the template and leaving `values.yaml` decorative. If `helm template ... --set replicaCount=7` still prints the old number, the wiring is not there."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "cilium",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cilium"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cilium"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cilium"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "cilium-agent",
+                        "image": "quay.io/cilium/cilium:v1.19.2",
+                        "ports": [
+                          {
+                            "containerPort": 9962
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "Certificate",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "secretName": "portal-tls",
+                "duration": "2160h",
+                "renewBefore": "720h",
+                "commonName": "portal.corp.internal",
+                "dnsNames": [
+                  "portal.corp.internal"
+                ],
+                "issuerRef": {
+                  "name": "corp-ca",
+                  "kind": "ClusterIssuer"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "Gateway",
+              "metadata": {
+                "name": "corp-gw",
+                "namespace": "payments"
+              },
+              "spec": {
+                "gatewayClassName": "envoy-internal",
+                "listeners": [
+                  {
+                    "name": "https",
+                    "port": 443,
+                    "protocol": "HTTPS",
+                    "hostname": "portal.corp.internal",
+                    "tls": {
+                      "mode": "Terminate",
+                      "certificateRefs": [
+                        {
+                          "name": "portal-tls"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "http",
+                    "port": 80,
+                    "protocol": "HTTP",
+                    "hostname": "portal.corp.internal"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.corp.internal"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "files": {
+            "/root/manifests/dev.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: reports\n  namespace: analytics\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: reports\n  template:\n    metadata:\n      labels:\n        app: reports\n    spec:\n      containers:\n      - name: reports\n        image: harbor.corp.internal/team/reports:2.2.0-rc1\n        ports:\n        - containerPort: 9090\n        resources:\n          requests:\n            memory: 256Mi\n          limits:\n            memory: 512Mi\n",
+            "/root/manifests/staging.yaml": "# 从 dev.yaml 复制过来的，改了副本数\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: reports\n  namespace: analytics\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: reports\n  template:\n    metadata:\n      labels:\n        app: reports\n    spec:\n      containers:\n      - name: reports\n        image: harbor.corp.internal/team/reports:2.2.0-rc1\n        ports:\n        - containerPort: 9090\n        resources:\n          requests:\n            memory: 256Mi\n          limits:\n            memory: 512Mi\n",
+            "/root/manifests/prod.yaml": "# 从 staging.yaml 复制过来的。资源忘了跟着调，镜像也还是老的。\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: reports\n  namespace: payments\nspec:\n  replicas: 3\n  selector:\n    matchLabels:\n      app: reports\n  template:\n    metadata:\n      labels:\n        app: reports\n    spec:\n      containers:\n      - name: reports\n        image: harbor.corp.internal/team/reports:2.1.0\n        ports:\n        - containerPort: 9090\n        resources:\n          requests:\n            memory: 256Mi\n          limits:\n            memory: 512Mi\n"
+          },
+          "referenceFiles": {
+            "/root/charts/reports/Chart.yaml": "apiVersion: v2\nname: reports\ndescription: 财务报表服务\ntype: application\nversion: 0.1.0\nappVersion: \"2.1.0\"\n",
+            "/root/charts/reports/values.yaml": "replicaCount: 1\n\nimage:\n  repository: harbor.corp.internal/team/reports\n  tag: \"2.1.0\"\n\nservice:\n  port: 80\n  targetPort: 9090\n\nresources:\n  requests:\n    memory: 512Mi\n  limits:\n    memory: 1Gi\n",
+            "/root/charts/reports/templates/_helpers.tpl": "{{/*\n名字跟着 release 走。写死的话同一个 chart 装两次就会互相覆盖。\n*/}}\n{{- define \"reports.fullname\" -}}\n{{- printf \"%s-%s\" .Release.Name .Chart.Name | trunc 63 | trimSuffix \"-\" -}}\n{{- end -}}\n\n{{- define \"reports.labels\" -}}\napp.kubernetes.io/name: {{ .Chart.Name }}\napp.kubernetes.io/instance: {{ .Release.Name }}\napp.kubernetes.io/version: {{ .Chart.AppVersion | quote }}\napp.kubernetes.io/managed-by: {{ .Release.Service }}\n{{- end -}}\n\n{{- define \"reports.selectorLabels\" -}}\napp.kubernetes.io/name: {{ .Chart.Name }}\napp.kubernetes.io/instance: {{ .Release.Name }}\n{{- end -}}\n",
+            "/root/charts/reports/templates/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {{ include \"reports.fullname\" . }}\n  labels:\n    {{- include \"reports.labels\" . | nindent 4 }}\nspec:\n  replicas: {{ .Values.replicaCount }}\n  selector:\n    matchLabels:\n      {{- include \"reports.selectorLabels\" . | nindent 6 }}\n  template:\n    metadata:\n      labels:\n        {{- include \"reports.selectorLabels\" . | nindent 8 }}\n    spec:\n      containers:\n      - name: reports\n        image: \"{{ .Values.image.repository }}:{{ .Values.image.tag }}\"\n        ports:\n        - containerPort: {{ .Values.service.targetPort }}\n        resources:\n          {{- toYaml .Values.resources | nindent 10 }}\n",
+            "/root/charts/reports/templates/service.yaml": "apiVersion: v1\nkind: Service\nmetadata:\n  name: {{ include \"reports.fullname\" . }}\n  labels:\n    {{- include \"reports.labels\" . | nindent 4 }}\nspec:\n  selector:\n    {{- include \"reports.selectorLabels\" . | nindent 4 }}\n  ports:\n  - port: {{ .Values.service.port }}\n    targetPort: {{ .Values.service.targetPort }}\n",
+            "/root/charts/values-staging.yaml": "replicaCount: 1\nimage:\n  tag: \"2.2.0-rc1\"\nresources:\n  requests:\n    memory: 256Mi\n  limits:\n    memory: 512Mi\n",
+            "/root/charts/values-prod.yaml": "replicaCount: 3\nimage:\n  tag: \"2.1.0\"\nresources:\n  requests:\n    memory: 1Gi\n  limits:\n    memory: 2Gi\n"
+          },
+          "referenceCommands": [
+            "helm install reports-staging /root/charts/reports -n analytics -f /root/charts/values-staging.yaml",
+            "helm install reports-prod /root/charts/reports -n payments -f /root/charts/values-prod.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "helm-chart.spec.ts",
+            "content": "import { list, sh } from '@ops/lab';\n\nconst CHART = '/root/charts/reports';\n\ndescribe('Helm chart', () => {\n  it('chart 过 lint', async () => {\n    const result = await sh('helm lint ' + CHART);\n    expect(result.code).toBe(0);\n    expect(result.stdout).toContain('0 chart(s) failed');\n  });\n\n  it('两个 release 都装上了', async () => {\n    const result = await sh('helm list -A');\n    expect(result.stdout).toContain('reports-staging');\n    expect(result.stdout).toContain('reports-prod');\n    // 两行都得是 deployed，failed 不算\n    expect(result.stdout.split('\\n').filter((line) => line.includes('reports-')).length).toBe(2);\n    expect(result.stdout).not.toContain('failed');\n  });\n\n  it('两个环境的 Pod 都跑起来了', () => {\n    const running = (namespace) => list('Pod', { namespace })\n      .filter((pod) => pod.status.phase === 'Running'\n        && (pod.metadata.labels || {})['app.kubernetes.io/name'] === 'reports');\n    expect(running('analytics').length).toBe(1);\n    expect(running('payments').length).toBe(3);\n  });\n\n  it('prod 与 staging 的资源上限来自各自的 values', () => {\n    const limitOf = (namespace) => {\n      const deployment = list('Deployment', { namespace })\n        .find((item) => (item.spec.template.metadata.labels || {})['app.kubernetes.io/name'] === 'reports');\n      return deployment.spec.template.spec.containers[0].resources.limits.memory;\n    };\n    expect(limitOf('payments')).toBe('2Gi');\n    expect(limitOf('analytics')).toBe('512Mi');\n  });\n\n  it('对象名字跟着 release 走，两个 release 不撞', async () => {\n    const one = await sh('helm template alpha ' + CHART);\n    const two = await sh('helm template beta ' + CHART);\n    expect(one.code).toBe(0);\n    expect(two.code).toBe(0);\n    const names = (text) => text.split('\\n')\n      .filter((line) => line.startsWith('  name:'))\n      .map((line) => line.slice('  name:'.length).trim());\n    const first = names(one.stdout);\n    const second = names(two.stdout);\n    expect(first.length).toBeGreaterThan(0);\n    for (const name of first) expect(second).not.toContain(name);\n  });\n\n  it('值确实从 values 来，不是写死在模板里', async () => {\n    const rendered = await sh(\n      'helm template probe ' + CHART\n      + ' --set replicaCount=7 --set image.tag=9.9.9-probe'\n    );\n    expect(rendered.code).toBe(0);\n    expect(rendered.stdout).toContain('replicas: 7');\n    expect(rendered.stdout).toContain(':9.9.9-probe');\n  });\n\n  it('没有靠三份 chart 蒙过去 —— 只能有一个', async () => {\n    const found = await sh('find /root/charts -name Chart.yaml');\n    expect(found.stdout.trim().split('\\n').filter(Boolean).length).toBe(1);\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "maintainability",
+          "correctness"
+        ],
+        "extension": {
+          "zh": "Helm 最容易被误解的一点：它不是「模板引擎 + kubectl apply」，\n它还记着**这一次 release 渲染出了哪些对象**。所以 `helm upgrade` 之后\n上一版有、这一版没有的对象会被删掉，`helm uninstall` 能把一整套收干净。\n这份记录存在集群里（一个 Secret），不在你的机器上 —— 换台机器接着管同一个\nrelease 是可以的。\n\n另一点是**渲染发生在客户端**。`helm template` 出来的 YAML 就是最终会被\napply 的东西，没有任何服务端魔法。所以排查模板问题永远从 `helm template`\n开始，而不是装上去再看集群 —— 后者把「模板错了」和「集群拒绝了」混在了一起。\n",
+          "en": "The most misunderstood thing about Helm: it is not \"a template engine plus\nkubectl apply\". It also records **which objects this release rendered**. That is\nwhy `helm upgrade` deletes objects the previous revision had and this one does\nnot, and why `helm uninstall` can clean up a whole set. The record lives in the\ncluster (a Secret), not on your machine, so someone else can manage the same\nrelease from another laptop.\n\nThe other point is that **rendering happens client-side**. The YAML from\n`helm template` is exactly what gets applied; there is no server-side magic.\nSo template debugging always starts at `helm template`, never at installing and\nthen inspecting the cluster, which conflates \"the template is wrong\" with \"the\ncluster rejected it\".\n"
+        },
+        "primer": {
+          "zh": "同一个服务要在开发、预发、生产各跑一套，manifest 之间只差几个值：副本数、镜像 tag、资源上限。复制粘贴三份是最直接的做法，也是最先坏掉的做法：改一处忘了改另外两处，环境之间就开始漂，而漂到什么程度没人说得清。`Helm` 解决的就是这件事：一份模板，差异全部落在 `values` 里。\n\n一个 `chart` 是一个目录：`Chart.yaml` 写名字与版本，`values.yaml` 是默认值，`templates/` 下是模板。模板用的是 Go 的 `text/template` 加上 `sprig` 函数库，`{{ .Values.replicaCount }}` 取值，`{{ .Release.Name }}` 取这次安装的名字，`{{ .Chart.Name }}` 取 chart 名。装的时候用 `-f values-prod.yaml` 或 `--set key=value` 覆盖默认值，后者优先级更高。\n\n有两个细节几乎人人踩一次。第一是`名字`：对象名里必须带 `.Release.Name`，写死的话同一个 chart 装第二个 release 时会去改第一个的对象，而且没有任何报错。惯例是定义一个 `fullname` 辅助模板，所有对象都用它。第二是`缩进`：模板输出的是文本，缩进错了就是 YAML 错。`nindent N` 会先换行再缩进 N 个空格，`{{- ` 和 ` -}}` 吃掉两侧空白，套在 `include` 与 `toYaml` 外面基本就对了。\n\n排查模板永远从 `helm template <release> <chart> -f <values>` 开始。它只渲染不安装，出来的 YAML 就是最终会被提交的东西，客户端渲染，没有服务端魔法。装上去再看集群是把两类问题混在了一起：模板写错了，和集群拒绝了。另外 Helm 会在集群里记下每次 release 渲染了哪些对象，所以 `helm upgrade` 能删掉上一版有、这一版没有的东西，`helm uninstall` 能收干净一整套。",
+          "en": "The same service runs in development, staging, and production, and the manifests differ by a handful of values: replica count, image tag, resource limits. Copying the file three times is the obvious move and the first thing to break, because changing one copy and forgetting the others makes environments drift in ways nobody can enumerate. `Helm` exists for exactly this: one template, with every difference living in `values`.\n\nA `chart` is a directory: `Chart.yaml` names and versions it, `values.yaml` holds defaults, `templates/` holds the templates. Templates are Go `text/template` plus the `sprig` function library. `{{ .Values.replicaCount }}` reads a value, `{{ .Release.Name }}` gives the name of this installation, `{{ .Chart.Name }}` the chart name. At install time `-f values-prod.yaml` or `--set key=value` override the defaults, with `--set` winning.\n\nTwo details catch almost everyone once. First, `naming`: object names must include `.Release.Name`. Hardcode them and installing a second release rewrites the first release objects, silently. The convention is a `fullname` helper template used by every object. Second, `indentation`: templates emit text, so wrong indentation is wrong YAML. `nindent N` emits a newline then indents by N spaces, and `{{- ` / ` -}}` trim surrounding whitespace; wrapping `include` and `toYaml` with those covers most cases.\n\nDebugging templates always starts at `helm template <release> <chart> -f <values>`. It renders without installing, and the YAML it prints is exactly what would be submitted: rendering is client-side, with no server-side magic. Installing first and then inspecting the cluster conflates two different problems, a wrong template and a rejecting cluster. Helm also records in the cluster which objects each release rendered, which is how `helm upgrade` deletes what the previous revision had and this one does not, and how `helm uninstall` cleans up a whole set."
         }
       }
     ]

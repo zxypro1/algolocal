@@ -26,6 +26,7 @@ const LEDGER_IMAGE = 'harbor.corp.internal/team/ledger:3.2.1';
 const FLANNEL_IMAGE = 'docker.io/flannel/flannel:v0.28.0';
 const CILIUM_IMAGE = 'quay.io/cilium/cilium:v1.19.2';
 const ARGOCD_IMAGE = 'quay.io/argoproj/argocd:v3.2.4';
+const REPORTS_IMAGE_RC = 'harbor.corp.internal/team/reports:2.2.0-rc1';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -164,6 +165,11 @@ const WORLD = {
       enforcesNetworkPolicy: true,
     },
     [ARGOCD_IMAGE]: { pullMs: 500, startupMs: 700, readyAfterMs: 300, listens: [8080] },
+    // 报表服务的预发版本
+    [REPORTS_IMAGE_RC]: {
+      pullMs: 500, startupMs: 800, readyAfterMs: 200,
+      listens: [9090], routes: { '/healthz': 200 }, memoryUsage: '300Mi',
+    },
     // 财务的报表任务：吃 900Mi，limits 写小了就会被 OOMKill
     [REPORTS_IMAGE]: {
       pullMs: 500, startupMs: 800, readyAfterMs: 200,
@@ -3147,6 +3153,433 @@ const stage11 = {
   ),
 };
 
+
+/* ------------------------------------------------------------------ */
+/* 第 12 关                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 三份互相复制粘贴、已经漂了的 manifest */
+const REPORTS_DEV = code`
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: reports
+    namespace: analytics
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
+        app: reports
+    template:
+      metadata:
+        labels:
+          app: reports
+      spec:
+        containers:
+        - name: reports
+          image: ${REPORTS_IMAGE_RC}
+          ports:
+          - containerPort: 9090
+          resources:
+            requests:
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+`;
+
+const REPORTS_STAGING = code`
+  # 从 dev.yaml 复制过来的，改了副本数
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: reports
+    namespace: analytics
+  spec:
+    replicas: 2
+    selector:
+      matchLabels:
+        app: reports
+    template:
+      metadata:
+        labels:
+          app: reports
+      spec:
+        containers:
+        - name: reports
+          image: ${REPORTS_IMAGE_RC}
+          ports:
+          - containerPort: 9090
+          resources:
+            requests:
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+`;
+
+const REPORTS_PROD = code`
+  # 从 staging.yaml 复制过来的。资源忘了跟着调，镜像也还是老的。
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: reports
+    namespace: payments
+  spec:
+    replicas: 3
+    selector:
+      matchLabels:
+        app: reports
+    template:
+      metadata:
+        labels:
+          app: reports
+      spec:
+        containers:
+        - name: reports
+          image: ${REPORTS_IMAGE}
+          ports:
+          - containerPort: 9090
+          resources:
+            requests:
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+`;
+
+/* 参考解：一个 chart + 两份 values */
+
+const CHART_YAML = code`
+  apiVersion: v2
+  name: reports
+  description: 财务报表服务
+  type: application
+  version: 0.1.0
+  appVersion: "2.1.0"
+`;
+
+const CHART_VALUES = code`
+  replicaCount: 1
+
+  image:
+    repository: harbor.corp.internal/team/reports
+    tag: "2.1.0"
+
+  service:
+    port: 80
+    targetPort: 9090
+
+  resources:
+    requests:
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+`;
+
+const CHART_HELPERS = code`
+  {{/*
+  名字跟着 release 走。写死的话同一个 chart 装两次就会互相覆盖。
+  */}}
+  {{- define "reports.fullname" -}}
+  {{- printf "%s-%s" .Release.Name .Chart.Name | trunc 63 | trimSuffix "-" -}}
+  {{- end -}}
+
+  {{- define "reports.labels" -}}
+  app.kubernetes.io/name: {{ .Chart.Name }}
+  app.kubernetes.io/instance: {{ .Release.Name }}
+  app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+  app.kubernetes.io/managed-by: {{ .Release.Service }}
+  {{- end -}}
+
+  {{- define "reports.selectorLabels" -}}
+  app.kubernetes.io/name: {{ .Chart.Name }}
+  app.kubernetes.io/instance: {{ .Release.Name }}
+  {{- end -}}
+`;
+
+const CHART_DEPLOYMENT = code`
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: {{ include "reports.fullname" . }}
+    labels:
+      {{- include "reports.labels" . | nindent 4 }}
+  spec:
+    replicas: {{ .Values.replicaCount }}
+    selector:
+      matchLabels:
+        {{- include "reports.selectorLabels" . | nindent 6 }}
+    template:
+      metadata:
+        labels:
+          {{- include "reports.selectorLabels" . | nindent 8 }}
+      spec:
+        containers:
+        - name: reports
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          ports:
+          - containerPort: {{ .Values.service.targetPort }}
+          resources:
+            {{- toYaml .Values.resources | nindent 10 }}
+`;
+
+const CHART_SERVICE = code`
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: {{ include "reports.fullname" . }}
+    labels:
+      {{- include "reports.labels" . | nindent 4 }}
+  spec:
+    selector:
+      {{- include "reports.selectorLabels" . | nindent 4 }}
+    ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+`;
+
+const VALUES_STAGING = code`
+  replicaCount: 1
+  image:
+    tag: "2.2.0-rc1"
+  resources:
+    requests:
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+`;
+
+const VALUES_PROD = code`
+  replicaCount: 3
+  image:
+    tag: "2.1.0"
+  resources:
+    requests:
+      memory: 1Gi
+    limits:
+      memory: 2Gi
+`;
+
+const stage12 = {
+  id: 'helm-chart',
+  title: t('把三份复制粘贴收成一个 chart', 'Fold Three Copies Into One Chart'),
+  goal: t(
+    code`
+      报表服务现在有三份 manifest：\`/root/manifests/\` 下的 dev、staging、prod。
+      它们是互相复制粘贴出来的，已经漂了 —— prod 的资源限制没跟着调，
+      镜像也还停在老版本。每加一个环境就再复制一份，这条路走不下去了。
+
+      把它做成一个 Helm chart：一份模板，环境差异全部落在 values 里。
+
+      ## 通关标准
+
+      1. \`/root/charts/reports\` 是个能过 \`helm lint\` 的 chart；
+      2. 用它装两个 release：\`reports-staging\`（analytics 命名空间）和
+         \`reports-prod\`（payments 命名空间），两个都 deployed、Pod 都起来；
+      3. 两个 release 的对象**不能撞名字** —— 名字要跟着 release 走；
+      4. 副本数、镜像 tag、资源都从 values 来，模板里不许写死
+         （判定会用别的 values 渲染一遍，看值有没有跟着变）；
+      5. prod 3 个副本 / 2Gi 上限，staging 1 个副本 / 512Mi 上限。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      helm create reports                # 想从脚手架开始的话
+      helm lint ./charts/reports
+      helm template reports-prod ./charts/reports -f ./charts/values-prod.yaml
+      helm install reports-prod ./charts/reports -n payments -f ./charts/values-prod.yaml
+      helm list -A
+      \`\`\`
+    `,
+    code`
+      The reports service has three manifests today: dev, staging, and prod under
+      \`/root/manifests/\`. They were copied from one another and have drifted: prod
+      never got its resource limits updated and still runs an older image. Adding an
+      environment means copying again, and that road ends here.
+
+      Turn it into a Helm chart: one template, with every environment difference
+      living in values.
+
+      ## Done when
+
+      1. \`/root/charts/reports\` is a chart that passes \`helm lint\`;
+      2. two releases are installed from it: \`reports-staging\` in the analytics
+         namespace and \`reports-prod\` in payments, both deployed with running pods;
+      3. the two releases' objects **do not collide**: names follow the release;
+      4. replica count, image tag, and resources all come from values, with nothing
+         hardcoded in the templates (the grader renders with different values and
+         checks the output follows);
+      5. prod runs 3 replicas with a 2Gi limit, staging 1 replica with 512Mi.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      helm create reports                # if you want the scaffold
+      helm lint ./charts/reports
+      helm template reports-prod ./charts/reports -f ./charts/values-prod.yaml
+      helm install reports-prod ./charts/reports -n payments -f ./charts/values-prod.yaml
+      helm list -A
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('chart 能过 lint，渲染得出正确的对象', 'Chart lints clean and renders correct objects'),
+    t('两个环境各一个 release，互不干扰', 'One release per environment, no interference'),
+    t('环境差异全在 values 里', 'Every environment difference lives in values'),
+  ],
+  hints: [
+    t(
+      '\`helm template <release> <chart> -f <values>\` 只渲染不安装，先用它把模板调对，再去 install。渲染出来的 YAML 直接读就行。',
+      '`helm template <release> <chart> -f <values>` renders without installing. Get the template right with it first, then install. The rendered YAML is meant to be read.'
+    ),
+    t(
+      '对象名字里要带 \`.Release.Name\`。写死成 \`reports\` 的话，第二个 release 会把第一个的对象改掉 —— 而且 helm 不会拦你。',
+      'Object names must include `.Release.Name`. Hardcode `reports` and the second release rewrites the first release’s objects, and Helm will not stop you.'
+    ),
+    t(
+      '\`{{- \` 和 \` -}}\` 是空白控制。\`nindent N\` 会先换行再按 N 空格缩进，套在 \`include\` 或 \`toYaml\` 外面正好。缩进错了 \`helm template\` 会直接报 YAML 解析失败，那反而是好事。',
+      '`{{- ` and ` -}}` control whitespace. `nindent N` inserts a newline then indents by N, which is exactly what you want around `include` or `toYaml`. Wrong indentation makes `helm template` fail to parse, which is the good outcome.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '把两个环境做成两个 chart。那只是把复制粘贴换了个地方 —— 模板还是两份，还是会漂。差异应该只存在于 values 里。',
+      'Making two charts, one per environment. That just relocates the copy-paste: still two templates, still drifting. The difference belongs in values only.'
+    ),
+    t(
+      '名字写死。两个 release 装进同一个命名空间时会互相覆盖，装进不同命名空间时看起来没事 —— 直到有人把它们放到一起。判定会用两个不同的 release 名渲染，比较对象名。',
+      'Hardcoded names. Two releases in the same namespace overwrite each other; in different namespaces it looks fine until someone colocates them. The grader renders with two release names and compares.'
+    ),
+    t(
+      '把值写进模板、只把 \`values.yaml\` 当摆设。\`helm template ... --set replicaCount=7\` 出来的还是原来那个数，就说明这条路没通。',
+      'Baking values into the template and leaving `values.yaml` decorative. If `helm template ... --set replicaCount=7` still prints the old number, the wiring is not there.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      CNI_CILIUM,
+      ...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...TLS_PLATFORM,
+      ...PORTAL_WORKLOAD, PORTAL_ROUTE,
+    ],
+    files: {
+      '/root/manifests/dev.yaml': REPORTS_DEV,
+      '/root/manifests/staging.yaml': REPORTS_STAGING,
+      '/root/manifests/prod.yaml': REPORTS_PROD,
+    },
+    referenceFiles: {
+      '/root/charts/reports/Chart.yaml': CHART_YAML,
+      '/root/charts/reports/values.yaml': CHART_VALUES,
+      '/root/charts/reports/templates/_helpers.tpl': CHART_HELPERS,
+      '/root/charts/reports/templates/deployment.yaml': CHART_DEPLOYMENT,
+      '/root/charts/reports/templates/service.yaml': CHART_SERVICE,
+      '/root/charts/values-staging.yaml': VALUES_STAGING,
+      '/root/charts/values-prod.yaml': VALUES_PROD,
+    },
+    referenceCommands: [
+      'helm install reports-staging /root/charts/reports -n analytics -f /root/charts/values-staging.yaml',
+      'helm install reports-prod /root/charts/reports -n payments -f /root/charts/values-prod.yaml',
+    ],
+  },
+  specs: [
+    spec('helm-chart.spec.ts', code`
+      import { list, sh } from '@ops/lab';
+
+      const CHART = '/root/charts/reports';
+
+      describe('Helm chart', () => {
+        it('chart 过 lint', async () => {
+          const result = await sh('helm lint ' + CHART);
+          expect(result.code).toBe(0);
+          expect(result.stdout).toContain('0 chart(s) failed');
+        });
+
+        it('两个 release 都装上了', async () => {
+          const result = await sh('helm list -A');
+          expect(result.stdout).toContain('reports-staging');
+          expect(result.stdout).toContain('reports-prod');
+          // 两行都得是 deployed，failed 不算
+          expect(result.stdout.split('\\n').filter((line) => line.includes('reports-')).length).toBe(2);
+          expect(result.stdout).not.toContain('failed');
+        });
+
+        it('两个环境的 Pod 都跑起来了', () => {
+          const running = (namespace) => list('Pod', { namespace })
+            .filter((pod) => pod.status.phase === 'Running'
+              && (pod.metadata.labels || {})['app.kubernetes.io/name'] === 'reports');
+          expect(running('analytics').length).toBe(1);
+          expect(running('payments').length).toBe(3);
+        });
+
+        it('prod 与 staging 的资源上限来自各自的 values', () => {
+          const limitOf = (namespace) => {
+            const deployment = list('Deployment', { namespace })
+              .find((item) => (item.spec.template.metadata.labels || {})['app.kubernetes.io/name'] === 'reports');
+            return deployment.spec.template.spec.containers[0].resources.limits.memory;
+          };
+          expect(limitOf('payments')).toBe('2Gi');
+          expect(limitOf('analytics')).toBe('512Mi');
+        });
+
+        it('对象名字跟着 release 走，两个 release 不撞', async () => {
+          const one = await sh('helm template alpha ' + CHART);
+          const two = await sh('helm template beta ' + CHART);
+          expect(one.code).toBe(0);
+          expect(two.code).toBe(0);
+          const names = (text) => text.split('\\n')
+            .filter((line) => line.startsWith('  name:'))
+            .map((line) => line.slice('  name:'.length).trim());
+          const first = names(one.stdout);
+          const second = names(two.stdout);
+          expect(first.length).toBeGreaterThan(0);
+          for (const name of first) expect(second).not.toContain(name);
+        });
+
+        it('值确实从 values 来，不是写死在模板里', async () => {
+          const rendered = await sh(
+            'helm template probe ' + CHART
+            + ' --set replicaCount=7 --set image.tag=9.9.9-probe'
+          );
+          expect(rendered.code).toBe(0);
+          expect(rendered.stdout).toContain('replicas: 7');
+          expect(rendered.stdout).toContain(':9.9.9-probe');
+        });
+
+        it('没有靠三份 chart 蒙过去 —— 只能有一个', async () => {
+          const found = await sh('find /root/charts -name Chart.yaml');
+          expect(found.stdout.trim().split('\\n').filter(Boolean).length).toBe(1);
+        });
+      });
+    `),
+  ],
+  focus: ['maintainability', 'correctness'],
+  extension: t(
+    code`
+      Helm 最容易被误解的一点：它不是「模板引擎 + kubectl apply」，
+      它还记着**这一次 release 渲染出了哪些对象**。所以 \`helm upgrade\` 之后
+      上一版有、这一版没有的对象会被删掉，\`helm uninstall\` 能把一整套收干净。
+      这份记录存在集群里（一个 Secret），不在你的机器上 —— 换台机器接着管同一个
+      release 是可以的。
+
+      另一点是**渲染发生在客户端**。\`helm template\` 出来的 YAML 就是最终会被
+      apply 的东西，没有任何服务端魔法。所以排查模板问题永远从 \`helm template\`
+      开始，而不是装上去再看集群 —— 后者把「模板错了」和「集群拒绝了」混在了一起。
+    `,
+    code`
+      The most misunderstood thing about Helm: it is not "a template engine plus
+      kubectl apply". It also records **which objects this release rendered**. That is
+      why \`helm upgrade\` deletes objects the previous revision had and this one does
+      not, and why \`helm uninstall\` can clean up a whole set. The record lives in the
+      cluster (a Secret), not on your machine, so someone else can manage the same
+      release from another laptop.
+
+      The other point is that **rendering happens client-side**. The YAML from
+      \`helm template\` is exactly what gets applied; there is no server-side magic.
+      So template debugging always starts at \`helm template\`, never at installing and
+      then inspecting the cluster, which conflates "the template is wrong" with "the
+      cluster rejected it".
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -3191,6 +3624,6 @@ module.exports = {
   files: [],
   stages: [
     stage1, stage2, stage3, stage4, stage5, stage6,
-    stage7, stage8, stage9, stage10, stage11,
+    stage7, stage8, stage9, stage10, stage11, stage12,
   ],
 };
