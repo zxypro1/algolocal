@@ -224,9 +224,18 @@ export interface OpsWorldSpec {
   seed?: number;
   /** 世界的起始时刻，ISO8601。固定住，AGE 列才可复现。 */
   startTime?: string;
+  /** 这个集群已经跑了多少天。不填按 32 天算 —— 接手的从来不是新集群。 */
+  clusterAgeDays?: number;
   nodes?: OpsNodeSpec[];
   namespaces?: string[];
   images?: Record<string, OpsImageSpec>;
+  /**
+   * 本地已经有的基础镜像，`FROM` 得着。
+   *
+   * 值是工具链的名字：`node` 的镜像里有 npm，`python` 的有 pip。
+   * 具体命令的行为写在 src/lib/opslab/lab/toolchains.ts 里 —— 行为写不进 JSON。
+   */
+  baseImages?: Record<string, 'node' | 'python' | 'static'>;
   registries?: OpsRegistrySpec[];
   machine?: OpsMachineSpec;
   /**
@@ -255,6 +264,15 @@ export interface OpsStageSpec {
   setupCommands?: string[];
   /** 额外的镜像目录条目 */
   images?: Record<string, OpsImageSpec>;
+  /**
+   * 参考解：把这一关做对需要敲的命令。
+   *
+   * 反向验证靠它：跑完这串命令，隐藏用例必须全绿；不跑，必须挂。
+   * 一关的题面和判定对不对，只有这一条能说了算。
+   */
+  referenceCommands?: string[];
+  /** 参考解顺带写下的文件（比如学员要自己写的 manifest） */
+  referenceFiles?: Record<string, string>;
 }
 
 export type WorkspaceSpec = CodeWorkspaceSpec | OpsWorkspaceSpec;

@@ -47,8 +47,25 @@ export const DEPLOYMENTS: ResourceDefinition = {
   namespaced: true, shortNames: ['deploy'], categories: ['all'], subresources: ['status', 'scale'],
 };
 
+export const CONFIGMAPS: ResourceDefinition = {
+  group: '', version: 'v1', resource: 'configmaps', singular: 'configmap', kind: 'ConfigMap',
+  namespaced: true, shortNames: ['cm'],
+};
+
+export const SECRETS: ResourceDefinition = {
+  group: '', version: 'v1', resource: 'secrets', singular: 'secret', kind: 'Secret',
+  namespaced: true, shortNames: [],
+};
+
+export const SERVICEACCOUNTS: ResourceDefinition = {
+  group: '', version: 'v1', resource: 'serviceaccounts', singular: 'serviceaccount',
+  kind: 'ServiceAccount', namespaced: true, shortNames: ['sa'],
+};
+
 export const CORE_RESOURCES: ResourceDefinition[] = [
-  NAMESPACES, NODES, PODS, SERVICES, ENDPOINTS, EVENTS, REPLICASETS, DEPLOYMENTS,
+  NAMESPACES, NODES, PODS, SERVICES, ENDPOINTS, EVENTS,
+  CONFIGMAPS, SECRETS, SERVICEACCOUNTS,
+  REPLICASETS, DEPLOYMENTS,
 ];
 
 /** Deployment 给自己的 ReplicaSet 打的标签，用来区分不同版本 */

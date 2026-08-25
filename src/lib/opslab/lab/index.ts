@@ -9,3 +9,5 @@ export {
   type TopologyGraph, type TopologyNode, type TopologyEdge, type TopologyLane,
   type TopologyStatus, type TopologyOptions, type ChangeEntry, type ChangeType,
 } from './view';
+
+export { toolchainFor, baseImageOf, type ToolchainName } from './toolchains';

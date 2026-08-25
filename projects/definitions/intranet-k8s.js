@@ -190,7 +190,12 @@ const stage1 = {
     ),
   ],
   ops: {
-    files: {},
+    // 参考解：反向验证跑这串命令，跑完隐藏用例必须全绿；不跑必须挂
+    referenceCommands: [
+      'kubectl config use-context prod',
+      'mkdir -p /root/handover',
+      'kubectl get nodes -o wide > /root/handover/nodes.txt',
+    ],
   },
   specs: [
     spec('take-over.spec.ts', code`

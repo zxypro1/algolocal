@@ -14,7 +14,7 @@ import {
   buildTopology, createOpsWorld, diffVersions, snapshotVersions,
   type ChangeEntry, type OpsWorld, type TopologyGraph,
 } from '../lib/opslab/lab';
-import { createCliRuntime } from '../lib/opslab/wasm';
+import { sharedCliRuntime } from '../lib/opslab/wasm';
 import type { OpsStageSpec, OpsWorldSpec } from '../lib/engineering/types';
 
 export type OpsBootStatus = 'idle' | 'booting' | 'ready' | 'error';
@@ -88,7 +88,7 @@ export function useOpsWorkspace(options: UseOpsWorkspaceOptions): OpsWorkspaceSt
             ...options.stage,
             files: { ...(options.stage?.files ?? {}), ...(options.files ?? {}) },
           },
-          runtime: createCliRuntime(),
+          runtime: sharedCliRuntime(),
         });
         if (cancelled) return;
         versionSnapshot.current = snapshotVersions(next.cluster);

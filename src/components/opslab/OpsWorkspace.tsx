@@ -87,6 +87,19 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
     return () => registerClearResults(null);
   }, [registerClearResults]);
 
+  /**
+   * 自测入口，只在开发构建里挂。
+   *
+   * 终端的输入走的是真键盘事件（xterm 自己解析），自动化环境很难可靠地
+   * 打进去。暴露一个直接调命令的钩子，好让端到端验的是链路而不是键位。
+   */
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'production') return undefined;
+    const host = window as unknown as Record<string, unknown>;
+    host.__opslabRun = ops.runCommand;
+    return () => { delete host.__opslabRun; };
+  }, [ops.runCommand]);
+
   const machineFiles = useMemo(
     () => ops.world?.machine.vfs.toFileMap('/root') ?? {},
     // eslint-disable-next-line react-hooks/exhaustive-deps

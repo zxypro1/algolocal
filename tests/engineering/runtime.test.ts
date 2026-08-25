@@ -706,8 +706,16 @@ describe('preset projects', () => {
     expect(projects.length).toBeGreaterThan(0);
   });
 
+  /**
+   * ops 形态的项目没有 JavaScript 版本。
+   *
+   * 「换一种语言重做一遍」对代码题成立，对「敲命令改 YAML」这类题不成立 ——
+   * 那里根本没有一份用户写的 TypeScript 可以派生。
+   */
+  const codeProjects = projects.filter((project) => (project.workspace?.kind ?? 'code') === 'code');
+
   it('offers JavaScript alongside TypeScript', () => {
-    for (const project of projects) {
+    for (const project of codeProjects) {
       expect(availableLanguages(project)).toEqual(['typescript', 'javascript']);
     }
   });
@@ -738,7 +746,7 @@ describe('preset projects', () => {
   });
 
   it('derived JavaScript files carry no TypeScript syntax', () => {
-    for (const project of projects) {
+    for (const project of codeProjects) {
       const variant = project.variants?.javascript;
       expect(variant).toBeDefined();
 
@@ -824,7 +832,14 @@ describe('preset projects', () => {
     });
   });
 
-  projects.forEach((rawProject) => {
+  /**
+   * ops 形态的反向验证不在这里。
+   *
+   * 那些关卡的隐藏用例 import 的是 `@ops/lab`，要先起一个真集群、跑一遍参考命令
+   * 才谈得上「参考解能过」；而且要 142MB 的 CLI 产物。放在 tests/opslab/stages
+   * 里做，那边本来就按产物在不在决定跑不跑。
+   */
+  codeProjects.forEach((rawProject) => {
     // 内容只写一份 TS，JS 版是构建时派生的。派生出来的东西必须自己能跑通，
     // 否则学员切到 JS 就会撞上一堆不是自己写出来的失败。
     const languages = ['typescript', ...Object.keys(rawProject.variants || {})];

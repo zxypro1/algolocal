@@ -19,8 +19,14 @@ export interface MachineFilesProps {
 }
 
 export default function MachineFiles({ files, activePath, onSelect, root = '/root' }: MachineFilesProps) {
+  /**
+   * kubectl 会往 `~/.kube/cache` 里写一堆 discovery 与 HTTP 缓存 —— 真实，
+   * 但塞进文件树只会把学员自己的文件淹掉。和真 IDE 一样，把它藏起来。
+   */
   const paths = useMemo(
-    () => Object.keys(files).filter((path) => path.startsWith(`${root}/`)).sort(),
+    () => Object.keys(files)
+      .filter((path) => path.startsWith(`${root}/`) && !path.includes('/.kube/cache/'))
+      .sort(),
     [files, root]
   );
 

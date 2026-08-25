@@ -47,6 +47,16 @@ const SERVICE = {
 };
 
 describe('世界装配', () => {
+  it('节点与命名空间有合理的年龄 —— 接手的不是刚建好的集群', async () => {
+    const world = await createOpsWorld({ world: WORLD });
+    const node = world.cluster.registry.get(
+      world.cluster.scheme.mustGet({ group: '', version: 'v1', resource: 'nodes' }),
+      undefined, 'node-1'
+    );
+    // 默认 32 天
+    expect(node.metadata.creationTimestamp).toBe('2026-01-29T09:00:00Z');
+  });
+
   it('按题目的世界定义把集群和机器接起来', async () => {
     const world = await createOpsWorld({ world: WORLD });
     expect(world.machine.hostname).toBe('jump-01');
@@ -66,7 +76,8 @@ describe('世界装配', () => {
       'default', 'portal'
     );
     expect(deployment.metadata.uid).toMatch(/^uid-/);
-    expect(deployment.metadata.creationTimestamp).toBe('2026-03-02T09:00:00Z');
+    // 初态对象是「本来就在」的，按 6 小时前建出来算，AGE 列才不会全是 0s
+    expect(deployment.metadata.creationTimestamp).toBe('2026-03-02T03:00:00Z');
     // 控制器已经跑过了：Pod 起来了
     const pods = world.cluster.registry.list(
       world.cluster.scheme.mustGet({ group: '', version: 'v1', resource: 'pods' })

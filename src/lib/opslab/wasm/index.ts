@@ -2,7 +2,7 @@
  * 真 CLI 在浏览器里跑
  */
 export {
-  CliRuntime, createCliRuntime, CLI_WASM_URL, WASM_EXEC_URL,
+  CliRuntime, createCliRuntime, sharedCliRuntime, CLI_WASM_URL, WASM_EXEC_URL,
   type CliRuntimeOptions, type CliRunOptions, type CliResult, type FetchLike,
 } from './runtime';
 

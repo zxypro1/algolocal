@@ -9,10 +9,13 @@ import type {
   OpsImageSpec, OpsStageSpec, OpsWorldSpec,
 } from '../../engineering/types';
 import { Cluster, createCluster } from '../controllers';
-import { Machine, createMachine } from '../machine';
+import { Machine, createMachine, type CommandHandler } from '../machine';
 import {
   ImageStore, Registry as ImageRegistry, RegistryNetwork, createDockerCommand,
+  normalizeReference, parseReference, type Image,
 } from '../machine/oci';
+import type { ImageBehavior } from '../controllers';
+import { baseImageOf, toolchainFor } from './toolchains';
 import { CliRuntime, installClusterCli } from '../wasm';
 import type { KubeObject } from '../apiserver';
 
@@ -37,10 +40,21 @@ export interface OpsWorld {
 }
 
 const DEFAULT_START = '2026-03-02T09:00:00Z';
+/** 集群默认「已经跑了 32 天」——接手的从来不是一个刚建好的集群 */
+const DEFAULT_CLUSTER_AGE_MS = 32 * 24 * 60 * 60_000;
+/** 初态对象默认「已经在那儿 6 小时」 */
+const DEFAULT_OBJECT_AGE_MS = 6 * 60 * 60_000;
 
 export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<OpsWorld> {
   const spec = options.world ?? {};
   const stage = options.stage ?? {};
+
+  const clusterAgeMs = spec.clusterAgeDays !== undefined
+    ? spec.clusterAgeDays * 24 * 60 * 60_000
+    : DEFAULT_CLUSTER_AGE_MS;
+
+  // 先声明，下面 createCluster 要用；仓库对象在它之后才建得出来
+  let lookupPushedImage: (image: string) => ReturnType<typeof behaviorOfImage> | undefined = () => undefined;
 
   const cluster = createCluster({
     seed: spec.seed ?? 1,
@@ -48,6 +62,16 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     nodes: spec.nodes,
     namespaces: spec.namespaces,
     images: mergeImages(spec.images, stage.images),
+    // kubelet 拉私有镜像时要按这张表验凭据
+    registries: Object.fromEntries((spec.registries ?? []).map((registry) => [
+      registry.host,
+      {
+        requiresAuth: Object.keys(registry.users ?? {}).length > 0,
+        users: registry.users,
+      },
+    ])),
+    clusterAgeMs,
+    resolveImage: (image) => lookupPushedImage(image),
   });
   cluster.start();
 
@@ -70,11 +94,38 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
       anonymousPull: registry.anonymousPull,
     }));
   }
+  // 基础镜像：本地就有，FROM 得着，各自带着自己的工具链
+  const toolchains: Record<string, Record<string, CommandHandler>> = {};
+  for (const [reference, toolchain] of Object.entries(spec.baseImages ?? {})) {
+    images.add(baseImageOf(reference, toolchain, new Date(cluster.wallClock()).toISOString()));
+    toolchains[normalizeReference(reference)] = toolchainFor(toolchain);
+  }
+
   machine.install('docker', createDockerCommand({
     store: images,
     network: registries,
+    toolchains,
     now: () => cluster.wallClock(),
   }));
+
+  /**
+   * 学员自己 build + push 上去的镜像也要能部署。
+   *
+   * 行为从镜像自己的配置里推：EXPOSE 的端口就是它监听的端口，USER 就是它跑的
+   * 身份。这样第 3 关写的 Dockerfile 会直接影响第 6 关探针配得对不对 ——
+   * 两关之间的因果是真的，不是题面上说说。
+   */
+  lookupPushedImage = (image: string) => {
+    const local = images.get(image);
+    if (local) return behaviorOfImage(local);
+    try {
+      const parsed = parseReference(image);
+      if (!registries.has(parsed.registry)) return undefined;
+      return behaviorOfImage(registries.resolve(parsed.registry).pull(image));
+    } catch {
+      return undefined;
+    }
+  };
 
   const applets = options.runtime
     ? await installClusterCli({
@@ -86,10 +137,13 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     })
     : [];
 
-  // 世界的初态：项目级对象在前，关卡增量在后
-  for (const object of [...(spec.objects ?? []), ...(stage.objects ?? [])]) {
-    applyObject(cluster, object as KubeObject);
-  }
+  // 世界的初态：项目级对象在前，关卡增量在后。它们是「本来就在」的东西，
+  // 所以按 6 小时前建出来算，AGE 列才不会全是 0s。
+  cluster.seedExisting(DEFAULT_OBJECT_AGE_MS, () => {
+    for (const object of [...(spec.objects ?? []), ...(stage.objects ?? [])]) {
+      applyObject(cluster, object as KubeObject);
+    }
+  });
   await cluster.settle();
 
   const world: OpsWorld = {
@@ -141,4 +195,22 @@ function applyObject(cluster: Cluster, object: KubeObject): void {
 function splitApiVersion(apiVersion: string): [string, string] {
   const index = apiVersion.indexOf('/');
   return index < 0 ? ['', apiVersion] : [apiVersion.slice(0, index), apiVersion.slice(index + 1)];
+}
+
+
+/** 从镜像自己的配置推出它的运行时行为 */
+function behaviorOfImage(image: Image): OpsImageSpec & ImageBehavior {
+  const ports = Object.keys(image.config.ExposedPorts ?? {})
+    .map((entry) => Number(entry.split('/')[0]))
+    .filter((port) => Number.isFinite(port));
+  const user = image.config.User ?? '';
+  return {
+    pullMs: 400,
+    startupMs: 600,
+    readyAfterMs: 300,
+    listens: ports.length ? ports : [8080],
+    // 没别的信息时假定它是个正常的 HTTP 服务
+    routes: { '/': 200, '/healthz': 200, '/readyz': 200 },
+    runAsUser: /^\d+$/.test(user) ? Number(user) : 0,
+  };
 }
