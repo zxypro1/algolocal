@@ -66,6 +66,15 @@ export interface Target {
   tls?: boolean;
   /** TLS 时的 SNI，缺省用 host */
   serverName?: string;
+  /**
+   * 直接连这个地址，不查 DNS。
+   *
+   * `curl --resolve host:port:addr` 就是这么干的：DNS 还没改过来的时候，
+   * 拿它先把路由验通。
+   */
+  address?: string;
+  /** Host 头。Gateway 与 HTTPRoute 匹配的是它，不是连过去的那个地址。 */
+  headerHost?: string;
 }
 
 /** DNS 查出来的东西 */

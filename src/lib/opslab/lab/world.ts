@@ -80,6 +80,7 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
       ])),
       ...(spec.externalHosts ?? {}),
     },
+    addressPools: spec.addressPools,
   });
 
   const machineSpec = spec.machine ?? {};

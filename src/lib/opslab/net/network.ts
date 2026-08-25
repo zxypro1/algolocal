@@ -33,6 +33,18 @@ export interface NetworkDeps {
    * 不在表里的地址，办公网与外网都够不到 —— Pod IP 天然如此。
    */
   exposure?(address: string): Zone[];
+  /**
+   * 这个地址归不归某个 Gateway 管、这个请求该转到哪。
+   *
+   * 由集群注入，网络层自己不认识 Gateway 的 CRD —— 数据面只管「转给谁」。
+   */
+  gatewayRoute?(address: string, request: { host: string; port: number; path: string }): {
+    gateway: string;
+    route?: string;
+    backend?: { namespace: string; name: string; port: number };
+    status?: number;
+    detail: string;
+  } | undefined;
 }
 
 /** 连一次要多久（虚拟毫秒）。超时按 kube-proxy 的默认行为算。 */
@@ -66,9 +78,17 @@ export class Network {
     const hops: Hop[] = [];
     let elapsed = 0;
 
-    // 1. 名字解析
+    // 1. 名字解析。`--resolve` 指定了地址就跳过这一步。
     let addresses: string[];
-    if (isIpv4(target.host)) {
+    if (target.address) {
+      addresses = [target.address];
+      hops.push({
+        at: 'dns',
+        detail: `${target.host} -> ${target.address}（--resolve，没查 DNS）`,
+        verdict: 'forward',
+        elapsedMs: 0,
+      });
+    } else if (isIpv4(target.host)) {
       addresses = [target.host];
     } else {
       const answer = this.resolve(target.host, source);
@@ -104,10 +124,48 @@ export class Network {
       return { kind: 'no-route', hops, elapsedMs: elapsed, blockedBy: 'no route to host' };
     }
 
-    // 3. 目标是 Service 还是 Pod
-    const service = this.serviceByClusterIp(address);
+    // 3. 这个地址归不归某个 Gateway 管
+    const gateway = this.deps.gatewayRoute?.(address, {
+      host: target.headerHost ?? target.host,
+      port: target.port,
+      path: target.path ?? '/',
+    });
+    let serviceOverride: KubeObject | undefined;
+    let portOverride: number | undefined;
+    if (gateway) {
+      elapsed += LATENCY.hop;
+      hops.push({
+        at: gateway.route ? `${gateway.gateway} -> httproute/${gateway.route}` : gateway.gateway,
+        detail: gateway.detail,
+        verdict: gateway.backend ? 'forward' : 'reject',
+        elapsedMs: LATENCY.hop,
+      });
+      if (!gateway.backend) {
+        // Gateway 活着，只是没有路由匹配上 —— 是 404 不是连不上
+        return {
+          kind: 'ok',
+          status: gateway.status ?? 404,
+          body: `${gateway.status ?? 404} ${gateway.detail}\n`,
+          hops,
+          elapsedMs: elapsed,
+        };
+      }
+      serviceOverride = this.serviceByName(gateway.backend.namespace, gateway.backend.name);
+      portOverride = gateway.backend.port;
+      if (!serviceOverride) {
+        return {
+          kind: 'ok', status: 503,
+          body: '503 backend service not found\n',
+          hops, elapsedMs: elapsed,
+        };
+      }
+    }
+
+    // 4. 目标是 Service 还是 Pod
+    const service = serviceOverride ?? this.serviceByClusterIp(address);
+    const servicePort = portOverride ?? target.port;
     const backends = service
-      ? this.backendsOf(service, target.port)
+      ? this.backendsOf(service, servicePort)
       : this.podByIp(address)
         ? [{ pod: this.podByIp(address)!, port: target.port }]
         : [];
@@ -117,8 +175,8 @@ export class Network {
       hops.push({
         at: `svc/${service.metadata.namespace}/${service.metadata.name}`,
         detail: backends.length
-          ? `ClusterIP ${address}:${target.port} -> ${backends.length} 个后端`
-          : `ClusterIP ${address}:${target.port} 没有后端（Endpoints 为空）`,
+          ? `${service.metadata.name}:${servicePort} -> ${backends.length} 个后端`
+          : `${service.metadata.name}:${servicePort} 没有后端（Endpoints 为空）`,
         verdict: backends.length ? 'forward' : 'reject',
         elapsedMs: LATENCY.hop,
       });
@@ -134,7 +192,7 @@ export class Network {
       return { kind: 'no-route', hops, elapsedMs: elapsed, blockedBy: 'no route to host' };
     }
 
-    // 4. 网络策略。两端都要放行，被拒绝表现为丢包 -> 超时。
+    // 5. 网络策略。两端都要放行，被拒绝表现为丢包 -> 超时。
     const chosen = backends[0];
     const decision = evaluate(this.policies(), {
       source: this.peerOf(source),
@@ -168,7 +226,7 @@ export class Network {
       });
     }
 
-    // 5. 端口上有没有人听、应用怎么答
+    // 6. 端口上有没有人听、应用怎么答
     return this.deliver(chosen.pod, chosen.port, target, hops, elapsed);
   }
 
@@ -251,6 +309,10 @@ export class Network {
       },
       external: (name) => this.deps.externalHosts?.[name],
     };
+  }
+
+  private serviceByName(namespace: string, name: string): KubeObject | undefined {
+    return this.list('services', namespace).find((item) => item.metadata.name === name);
   }
 
   private serviceByClusterIp(ip: string): KubeObject | undefined {
