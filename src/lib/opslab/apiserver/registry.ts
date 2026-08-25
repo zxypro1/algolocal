@@ -13,14 +13,7 @@ import {
   fieldSetOf, mergeApplied, ownedBy, pruneUnowned, recordOwnership, strippedForApply,
 } from './ssa';
 import { Store, WatchEvent } from '../store';
-import {
-  alreadyExists,
-  badRequest,
-  conflict,
-  invalid,
-  notFound,
-  tooOldResourceVersion,
-} from './errors';
+import { alreadyExists, badRequest, conflict, forbidden, invalid, notFound, tooOldResourceVersion } from './errors';
 import { CompactedError } from '../store';
 import { ResourceDefinition, Scheme, storageKey, storagePrefix } from './scheme';
 import type {
@@ -51,6 +44,24 @@ export interface Defaulter {
   apply(object: KubeObject, definition: ResourceDefinition, existing?: KubeObject): void;
 }
 
+/**
+ * 准入。对象写进 store 之前的最后一道关。
+ *
+ * 和 Defaulter 的区别是它只能说「不行」，不能改对象 —— 变更类的准入
+ * （mutating）走 Defaulter 那条路。
+ */
+export interface Validator {
+  readonly name: string;
+  /** 允许就返回 undefined；拒绝就返回一句能读的话 */
+  review(input: {
+    definition: ResourceDefinition;
+    namespace?: string;
+    operation: 'CREATE' | 'UPDATE';
+    object: KubeObject;
+    oldObject?: KubeObject;
+  }): string | undefined;
+}
+
 export interface RegistryDeps {
   store: Store;
   scheme: Scheme;
@@ -59,6 +70,7 @@ export interface RegistryDeps {
   /** 生成 uid，来自确定性随机数 */
   uid: () => string;
   defaulters?: Defaulter[];
+  validators?: Validator[];
 }
 
 function clone<T>(value: T): T {
@@ -191,6 +203,34 @@ export class Registry {
     this.defaulters.push(defaulter);
   }
 
+  private readonly validators: Validator[];
+
+  /** 装一道准入。PSA 与 Kyverno 都从这里进来。 */
+  addValidator(validator: Validator): void {
+    this.validators.push(validator);
+  }
+
+  /**
+   * 跑一遍准入。任何一道拦下来就抛 403。
+   *
+   * 报错的形状照抄真 apiserver：`<resource> "<name>" is forbidden: <原因>`，
+   * kubectl 会在前面补上 `Error from server (Forbidden): ...`。
+   */
+  private admit(
+    definition: ResourceDefinition,
+    namespace: string | undefined,
+    operation: 'CREATE' | 'UPDATE',
+    object: KubeObject,
+    oldObject?: KubeObject
+  ): void {
+    for (const validator of this.validators) {
+      const message = validator.review({ definition, namespace, operation, object, oldObject });
+      if (message) {
+        throw forbidden(`${definition.resource} "${object.metadata?.name ?? ''}" is forbidden: ${message}`);
+      }
+    }
+  }
+
   private applyDefaults(definition: ResourceDefinition, object: KubeObject, existing?: KubeObject): void {
     for (const defaulter of this.defaulters) {
       if (defaulter.matches(definition)) defaulter.apply(object, definition, existing);
@@ -199,6 +239,7 @@ export class Registry {
 
   constructor(deps: RegistryDeps) {
     this.defaulters = [...(deps.defaulters ?? [])];
+    this.validators = [...(deps.validators ?? [])];
     this.store = deps.store;
     this.scheme = deps.scheme;
     this.now = deps.now;
@@ -321,6 +362,7 @@ export class Registry {
     delete meta.deletionTimestamp;
 
     this.applyDefaults(definition, candidate);
+    this.admit(definition, namespace, 'CREATE', candidate);
 
     if (options.dryRun) return this.decorate(candidate, this.store.revision);
 
@@ -419,6 +461,7 @@ export class Registry {
     next.status = existing.status;
 
     this.applyDefaults(definition, next, existing);
+    this.admit(definition, namespace, 'UPDATE', next, existing);
 
     const specChanged = JSON.stringify(next.spec ?? null) !== JSON.stringify(existing.spec ?? null);
     meta.generation = (existing.metadata.generation ?? 1) + (specChanged ? 1 : 0);

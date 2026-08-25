@@ -17,6 +17,9 @@ import {
 } from '../apiserver';
 import { Controller, ControllerContext } from './framework';
 import { createServiceIpDefaulter } from './serviceip';
+import {
+  KYVERNO_LABEL, KYVERNO_RESOURCES, createPsaValidator, digestOf, reviewWithKyverno,
+} from '../admission';
 import { DaemonSetController } from './daemonset';
 import { ARGOCD_RESOURCES, ArgoCdController } from '../argocd';
 import {
@@ -85,6 +88,8 @@ export interface ClusterOptions {
    * 所有请求都是 cluster-admin —— 前面十几关不必为此各配一套角色。
    */
   users?: Record<string, { username: string; groups?: string[] }>;
+  /** 镜像签名库。由世界注入，和镜像仓库一样是集群外的东西。 */
+  signatures?: import('../admission').SignatureStore;
   /** Service 的 VIP 从哪个网段分。默认 10.96.0.0/12，和真集群一样。 */
   serviceCidr?: string;
   /** `kubectl exec` 落到哪。不给就是这个集群不支持 exec。 */
@@ -140,7 +145,7 @@ export class Cluster {
     this.store = createStore();
     this.scheme = createScheme([
       ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES, ...ARGOCD_RESOURCES,
-      ...MESH_RESOURCES, ...RBAC_RESOURCES,
+      ...MESH_RESOURCES, ...RBAC_RESOURCES, ...KYVERNO_RESOURCES,
       ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
@@ -195,6 +200,45 @@ export class Cluster {
     this.registry.addDefaulter(createServiceIpDefaulter({
       registry: this.registry, scheme: this.scheme, cidr: options.serviceCidr,
     }));
+
+    /**
+     * PodSecurity 是 apiserver 内置的准入，不是一个工作负载 ——
+     * 真集群里也一样，它没法被卸载，只能靠命名空间标签开关。
+     */
+    /**
+     * 顺序要紧：内置插件跑在 webhook 前面。
+     *
+     * 一个 Pod 同时违反 PSA 与 Kyverno 时，真集群报的是 PSA 那句话 ——
+     * 反过来的话学员会以为「先去加个 owner 标签」，改完才发现还有特权容器。
+     */
+    this.registry.addValidator(createPsaValidator({
+      namespace: (name) => {
+        const namespaces = this.scheme.get({ group: '', version: 'v1', resource: 'namespaces' });
+        if (!namespaces) return undefined;
+        return this.registry.list(namespaces).items.find((item) => item.metadata.name === name);
+      },
+    }));
+
+    /**
+     * Kyverno 是集群里的一个工作负载。
+     *
+     * Deployment 停了策略就不再执行，而 `kubectl get cpol` 照样看得见 ——
+     * 和 CNI、网格一样，这条约束在这里兑现。
+     */
+    this.registry.addValidator({
+      name: 'kyverno',
+      review: ({ definition, namespace, object }) => reviewWithKyverno({
+        installed: () => this.kyvernoInstalled(),
+        policies: () => {
+          const policies = this.scheme.get({
+            group: 'kyverno.io', version: 'v1', resource: 'clusterpolicies',
+          });
+          return policies ? this.registry.list(policies).items : [];
+        },
+        verifyImage: (image, publicKey) =>
+          this.options.signatures?.verify(digestOf(image), publicKey) ?? false,
+      }, { definition, object, namespace }).denied,
+    });
 
     this.seed();
   }
@@ -390,6 +434,15 @@ export class Cluster {
       serviceAccount: ((pod.spec ?? {}) as any).serviceAccountName ?? 'default',
       enrolled: isAmbient(object),
     };
+  }
+
+  /** Kyverno 的控制面在不在 */
+  private kyvernoInstalled(): boolean {
+    const deployments = this.scheme.get({ group: 'apps', version: 'v1', resource: 'deployments' });
+    if (!deployments) return false;
+    return this.registry.list(deployments).items.some((item) =>
+      item.metadata.labels?.[KYVERNO_LABEL.key] === KYVERNO_LABEL.value
+      && (((item.status ?? {}) as any).availableReplicas ?? 0) > 0);
   }
 
   imageBehaviorOf(image: string | undefined): ImageBehavior | undefined {

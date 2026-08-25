@@ -13,7 +13,7 @@ export {
   parseFieldSelector,
   parseLabelSelector,
 } from './registry';
-export type { Defaulter, RegistryDeps } from './registry';
+export type { Defaulter, RegistryDeps, Validator } from './registry';
 export { Scheme, createScheme, storageKey, storagePrefix } from './scheme';
 export { ApiServer, createApiServer, parsePath } from './http';
 export type { ApiServerDeps } from './http';

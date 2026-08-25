@@ -182,6 +182,32 @@ function encodePublicKey(key: RsaKeyPair): Uint8Array {
 }
 
 /**
+ * 导出成 SPKI 的 `PUBLIC KEY`。
+ *
+ * cosign 的 `cosign.pub` 就是这个格式，openssl 与真 cosign 都读得懂。
+ */
+export function publicKeyPem(key: Pick<RsaKeyPair, 'n' | 'e'>): string {
+  return toPem('PUBLIC KEY', encodePublicKey(key as RsaKeyPair));
+}
+
+/** 从 SPKI PEM 里把公钥读回来。验签只要 n 和 e。 */
+export function parsePublicKeyPem(pem: string): { n: string; e: string } | undefined {
+  const match = /-----BEGIN PUBLIC KEY-----([\s\S]*?)-----END PUBLIC KEY-----/.exec(pem);
+  if (!match) return undefined;
+  try {
+    const root = parseDer(base64ToBytes(match[1].replace(/\s+/g, '')));
+    // SEQUENCE { AlgorithmIdentifier, BIT STRING { RSAPublicKey } }
+    const bits = root.children![1];
+    // BIT STRING 的第一个字节是「未用位数」，跳过
+    const inner = parseDer(bits.value.subarray(1));
+    const [n, e] = inner.children!.map((node) => bytesToBase64url(trimLeadingZeros(node.value)));
+    return { n, e };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * 导出成 PKCS#1 的 `RSA PRIVATE KEY`。
  *
  * 结构完整（带 CRT 参数），openssl 读得懂，我们自己也解析得回来 ——

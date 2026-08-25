@@ -24,5 +24,16 @@ const customJestConfig = {
   maxWorkers: 1, // Run tests sequentially to avoid conflicts
 }
 
-// createJestConfig is exported this way to ensure that next/jest can load the Next.js config which is async
-module.exports = createJestConfig(customJestConfig)
+/**
+ * createJestConfig 返回的是一个异步函数（next/jest 要先读 next.config.js）。
+ * 这里再包一层是为了改 transformIgnorePatterns —— next/jest 默认整个
+ * node_modules 都不转译，而 @marcbachmann/cel-js 是纯 ESM 包，
+ * 不转译的话 require 它会直接报「Cannot use import statement outside a module」。
+ */
+module.exports = async () => {
+  const config = await createJestConfig(customJestConfig)()
+  config.transformIgnorePatterns = (config.transformIgnorePatterns || []).map((pattern) =>
+    pattern === '/node_modules/' ? '/node_modules/(?!@marcbachmann/)' : pattern
+  )
+  return config
+}
