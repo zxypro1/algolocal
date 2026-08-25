@@ -15,6 +15,10 @@ export {
 } from './registry';
 export type { RegistryDeps } from './registry';
 export { Scheme, createScheme, storageKey, storagePrefix } from './scheme';
+export { ApiServer, createApiServer, parsePath } from './http';
+export type { ApiServerDeps } from './http';
+export { humanDuration, printerFor, renderTable, wantsTable, TABLE_PRINTERS } from './tables';
+export type { Table, TableColumnDefinition, TablePrinter, TableRow } from './tables';
 export type { GVR, ResourceDefinition } from './scheme';
 export {
   ApiError,
