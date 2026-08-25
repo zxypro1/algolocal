@@ -78,10 +78,15 @@ export const INGRESSCLASSES: ResourceDefinition = {
   singular: 'ingressclass', kind: 'IngressClass', namespaced: false, shortNames: [],
 };
 
+export const DAEMONSETS: ResourceDefinition = {
+  group: 'apps', version: 'v1', resource: 'daemonsets', singular: 'daemonset', kind: 'DaemonSet',
+  namespaced: true, shortNames: ['ds'], categories: ['all'], subresources: ['status'],
+};
+
 export const CORE_RESOURCES: ResourceDefinition[] = [
   NAMESPACES, NODES, PODS, SERVICES, ENDPOINTS, EVENTS,
   CONFIGMAPS, SECRETS, SERVICEACCOUNTS,
-  REPLICASETS, DEPLOYMENTS,
+  REPLICASETS, DEPLOYMENTS, DAEMONSETS,
   NETWORKPOLICIES, INGRESSES, INGRESSCLASSES,
 ];
 

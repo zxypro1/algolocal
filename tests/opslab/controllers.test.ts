@@ -5,7 +5,7 @@
  * 被调度 → 变 Running → 变 Ready → 进 Service 的端点。
  * 这条链是四块面板里学员看到的第一个「东西自己动起来了」。
  */
-import { createCluster, Cluster, DEPLOYMENTS, ENDPOINTS, EVENTS, PODS, REPLICASETS, SERVICES, NODES, isPodReady, parseCpu, resolveCount, templateHash } from '../../src/lib/opslab/controllers';
+import { createCluster, Cluster, DAEMONSETS, DEPLOYMENTS, ENDPOINTS, EVENTS, PODS, REPLICASETS, SERVICES, NODES, isPodReady, parseCpu, resolveCount, templateHash } from '../../src/lib/opslab/controllers';
 import type { KubeObject } from '../../src/lib/opslab/apiserver';
 
 const IMAGES = {
@@ -453,5 +453,78 @@ describe('ClusterIP 分配器', () => {
       spec: { selector: { app: 'portal' }, ports: [{ port: 8080 }] },
     } as never);
     expect((replaced.spec as any).clusterIP).toBe(ip);
+  });
+});
+
+/**
+ * DaemonSet
+ *
+ * 每个节点一份。CNI 的 agent、日志采集都是这个形状 ——
+ * 它们不是「跑几份」，而是「每台机器上都得有一份」。
+ */
+describe('DaemonSet', () => {
+  const AGENT = 'registry.corp.internal/agent:1.0';
+
+  function daemonSet(extra: Record<string, unknown> = {}) {
+    return {
+      apiVersion: 'apps/v1', kind: 'DaemonSet',
+      metadata: { name: 'agent', namespace: 'kube-system' },
+      spec: {
+        selector: { matchLabels: { app: 'agent' } },
+        template: {
+          metadata: { labels: { app: 'agent' } },
+          spec: { containers: [{ name: 'agent', image: AGENT }], ...extra },
+        },
+      },
+    };
+  }
+
+  async function withAgent(extra: Record<string, unknown> = {}) {
+    const cluster = createCluster({ images: { [AGENT]: { pullMs: 10, startupMs: 10, readyAfterMs: 10 } } });
+    cluster.start();
+    cluster.registry.create(DAEMONSETS, 'kube-system', daemonSet(extra) as never);
+    await cluster.settle();
+    return cluster;
+  }
+
+  const podsOf = (cluster: Cluster) =>
+    cluster.registry.list(PODS, { namespace: 'kube-system' }).items;
+
+  it('每个节点一个 Pod，nodeName 由控制器直接写死', async () => {
+    const cluster = await withAgent();
+    const pods = podsOf(cluster);
+    const nodes = cluster.registry.list(NODES).items.map((node) => node.metadata.name).sort();
+    expect(pods.map((pod) => (pod.spec as any).nodeName).sort()).toEqual(nodes);
+  });
+
+  it('status 上报 desired / ready', async () => {
+    const cluster = await withAgent();
+    const status = cluster.registry.get(DAEMONSETS, 'kube-system', 'agent').status as any;
+    const nodes = cluster.registry.list(NODES).items.length;
+    expect(status.desiredNumberScheduled).toBe(nodes);
+    expect(status.numberReady).toBe(nodes);
+  });
+
+  it('nodeSelector 限定了范围就只在那些节点上跑', async () => {
+    const cluster = await withAgent({ nodeSelector: { role: 'edge' } });
+    expect(podsOf(cluster)).toHaveLength(0);
+
+    const node = cluster.registry.list(NODES).items[0];
+    cluster.registry.update(NODES, undefined, node.metadata.name!, {
+      ...node, metadata: { ...node.metadata, labels: { ...node.metadata.labels, role: 'edge' } },
+    } as never);
+    await cluster.settle();
+    expect(podsOf(cluster)).toHaveLength(1);
+  });
+
+  it('新节点加进来，Pod 跟着补上', async () => {
+    const cluster = await withAgent();
+    const before = podsOf(cluster).length;
+    cluster.registry.create(NODES, undefined, {
+      apiVersion: 'v1', kind: 'Node', metadata: { name: 'node-new' },
+      status: { conditions: [{ type: 'Ready', status: 'True' }] },
+    } as never);
+    await cluster.settle();
+    expect(podsOf(cluster)).toHaveLength(before + 1);
   });
 });

@@ -5613,6 +5613,7 @@
           "default",
           "kube-system",
           "payments",
+          "analytics",
           "envoy-gateway-system",
           "ingress-nginx",
           "cert-manager"
@@ -5649,6 +5650,34 @@
             "listens": [
               9402
             ]
+          },
+          "harbor.corp.internal/team/ledger:3.2.1": {
+            "pullMs": 400,
+            "startupMs": 700,
+            "readyAfterMs": 300,
+            "listens": [
+              8080
+            ],
+            "routes": {
+              "/": 200,
+              "/healthz": 200
+            },
+            "memoryUsage": "240Mi"
+          },
+          "docker.io/flannel/flannel:v0.28.0": {
+            "pullMs": 200,
+            "startupMs": 300,
+            "readyAfterMs": 100,
+            "enforcesNetworkPolicy": false
+          },
+          "quay.io/cilium/cilium:v1.19.2": {
+            "pullMs": 600,
+            "startupMs": 900,
+            "readyAfterMs": 400,
+            "listens": [
+              9962
+            ],
+            "enforcesNetworkPolicy": true
           },
           "harbor.corp.internal/team/reports:2.1.0": {
             "pullMs": 500,
@@ -6924,6 +6953,549 @@
         "primer": {
           "zh": "HTTPS 的信任建立在一条`证书链`上。服务端出示一张`叶子证书`，上面写着它是谁（`Subject`）、能代表哪些域名（`SAN`，Subject Alternative Name）、有效期、以及公钥。这张证书由某个`证书颁发机构`（CA）用私钥签过名。客户端手里有一份`信任库`，里面是它信任的根 CA。验证的过程就是从叶子往上找签它的那一级，一级级找到信任库里的某个根为止。\n\n实际的 PKI 很少只有一层。通常是一个离线保存的根 CA，签出若干个`中间 CA`，日常签发全用中间 CA 做。好处是根的私钥可以锁在保险柜里，中间 CA 泄漏了也能单独吊销。代价是**服务端必须把中间证书一起发给客户端**：客户端信任库里只有根，它不认识那张中间 CA，链就断在那里。\n\n这个坑之所以难查，是因为它不是必然失败。浏览器可能之前访问别的站点时缓存过同一张中间证书，或者按证书里的 AIA 扩展自己去下载补齐；而 curl、Go 与 Java 写的服务都不做这些事。于是现象是「浏览器能打开，服务之间调不通」。判断的办法只有一个：看服务端实际发出来的是几张证书。\n\n`SAN` 是另一处常见问题。2017 年之后所有主流验证器都不再看 `CN` 字段，只认 SAN。一张 CN 写对但 SAN 里没有这个名字的证书会被拒绝，报错是「certificate is valid for A, not B」。Kubernetes 里这些事通常交给 `cert-manager`：`Issuer` 声明用哪个 CA，`Certificate` 声明要签什么，控制器把签好的叶子**连同签发链**一起写进一个 `kubernetes.io/tls` 类型的 Secret，链不完整这个错自然就不会犯。",
           "en": "HTTPS trust rests on a `certificate chain`. A server presents a `leaf certificate` stating who it is (`Subject`), which names it may represent (`SAN`, Subject Alternative Name), how long it is valid, and its public key. That certificate is signed by some `certificate authority` (CA). The client holds a `trust store` of root CAs it trusts, and verification walks upward from the leaf, level by level, until it reaches one of those roots.\n\nReal PKIs rarely have a single level. The usual shape is an offline root CA that signs several `intermediate CAs`, with day-to-day issuance done by an intermediate. The root private key can then live in a safe, and a compromised intermediate can be revoked on its own. The price is that **the server must send the intermediate along with the leaf**: the client only trusts the root, does not recognise the intermediate, and the chain breaks there.\n\nThis is hard to diagnose because it does not always fail. A browser may have cached the same intermediate from another site, or fetch it itself via the AIA extension in the certificate; curl, Go services, and Java services do neither. The symptom is \"the browser opens it, service-to-service calls fail\". There is one reliable check: look at how many certificates the server actually sends.\n\n`SAN` is the other frequent problem. Since 2017 no mainstream verifier reads the `CN` field; only SAN counts. A certificate with the right CN but a SAN that omits the name is rejected with \"certificate is valid for A, not B\". In Kubernetes this is normally handled by `cert-manager`: an `Issuer` names the CA, a `Certificate` describes what to issue, and the controller writes the leaf **together with its issuing chain** into a `kubernetes.io/tls` Secret, which makes the incomplete-chain mistake impossible to commit."
+        }
+      },
+      {
+        "id": "network-policy",
+        "title": {
+          "zh": "网络策略：让它真的生效",
+          "en": "Network Policy: Make It Actually Apply"
+        },
+        "goal": {
+          "zh": "安全评审提了一条：支付核心 `ledger` 只能被门户访问。前任在交接里写着\n「已加 NetworkPolicy」，`kubectl get netpol -n payments` 也确实看得见一条\n`payments-lockdown`。但审计的人从 `analytics` 命名空间的报表机上\ncurl 了一下 ledger，通了。\n\n集群现在的 CNI 是 flannel。平台组把 Cilium 的清单放在\n`/root/infra/cilium.yaml` 了。\n\n**先把话说在前面**：策略一旦真的开始执行，前任那条会立刻生效 ——\n而它选中的是整个命名空间。装之前先读一遍它写了什么。\n\n## 通关标准\n\n1. Cilium 装上，每个节点一份，全部 Ready；\n2. 从跳板机 `curl https://portal.corp.internal/` 仍然返回 200；\n3. 从门户的 Pod 里访问 `http://ledger` 通；\n4. 从 analytics 的报表 Pod 里访问 ledger **连不上**；\n5. ledger 的 Pod 里 DNS 还能用。\n\n## 会用到的命令\n\n```bash\nkubectl get netpol -A\nkubectl get ds -n kube-system\nkubectl apply -f /root/infra/cilium.yaml\nkubectl exec -n payments deploy/portal -- curl -s -m 5 http://ledger\nkubectl exec -n analytics deploy/reports -- curl -s -m 5 http://ledger.payments.svc.cluster.local\nkubectl exec -n payments deploy/ledger -- nslookup portal\n```\n",
+          "en": "A security review says the payment core `ledger` must only be reachable from\nthe portal. The handover claims \"NetworkPolicy added\", and\n`kubectl get netpol -n payments` does show a `payments-lockdown`. Yet the\nauditor curled ledger from the reports machine in the `analytics` namespace\nand it answered.\n\nThe cluster currently runs flannel as its CNI. The platform team left a Cilium\nmanifest at `/root/infra/cilium.yaml`.\n\n**Fair warning**: the moment policies actually get enforced, your predecessor's\npolicy takes effect too, and it selects the whole namespace. Read it before you\ninstall anything.\n\n## Done when\n\n1. Cilium is installed, one pod per node, all Ready;\n2. `curl https://portal.corp.internal/` from the jump host still returns 200;\n3. the portal's pods can reach `http://ledger`;\n4. the reports pod in analytics **cannot** reach ledger;\n5. DNS still works from ledger's pods.\n\n## Commands you will need\n\n```bash\nkubectl get netpol -A\nkubectl get ds -n kube-system\nkubectl apply -f /root/infra/cilium.yaml\nkubectl exec -n payments deploy/portal -- curl -s -m 5 http://ledger\nkubectl exec -n analytics deploy/reports -- curl -s -m 5 http://ledger.payments.svc.cluster.local\nkubectl exec -n payments deploy/ledger -- nslookup portal\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "Cilium 装上，策略开始被执行",
+            "en": "Cilium installed and policies enforced"
+          },
+          {
+            "zh": "门户对外照常，ledger 只对门户开放",
+            "en": "Portal still serves; ledger only accepts the portal"
+          },
+          {
+            "zh": "DNS 没被 egress 规则误伤",
+            "en": "DNS survives the egress rules"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "策略没生效不代表策略写错了。NetworkPolicy 是 apiserver 收下就完事的对象，拦不拦包看 CNI —— flannel 不做这件事，所以那条策略从写下去那天起就是一张废纸。",
+            "en": "A policy that does nothing is not necessarily a wrong policy. NetworkPolicy is just an object the apiserver accepts; whether packets get dropped is up to the CNI, and flannel does not implement it. That policy has been inert since the day it was written."
+          },
+          {
+            "zh": "`podSelector: {}` 选中的是命名空间里的**每一个** Pod，门户也在里面。门户的入向流量来自 Gateway 的数据面 Pod（在 `envoy-gateway-system` 里），不是 app=portal 的 Pod。",
+            "en": "`podSelector: {}` selects **every** pod in the namespace, the portal included. The portal’s inbound traffic comes from the Gateway’s data plane pods in `envoy-gateway-system`, not from pods labelled app=portal."
+          },
+          {
+            "zh": "一旦某个 Pod 被带 Egress 的策略选中，它的出向就变成默认拒绝 —— 包括查 DNS。放行 kube-system 的 53/UDP 几乎是每条 egress 策略都要写的一行。",
+            "en": "Once a pod is selected by any policy with Egress, its egress becomes default-deny, DNS included. Allowing UDP/53 to kube-system is a line almost every egress policy needs."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "被拒绝的连接表现为**超时**，不是拒绝。策略是丢包，对面不会回 RST，所以 curl 会卡到超时才报错。看到 `Connection refused` 说明包到了对端而对端没在听，那是另一回事 —— 别拿它去查策略。",
+            "en": "A denied connection shows up as a **timeout**, not a refusal. Policies drop packets, so nothing sends an RST and curl hangs until it gives up. `Connection refused` means the packet arrived and nobody was listening, which is a different problem entirely; do not go looking at policies for it."
+          },
+          {
+            "zh": "为了让门户能通就把 `payments-lockdown` 的 ingress 加成 `from: []`（或者干脆删掉 policyTypes 里的 Ingress）。那等于把整个命名空间重新打开，ledger 又回到评审之前的样子。",
+            "en": "Opening the portal back up by giving `payments-lockdown` an empty `from` (or dropping Ingress from policyTypes). That reopens the entire namespace and puts ledger back where it was before the review."
+          },
+          {
+            "zh": "在 `analytics` 那边加一条 egress 策略来「禁止访问 ledger」。方向反了：那台机器不归你管，也随时可以被绕过。拒绝要写在**被保护的一侧**，ingress 上。",
+            "en": "Adding an egress policy in `analytics` to \"forbid access to ledger\". That is the wrong side: you do not control that namespace and the rule is trivially bypassed. Denial belongs on the **protected** side, in ingress."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "kube-flannel-ds",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "flannel"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "flannel"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "flannel"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "kube-flannel",
+                        "image": "docker.io/flannel/flannel:v0.28.0"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "Certificate",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "secretName": "portal-tls",
+                "duration": "2160h",
+                "renewBefore": "720h",
+                "commonName": "portal.corp.internal",
+                "dnsNames": [
+                  "portal.corp.internal"
+                ],
+                "issuerRef": {
+                  "name": "corp-ca",
+                  "kind": "ClusterIssuer"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "Gateway",
+              "metadata": {
+                "name": "corp-gw",
+                "namespace": "payments"
+              },
+              "spec": {
+                "gatewayClassName": "envoy-internal",
+                "listeners": [
+                  {
+                    "name": "https",
+                    "port": 443,
+                    "protocol": "HTTPS",
+                    "hostname": "portal.corp.internal",
+                    "tls": {
+                      "mode": "Terminate",
+                      "certificateRefs": [
+                        {
+                          "name": "portal-tls"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "http",
+                    "port": 80,
+                    "protocol": "HTTP",
+                    "hostname": "portal.corp.internal"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.corp.internal"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "ledger",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "ledger"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "ledger"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "app",
+                        "image": "harbor.corp.internal/team/ledger:3.2.1",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "ledger",
+                "namespace": "payments"
+              },
+              "spec": {
+                "selector": {
+                  "app": "ledger"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "reports",
+                "namespace": "analytics"
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app": "reports"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "reports"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "app",
+                        "image": "harbor.corp.internal/team/reports:2.1.0",
+                        "ports": [
+                          {
+                            "containerPort": 9090
+                          }
+                        ],
+                        "resources": {
+                          "requests": {
+                            "memory": "256Mi"
+                          },
+                          "limits": {
+                            "memory": "1Gi"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "networking.k8s.io/v1",
+              "kind": "NetworkPolicy",
+              "metadata": {
+                "name": "payments-lockdown",
+                "namespace": "payments"
+              },
+              "spec": {
+                "podSelector": {},
+                "policyTypes": [
+                  "Ingress",
+                  "Egress"
+                ],
+                "ingress": [
+                  {
+                    "from": [
+                      {
+                        "podSelector": {
+                          "matchLabels": {
+                            "app": "portal"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "egress": []
+              }
+            }
+          ],
+          "files": {
+            "/root/infra/cilium.yaml": "apiVersion: apps/v1\nkind: DaemonSet\nmetadata:\n  name: cilium\n  namespace: kube-system\n  labels:\n    app.kubernetes.io/name: cilium\nspec:\n  selector:\n    matchLabels:\n      app.kubernetes.io/name: cilium\n  template:\n    metadata:\n      labels:\n        app.kubernetes.io/name: cilium\n    spec:\n      containers:\n      - name: cilium-agent\n        image: quay.io/cilium/cilium:v1.19.2\n        ports:\n        - containerPort: 9962\n",
+            "/root/infra/netpol.yaml": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: payments-lockdown\n  namespace: payments\nspec:\n  podSelector: {}\n  policyTypes:\n  - Ingress\n  - Egress\n  ingress:\n  - from:\n    - podSelector:\n        matchLabels:\n          app: portal\n  egress: []\n"
+          },
+          "referenceFiles": {
+            "/root/infra/netpol.yaml": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  podSelector:\n    matchLabels:\n      app: portal\n  policyTypes:\n  - Ingress\n  - Egress\n  ingress:\n  - from:\n    - namespaceSelector:\n        matchLabels:\n          kubernetes.io/metadata.name: envoy-gateway-system\n  egress:\n  - to:\n    - podSelector:\n        matchLabels:\n          app: ledger\n  - to:\n    - namespaceSelector:\n        matchLabels:\n          kubernetes.io/metadata.name: kube-system\n    ports:\n    - protocol: UDP\n      port: 53\n---\napiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: ledger\n  namespace: payments\nspec:\n  podSelector:\n    matchLabels:\n      app: ledger\n  policyTypes:\n  - Ingress\n  - Egress\n  ingress:\n  - from:\n    - podSelector:\n        matchLabels:\n          app: portal\n  egress:\n  - to:\n    - namespaceSelector:\n        matchLabels:\n          kubernetes.io/metadata.name: kube-system\n    ports:\n    - protocol: UDP\n      port: 53\n"
+          },
+          "referenceCommands": [
+            "kubectl apply -f /root/infra/cilium.yaml",
+            "kubectl delete netpol payments-lockdown -n payments",
+            "kubectl apply -f /root/infra/netpol.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "network-policy.spec.ts",
+            "content": "import { list, sh } from '@ops/lab';\n\ndescribe('网络策略', () => {\n  it('Cilium 每个节点一份，全部 Ready', () => {\n    const nodes = list('Node').length;\n    const enforcing = list('DaemonSet', { namespace: 'kube-system' })\n      .filter((item) => item.spec.template.spec.containers\n        .some((container) => container.image.includes('cilium')));\n    expect(enforcing.length).toBe(1);\n    expect(enforcing[0].status.desiredNumberScheduled).toBe(nodes);\n    expect(enforcing[0].status.numberReady).toBe(nodes);\n  });\n\n  it('门户对外照常 —— 策略没把入口打死', async () => {\n    const gateway = list('Gateway', { namespace: 'payments' })[0];\n    const address = gateway.status.addresses[0].value;\n    const result = await sh(\n      'curl -s -o /dev/null -w %{http_code} --resolve portal.corp.internal:443:' + address\n      + ' https://portal.corp.internal/'\n    );\n    expect(result.stdout).toBe('200');\n  });\n\n  it('门户访问得到 ledger', async () => {\n    const result = await sh(\n      'kubectl exec -n payments deploy/portal -- curl -s -m 5 -o /dev/null -w %{http_code} http://ledger'\n    );\n    expect(result.stdout).toBe('200');\n  });\n\n  it('analytics 的报表机访问不到 ledger', async () => {\n    const result = await sh(\n      'kubectl exec -n analytics deploy/reports -- '\n      + 'curl -s -m 5 -o /dev/null -w %{http_code} http://ledger.payments.svc.cluster.local'\n    );\n    expect(result.stdout).not.toBe('200');\n    // 策略是丢包：应该卡到超时（28），而不是被拒绝（7）\n    expect(result.stderr).toContain('curl: (28)');\n  });\n\n  it('ledger 的 DNS 还能用', async () => {\n    const result = await sh('kubectl exec -n payments deploy/ledger -- nslookup portal');\n    expect(result.code).toBe(0);\n  });\n\n  it('拦住 analytics 靠的是策略，不是把两边拆了', () => {\n    // 把报表机停掉、或者把 ledger 的后端摘空，上一条也会「通过」\n    const reports = list('Deployment', { namespace: 'analytics' })\n      .find((item) => item.metadata.name === 'reports');\n    expect(reports.status.readyReplicas).toBeGreaterThan(0);\n\n    const endpoints = list('Endpoints', { namespace: 'payments' })\n      .find((item) => item.metadata.name === 'ledger');\n    const addresses = (endpoints.subsets || [])\n      .flatMap((subset) => subset.addresses || []);\n    expect(addresses.length).toBe(2);\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "resilience"
+        ],
+        "extension": {
+          "zh": "「加了策略但什么都没变」在真集群里非常常见，而且极难自查 ——\napiserver 收下了对象，`kubectl get netpol` 看得见，`describe` 也漂亮，\n唯一缺的是那个会执行它的东西。判断的办法不是读策略，是发一个包：\n从一个**本该被拒绝**的地方连一次，看它是超时还是通。通了就说明没人执行。\n\n反过来，策略真的生效之后，第一个被打挂的往往不是攻击者而是自己。\n`podSelector: {}` 加 `policyTypes: [Egress]` 是一条能让整个命名空间\n连不上 DNS 的策略，而它看起来只是「先默认拒绝，再慢慢放行」。\n所以上线顺序应该反过来：先写放行规则，确认业务正常，最后才收紧默认。\n",
+          "en": "\"We added a policy and nothing changed\" is common in real clusters and very hard\nto self-diagnose: the apiserver accepted the object, `kubectl get netpol` shows\nit, `describe` looks fine, and the only missing piece is something that\nenforces it. The way to check is not to read the policy but to send a packet:\nconnect from somewhere that **should** be denied and see whether it times out or\nanswers. If it answers, nobody is enforcing.\n\nConversely, once policies do take effect, the first thing they break is usually\nyou. `podSelector: {}` with `policyTypes: [Egress]` is a policy that cuts an\nentire namespace off from DNS, and it reads like a reasonable \"deny by default,\nallow later\". So reverse the rollout order: write the allow rules first, confirm\nthe workloads still work, and tighten the default last.\n"
+        },
+        "primer": {
+          "zh": "集群里的 Pod 默认可以互相访问，不分命名空间。`NetworkPolicy` 是收紧这件事的对象：它按标签选中一批 Pod，然后声明这批 Pod 的入向（`ingress`）和出向（`egress`）允许什么。没有任何策略选中某个 Pod 时，这个 Pod 完全开放；一旦被选中，对应方向就变成默认拒绝，只有明确写出来的才放行。\n\n有两件事经常被搞混。第一，`policyTypes` 决定这条策略管哪个方向：写了 `Egress` 却不写任何 egress 规则，等于「这批 Pod 什么都出不去」，包括查 DNS。第二，`from` 和 `to` 里的每一个元素是「或」的关系，但同一个元素内部的 `podSelector` 和 `namespaceSelector` 是「与」。写成两个元素就是「这个命名空间的所有 Pod，或者任何命名空间里叫这个名字的 Pod」，比想要的宽得多。另外，只写 `podSelector` 不写 `namespaceSelector` 时，它只在策略自己所在的命名空间里找。\n\n最关键、也最容易踩的一点：`NetworkPolicy` 只是一个被 apiserver 收下的对象，真正拦不拦包取决于 CNI。flannel 这类只做网络连通的插件根本不看这些对象，策略写得再对也是一张废纸；Cilium、Calico 这类才会把它翻译成数据面规则。所以「加了策略但行为没变」时，第一个要确认的不是策略写得对不对，而是集群里到底有没有人在执行它。\n\n被策略拒绝的连接表现为`超时`，不是`拒绝`。丢包意味着对端不会回 RST，客户端只能等到自己的超时时间。这个区别很有用：`Connection refused` 说明包已经到了对端而那里没有进程在听，和策略无关；`timeout` 才值得去看策略、路由和防火墙。",
+          "en": "Pods can reach each other freely by default, across namespaces. `NetworkPolicy` is how you tighten that: it selects pods by label and declares what their inbound (`ingress`) and outbound (`egress`) traffic may be. A pod that no policy selects stays fully open; once selected, that direction becomes deny-by-default and only what you spell out gets through.\n\nTwo details cause most of the confusion. First, `policyTypes` decides which directions the policy governs: listing `Egress` without writing any egress rule means \"these pods may not reach anything\", DNS lookups included. Second, entries in `from` and `to` are ORed together, but `podSelector` and `namespaceSelector` inside a single entry are ANDed. Writing them as two entries means \"every pod in that namespace, or any pod with that label in any namespace\", which is far wider than intended. And a bare `podSelector` with no `namespaceSelector` only matches within the policy own namespace.\n\nThe most important point, and the easiest to miss: a `NetworkPolicy` is only an object the apiserver accepts. Whether packets get dropped depends on the CNI. Plugins like flannel provide connectivity and never read these objects, so a perfectly correct policy does nothing at all; Cilium and Calico translate them into real data plane rules. When a policy changes no behaviour, the first thing to check is not the policy but whether anything is enforcing it.\n\nA connection denied by policy shows up as a `timeout`, not a `refusal`. Dropping a packet means no RST comes back, so the client waits out its own deadline. That distinction is useful: `Connection refused` means the packet arrived and no process was listening, which has nothing to do with policy, while a `timeout` is what sends you looking at policies, routing, and firewalls."
         }
       }
     ]

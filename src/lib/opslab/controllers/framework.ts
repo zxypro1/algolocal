@@ -322,6 +322,16 @@ export abstract class Controller {
     this.track(informer);
   }
 
+  /**
+   * 手动排一个 key。
+   *
+   * watch 的 mapKey 是一对一的，扇出型的关系（节点变了要重看所有
+   * DaemonSet）映不过去，这时候直接排队。
+   */
+  protected enqueue(key: string): void {
+    this.queue.add(key);
+  }
+
   protected abstract reconcile(key: string): Promise<void> | void;
 
   start(): void {

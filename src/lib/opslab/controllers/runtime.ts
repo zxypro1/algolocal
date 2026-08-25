@@ -66,6 +66,15 @@ export interface ImageBehavior {
   handlesSigterm?: boolean;
   /** 以哪个 uid 跑（Dockerfile 里的 USER）。0 表示 root。 */
   runAsUser?: number;
+  /**
+   * 这个镜像是不是一个会**执行 NetworkPolicy** 的 CNI。
+   *
+   * NetworkPolicy 是 apiserver 收下就完事的对象，真正拦不拦包看 CNI。
+   * flannel 不做策略，Cilium / Calico 做 —— 所以「apply 了策略但什么都没变」
+   * 是真集群里最常见也最难查的一类现象。这条声明写在关卡的镜像表里，
+   * 宿主不认识任何具体的 CNI。
+   */
+  enforcesNetworkPolicy?: boolean;
 }
 
 /* ------------------------------------------------------------------ */

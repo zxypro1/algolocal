@@ -47,7 +47,7 @@ import {
 } from './runtime';
 
 /** 一次 reconcile 里改 status 时，冲突就放弃这一轮 —— 下一轮会带着新版本重来 */
-async function ignoreConflict(action: () => void): Promise<void> {
+export async function ignoreConflict(action: () => void): Promise<void> {
   try {
     action();
   } catch (error) {
@@ -65,7 +65,7 @@ async function ignoreConflict(action: () => void): Promise<void> {
  *
  * 真 k8s 的控制器同样是「比较后再写」，原因一样。
  */
-function updateStatusIfChanged(
+export function updateStatusIfChanged(
   registry: Registry,
   definition: ResourceDefinition,
   namespace: string | undefined,

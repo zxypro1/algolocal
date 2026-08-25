@@ -101,7 +101,8 @@ export class GatewayController extends Controller {
       return;
     }
 
-    // 给这个 Gateway 建（或更新）它的 LoadBalancer Service
+    // 给这个 Gateway 建（或更新）它的数据面：一个 Deployment + 一个 LoadBalancer Service
+    this.ensureDeployment(gateway);
     const service = this.ensureService(gateway, owned);
     const address = ((service?.status ?? {}) as any)?.loadBalancer?.ingress?.[0]?.ip;
 
@@ -132,11 +133,79 @@ export class GatewayController extends Controller {
    * 看起来像「入口坏了」而不是「入口被删了」。
    */
   private removeService(namespace: string | undefined, name: string): void {
-    try {
-      this.registry.delete(SERVICES, 'envoy-gateway-system', `envoy-${namespace}-${name}`);
-    } catch (error) {
-      if (!isNotFound(error) && !isConflict(error)) throw error;
+    const proxy = `envoy-${namespace}-${name}`;
+    for (const definition of [SERVICES, DEPLOYMENTS]) {
+      try {
+        this.registry.delete(definition, 'envoy-gateway-system', proxy);
+      } catch (error) {
+        if (!isNotFound(error) && !isConflict(error)) throw error;
+      }
     }
+  }
+
+  /**
+   * Gateway 的数据面。
+   *
+   * 真 Envoy Gateway 给每个 Gateway 起一组 envoy 进程，这里同样做成一个
+   * Deployment —— 不是为了好看：过了 Gateway 之后那段流量的源头是这些 Pod，
+   * NetworkPolicy 看到的就是它们。没有这一层，「只允许 Gateway 访问后端」
+   * 这条策略在这个世界里根本写不出来。
+   */
+  private ensureDeployment(gateway: KubeObject): void {
+    const namespace = 'envoy-gateway-system';
+    const name = `envoy-${gateway.metadata.namespace}-${gateway.metadata.name}`;
+    const labels = {
+      'app.kubernetes.io/name': 'envoy',
+      'app.kubernetes.io/component': 'proxy',
+      'gateway.envoyproxy.io/owning-gateway-name': gateway.metadata.name!,
+      'gateway.envoyproxy.io/owning-gateway-namespace': gateway.metadata.namespace ?? '',
+    };
+    const image = this.proxyImage();
+    const desired = {
+      apiVersion: 'apps/v1', kind: 'Deployment',
+      metadata: {
+        name, namespace, labels,
+        ownerReferences: [{
+          apiVersion: 'gateway.networking.k8s.io/v1', kind: 'Gateway',
+          name: gateway.metadata.name, uid: gateway.metadata.uid, controller: true,
+        }],
+      },
+      spec: {
+        replicas: 1,
+        selector: { matchLabels: {
+          'app.kubernetes.io/name': 'envoy',
+          'gateway.envoyproxy.io/owning-gateway-name': gateway.metadata.name,
+        } },
+        template: {
+          metadata: { labels },
+          spec: { containers: [{
+            name: 'envoy', image,
+            ports: listenersOf((gateway.spec ?? {}) as any).map((listener) => ({ containerPort: listener.port })),
+          }] },
+        },
+      },
+    } as unknown as KubeObject;
+
+    const existing = this.deployments.list().find(
+      (item) => item.metadata.namespace === namespace && item.metadata.name === name
+    );
+    try {
+      if (!existing) { this.registry.create(DEPLOYMENTS, namespace, desired); return; }
+      const merged = { ...existing, spec: { ...(existing.spec as any), ...(desired.spec as any) } };
+      if (JSON.stringify(merged.spec) === JSON.stringify(existing.spec)) return;
+      this.registry.update(DEPLOYMENTS, namespace, name, merged);
+    } catch (error) {
+      if (!isConflict(error) && !isNotFound(error)) throw error;
+    }
+  }
+
+  /** 数据面用哪个镜像：跟控制器自己用同一个，和真 Envoy Gateway 一样 */
+  private proxyImage(): string {
+    const controller = this.deployments.list().find(
+      (deployment) => deployment.metadata.labels?.[ENVOY_LABEL.key] === ENVOY_LABEL.value
+    );
+    const containers = ((controller?.spec ?? {}) as any)?.template?.spec?.containers ?? [];
+    return containers[0]?.image ?? 'registry.k8s.io/gateway-api/envoy-gateway:latest';
   }
 
   /** 每个 Gateway 对应一个 LoadBalancer Service，真 Envoy Gateway 也是这么干的 */

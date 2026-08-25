@@ -373,7 +373,9 @@ describe('TLS 在网络里真的会被验', () => {
     world.machine.vfs.writeFile('/root/portal.pem', decodeSecret(secret)['tls.crt']);
 
     const dates = await world.run('openssl x509 -in /root/portal.pem -noout -dates');
-    expect(dates.stdout).toContain('notBefore=Mar  2 09:00:00 2026 GMT');
+    // 秒数取决于签发前集群转了几圈，不钉死；格式与日期才是 openssl 的行为
+    expect(dates.stdout).toMatch(/^notBefore=Mar {2}2 09:00:0\d 2026 GMT$/m);
+    expect(dates.stdout).toMatch(/^notAfter=May 31 09:00:0\d 2026 GMT$/m);
 
     const san = await world.run('openssl x509 -in /root/portal.pem -noout -ext subjectAltName');
     expect(san.stdout).toContain('DNS:portal.corp.internal');
