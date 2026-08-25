@@ -219,8 +219,11 @@ export class Kernel {
   /**
    * 快进一段虚拟时间，沿途所有定时器（含后台）都会触发。
    *
-   * 「等 30 秒看滚动更新走到哪」「让证书过期」用这个。推进完再 settle 一次，
-   * 让被唤醒的那些实体把手上的活干完。
+   * 「等 30 秒看滚动更新走到哪」「让证书过期」用这个。
+   *
+   * **只推进这段窗口内到期的东西**，不会顺带把之后的也跑完 ——
+   * 早先的版本在末尾调了一次 settle()，结果「只走 150ms 看看中间态」
+   * 会直接看到终态，中间过程完全观察不到。要静止请显式调 settle()。
    */
   async advanceBy(ms: number, options: SettleOptions = {}): Promise<void> {
     const target = this.clock.now() + Math.max(0, Math.floor(ms));
@@ -234,7 +237,11 @@ export class Kernel {
       this.throwTaskFailure();
     }
     this.clock.advanceTo(target);
-    await this.settle(options);
+    // 让这一刻被唤醒的微任务链跑完，但不驱动未来的定时器
+    await flushMicrotasks();
+    const trailing = this.clock.takeFailure();
+    if (trailing) throw trailing.error;
+    this.throwTaskFailure();
   }
 
   /**
