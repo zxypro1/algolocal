@@ -83,7 +83,8 @@ L0 内核     虚拟时钟 · 确定性并发调度器 · 种子 RNG · 结构�
 
 | 组件 | | 怎么做 | 学员会在哪察觉 |
 | --- | --- | --- | --- |
-| kubectl 全部子命令 | S1 | 真 kubectl 编 WASM | **察觉不到** |
+| kubectl 全部子命令 | S1 | 真 kubectl 编 WASM（spike 已验证；需 6 处 js/wasm 补丁，见 [opslab-spike.md](./opslab-spike.md)） | **察觉不到** |
+| `kubectl get` 的表格 | S3 | **服务端渲染**（`Accept: ...as=Table`）+ 照抄 k8s printers 的列定义，`priority:1` 只在 `-o wide` 显示；AGE 由服务端按虚拟时钟算 | 不实现的话只剩 NAME/AGE 两列，一眼假 |
 | apiserver 对象语义 | S3 | 自己实现 REST + 存储 + watch；校验用官方 JSON Schema + ajv；`resourceVersion`、finalizer、ownerRef、级联删除、SSA 字段所有权都真做 | 冷门准入插件、审计日志格式、APF 不做 |
 | 控制器与状态流转 | S3 | 按真控制器结构写；生命周期转换借鉴 [KWOK](https://kwok.sigs.k8s.io/) 的声明式 Stage 模型 | 转换耗时是参数化的 |
 | Helm 渲染 | S1 | 真 helm 编 WASM | **察觉不到** |
@@ -220,7 +221,7 @@ ops 关卡最终仍然产出一个 `StageRunReport`，结果面板、计分卡�
 **第一段（已完成）· 零回归的工作区可组合化重构**
 引入 `workspace.kind`，把写死的布局改成可组合。不含任何 K8s 内容，独立可合并。
 
-**第二段 · Spike（3–4 周，不进主干）**
+**第二段 · Spike（已完成，结论见 [opslab-spike.md](./opslab-spike.md)）**
 
 - **Go CLI → WASM 打通**：真 kubectl 编成 wasm，通过假 fetch 传输层打到一个只有三个 GVK
   的最小 apiserver，跑通 `get` / `describe` / `apply` / `-o yaml`。**这是整个方案的命门。**
@@ -239,9 +240,10 @@ L0 内核、shell、容器进程运行时、镜像与 registry、apiserver 与�
 
 | 风险 | 缓解 |
 | --- | --- |
-| **Go WASM 的不确定性**（map 迭代随机化、goroutine 调度、时间） | 第二段头等任务；千次运行逐字节一致进 CI；必要时注入固定种子与假时钟；驯不服的 CLI 退回 S3 |
+| ~~Go WASM 的不确定性~~ —— **spike 已验证：1000 次重放逐字节一致**，map 迭代随机化未造成问题 | 保留千次重放作为 CI 门禁；我们这侧的责任是 apiserver 的 list 必须按名字稳定排序 |
 | **确定性并发调度器做不对** —— 一错，重放、反向验证、进度恢复全塌 | 第二段就验证；参考 FoundationDB / TigerBeetle 的成熟做法 |
-| WASM 制品体积（6–8 个 CLI × 2–3MB gzip） | 按关卡懒加载、`idb-keyval` / Electron 磁盘缓存 |
+| WASM 制品体积 —— spike 实测比预估大：kubectl 单独 11.1MB brotli | 改成 **busybox 式多合一二进制**（加 helm 只多 1.1MB），总计约 15–18MB brotli；按关卡懒加载 + 磁盘缓存 |
+| **wasm 实例内存泄漏** —— spike 实测每条命令泄漏 68MB，约 150 条后 OOM | 每次运行结束显式断开 `go._inst`/`mem`/`_values`，并按 Map 遍历清空 `_scheduledTimeouts`（`Object.values` 对 Map 无效） |
 | 新增 Go 构建链 | 制品预构建后入库或挂 release，日常开发不需要装 Go；CI 单独一条 job |
 | 上游版本漂移（k8s 每年三个版本） | 选型与版本集中在 [opslab-stack.md](./opslab-stack.md)；schema 按版本取；CLI 制品钉版本号 |
 | 出题成本 | 共享 `world-presets.js` 描述这家公司的内网，每关只写增量 |
