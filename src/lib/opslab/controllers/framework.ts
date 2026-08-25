@@ -301,6 +301,17 @@ export abstract class Controller {
    * mapKey 决定「这个对象变了，该 reconcile 谁」——
    * ReplicaSet 控制器 watch Pod，但要 reconcile 的是 Pod 的属主。
    */
+  /**
+   * 登记一个 informer，让 start()/stop() 管它的生命周期。
+   *
+   * 只调 informer.onChange 而不登记的话，start() 不会启动它，
+   * 它就永远收不到事件 —— 这个坑很安静，专门给个方法避开。
+   */
+  protected track(informer: Informer): Informer {
+    if (!this.informers.includes(informer)) this.informers.push(informer);
+    return informer;
+  }
+
   protected watch(informer: Informer, mapKey: (object: KubeObject, key: string) => string | null = (_, key) => key): void {
     informer.onChange((key, object) => {
       // 删除时缓存里已经没有它了，用事件带来的最后一次状态来定位属主
@@ -308,7 +319,7 @@ export abstract class Controller {
       const target = known ? mapKey(known, key) : key;
       if (target) this.queue.add(target);
     });
-    this.informers.push(informer);
+    this.track(informer);
   }
 
   protected abstract reconcile(key: string): Promise<void> | void;

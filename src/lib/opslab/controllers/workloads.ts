@@ -77,7 +77,7 @@ export class SchedulerController extends Controller {
   constructor(context: ControllerContext) {
     super(context, 'scheduler');
     this.pods = new Informer(this.registry, PODS);
-    this.nodes = new Informer(this.registry, NODES);
+    this.nodes = this.track(new Informer(this.registry, NODES));
     this.watch(this.pods);
     // 节点变了，所有待调度的 Pod 都值得再看一眼
     this.nodes.onChange(() => {
@@ -85,11 +85,6 @@ export class SchedulerController extends Controller {
         if (!(pod.spec as any)?.nodeName) this.queue.add(objectKey(pod));
       }
     });
-  }
-
-  start(): void {
-    super.start();
-    this.nodes.start();
   }
 
   protected async reconcile(key: string): Promise<void> {
@@ -553,7 +548,7 @@ export class EndpointsController extends Controller {
   constructor(context: ControllerContext) {
     super(context, 'endpoints');
     this.services = new Informer(this.registry, SERVICES);
-    this.pods = new Informer(this.registry, PODS);
+    this.pods = this.track(new Informer(this.registry, PODS));
     this.watch(this.services);
     // Pod 变了，命名空间里所有 Service 都要重算（谁选中它不好反查）
     this.pods.onChange((key) => {
@@ -562,11 +557,6 @@ export class EndpointsController extends Controller {
         if (service.metadata.namespace === namespace) this.queue.add(objectKey(service));
       }
     });
-  }
-
-  start(): void {
-    super.start();
-    this.pods.start();
   }
 
   protected async reconcile(key: string): Promise<void> {

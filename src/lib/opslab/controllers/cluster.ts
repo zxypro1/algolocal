@@ -91,6 +91,11 @@ export class Cluster {
     };
   }
 
+  /** 节点清单。seed 和 start 都要用，只能有一处定义，否则两边会漂。 */
+  private get nodeSpecs(): NodeSpec[] {
+    return this.options.nodes ?? [{ name: 'node-1' }, { name: 'node-2' }, { name: 'node-3' }];
+  }
+
   /** 建好命名空间与节点。这些是世界的初态，不是控制器造出来的。 */
   private seed(): void {
     const namespaces = this.options.namespaces ?? ['default', 'kube-system'];
@@ -102,9 +107,7 @@ export class Cluster {
       });
     }
 
-    const nodes = this.options.nodes ?? [
-      { name: 'node-1' }, { name: 'node-2' }, { name: 'node-3' },
-    ];
+    const nodes = this.nodeSpecs;
     for (const node of nodes) {
       const cpu = node.cpu ?? '4';
       const memory = node.memory ?? '8Gi';
@@ -182,7 +185,7 @@ export class Cluster {
       new ReplicaSetController(context),
       new DeploymentController(context),
       new EndpointsController(context),
-      ...(this.options.nodes ?? [{ name: 'node-1' }, { name: 'node-2' }, { name: 'node-3' }]).map(
+      ...this.nodeSpecs.map(
         (node) => new KubeletController(context, node.name, { images: this.options.images })
       ),
     ];
