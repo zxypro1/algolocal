@@ -1192,6 +1192,21 @@ const primers = {
       )
     ),
 
+    'gitops-with-argocd': t(
+      p(
+        '`GitOps` 把「集群里应该跑什么」这个答案从集群搬到了仓库。一个 Git 仓库存着全部 manifest，一个控制器不停地把仓库和集群比对，不一致就补齐。改配置的方式从「敲 kubectl」变成「提交一次代码」，于是每一次变更天然有作者、有时间、有 review、能回滚。',
+        '`Argo CD` 是最常见的实现。它的核心对象是 `Application`：`spec.source` 指到仓库的某个路径与某个分支，`spec.destination` 指到集群的某个命名空间。控制器把那个路径下的 YAML 渲染出来，和集群里的现状比一比，结果写进 `status`。要强调的是它读的是**远端仓库**：本地 commit 了没 push，对它来说等于什么都没发生。',
+        '`status` 里有两栏，代表两件完全不同的事，混在一起看会误判。`sync.status` 是 `Synced` 还是 `OutOfSync`，说的是「现状和仓库一不一致」；`health.status` 是 `Healthy` / `Progressing` / `Degraded`，说的是「服务好不好」。一个刚被人手工扩容过的服务是 OutOfSync 但 Healthy；一个刚同步完但镜像拉不下来的服务是 Synced 但 Degraded。',
+        '同步行为由 `syncPolicy` 上三个独立的开关决定，各管各的：不写 `automated` 时它只比对、只报告，什么都不动；写了 `automated` 之后仓库一变就自动 apply；再加 `selfHeal: true`，集群里的手工改动也会被拉回仓库的样子；再加 `prune: true`，仓库里删掉的对象才会在集群里被删除。想手动触发一次同步，写 `operation` 字段就行，`argocd app sync` 做的正是这件事。'
+      ),
+      p(
+        '`GitOps` moves the answer to "what should be running" out of the cluster and into a repository. One Git repository holds all the manifests, a controller continuously compares repository against cluster, and reconciles any difference. Changing configuration becomes committing code, so every change comes with an author, a timestamp, a review, and a way back.',
+        '`Argo CD` is the common implementation. Its central object is the `Application`: `spec.source` points at a path and revision in a repository, `spec.destination` at a namespace in a cluster. The controller renders the YAML under that path, compares it with live state, and writes the outcome into `status`. Note that it reads the **remote** repository: a local commit that was never pushed may as well not exist.',
+        'Two fields in `status` mean two entirely different things, and conflating them causes misdiagnosis. `sync.status` (`Synced` or `OutOfSync`) says whether live state matches the repository. `health.status` (`Healthy`, `Progressing`, `Degraded`) says whether the workload is well. A service someone just hand-scaled is OutOfSync but Healthy; a freshly synced service whose image will not pull is Synced but Degraded.',
+        'Sync behaviour comes from three independent switches under `syncPolicy`. Without `automated`, the controller only compares and reports, never acts. With `automated`, repository changes get applied. Adding `selfHeal: true` also pulls hand edits in the cluster back to what the repository says. Adding `prune: true` deletes objects that no longer exist in the repository. To trigger one sync by hand, write the `operation` field, which is exactly what `argocd app sync` does.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',

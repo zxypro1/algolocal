@@ -157,6 +157,25 @@ export const TABLE_PRINTERS: Record<string, TablePrinter> = {
       ];
     },
   },
+  applications: {
+    columns: [
+      NAME_COLUMN,
+      col('Sync Status', 'Whether the live state matches the repository.'),
+      col('Health Status', 'Health of the resources this application manages.'),
+      col('Revision', 'The revision the application is synced to.', 1),
+      AGE_COLUMN,
+    ],
+    cells: (object, age) => {
+      const status = (object.status ?? {}) as any;
+      return [
+        object.metadata.name,
+        status.sync?.status ?? 'Unknown',
+        status.health?.status ?? 'Unknown',
+        (status.sync?.revision ?? '').slice(0, 7) || '<none>',
+        age,
+      ];
+    },
+  },
   namespaces: {
     columns: [NAME_COLUMN, col('Status', 'The status of the namespace.'), AGE_COLUMN],
     cells: (object, age) => [
