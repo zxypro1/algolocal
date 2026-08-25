@@ -42,6 +42,18 @@ export interface NetworkDeps {
    */
   policyEnforced?(): boolean;
   /**
+   * 这条连接过不过服务网格，过了之后发生了什么。
+   *
+   * 由集群注入 —— 网络层不认识 Istio 的 CRD，它只负责把结果画进包路径。
+   */
+  mesh?(input: {
+    source: Source;
+    destination: KubeObject;
+    port: number;
+    method?: string;
+    path?: string;
+  }): { kind: string; detail: string; blocked?: boolean } | undefined;
+  /**
    * 这个地址归不归某个 Gateway 管、这个请求该转到哪。
    *
    * 由集群注入，网络层自己不认识 Gateway 的 CRD —— 数据面只管「转给谁」。
@@ -299,6 +311,28 @@ export class Network {
         verdict: 'forward',
         elapsedMs: 0,
       });
+    }
+
+    // 5.5 服务网格。ztunnel 在 CNI 之后、应用之前拦一道。
+    const mesh = this.deps.mesh?.({
+      source: policySource,
+      destination: chosen.pod,
+      port: chosen.port,
+      method: target.method,
+      path: target.path,
+    });
+    if (mesh && mesh.kind !== 'off' && mesh.kind !== 'passthrough') {
+      elapsed += LATENCY.hop;
+      hops.push({
+        at: 'mesh/ztunnel',
+        detail: mesh.detail,
+        verdict: mesh.blocked ? 'reject' : 'forward',
+        elapsedMs: LATENCY.hop,
+      });
+      if (mesh.blocked) {
+        // ztunnel 会回 RST —— 是连接被重置，不是超时。这个区别指向不同的层。
+        return { kind: 'reset', hops, elapsedMs: elapsed, blockedBy: mesh.kind };
+      }
     }
 
     // 6. TLS 握手。证书验不过就在这里断，还没到应用。
