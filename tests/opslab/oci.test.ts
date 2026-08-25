@@ -325,12 +325,40 @@ describe('私有仓库', () => {
     expect(harbor.listTags('team/app')).toEqual(['v1']);
   });
 
-  it('推到没权限的项目被拒', async () => {
+  it('COPY 单个文件到不带斜杠的目标会改名，目录来源保留层级', async () => {
+    const { machine, store } = dockerMachine({
+      '/root/app/Dockerfile': [
+        'FROM node:22-alpine',
+        'COPY index.js /srv/server.js',
+        'COPY assets /srv/assets',
+      ].join('\n'),
+      '/root/app/index.js': 'ok\n',
+      '/root/app/assets/css/site.css': 'body{}\n',
+      '/root/app/assets/logo.svg': '<svg/>\n',
+    });
+    expect((await machine.exec('docker build -t app:copy app')).code).toBe(0);
+    const rootfs = imageRootfs(store.get('app:copy')!);
+    expect(rootfs['/srv/server.js']).toBe('ok\n');
+    expect(rootfs['/srv/assets/css/site.css']).toBe('body{}\n');
+    expect(rootfs['/srv/assets/logo.svg']).toBe('<svg/>\n');
+  });
+
+  it('登录了但推到没权限的项目，报的是 denied 不是 unauthorized', async () => {
     const { machine } = dockerMachine(CONTEXT);
     await machine.exec('docker login harbor.corp.internal -u ci -p "S3cret!"');
     await machine.exec('docker build -t harbor.corp.internal/other/app:v1 app');
     const result = await machine.exec('docker push harbor.corp.internal/other/app:v1');
     expect(result.stderr).toContain('denied: requested access to the resource is denied');
+  });
+
+  it('push -a 把同一个仓库的所有 tag 都推上去', async () => {
+    const { machine, harbor } = dockerMachine(CONTEXT);
+    await machine.exec('docker login harbor.corp.internal -u ci -p "S3cret!"');
+    await machine.exec('docker build -t harbor.corp.internal/team/app:v1 app');
+    await machine.exec('docker tag harbor.corp.internal/team/app:v1 harbor.corp.internal/team/app:latest');
+    const pushed = await machine.exec('docker push -a harbor.corp.internal/team/app:v1');
+    expect(pushed.code).toBe(0);
+    expect(harbor.listTags('team/app')).toEqual(['latest', 'v1']);
   });
 
   it('解析不了的主机名报 DNS 错误', async () => {

@@ -247,11 +247,15 @@ describe('shell 执行', () => {
   });
 
   it('死循环会被拦住而不是把页面挂死', async () => {
-    const small = createMachine({ maxLoopIterations: 5 } as never);
     const result = await machine.exec('while true; do echo x > /dev/null; done');
     expect(result.code).toBe(1);
-    expect(result.stderr).toMatch(/loop exceeded/);
-    expect(small).toBeDefined();
+    expect(result.stderr).toBe('bash: loop exceeded 10000 iterations, aborted\n');
+  });
+
+  it('循环上限可以调小，报错里写的是实际生效的那个数', async () => {
+    const strict = createMachine({ maxLoopIterations: 5 });
+    const result = await strict.exec('i=0\nwhile true; do i=$((i+1)); done\necho $i');
+    expect(result.stderr).toBe('bash: loop exceeded 5 iterations, aborted\n');
   });
 
   it('case 按模式选分支', async () => {
@@ -417,16 +421,20 @@ describe('机器', () => {
     expect(machine.history).toEqual(['echo one', 'false']);
   });
 
-  it('快照能把机器整台还原回去', async () => {
+  it('快照能把机器整台还原回去，连变量和函数一起', async () => {
     const machine = createMachine();
     await machine.exec('echo before > f.txt');
     const snapshot = machine.snapshot();
     await machine.exec('echo after > f.txt');
     await machine.exec('cd /etc');
+    await machine.exec('LEFTOVER=1');
+    await machine.exec('leftover() { echo nope; }');
 
     machine.restore(snapshot);
     expect(machine.vfs.readFile('/root/f.txt')).toBe('before\n');
     expect(machine.cwd).toBe('/root');
+    expect((await machine.exec('echo "[$LEFTOVER]"')).stdout).toBe('[]\n');
+    expect((await machine.exec('leftover')).code).toBe(127);
   });
 
   it('同样的脚本跑两遍，输出逐字节相同', async () => {

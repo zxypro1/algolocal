@@ -657,6 +657,18 @@ export class Shell {
     this.positional = [...args];
   }
 
+  /** 回到一个干净状态。快照还原要用 —— 变量、函数、set 选项都不该留到下一轮。 */
+  reset(state: { cwd: string; env: Record<string, string> }): void {
+    this.cwd = state.cwd;
+    this.env = { ...state.env, PWD: state.cwd };
+    this.vars = {};
+    this.functions = {};
+    this.positional = [];
+    this.frames = [];
+    this.options = { errexit: false, nounset: false, pipefail: false };
+    this.lastStatus = 0;
+  }
+
   changeDirectory(target: string): void {
     const path = normalizePath(target, this.cwd);
     if (!this.vfs.exists(path)) throw new Error(`cd: ${target}: No such file or directory`);

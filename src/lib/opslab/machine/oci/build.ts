@@ -386,22 +386,41 @@ function applyCopy(
         `ERROR: failed to solve: failed to compute cache key: "${source}" not found: not found\n`
       );
     }
-    // 单个文件拷成文件；目录或多个来源拷进目标目录
-    const single = matched.length === 1 && matched[0] === absolute;
     for (const path of matched) {
-      const target = single && sources.length === 1 && !destination.endsWith('/')
-        ? normalizePath(destination, workdir)
-        : normalizePath(
-            `${destination}/${single ? path.slice(absolute.lastIndexOf('/') + 1) : path.slice(absolute.length + (path === absolute ? 0 : 1))}`,
-            workdir
-          );
-      collected[target] = sourceFiles[path];
+      collected[copyTarget({ path, absolute, matched, sources, destination, workdir })] = sourceFiles[path];
     }
   }
 
   const after = { ...result.rootfs, ...collected };
   const layer = diffLayer(result.rootfs, after, `${instruction.name} ${instruction.args}`);
   commit(result, layer, options.created);
+}
+
+/**
+ * 一个来源文件该落到目标的哪个路径上。
+ *
+ * Docker 的规矩：**单个文件 + 目标不以 `/` 结尾** 时目标就是文件名本身
+ * （`COPY app.js /srv/index.js` 会改名）；其它情况一律当成「拷进目录」，
+ * 目录来源还要保留相对层级。
+ */
+function copyTarget(input: {
+  path: string;
+  absolute: string;
+  matched: string[];
+  sources: string[];
+  destination: string;
+  workdir: string;
+}): string {
+  const { path, absolute, matched, sources, destination, workdir } = input;
+  const isSingleFile = matched.length === 1 && matched[0] === absolute;
+
+  if (isSingleFile && sources.length === 1 && !destination.endsWith('/')) {
+    return normalizePath(destination, workdir);
+  }
+  const relative = isSingleFile
+    ? absolute.slice(absolute.lastIndexOf('/') + 1)
+    : path.slice(absolute.length + 1);
+  return normalizePath(`${destination}/${relative}`, workdir);
 }
 
 function stageFiles(

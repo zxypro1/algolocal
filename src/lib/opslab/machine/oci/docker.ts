@@ -171,11 +171,21 @@ function push(argv: string[], context: CommandContext, options: DockerOptions): 
   const parsed = parseReference(reference);
   const registry = options.network.resolve(parsed.registry);
   const credentials = readCredentials(context.vfs, configPath(context, options))[parsed.registry];
-  const { digest } = registry.push(reference, image, credentials);
+
+  // -a / --all-tags：把这个仓库下该镜像的所有 tag 都推上去
+  const allTags = flags.bools.has('a') || flags.bools.has('all-tags');
+  const targets = allTags
+    ? image.repoTags
+      .map((tag) => parseReference(tag))
+      .filter((tag) => tag.registry === parsed.registry && tag.repository === parsed.repository)
+    : [parsed];
 
   const lines = [`The push refers to repository [${parsed.registry}/${parsed.repository}]`];
   for (const layer of image.layers) lines.push(`${shortId(layer.digest)}: Pushed`);
-  lines.push(`${parsed.tag}: digest: ${digest} size: ${imageManifest(image).length}`);
+  for (const target of targets) {
+    const { digest } = registry.push(target.canonical, image, credentials);
+    lines.push(`${target.tag}: digest: ${digest} size: ${imageManifest(image).length}`);
+  }
   return { stdout: `${lines.join('\n')}\n` };
 }
 
@@ -261,7 +271,10 @@ function inspect(argv: string[], options: DockerOptions): CommandResult {
     found.push({
       Id: image.id,
       RepoTags: image.repoTags,
-      RepoDigests: [...image.repoTags.map((t) => `${t.split(':')[0]}@${manifestDigest(image)}`)],
+      RepoDigests: image.repoTags.map((tag) => {
+        const ref = parseReference(tag);
+        return `${ref.registry}/${ref.repository}@${manifestDigest(image)}`;
+      }),
       Created: image.created,
       Architecture: image.architecture,
       Os: image.os,

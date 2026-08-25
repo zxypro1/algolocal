@@ -348,13 +348,18 @@ export const COREUTILS: Record<string, CommandHandler> = {
   },
 
   find: (context) => {
-    const args = parseArgs(context.argv);
-    // `-name` / `-type` 是 find 自己的谓词，不走通用选项解析
-    const nameIndex = context.argv.indexOf('-name');
-    const namePattern = nameIndex >= 0 ? context.argv[nameIndex + 1] : undefined;
-    const typeIndex = context.argv.indexOf('-type');
-    const type = typeIndex >= 0 ? context.argv[typeIndex + 1] : undefined;
-    const start = args.values.find((value) => !isPredicateValue(context.argv, value)) ?? '.';
+    // find 的语法是「路径 + 谓词」，不是普通的选项，按位置一个个扫
+    let namePattern: string | undefined;
+    let type: string | undefined;
+    let start = '.';
+    let sawStart = false;
+    for (let i = 0; i < context.argv.length; i += 1) {
+      const arg = context.argv[i];
+      if (arg === '-name') { namePattern = context.argv[++i]; continue; }
+      if (arg === '-type') { type = context.argv[++i]; continue; }
+      if (arg.startsWith('-')) continue;
+      if (!sawStart) { start = arg; sawStart = true; }
+    }
 
     const root = resolve(context, start);
     if (!context.vfs.exists(root)) return fail(`find: '${start}': No such file or directory`);
@@ -482,12 +487,6 @@ function globToRegExp(pattern: string): RegExp {
     .map((char) => (char === '*' ? '.*' : char === '?' ? '.' : escapeRegExp(char)))
     .join('');
   return new RegExp(`^${body}$`);
-}
-
-/** `-name` / `-type` 后面那个值不是起始目录 */
-function isPredicateValue(argv: string[], value: string): boolean {
-  const index = argv.indexOf(value);
-  return index > 0 && (argv[index - 1] === '-name' || argv[index - 1] === '-type');
 }
 
 /** `ls -l` 的那一行 */

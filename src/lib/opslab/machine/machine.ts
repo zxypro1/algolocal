@@ -22,6 +22,8 @@ export interface MachineOptions {
   commands?: Record<string, CommandHandler>;
   /** 虚拟墙钟，毫秒 */
   now?: () => number;
+  /** 循环体最多跑多少轮，防住写错的死循环 */
+  maxLoopIterations?: number;
 }
 
 export interface MachineSnapshot {
@@ -66,6 +68,7 @@ export class Machine {
       hostname: this.hostname,
       user: options.user ?? 'root',
       env: options.env,
+      maxLoopIterations: options.maxLoopIterations,
       commands: { ...COREUTILS, ...(options.commands ?? {}) },
     });
   }
@@ -119,8 +122,8 @@ export class Machine {
 
   restore(snapshot: MachineSnapshot): void {
     this.vfs.restore(snapshot.vfs);
-    this.shell.cwd = snapshot.cwd;
-    this.shell.env = { ...snapshot.env };
+    // 变量、函数、set -e 这些也要跟着回去，否则「重来一次」会带着上一轮的残留
+    this.shell.reset({ cwd: snapshot.cwd, env: snapshot.env });
     this.history.length = 0;
     this.history.push(...snapshot.history);
   }

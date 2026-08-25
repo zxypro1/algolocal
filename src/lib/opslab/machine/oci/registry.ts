@@ -136,10 +136,10 @@ export class Registry {
   push(reference: string, image: Image, credentials?: Credentials): { digest: string } {
     const parsed = parseReference(reference);
     if (this.requiresAuth() && !this.authenticate(credentials)) {
-      throw new RegistryError(
-        `unauthorized: authentication required`,
-        credentials ? 'denied' : 'unauthorized'
-      );
+      // 没登录和登录了但密码/权限不对，是两种要分开查的故障
+      throw credentials
+        ? new RegistryError(`denied: requested access to the resource is denied`, 'denied')
+        : new RegistryError(`unauthorized: authentication required`, 'unauthorized');
     }
     const project = parsed.repository.split('/')[0];
     if (this.projects && !this.projects.includes(project)) {
