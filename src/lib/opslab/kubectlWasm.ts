@@ -78,7 +78,26 @@ async function ensureGoRuntime(): Promise<void> {
   });
 }
 
-export async function runKubectl(
+/**
+ * 串行执行。
+ *
+ * 运行一条命令要把 globalThis 上的 fs / fetch / process 换成这一次的，跑完再换回去。
+ * 两条命令并发的话会互相把对方的全局踩掉，输出串台。终端本身是串行的，
+ * 但判定探测那边会有多个调用方，所以把串行保证放在这一层，而不是指望调用方守规矩。
+ */
+let queue: Promise<unknown> = Promise.resolve();
+
+export function runKubectl(
+  args: string[],
+  options: { server: ApiServerLike; files?: Record<string, string>; wasmUrl?: string }
+): Promise<RunResult> {
+  const next = queue.then(() => runKubectlExclusive(args, options));
+  // 前一条失败不能卡住后面的
+  queue = next.catch(() => undefined);
+  return next;
+}
+
+async function runKubectlExclusive(
   args: string[],
   options: { server: ApiServerLike; files?: Record<string, string>; wasmUrl?: string }
 ): Promise<RunResult> {

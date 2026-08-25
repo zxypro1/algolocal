@@ -8,13 +8,14 @@ import { useCallback, useEffect, useRef } from 'react';
 import type { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 
+// 键盘输入用显式转义写，源码里放字面控制字符不可读也容易被编辑器改坏
 const KEY_ENTER = '\r';
-const KEY_BACKSPACE = '';
-const KEY_CTRL_C = '';
-const KEY_UP = '[A';
-const KEY_DOWN = '[B';
+const KEY_BACKSPACE = '\x7f';
+const KEY_CTRL_C = '\x03';
+const KEY_UP = '\x1b[A';
+const KEY_DOWN = '\x1b[B';
 
-const ESC = '';
+const ESC = '\x1b';
 const BLUE = `${ESC}[1;34m`;
 const RED = `${ESC}[31m`;
 const RESET = `${ESC}[0m`;
