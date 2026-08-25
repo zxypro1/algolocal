@@ -17,7 +17,7 @@
  * ResolvedRefs=False 会直接说出是后端 Service 不存在还是端口对不上。
  */
 import { Priority } from '../kernel';
-import type { KubeObject } from '../apiserver';
+import type { KubeObject, ResourceDefinition } from '../apiserver';
 import {
   Controller, ControllerContext, Informer, isConflict, isNotFound, objectKey, splitKey,
 } from '../controllers/framework';
@@ -80,10 +80,10 @@ export class GatewayController extends Controller {
     try {
       gateway = this.registry.get(GATEWAYS, namespace, name);
     } catch (error) {
-      if (isNotFound(error)) return;
+      if (isNotFound(error)) { this.removeService(namespace, name); return; }
       throw error;
     }
-    if (gateway.metadata.deletionTimestamp) return;
+    if (gateway.metadata.deletionTimestamp) { this.removeService(namespace, name); return; }
 
     const spec = (gateway.spec ?? {}) as any;
     const owned = this.classes.list().find(
@@ -125,6 +125,20 @@ export class GatewayController extends Controller {
     for (const route of this.routesFor(gateway)) this.setRouteStatus(route, gateway);
   }
 
+  /**
+   * Gateway 没了，它的 Service 也要跟着走。
+   *
+   * 不清的话地址还挂在那儿，`resolveGateway` 会一直返回 503，
+   * 看起来像「入口坏了」而不是「入口被删了」。
+   */
+  private removeService(namespace: string | undefined, name: string): void {
+    try {
+      this.registry.delete(SERVICES, 'envoy-gateway-system', `envoy-${namespace}-${name}`);
+    } catch (error) {
+      if (!isNotFound(error) && !isConflict(error)) throw error;
+    }
+  }
+
   /** 每个 Gateway 对应一个 LoadBalancer Service，真 Envoy Gateway 也是这么干的 */
   private ensureService(gateway: KubeObject, gatewayClass: KubeObject): KubeObject | undefined {
     const namespace = 'envoy-gateway-system';
@@ -141,6 +155,14 @@ export class GatewayController extends Controller {
           'gateway.envoyproxy.io/owning-gateway-namespace': gateway.metadata.namespace ?? '',
         },
         annotations: parameters.annotations,
+        // 属主关系写清楚，`kubectl get svc -o yaml` 里看得出这个 Service 是谁生的
+        ownerReferences: [{
+          apiVersion: 'gateway.networking.k8s.io/v1',
+          kind: 'Gateway',
+          name: gateway.metadata.name,
+          uid: gateway.metadata.uid,
+          controller: true,
+        }],
       },
       spec: {
         type: 'LoadBalancer',
@@ -257,7 +279,7 @@ export class GatewayController extends Controller {
     });
   }
 
-  private writeStatus(definition: typeof GATEWAYS, object: KubeObject, status: unknown): void {
+  private writeStatus(definition: ResourceDefinition, object: KubeObject, status: unknown): void {
     if (JSON.stringify(object.status ?? null) === JSON.stringify(status)) return;
     try {
       const latest = this.registry.get(definition, object.metadata.namespace, object.metadata.name);
@@ -298,6 +320,17 @@ export class LoadBalancerController extends Controller {
       ((service.spec as any)?.type === 'LoadBalancer' ? key : null));
   }
 
+  /** 从池子里挑一个还没被占的地址 */
+  private pick(pool: AddressPool, key: string): string {
+    const taken = new Set(this.assigned.values());
+    const start = hash(key) % 200;
+    for (let offset = 0; offset < 200; offset += 1) {
+      const candidate = `${pool.cidrPrefix}.${((start + offset) % 200) + 20}`;
+      if (!taken.has(candidate)) return candidate;
+    }
+    throw new Error(`地址池 ${pool.loadBalancerClass} 用完了`);
+  }
+
   protected async reconcile(key: string): Promise<void> {
     const { namespace, name } = splitKey(key);
     let service: KubeObject;
@@ -314,8 +347,13 @@ export class LoadBalancerController extends Controller {
       ?? this.pools[0];
     if (!pool) return;
 
-    // 地址按 key 派生，不用计数器 —— 同一个世界重放两次要分到同一个地址
-    const address = this.assigned.get(key) ?? `${pool.cidrPrefix}.${(hash(key) % 200) + 20}`;
+    /**
+     * 地址按 key 派生，不用计数器 —— 同一个世界重放两次要分到同一个地址。
+     *
+     * 但派生会撞：两个 Service 抢到同一个地址的话，路由会串到别人身上。
+     * 撞了就往后顺延，顺延也是确定的。
+     */
+    const address = this.assigned.get(key) ?? this.pick(pool, key);
     this.assigned.set(key, address);
 
     const status = { loadBalancer: { ingress: [{ ip: address }] } };

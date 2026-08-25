@@ -185,6 +185,49 @@ describe('控制器是集群里的一个工作负载', () => {
   });
 });
 
+describe('地址与清理', () => {
+  it('两个 Gateway 拿到不同的地址 —— 撞了路由会串到别人身上', async () => {
+    const cluster = await world([
+      controllerDeployment(),
+      envoyProxy('office', 'corp.internal/office-lb'),
+      gatewayClass('envoy-internal', 'office'),
+      gateway('corp-gw', 'envoy-internal'),
+      {
+        apiVersion: 'gateway.networking.k8s.io/v1', kind: 'Gateway',
+        metadata: { name: 'other-gw', namespace: 'payments' },
+        spec: {
+          gatewayClassName: 'envoy-internal',
+          listeners: [{ name: 'http', port: 80, protocol: 'HTTP' }],
+        },
+      } as unknown as KubeObject,
+    ]);
+    const gateways = cluster.registry.list(
+      cluster.scheme.mustGet({ group: 'gateway.networking.k8s.io', version: 'v1', resource: 'gateways' })
+    ).items;
+    const addresses = gateways.map((item) => (item.status as any).addresses[0].value);
+    expect(addresses).toHaveLength(2);
+    expect(new Set(addresses).size).toBe(2);
+  });
+
+  it('Gateway 删掉之后，它的 Service 也不在了', async () => {
+    const cluster = await world([
+      controllerDeployment(),
+      envoyProxy('office', 'corp.internal/office-lb'),
+      gatewayClass('envoy-internal', 'office'),
+      gateway('corp-gw', 'envoy-internal'),
+    ]);
+    const services = cluster.scheme.mustGet({ group: '', version: 'v1', resource: 'services' });
+    expect(cluster.registry.list(services, { namespace: 'envoy-gateway-system' }).items).toHaveLength(1);
+
+    cluster.registry.delete(
+      cluster.scheme.mustGet({ group: 'gateway.networking.k8s.io', version: 'v1', resource: 'gateways' }),
+      'payments', 'corp-gw'
+    );
+    await cluster.settle();
+    expect(cluster.registry.list(services, { namespace: 'envoy-gateway-system' }).items).toHaveLength(0);
+  });
+});
+
 describe('内网入口与公网入口', () => {
   const base = (loadBalancerClass: string) => [
     controllerDeployment(),
