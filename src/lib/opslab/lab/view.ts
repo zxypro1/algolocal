@@ -10,6 +10,7 @@
  */
 import type { Cluster } from '../controllers';
 import type { KubeObject } from '../apiserver';
+import type { ConnectResult, ConnectTrace, Hop, Source, Target } from '../net';
 
 export type TopologyStatus = 'ok' | 'pending' | 'warn' | 'error';
 
@@ -369,4 +370,118 @@ export function currentNamespaceOf(kubeconfig: string, fallback = 'default'): st
 
 function escapeForRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/* ------------------------------------------------------------------ */
+/* 数据面：一个包走过的路                                              */
+/* ------------------------------------------------------------------ */
+
+export interface PacketStep {
+  /** 第几跳，从 1 开始 */
+  index: number;
+  /** 这一跳发生在哪 —— 原样来自 Hop.at，如 `svc/payments/portal` */
+  at: string;
+  detail: string;
+  verdict: Hop['verdict'];
+  /** 到这一跳为止累计花了多少虚拟毫秒 */
+  elapsedMs: number;
+  /**
+   * 对应拓扑图上的哪个节点。
+   *
+   * 对不上的跳（DNS、分区边界、NetworkPolicy）没有节点 —— 它们不是集群里的
+   * 对象。这些恰恰是最常出问题的地方，所以路径面板要能单独把它们显示出来，
+   * 而不是只在图上高亮。
+   */
+  nodeId?: string;
+}
+
+export interface PacketPath {
+  id: number;
+  /** 谁发起的，如 `jump-01` 或 `pod/payments/portal-xxx` */
+  from: string;
+  /** 打给谁，如 `https://portal.corp.internal/` */
+  to: string;
+  /** ok / refused / timeout / reset / no-route / dns-failure */
+  outcome: ConnectResult['kind'];
+  /** HTTP 状态码，只有 kind === 'ok' 时有 */
+  status?: number;
+  /** 被谁挡下的 */
+  blockedBy?: string;
+  totalMs: number;
+  steps: PacketStep[];
+}
+
+/**
+ * 把一次连接翻译成拓扑图上的一条路径。
+ *
+ * 只做映射，不做判断 —— 「哪一跳出的问题」在 hop 的 verdict 里已经写好了。
+ */
+export function buildPacketPath(trace: ConnectTrace, graph?: TopologyGraph): PacketPath {
+  const known = new Set((graph?.nodes ?? []).map((node) => node.id));
+  let elapsed = 0;
+  const steps = trace.result.hops.map((hop, index) => {
+    elapsed += hop.elapsedMs;
+    const nodeId = nodeIdForHop(hop.at);
+    return {
+      index: index + 1,
+      at: hop.at,
+      detail: hop.detail,
+      verdict: hop.verdict,
+      elapsedMs: elapsed,
+      nodeId: nodeId && (known.size === 0 || known.has(nodeId)) ? nodeId : undefined,
+    };
+  });
+
+  return {
+    id: trace.id,
+    from: sourceLabel(trace.source),
+    to: targetLabel(trace.target),
+    outcome: trace.result.kind,
+    status: trace.result.status,
+    blockedBy: trace.result.blockedBy,
+    totalMs: trace.result.elapsedMs,
+    steps,
+  };
+}
+
+/** 最近几次连接，最新的在前 */
+export function buildPacketPaths(cluster: Cluster, graph?: TopologyGraph): PacketPath[] {
+  return [...cluster.network.traces]
+    .reverse()
+    .map((trace) => buildPacketPath(trace, graph));
+}
+
+/**
+ * hop 的 `at` 长什么样 -> 拓扑节点 id。
+ *
+ * 网络层写的是 `svc/ns/name` 这种小写复数形式，拓扑节点的 id 是
+ * `Kind/ns/name`。两边各有各的道理（一个抄的是 kubectl，一个抄的是 GVK），
+ * 所以在这里翻译，而不是逼一边改。
+ */
+function nodeIdForHop(at: string): string | undefined {
+  const [prefix, ...rest] = at.split('/');
+  if (rest.length !== 2) return undefined;
+  const kind = HOP_KINDS[prefix];
+  return kind ? `${kind}/${rest[0]}/${rest[1]}` : undefined;
+}
+
+const HOP_KINDS: Record<string, string> = {
+  svc: 'Service',
+  service: 'Service',
+  pod: 'Pod',
+  gateway: 'Gateway',
+  httproute: 'HTTPRoute',
+};
+
+function sourceLabel(source: Source): string {
+  if (source.zone === 'cluster' && source.podName) {
+    return `pod/${source.namespace ?? 'default'}/${source.podName}`;
+  }
+  return source.label ?? source.zone;
+}
+
+function targetLabel(target: Target): string {
+  const scheme = target.tls ? 'https' : 'http';
+  const port = target.port === (target.tls ? 443 : 80) ? '' : `:${target.port}`;
+  return `${scheme}://${target.host}${port}${target.path ?? ''}`;
 }

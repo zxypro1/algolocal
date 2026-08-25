@@ -5700,6 +5700,19 @@
             },
             "memoryUsage": "120Mi"
           },
+          "harbor.corp.internal/team/sessions:1.8.0": {
+            "pullMs": 300,
+            "startupMs": 500,
+            "readyAfterMs": 200,
+            "listens": [
+              8080
+            ],
+            "routes": {
+              "/": 200,
+              "/healthz": 200
+            },
+            "memoryUsage": "160Mi"
+          },
           "harbor.corp.internal/team/reports:2.2.0-rc1": {
             "pullMs": 500,
             "startupMs": 800,
@@ -8864,6 +8877,562 @@
         "primer": {
           "zh": "`kustomize` 和 Helm 常被拿来比，但它们解决的不是同一个问题。Helm 是模板：被打包的一方先把参数挖好（`{{ .Values.x }}`），你只能改对方想到的那些点。kustomize 不是模板，它是对 YAML 做结构化修改：不需要对方配合，任何一份 manifest 都能被改。所以「自己的服务」适合写 chart，「别人给的东西」适合套 overlay。它内置在 `kubectl` 里：`kubectl kustomize <dir>` 只渲染，`kubectl apply -k <dir>` 渲染并提交。\n\n结构是 `base` 加 `overlays`。`base` 是一份能直接 apply 的完整 manifest；每个 overlay 是一个目录，里面的 `kustomization.yaml` 用 `resources: [../../base]` 指回 base，然后只写差异。关键在于 base 保持原样：上游升级时整个目录换掉，你的修改都在 overlay 里，一条都不会丢。\n\n有一批常见改动不用写 patch，`kustomization.yaml` 里一行就够：`namespace` 改命名空间，`namePrefix` / `nameSuffix` 加前后缀，`labels` 打统一标签，`images` 改镜像仓库或 tag，`replicas` 改副本数，`configMapGenerator` 从文件生成 ConfigMap 并自动带上内容哈希后缀（内容一变名字就变，Pod 因此会滚动重启）。只有这些表达不了的，才需要 `patches`。\n\n`patches` 有两种写法，行为差别很大。`strategic merge patch` 是写一份不完整的 YAML，读起来自然，但**列表的合并取决于 merge key**：容器列表的 merge key 是 `name`，patch 里漏写它，kustomize 不会报错，而是把整个 `containers` 替换成你写的那一项，镜像、端口、资源全都没了。`JSON patch`（`op` / `path` / `value`）啰嗦但精确，`/spec/template/spec/containers/0/env/-` 明确表示追加到第 0 个容器的 env 末尾，不存在猜的余地。",
           "en": "`kustomize` gets compared to Helm constantly, but they solve different problems. Helm is templating: the packager has to anticipate every parameter (`{{ .Values.x }}`), so you can only change what they thought of. Kustomize is not templating; it edits YAML structurally, needing no cooperation from the author, so any manifest can be changed. Charts suit your own services, overlays suit what other people hand you. It ships inside `kubectl`: `kubectl kustomize <dir>` renders, `kubectl apply -k <dir>` renders and submits.\n\nThe structure is a `base` plus `overlays`. The base is a complete, directly appliable manifest. Each overlay is a directory whose `kustomization.yaml` points back with `resources: [../../base]` and then states only the difference. The point is that the base stays pristine: when upstream ships a new version the whole directory is replaced, and because every change of yours lives in the overlay, nothing is lost.\n\nA whole class of changes needs no patch at all, just a line in `kustomization.yaml`: `namespace` moves everything, `namePrefix` / `nameSuffix` rename, `labels` stamps labels, `images` rewrites registry or tag, `replicas` sets counts, and `configMapGenerator` builds a ConfigMap from files with a content hash appended to its name, so changing the content changes the name and rolls the pods. Reach for `patches` only for what these cannot express.\n\n`patches` come in two forms that behave very differently. A `strategic merge patch` is partial YAML, natural to read, but **list merging depends on the merge key**. For containers that key is `name`; omit it and kustomize does not complain, it replaces the entire `containers` list with the single entry you wrote, losing the image, ports, and resources. A `JSON patch` (`op` / `path` / `value`) is verbose but exact: `/spec/template/spec/containers/0/env/-` says append to the env of container zero, with nothing left to infer."
+        }
+      },
+      {
+        "id": "follow-the-packet",
+        "title": {
+          "zh": "顺着包走一遍",
+          "en": "Follow the Packet"
+        },
+        "goal": {
+          "zh": "周一早上三件事一起报过来，`kubectl get` 看下去却哪儿都正常：\nGateway 是 Programmed，Pod 全 Running，Service 都在。\n\n- 从跳板机访问 `https://portal.corp.internal/` 返回 **404**；\n- 门户访问 `http://ledger` **卡住不动，最后超时**；\n- 门户访问 `http://sessions` **立刻被拒**。\n\n三种现象指向三个不同的层。右边的「包路径」面板会把每一次连接\n逐跳列出来 —— 哪一跳被丢掉、哪一跳被拒绝，上面写着。\n\n## 通关标准\n\n1. 从跳板机不加 `-k` 访问门户返回 200；\n2. 门户访问得到 `http://ledger`；\n3. 门户访问得到 `http://sessions`；\n4. **修的方式要对**：Gateway 的 listener 不许放宽成通配、\n   ledger 的入向策略不许删掉、sessions 这个 Service 不许换名字。\n\n## 会用到的命令\n\n```bash\ncurl -sv --resolve portal.corp.internal:443:<Gateway 地址> https://portal.corp.internal/\nkubectl exec -n payments deploy/portal -- curl -s -m 5 -o /dev/null -w '%{http_code}' http://ledger\nkubectl exec -n payments deploy/portal -- curl -s -m 5 http://sessions\nkubectl get httproute portal -n payments -o yaml\nkubectl get endpoints -n payments\nkubectl get netpol -n payments -o yaml\n```\n",
+          "en": "Three reports land on Monday morning, and `kubectl get` shows nothing wrong:\nthe Gateway is Programmed, every pod is Running, the Services are all there.\n\n- `https://portal.corp.internal/` from the jump host returns **404**;\n- the portal reaching `http://ledger` **hangs and eventually times out**;\n- the portal reaching `http://sessions` is **refused immediately**.\n\nThree symptoms, three different layers. The packet path panel on the right lists\nevery hop of every connection, and says which hop dropped or rejected it.\n\n## Done when\n\n1. the portal returns 200 from the jump host, without `-k`;\n2. the portal can reach `http://ledger`;\n3. the portal can reach `http://sessions`;\n4. **and the fixes are the right ones**: the Gateway listener is not widened to a\n   wildcard, ledger's ingress policy is not deleted, and the sessions Service\n   keeps its name.\n\n## Commands you will need\n\n```bash\ncurl -sv --resolve portal.corp.internal:443:<gateway address> https://portal.corp.internal/\nkubectl exec -n payments deploy/portal -- curl -s -m 5 -o /dev/null -w '%{http_code}' http://ledger\nkubectl exec -n payments deploy/portal -- curl -s -m 5 http://sessions\nkubectl get httproute portal -n payments -o yaml\nkubectl get endpoints -n payments\nkubectl get netpol -n payments -o yaml\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "三种现象分别定位到正确的那一层",
+            "en": "Each symptom traced to the right layer"
+          },
+          {
+            "zh": "三条路都通了",
+            "en": "All three paths work"
+          },
+          {
+            "zh": "修的是根因，不是把防护拆掉",
+            "en": "Root causes fixed, not protections removed"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "**404 说明 Gateway 是活的**。连不上才是 Gateway 的问题；404 是「进来了但没有路由认领这个请求」，去看 HTTPRoute 的 hostnames 与 rules。",
+            "en": "**A 404 means the Gateway is alive.** A dead Gateway refuses the connection. A 404 means the request got in and no route claimed it, so look at the HTTPRoute hostnames and rules."
+          },
+          {
+            "zh": "**超时和拒绝是两件事**。拒绝说明包到了对端而没人听（或者 Service 没有后端，kube-proxy 直接回 RST）；超时说明包被丢了 —— NetworkPolicy 丢包，不回任何东西。",
+            "en": "**Timeout and refusal are different.** Refusal means the packet arrived and nobody was listening (or the Service has no endpoints and kube-proxy resets). A timeout means the packet was dropped, and dropping is what NetworkPolicy does."
+          },
+          {
+            "zh": "`kubectl get endpoints` 是 Service 这一层最直接的体检：Endpoints 为空说明 selector 一个 Pod 都没选中，而 `kubectl get svc` 看上去完全正常。",
+            "en": "`kubectl get endpoints` is the direct check at the Service layer: an empty Endpoints means the selector matched no pods, while `kubectl get svc` looks perfectly healthy."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "把 Gateway listener 的 hostname 删掉，让它接受所有域名。404 确实没了，但这台 Gateway 从此会把任何域名的请求都往门户转 —— 判定检查 listener 还在不在。",
+            "en": "Removing the hostname from the Gateway listener so it accepts everything. The 404 goes away, and now that Gateway forwards requests for any hostname to the portal. The grader checks the listener is still scoped."
+          },
+          {
+            "zh": "把 ledger 的 NetworkPolicy 删了。超时确实没了 —— 因为 ledger 重新对整个集群开放了，而它正是上一关刚关起来的东西。",
+            "en": "Deleting ledger’s NetworkPolicy. The timeout goes away because ledger is open to the whole cluster again, which is exactly what the previous stage closed."
+          },
+          {
+            "zh": "看到 Endpoints 为空就重建 Service。名字一换，所有引用它的地方（HTTPRoute、其他服务的配置）都得跟着改，而问题只是 selector 里的一个词。",
+            "en": "Recreating the Service because its Endpoints are empty. Renaming it means every reference (HTTPRoutes, other services’ config) has to change too, when the actual problem is one word in the selector."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "cilium",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cilium"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cilium"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cilium"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "cilium-agent",
+                        "image": "quay.io/cilium/cilium:v1.19.2",
+                        "ports": [
+                          {
+                            "containerPort": 9962
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "Certificate",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "secretName": "portal-tls",
+                "duration": "2160h",
+                "renewBefore": "720h",
+                "commonName": "portal.corp.internal",
+                "dnsNames": [
+                  "portal.corp.internal"
+                ],
+                "issuerRef": {
+                  "name": "corp-ca",
+                  "kind": "ClusterIssuer"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "Gateway",
+              "metadata": {
+                "name": "corp-gw",
+                "namespace": "payments"
+              },
+              "spec": {
+                "gatewayClassName": "envoy-internal",
+                "listeners": [
+                  {
+                    "name": "https",
+                    "port": 443,
+                    "protocol": "HTTPS",
+                    "hostname": "portal.corp.internal",
+                    "tls": {
+                      "mode": "Terminate",
+                      "certificateRefs": [
+                        {
+                          "name": "portal-tls"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "http",
+                    "port": 80,
+                    "protocol": "HTTP",
+                    "hostname": "portal.corp.internal"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "ledger",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "ledger"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "ledger"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "app",
+                        "image": "harbor.corp.internal/team/ledger:3.2.1",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "ledger",
+                "namespace": "payments"
+              },
+              "spec": {
+                "selector": {
+                  "app": "ledger"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "sessions",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "sessions"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "sessions"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "app",
+                        "image": "harbor.corp.internal/team/sessions:1.8.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "sessions",
+                "namespace": "payments"
+              },
+              "spec": {
+                "selector": {
+                  "app": "session-store"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.internal.corp"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "networking.k8s.io/v1",
+              "kind": "NetworkPolicy",
+              "metadata": {
+                "name": "ledger",
+                "namespace": "payments"
+              },
+              "spec": {
+                "podSelector": {
+                  "matchLabels": {
+                    "app": "ledger"
+                  }
+                },
+                "policyTypes": [
+                  "Ingress"
+                ],
+                "ingress": [
+                  {
+                    "from": [
+                      {
+                        "podSelector": {
+                          "matchLabels": {
+                            "app": "reports"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "files": {},
+          "referenceFiles": {
+            "/root/infra/triage.yaml": "apiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  parentRefs:\n  - name: corp-gw\n  hostnames:\n  - portal.corp.internal\n  rules:\n  - matches:\n    - path:\n        type: PathPrefix\n        value: /\n    backendRefs:\n    - name: portal\n      port: 80\n---\napiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: ledger\n  namespace: payments\nspec:\n  podSelector:\n    matchLabels:\n      app: ledger\n  policyTypes:\n  - Ingress\n  ingress:\n  - from:\n    - podSelector:\n        matchLabels:\n          app: portal\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: sessions\n  namespace: payments\nspec:\n  selector:\n    app: sessions\n  ports:\n  - port: 80\n    targetPort: 8080\n"
+          },
+          "referenceCommands": [
+            "kubectl apply -f /root/infra/triage.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "follow-the-packet.spec.ts",
+            "content": "import { get, list, sh } from '@ops/lab';\n\nconst EXEC = 'kubectl exec -n payments deploy/portal -- curl -s -m 5 -o /dev/null -w %{http_code} ';\n\ndescribe('顺着包走一遍', () => {\n  it('从跳板机访问门户返回 200', async () => {\n    const gateway = list('Gateway', { namespace: 'payments' })[0];\n    const address = gateway.status.addresses[0].value;\n    const result = await sh(\n      'curl -s -o /dev/null -w %{http_code} --resolve portal.corp.internal:443:' + address\n      + ' https://portal.corp.internal/'\n    );\n    expect(result.stdout).toBe('200');\n  });\n\n  it('门户访问得到 ledger', async () => {\n    const result = await sh(EXEC + 'http://ledger');\n    expect(result.stdout).toBe('200');\n  });\n\n  it('门户访问得到 sessions', async () => {\n    const result = await sh(EXEC + 'http://sessions');\n    expect(result.stdout).toBe('200');\n  });\n\n  it('Gateway 的 listener 没有被放宽成通配', () => {\n    const gateway = list('Gateway', { namespace: 'payments' })[0];\n    for (const listener of gateway.spec.listeners) {\n      expect(listener.hostname).toBeTruthy();\n      expect(listener.hostname).not.toContain('*');\n    }\n  });\n\n  it('ledger 还被入向策略保护着', () => {\n    const policies = list('NetworkPolicy', { namespace: 'payments' })\n      .filter((policy) => (policy.spec.podSelector.matchLabels || {}).app === 'ledger'\n        && (policy.spec.policyTypes || []).includes('Ingress'));\n    expect(policies.length).toBeGreaterThan(0);\n    // 而且不是靠 from 留空重新对全集群开放\n    for (const policy of policies) {\n      for (const rule of policy.spec.ingress || []) {\n        expect((rule.from || []).length).toBeGreaterThan(0);\n      }\n    }\n  });\n\n  it('sessions 这个 Service 还在，而且是靠 selector 修好的', () => {\n    const service = get('Service', 'sessions', 'payments');\n    expect(service).toBeTruthy();\n    const endpoints = get('Endpoints', 'sessions', 'payments');\n    const addresses = (endpoints.subsets || []).flatMap((subset) => subset.addresses || []);\n    expect(addresses.length).toBe(2);\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "resilience"
+        ],
+        "extension": {
+          "zh": "这一关真正要练的是**从现象反推层次**，而不是三个具体的 bug。把它记成一张表：\n\n- `Connection refused`：包到了对端，那里没人听。Service 没有 Endpoints\n  （kube-proxy 直接 RST）、进程没起来、端口写错，都长这样。\n- `timeout`：包被丢了，没有任何回应。防火墙、NetworkPolicy、\n  路由不通、安全组，都长这样。**看到超时先想「谁在丢包」**。\n- `connection reset`：连上了又被断开。TLS 握手失败、协议对不上\n  （拿 HTTP 打 HTTPS 端口）常见。\n- `404 / 502 / 503`：**连接是成功的**。这是应用层或者代理层的回答，\n  说明前面每一层都通了，问题在最后那一段。\n- DNS 失败：连尝试都没发生。名字错了、search domain 不对、\n  CoreDNS 挂了。\n\n这张表的价值在于它**排除**掉的东西：看到 404 就不用再查网络策略，\n看到 timeout 就不用再查 HTTPRoute。真集群里排查最费时间的从来不是修，\n是在错误的层里找。\n",
+          "en": "What this stage actually trains is **reasoning from symptom to layer**, not three\nspecific bugs. Keep the table:\n\n- `Connection refused`: the packet arrived and nobody was listening. A Service\n  with no Endpoints (kube-proxy resets), a process that never started, a wrong\n  port all look like this.\n- `timeout`: the packet was dropped with no reply at all. Firewalls, network\n  policies, missing routes, security groups. **A timeout means asking who is\n  dropping packets.**\n- `connection reset`: connected, then torn down. Typically a failed TLS\n  handshake or a protocol mismatch such as plain HTTP against an HTTPS port.\n- `404 / 502 / 503`: **the connection succeeded**. This is an answer from the\n  application or the proxy, which means every layer below it worked and the\n  problem is in the last hop.\n- DNS failure: no connection was even attempted. Wrong name, wrong search\n  domain, or CoreDNS is down.\n\nThe value of the table is what it **rules out**: a 404 means you can stop looking\nat network policies, and a timeout means you can stop reading HTTPRoutes. The\nexpensive part of real debugging is never the fix, it is searching in the wrong\nlayer.\n"
+        },
+        "primer": {
+          "zh": "排查网络问题最费时间的从来不是修，是在错误的层里找。而现象本身已经把层次说清楚了，只要认得出来。一条 TCP 连接从发起到拿到响应，要顺次经过：名字解析、路由可达、目标端口有没有人听、中间有没有人丢包、TLS 握手、最后才是应用的回答。每一层失败的样子都不一样。\n\n`Connection refused` 说明包**到了**对端，而那里没有进程在听。Kubernetes 里最常见的成因是 Service 的 selector 没选中任何 Pod：Endpoints 为空，kube-proxy 直接回 RST。注意 `kubectl get svc` 这时看上去完全正常，有 ClusterIP、有端口；要看的是 `kubectl get endpoints`。\n\n`timeout` 说明包被**丢**了，对端不回任何东西。防火墙、安全组、路由不通、NetworkPolicy 都长这样。这也是为什么策略拒绝表现为卡住而不是立刻失败：丢包的一方按定义不会告诉你它丢了。看到超时，该问的是「谁在丢包」，而不是「服务是不是挂了」。\n\n`404`、`502`、`503` 这类 HTTP 状态码意味着**连接是成功的**。这是应用或者代理给的回答，说明下面每一层都通了。Gateway 回 404 是「我活着，但没有路由认领这个域名或路径」，去看 HTTPRoute 的 `hostnames` 与 `rules`；连不上才是 Gateway 本身的问题。再往前一层，如果连 DNS 都没解析出来，那连接压根没发起过，`dig` 和 `/etc/resolv.conf` 才是现场。",
+          "en": "The expensive part of debugging a network problem is never the fix, it is searching in the wrong layer. The symptom already tells you the layer, if you can read it. A TCP connection passes through name resolution, route reachability, something listening on the target port, nobody dropping the packet, a TLS handshake, and only then the application answer. Each layer fails differently.\n\n`Connection refused` means the packet **arrived** and no process was listening. In Kubernetes the usual cause is a Service selector matching no pods: Endpoints is empty and kube-proxy resets the connection. Note that `kubectl get svc` looks perfectly healthy at that moment, with a ClusterIP and ports; the thing to read is `kubectl get endpoints`.\n\n`timeout` means the packet was **dropped** with no reply. Firewalls, security groups, missing routes, and NetworkPolicy all look like this. It is also why a policy denial hangs instead of failing fast: whoever drops the packet, by definition, does not tell you. A timeout should prompt \"who is dropping packets\", not \"is the service down\".\n\nHTTP status codes such as `404`, `502`, and `503` mean the **connection succeeded**. They are an answer from the application or the proxy, which means every layer below worked. A Gateway returning 404 is saying \"I am alive and no route claimed this hostname or path\", so read the HTTPRoute `hostnames` and `rules`; a Gateway that is actually broken refuses the connection instead. One layer earlier, if DNS never resolved, no connection was attempted at all and the scene of the crime is `dig` and `/etc/resolv.conf`."
         }
       }
     ]

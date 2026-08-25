@@ -36,6 +36,8 @@ type ResourceData = {
   detail: string;
   status: TopologyStatus;
   changed?: boolean;
+  /** 包路径当前停在这一跳上 */
+  onPath?: boolean;
 };
 
 /**
@@ -55,10 +57,16 @@ function ResourceNode({ data }: NodeProps) {
         width: 168,
         padding: '8px 10px',
         borderRadius: 8,
-        border: `1px solid ${item.changed ? 'var(--mantine-color-orange-5)' : 'var(--app-border)'}`,
+        border: `1px solid ${
+          item.onPath ? 'var(--mantine-color-blue-6)'
+            : item.changed ? 'var(--mantine-color-orange-5)'
+              : 'var(--app-border)'
+        }`,
         borderLeft: `4px solid ${STATUS_COLOR[item.status]}`,
         background: 'var(--mantine-color-body)',
-        boxShadow: item.changed ? '0 0 0 3px rgba(255,146,43,0.18)' : 'none',
+        boxShadow: item.onPath
+          ? '0 0 0 3px rgba(34,139,230,0.28)'
+          : item.changed ? '0 0 0 3px rgba(255,146,43,0.18)' : 'none',
       }}
     >
       <Handle type="target" position={Position.Top} style={HANDLE_STYLE} isConnectable={false} />
@@ -76,19 +84,25 @@ export interface TopologyViewProps {
   graph: TopologyGraph;
   /** 点节点：把只读命令插进终端 */
   onInspect?: (command: string) => void;
+  /** 包路径停在哪个节点上，圈出来 */
+  highlight?: string;
 }
 
-export default function TopologyView({ graph, onInspect }: TopologyViewProps) {
+export default function TopologyView({ graph, onInspect, highlight }: TopologyViewProps) {
   const initialNodes = useMemo<Node[]>(
     () => graph.nodes.map((node) => ({
       id: node.id,
       type: 'resource',
       position: { x: node.x, y: node.y },
-      data: { kind: node.kind, name: node.name, detail: node.detail, status: node.status, changed: node.changed },
+      data: {
+        kind: node.kind, name: node.name, detail: node.detail,
+        status: node.status, changed: node.changed,
+        onPath: node.id === highlight,
+      },
       draggable: false,
       selectable: true,
     })),
-    [graph]
+    [graph, highlight]
   );
 
   const initialEdges = useMemo<Edge[]>(

@@ -189,6 +189,13 @@ export interface OpsNodeSpec {
 }
 
 /** 镜像目录里的一条：不在目录里的镜像拉不到，会进 ImagePullBackOff */
+/**
+ * 一个镜像在这个世界里怎么表现。
+ *
+ * 时间之外的字段是**运行时行为**：端口上有没有人听、HTTP 路径返回什么、
+ * 吃多少内存。关卡的镜像表就是靠它们把「这个服务是什么样」写清楚的，
+ * 而不是靠宿主认识某个具体的镜像名。
+ */
 export interface OpsImageSpec {
   /** 拉取耗时（虚拟毫秒） */
   pullMs?: number;
@@ -198,6 +205,23 @@ export interface OpsImageSpec {
   readyAfterMs?: number;
   /** 缺了这些环境变量就崩 */
   needsEnv?: string[];
+  /** 真正在听的端口 */
+  listens?: number[];
+  /** HTTP 路径 -> 状态码。没列出的路径按 404 算。 */
+  routes?: Record<string, number>;
+  /** 声明的内存占用，如 `220Mi`。超过 limit 就 OOMKilled。 */
+  memoryUsage?: string;
+  /** 收到 SIGTERM 会不会先摘流量再优雅退出 */
+  handlesSigterm?: boolean;
+  /** 以哪个 uid 跑（Dockerfile 里的 USER）。0 表示 root。 */
+  runAsUser?: number;
+  /**
+   * 这个镜像是不是一个会执行 NetworkPolicy 的 CNI。
+   *
+   * 只要世界里有任何一个镜像写了这一条，「CNI 执不执行策略」就成为这个世界的
+   * 一个维度：没有执行者时策略对象还在，但一个包都不拦。
+   */
+  enforcesNetworkPolicy?: boolean;
 }
 
 /** 内网 Git 服务上的一个仓库 */

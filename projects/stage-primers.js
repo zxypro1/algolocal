@@ -1237,6 +1237,21 @@ const primers = {
       )
     ),
 
+    'follow-the-packet': t(
+      p(
+        '排查网络问题最费时间的从来不是修，是在错误的层里找。而现象本身已经把层次说清楚了，只要认得出来。一条 TCP 连接从发起到拿到响应，要顺次经过：名字解析、路由可达、目标端口有没有人听、中间有没有人丢包、TLS 握手、最后才是应用的回答。每一层失败的样子都不一样。',
+        '`Connection refused` 说明包**到了**对端，而那里没有进程在听。Kubernetes 里最常见的成因是 Service 的 selector 没选中任何 Pod：Endpoints 为空，kube-proxy 直接回 RST。注意 `kubectl get svc` 这时看上去完全正常，有 ClusterIP、有端口；要看的是 `kubectl get endpoints`。',
+        '`timeout` 说明包被**丢**了，对端不回任何东西。防火墙、安全组、路由不通、NetworkPolicy 都长这样。这也是为什么策略拒绝表现为卡住而不是立刻失败：丢包的一方按定义不会告诉你它丢了。看到超时，该问的是「谁在丢包」，而不是「服务是不是挂了」。',
+        '`404`、`502`、`503` 这类 HTTP 状态码意味着**连接是成功的**。这是应用或者代理给的回答，说明下面每一层都通了。Gateway 回 404 是「我活着，但没有路由认领这个域名或路径」，去看 HTTPRoute 的 `hostnames` 与 `rules`；连不上才是 Gateway 本身的问题。再往前一层，如果连 DNS 都没解析出来，那连接压根没发起过，`dig` 和 `/etc/resolv.conf` 才是现场。'
+      ),
+      p(
+        'The expensive part of debugging a network problem is never the fix, it is searching in the wrong layer. The symptom already tells you the layer, if you can read it. A TCP connection passes through name resolution, route reachability, something listening on the target port, nobody dropping the packet, a TLS handshake, and only then the application answer. Each layer fails differently.',
+        '`Connection refused` means the packet **arrived** and no process was listening. In Kubernetes the usual cause is a Service selector matching no pods: Endpoints is empty and kube-proxy resets the connection. Note that `kubectl get svc` looks perfectly healthy at that moment, with a ClusterIP and ports; the thing to read is `kubectl get endpoints`.',
+        '`timeout` means the packet was **dropped** with no reply. Firewalls, security groups, missing routes, and NetworkPolicy all look like this. It is also why a policy denial hangs instead of failing fast: whoever drops the packet, by definition, does not tell you. A timeout should prompt "who is dropping packets", not "is the service down".',
+        'HTTP status codes such as `404`, `502`, and `503` mean the **connection succeeded**. They are an answer from the application or the proxy, which means every layer below worked. A Gateway returning 404 is saying "I am alive and no route claimed this hostname or path", so read the HTTPRoute `hostnames` and `rules`; a Gateway that is actually broken refuses the connection instead. One layer earlier, if DNS never resolved, no connection was attempted at all and the scene of the crime is `dig` and `/etc/resolv.conf`.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',

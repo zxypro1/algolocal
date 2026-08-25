@@ -30,6 +30,7 @@ const REPORTS_IMAGE_RC = 'harbor.corp.internal/team/reports:2.2.0-rc1';
 // 第三方的对账 exporter。上游那个地址内网拉不到，只有 harbor 上的镜像能用。
 const EXPORTER_UPSTREAM = 'quay.io/acme/settlement-exporter:1.4.2';
 const EXPORTER_MIRROR = 'harbor.corp.internal/mirror/settlement-exporter:1.4.2';
+const SESSIONS_IMAGE = 'harbor.corp.internal/team/sessions:1.8.0';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -173,6 +174,11 @@ const WORLD = {
     [EXPORTER_MIRROR]: {
       pullMs: 300, startupMs: 400, readyAfterMs: 200,
       listens: [9100], routes: { '/metrics': 200 }, memoryUsage: '120Mi',
+    },
+    // 会话存储
+    [SESSIONS_IMAGE]: {
+      pullMs: 300, startupMs: 500, readyAfterMs: 200,
+      listens: [8080], routes: { '/': 200, '/healthz': 200 }, memoryUsage: '160Mi',
     },
     // 报表服务的预发版本
     [REPORTS_IMAGE_RC]: {
@@ -3912,6 +3918,326 @@ const stage13 = {
   ),
 };
 
+
+/* ------------------------------------------------------------------ */
+/* 第 14 关                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 会话存储。Service 的 selector 打错了，于是没有后端。 */
+const SESSIONS_WORKLOAD = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: 'sessions', namespace: 'payments' },
+    spec: {
+      replicas: 2,
+      selector: { matchLabels: { app: 'sessions' } },
+      template: {
+        metadata: { labels: { app: 'sessions' } },
+        spec: { containers: [{ name: 'app', image: SESSIONS_IMAGE, ports: [{ containerPort: 8080 }] }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'v1', kind: 'Service',
+    metadata: { name: 'sessions', namespace: 'payments' },
+    // 上一次重构把 Deployment 的标签从 session-store 改成了 sessions，
+    // Service 这边忘了跟着改
+    spec: { selector: { app: 'session-store' }, ports: [{ port: 80, targetPort: 8080 }] },
+  },
+];
+
+/** 路由的 hostname 写反了：portal.internal.corp */
+const BROKEN_ROUTE = {
+  apiVersion: 'gateway.networking.k8s.io/v1', kind: 'HTTPRoute',
+  metadata: { name: 'portal', namespace: 'payments' },
+  spec: {
+    parentRefs: [{ name: 'corp-gw' }],
+    hostnames: ['portal.internal.corp'],
+    rules: [{
+      matches: [{ path: { type: 'PathPrefix', value: '/' } }],
+      backendRefs: [{ name: 'portal', port: 80 }],
+    }],
+  },
+};
+
+/** 只放行 reports —— 但门户的标签是 portal */
+const LEDGER_POLICY = {
+  apiVersion: 'networking.k8s.io/v1', kind: 'NetworkPolicy',
+  metadata: { name: 'ledger', namespace: 'payments' },
+  spec: {
+    podSelector: { matchLabels: { app: 'ledger' } },
+    policyTypes: ['Ingress'],
+    ingress: [{ from: [{ podSelector: { matchLabels: { app: 'reports' } } }] }],
+  },
+};
+
+const TRIAGE_REFERENCE = code`
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: HTTPRoute
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    parentRefs:
+    - name: corp-gw
+    hostnames:
+    - portal.corp.internal
+    rules:
+    - matches:
+      - path:
+          type: PathPrefix
+          value: /
+      backendRefs:
+      - name: portal
+        port: 80
+  ---
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: ledger
+    namespace: payments
+  spec:
+    podSelector:
+      matchLabels:
+        app: ledger
+    policyTypes:
+    - Ingress
+    ingress:
+    - from:
+      - podSelector:
+          matchLabels:
+            app: portal
+  ---
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: sessions
+    namespace: payments
+  spec:
+    selector:
+      app: sessions
+    ports:
+    - port: 80
+      targetPort: 8080
+`;
+
+const stage14 = {
+  id: 'follow-the-packet',
+  title: t('顺着包走一遍', 'Follow the Packet'),
+  goal: t(
+    code`
+      周一早上三件事一起报过来，\`kubectl get\` 看下去却哪儿都正常：
+      Gateway 是 Programmed，Pod 全 Running，Service 都在。
+
+      - 从跳板机访问 \`https://portal.corp.internal/\` 返回 **404**；
+      - 门户访问 \`http://ledger\` **卡住不动，最后超时**；
+      - 门户访问 \`http://sessions\` **立刻被拒**。
+
+      三种现象指向三个不同的层。右边的「包路径」面板会把每一次连接
+      逐跳列出来 —— 哪一跳被丢掉、哪一跳被拒绝，上面写着。
+
+      ## 通关标准
+
+      1. 从跳板机不加 \`-k\` 访问门户返回 200；
+      2. 门户访问得到 \`http://ledger\`；
+      3. 门户访问得到 \`http://sessions\`；
+      4. **修的方式要对**：Gateway 的 listener 不许放宽成通配、
+         ledger 的入向策略不许删掉、sessions 这个 Service 不许换名字。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      curl -sv --resolve portal.corp.internal:443:<Gateway 地址> https://portal.corp.internal/
+      kubectl exec -n payments deploy/portal -- curl -s -m 5 -o /dev/null -w '%{http_code}' http://ledger
+      kubectl exec -n payments deploy/portal -- curl -s -m 5 http://sessions
+      kubectl get httproute portal -n payments -o yaml
+      kubectl get endpoints -n payments
+      kubectl get netpol -n payments -o yaml
+      \`\`\`
+    `,
+    code`
+      Three reports land on Monday morning, and \`kubectl get\` shows nothing wrong:
+      the Gateway is Programmed, every pod is Running, the Services are all there.
+
+      - \`https://portal.corp.internal/\` from the jump host returns **404**;
+      - the portal reaching \`http://ledger\` **hangs and eventually times out**;
+      - the portal reaching \`http://sessions\` is **refused immediately**.
+
+      Three symptoms, three different layers. The packet path panel on the right lists
+      every hop of every connection, and says which hop dropped or rejected it.
+
+      ## Done when
+
+      1. the portal returns 200 from the jump host, without \`-k\`;
+      2. the portal can reach \`http://ledger\`;
+      3. the portal can reach \`http://sessions\`;
+      4. **and the fixes are the right ones**: the Gateway listener is not widened to a
+         wildcard, ledger's ingress policy is not deleted, and the sessions Service
+         keeps its name.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      curl -sv --resolve portal.corp.internal:443:<gateway address> https://portal.corp.internal/
+      kubectl exec -n payments deploy/portal -- curl -s -m 5 -o /dev/null -w '%{http_code}' http://ledger
+      kubectl exec -n payments deploy/portal -- curl -s -m 5 http://sessions
+      kubectl get httproute portal -n payments -o yaml
+      kubectl get endpoints -n payments
+      kubectl get netpol -n payments -o yaml
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('三种现象分别定位到正确的那一层', 'Each symptom traced to the right layer'),
+    t('三条路都通了', 'All three paths work'),
+    t('修的是根因，不是把防护拆掉', 'Root causes fixed, not protections removed'),
+  ],
+  hints: [
+    t(
+      '**404 说明 Gateway 是活的**。连不上才是 Gateway 的问题；404 是「进来了但没有路由认领这个请求」，去看 HTTPRoute 的 hostnames 与 rules。',
+      '**A 404 means the Gateway is alive.** A dead Gateway refuses the connection. A 404 means the request got in and no route claimed it, so look at the HTTPRoute hostnames and rules.'
+    ),
+    t(
+      '**超时和拒绝是两件事**。拒绝说明包到了对端而没人听（或者 Service 没有后端，kube-proxy 直接回 RST）；超时说明包被丢了 —— NetworkPolicy 丢包，不回任何东西。',
+      '**Timeout and refusal are different.** Refusal means the packet arrived and nobody was listening (or the Service has no endpoints and kube-proxy resets). A timeout means the packet was dropped, and dropping is what NetworkPolicy does.'
+    ),
+    t(
+      '\`kubectl get endpoints\` 是 Service 这一层最直接的体检：Endpoints 为空说明 selector 一个 Pod 都没选中，而 \`kubectl get svc\` 看上去完全正常。',
+      '`kubectl get endpoints` is the direct check at the Service layer: an empty Endpoints means the selector matched no pods, while `kubectl get svc` looks perfectly healthy.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '把 Gateway listener 的 hostname 删掉，让它接受所有域名。404 确实没了，但这台 Gateway 从此会把任何域名的请求都往门户转 —— 判定检查 listener 还在不在。',
+      'Removing the hostname from the Gateway listener so it accepts everything. The 404 goes away, and now that Gateway forwards requests for any hostname to the portal. The grader checks the listener is still scoped.'
+    ),
+    t(
+      '把 ledger 的 NetworkPolicy 删了。超时确实没了 —— 因为 ledger 重新对整个集群开放了，而它正是上一关刚关起来的东西。',
+      'Deleting ledger’s NetworkPolicy. The timeout goes away because ledger is open to the whole cluster again, which is exactly what the previous stage closed.'
+    ),
+    t(
+      '看到 Endpoints 为空就重建 Service。名字一换，所有引用它的地方（HTTPRoute、其他服务的配置）都得跟着改，而问题只是 selector 里的一个词。',
+      'Recreating the Service because its Endpoints are empty. Renaming it means every reference (HTTPRoutes, other services’ config) has to change too, when the actual problem is one word in the selector.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      CNI_CILIUM,
+      ...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...TLS_PLATFORM,
+      ...PORTAL_WORKLOAD, ...LEDGER_WORKLOAD, ...SESSIONS_WORKLOAD,
+      BROKEN_ROUTE, LEDGER_POLICY,
+    ],
+    files: {},
+    referenceFiles: { '/root/infra/triage.yaml': TRIAGE_REFERENCE },
+    referenceCommands: [
+      'kubectl apply -f /root/infra/triage.yaml',
+    ],
+  },
+  specs: [
+    spec('follow-the-packet.spec.ts', code`
+      import { get, list, sh } from '@ops/lab';
+
+      const EXEC = 'kubectl exec -n payments deploy/portal -- curl -s -m 5 -o /dev/null -w %{http_code} ';
+
+      describe('顺着包走一遍', () => {
+        it('从跳板机访问门户返回 200', async () => {
+          const gateway = list('Gateway', { namespace: 'payments' })[0];
+          const address = gateway.status.addresses[0].value;
+          const result = await sh(
+            'curl -s -o /dev/null -w %{http_code} --resolve portal.corp.internal:443:' + address
+            + ' https://portal.corp.internal/'
+          );
+          expect(result.stdout).toBe('200');
+        });
+
+        it('门户访问得到 ledger', async () => {
+          const result = await sh(EXEC + 'http://ledger');
+          expect(result.stdout).toBe('200');
+        });
+
+        it('门户访问得到 sessions', async () => {
+          const result = await sh(EXEC + 'http://sessions');
+          expect(result.stdout).toBe('200');
+        });
+
+        it('Gateway 的 listener 没有被放宽成通配', () => {
+          const gateway = list('Gateway', { namespace: 'payments' })[0];
+          for (const listener of gateway.spec.listeners) {
+            expect(listener.hostname).toBeTruthy();
+            expect(listener.hostname).not.toContain('*');
+          }
+        });
+
+        it('ledger 还被入向策略保护着', () => {
+          const policies = list('NetworkPolicy', { namespace: 'payments' })
+            .filter((policy) => (policy.spec.podSelector.matchLabels || {}).app === 'ledger'
+              && (policy.spec.policyTypes || []).includes('Ingress'));
+          expect(policies.length).toBeGreaterThan(0);
+          // 而且不是靠 from 留空重新对全集群开放
+          for (const policy of policies) {
+            for (const rule of policy.spec.ingress || []) {
+              expect((rule.from || []).length).toBeGreaterThan(0);
+            }
+          }
+        });
+
+        it('sessions 这个 Service 还在，而且是靠 selector 修好的', () => {
+          const service = get('Service', 'sessions', 'payments');
+          expect(service).toBeTruthy();
+          const endpoints = get('Endpoints', 'sessions', 'payments');
+          const addresses = (endpoints.subsets || []).flatMap((subset) => subset.addresses || []);
+          expect(addresses.length).toBe(2);
+        });
+      });
+    `),
+  ],
+  focus: ['correctness', 'resilience'],
+  extension: t(
+    code`
+      这一关真正要练的是**从现象反推层次**，而不是三个具体的 bug。把它记成一张表：
+
+      - \`Connection refused\`：包到了对端，那里没人听。Service 没有 Endpoints
+        （kube-proxy 直接 RST）、进程没起来、端口写错，都长这样。
+      - \`timeout\`：包被丢了，没有任何回应。防火墙、NetworkPolicy、
+        路由不通、安全组，都长这样。**看到超时先想「谁在丢包」**。
+      - \`connection reset\`：连上了又被断开。TLS 握手失败、协议对不上
+        （拿 HTTP 打 HTTPS 端口）常见。
+      - \`404 / 502 / 503\`：**连接是成功的**。这是应用层或者代理层的回答，
+        说明前面每一层都通了，问题在最后那一段。
+      - DNS 失败：连尝试都没发生。名字错了、search domain 不对、
+        CoreDNS 挂了。
+
+      这张表的价值在于它**排除**掉的东西：看到 404 就不用再查网络策略，
+      看到 timeout 就不用再查 HTTPRoute。真集群里排查最费时间的从来不是修，
+      是在错误的层里找。
+    `,
+    code`
+      What this stage actually trains is **reasoning from symptom to layer**, not three
+      specific bugs. Keep the table:
+
+      - \`Connection refused\`: the packet arrived and nobody was listening. A Service
+        with no Endpoints (kube-proxy resets), a process that never started, a wrong
+        port all look like this.
+      - \`timeout\`: the packet was dropped with no reply at all. Firewalls, network
+        policies, missing routes, security groups. **A timeout means asking who is
+        dropping packets.**
+      - \`connection reset\`: connected, then torn down. Typically a failed TLS
+        handshake or a protocol mismatch such as plain HTTP against an HTTPS port.
+      - \`404 / 502 / 503\`: **the connection succeeded**. This is an answer from the
+        application or the proxy, which means every layer below it worked and the
+        problem is in the last hop.
+      - DNS failure: no connection was even attempted. Wrong name, wrong search
+        domain, or CoreDNS is down.
+
+      The value of the table is what it **rules out**: a 404 means you can stop looking
+      at network policies, and a timeout means you can stop reading HTTPRoutes. The
+      expensive part of real debugging is never the fix, it is searching in the wrong
+      layer.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -3956,6 +4282,6 @@ module.exports = {
   files: [],
   stages: [
     stage1, stage2, stage3, stage4, stage5, stage6,
-    stage7, stage8, stage9, stage10, stage11, stage12, stage13,
+    stage7, stage8, stage9, stage10, stage11, stage12, stage13, stage14,
   ],
 };

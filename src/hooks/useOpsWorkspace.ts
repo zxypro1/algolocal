@@ -11,8 +11,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { KubeObject } from '../lib/opslab/apiserver';
 import type { CommandRecord } from '../lib/opslab/machine';
 import {
-  buildTopology, createOpsWorld, currentNamespaceOf, diffVersions, snapshotVersions,
-  type ChangeEntry, type OpsWorld, type TopologyGraph,
+  buildPacketPaths, buildTopology, createOpsWorld, currentNamespaceOf, diffVersions, snapshotVersions,
+  type ChangeEntry, type OpsWorld, type PacketPath, type TopologyGraph,
 } from '../lib/opslab/lab';
 import { sharedCliRuntime } from '../lib/opslab/wasm';
 import type { OpsStageSpec, OpsWorldSpec } from '../lib/engineering/types';
@@ -42,6 +42,8 @@ export interface OpsWorkspaceState {
   /** 装上的真 CLI */
   applets: string[];
   topology: TopologyGraph;
+  /** 最近几次连接走过的路，最新的在前 */
+  packetPaths: PacketPath[];
   /** 最近一次命令引起的变更 */
   changes: ChangeEntry[];
   events: KubeObject[];
@@ -152,6 +154,16 @@ export function useOpsWorkspace(options: UseOpsWorkspaceOptions): OpsWorkspaceSt
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [world, revision, namespace, showReplicaSets]);
 
+  /**
+   * 包路径依赖拓扑图：能对上节点的跳才带 nodeId。
+   * 所以它排在 topology 后面算，而不是并列。
+   */
+  const packetPaths = useMemo(() => {
+    if (!world) return [];
+    return buildPacketPaths(world.cluster, topology);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [world, revision, topology]);
+
   const events = useMemo(() => {
     if (!world) return [];
     const definition = world.cluster.scheme.get({ group: '', version: 'v1', resource: 'events' });
@@ -173,6 +185,7 @@ export function useOpsWorkspace(options: UseOpsWorkspaceOptions): OpsWorkspaceSt
     error,
     applets,
     topology,
+    packetPaths,
     changes,
     events,
     history,
