@@ -11,3 +11,8 @@ export {
 } from './policy';
 export type { ConnectResult, ConnectKind, Hop, Resolution, Source, Target, Zone } from './types';
 export { createNetTools, parseUrl, type NetToolsOptions } from './tools';
+export {
+  WebSocketConnection, parseUpgrade, upgradeResponse, rejectResponse,
+  readFrame, writeFrame, OPCODE,
+  type UpgradeRequest, type StreamSession, type StreamServer, type Frame,
+} from './websocket';

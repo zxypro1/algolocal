@@ -5612,7 +5612,10 @@
         "namespaces": [
           "default",
           "kube-system",
-          "payments"
+          "payments",
+          "envoy-gateway-system",
+          "ingress-nginx",
+          "cert-manager"
         ],
         "images": {
           "harbor.corp.internal/team/portal:1.4.0": {
@@ -5631,6 +5634,22 @@
             "handlesSigterm": true,
             "runAsUser": 10001
           },
+          "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2": {
+            "pullMs": 300,
+            "startupMs": 400,
+            "readyAfterMs": 200,
+            "listens": [
+              18000
+            ]
+          },
+          "quay.io/jetstack/cert-manager-controller:v1.19.1": {
+            "pullMs": 300,
+            "startupMs": 400,
+            "readyAfterMs": 200,
+            "listens": [
+              9402
+            ]
+          },
           "harbor.corp.internal/team/reports:2.1.0": {
             "pullMs": 500,
             "startupMs": 800,
@@ -5647,6 +5666,55 @@
         "baseImages": {
           "node:22-alpine": "node"
         },
+        "pki": {
+          "roots": [
+            {
+              "name": "corp-root-ca",
+              "namespace": "cert-manager",
+              "commonName": "Corp Root CA"
+            }
+          ],
+          "intermediates": [
+            {
+              "name": "corp-issuing-ca",
+              "namespace": "cert-manager",
+              "commonName": "Corp Issuing CA",
+              "signedBy": "corp-root-ca"
+            }
+          ],
+          "serverCertificates": [
+            {
+              "name": "portal-tls-manual",
+              "namespace": "payments",
+              "commonName": "portal.corp.internal",
+              "dnsNames": [
+                "portal.corp.internal"
+              ],
+              "signedBy": "corp-issuing-ca",
+              "leafOnly": true
+            }
+          ],
+          "trust": [
+            "corp-root-ca"
+          ]
+        },
+        "addressPools": [
+          {
+            "loadBalancerClass": "corp.internal/office-lb",
+            "cidrPrefix": "10.10.8",
+            "zones": [
+              "office"
+            ]
+          },
+          {
+            "loadBalancerClass": "corp.internal/public-lb",
+            "cidrPrefix": "203.0.113",
+            "zones": [
+              "office",
+              "internet"
+            ]
+          }
+        ],
         "registries": [
           {
             "host": "harbor.corp.internal",
@@ -6249,6 +6317,613 @@
         "primer": {
           "zh": "容器声明资源有两个字段，管的是两件事。`requests` 是给调度器看的：调度器按它做装箱，把 Pod 放到「已承诺容量」还够的节点上。`limits` 是运行时的硬约束，落到 cgroup 上。两者可以不相等，也可以只写一个，不同的写法会得到不同的后果。\n\n内存和 CPU 的超限行为完全不同。内存是不可压缩资源：用量超过 limit，内核直接 OOMKill 这个容器，退出码 137（128+9，SIGKILL），日志经常来不及写完。CPU 是可压缩资源：超过 limit 只是被限流，进程继续跑，只是变慢，表现为 P99 变差而不是进程消失。所以「应用没崩但突然变慢了」和「应用被杀了」要往两个方向查。\n\n`QoS 等级`不是自己填的，是 kubelet 根据 requests 与 limits 推出来的：每个容器的 cpu 和 memory 都写了且 requests 等于 limits，是 `Guaranteed`；一个都没写，是 `BestEffort`；其余是 `Burstable`。这个等级决定节点内存不够时谁先被赶走：BestEffort 最先，然后是用量超过自己 requests 的 Burstable，Guaranteed 最后。\n\n于是有一个很容易走进去的死胡同：容器被 OOMKill 了，把 limits 删掉「就不会被杀了」。确实不会，但它同时变成了 BestEffort，节点一紧张第一个被驱逐，只是把一种死法换成了另一种。正确的做法是先量出实际用量再设定数字。生产里有 VPA 的 recommender 帮忙算，以及 LimitRange 给命名空间兜一个默认值。",
           "en": "A container declares resources with two fields that govern two different things. `requests` is for the scheduler: it bin-packs by requests, placing pods on nodes that still have promised capacity. `limits` is a runtime constraint enforced by cgroups. The two need not be equal, and either may be omitted, with different consequences.\n\nMemory and CPU behave completely differently when exceeded. Memory is incompressible: cross the limit and the kernel OOM-kills the container with exit code 137 (128+9, SIGKILL), often before the logs finish flushing. CPU is compressible: crossing the limit only throttles the process, which keeps running but slower, showing up as a degraded P99 rather than a missing process. \"The app did not crash but suddenly got slow\" and \"the app was killed\" therefore point in different directions.\n\nThe `QoS class` is derived, not declared. The kubelet computes it from requests and limits: every container declaring both cpu and memory with requests equal to limits is `Guaranteed`; declaring nothing is `BestEffort`; anything else is `Burstable`. That class decides who is evicted first when a node runs short of memory: BestEffort first, then Burstable pods exceeding their own requests, and Guaranteed last.\n\nThis creates an easy dead end. A container gets OOM-killed, so you remove the limit and it stops being killed. True, but it has also become BestEffort and is now first in line for eviction: one way of dying traded for another. The right move is to measure actual usage and set numbers from that. Production adds the VPA recommender to compute them and a LimitRange to give the namespace sane defaults."
+        }
+      },
+      {
+        "id": "gateway-migration",
+        "title": {
+          "zh": "从 Ingress 迁到 Gateway API",
+          "en": "Migrate from Ingress to Gateway API"
+        },
+        "goal": {
+          "zh": "      门户的对外入口还挂在 ingress-nginx 上，而这个项目已经在 2026 年 3 月退役了 ——\n      镜像从仓库里下架，控制器起不来，Ingress 一直没有地址，门户从办公网访问不了。\n\n      平台组已经把 Envoy Gateway 装好了，也提供了两个 GatewayClass：\n      `envoy-internal`（只暴露到办公网）和 `envoy-public`（暴露到公网）。\n      **门户是内部系统，不能上公网。**\n\n      ## 通关标准\n\n      1. 建一个 Gateway（用对 class）和一条 HTTPRoute，把\n         `portal.corp.internal` 指到 `portal` 这个 Service；\n      2. Gateway 的 `Programmed` 是 True，拿到了地址；\n      3. 从跳板机（办公网）访问得到，返回 200；\n      4. **从公网访问不到**；\n      5. 老的 Ingress 与 ingress-nginx 的 Deployment 都删掉 —— 留着不只是脏，\n         还会让下一个人以为它还在起作用。\n\n      ## 会用到的命令\n\n      ```bash\n      kubectl get ingress,pods -n payments\n      kubectl get gatewayclass\n      kubectl apply -f infra/gateway.yaml\n      kubectl get gateway corp-gw -n payments -o yaml\n      kubectl describe httproute portal -n payments\n      curl -s -o /dev/null -w '%{http_code}\n' \\\n        --resolve portal.corp.internal:80:<Gateway 的地址> http://portal.corp.internal/\n      ```\n\n      跳板机上没有配 `portal.corp.internal` 的解析，直接用 Gateway 拿到的\n      地址访问就行。\n",
+          "en": "      The portal's external entrypoint still runs on ingress-nginx, a project that\n      was retired in March 2026. The image was pulled from the registry, the\n      controller cannot start, the Ingress never got an address, and the portal is\n      unreachable from the office network.\n\n      The platform team has already installed Envoy Gateway and offers two\n      GatewayClasses: `envoy-internal` (office network only) and `envoy-public`\n      (public internet). **The portal is an internal system and must not be public.**\n\n      ## Done when\n\n      1. a Gateway (with the right class) and an HTTPRoute send\n         `portal.corp.internal` to the `portal` Service;\n      2. the Gateway reports `Programmed` True and has an address;\n      3. it answers 200 from the jump host (office network);\n      4. **it is not reachable from the internet**;\n      5. the old Ingress and the ingress-nginx Deployment are both deleted. Leaving\n         them is not just untidy: the next person will assume they still do something.\n\n      ## Commands you will need\n\n      ```bash\n      kubectl get ingress,pods -n payments\n      kubectl get gatewayclass\n      kubectl apply -f infra/gateway.yaml\n      kubectl get gateway corp-gw -n payments -o yaml\n      kubectl describe httproute portal -n payments\n      curl -s -o /dev/null -w '%{http_code}\n' \\\n        --resolve portal.corp.internal:80:<gateway address> http://portal.corp.internal/\n      ```\n"
+        },
+        "checklist": [
+          {
+            "zh": "Gateway 与 HTTPRoute 建好并生效",
+            "en": "Gateway and HTTPRoute created and effective"
+          },
+          {
+            "zh": "办公网访问得到、公网访问不到",
+            "en": "Reachable from the office network, not from the internet"
+          },
+          {
+            "zh": "老的 Ingress 与 ingress-nginx 都下线",
+            "en": "The old Ingress and ingress-nginx are gone"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "`kubectl get gatewayclass` 会列出平台提供了哪几个 class，名字里就写着内外网。",
+            "en": "`kubectl get gatewayclass` lists what the platform offers; the names say internal or public."
+          },
+          {
+            "zh": "Gateway 的 `status.addresses` 里就是访问地址。`kubectl get gateway -o wide` 也看得到。",
+            "en": "The address is in the Gateway’s `status.addresses`; `kubectl get gateway -o wide` shows it too."
+          },
+          {
+            "zh": "路由不生效时先看 `kubectl describe httproute` 里的 `ResolvedRefs`，它会直接说是后端不存在还是别的。",
+            "en": "When a route does not work, check `ResolvedRefs` in `kubectl describe httproute`; it names the actual problem."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "用了 `envoy-public` 那个 class。门户能访问了，但同时也暴露到了公网上 —— 判定会挂在这一条，现实里则是一次事故。",
+            "en": "Using the `envoy-public` class. The portal works, and is also on the public internet. The grader catches it; production would not."
+          },
+          {
+            "zh": "只删 Ingress 不删 ingress-nginx 的 Deployment。那个 Pod 还在那儿 CrashLoop，占着资源，还会让下一个人以为入口是它在管。",
+            "en": "Deleting the Ingress but not the ingress-nginx Deployment. The pod keeps crash-looping, burning resources and misleading the next person."
+          },
+          {
+            "zh": "HTTPRoute 的 `hostnames` 和 Gateway listener 的 `hostname` 对不上，两边都写了但不一样，结果是永远 404。",
+            "en": "Mismatched `hostnames` between the HTTPRoute and the Gateway listener: both set, both different, permanent 404."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "ingress-nginx-controller",
+                "namespace": "ingress-nginx",
+                "labels": {
+                  "app.kubernetes.io/name": "ingress-nginx"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "ingress-nginx"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "ingress-nginx"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/ingress-nginx/controller:v1.13.0"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            }
+          ],
+          "files": {
+            "/root/infra/ingress.yaml": "apiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: portal\n  namespace: payments\n  annotations:\n    nginx.ingress.kubernetes.io/rewrite-target: /\nspec:\n  ingressClassName: nginx\n  rules:\n  - host: portal.corp.internal\n    http:\n      paths:\n      - path: /\n        pathType: Prefix\n        backend:\n          service:\n            name: portal\n            port:\n              number: 80\n",
+            "/root/infra/gateway.yaml": "# 在这里写 Gateway 与 HTTPRoute\n"
+          },
+          "referenceFiles": {
+            "/root/infra/gateway.yaml": "apiVersion: gateway.networking.k8s.io/v1\nkind: Gateway\nmetadata:\n  name: corp-gw\n  namespace: payments\nspec:\n  gatewayClassName: envoy-internal\n  listeners:\n  - name: http\n    port: 80\n    protocol: HTTP\n    hostname: portal.corp.internal\n    allowedRoutes:\n      namespaces:\n        from: Same\n---\napiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  parentRefs:\n  - name: corp-gw\n  hostnames:\n  - portal.corp.internal\n  rules:\n  - matches:\n    - path:\n        type: PathPrefix\n        value: /\n    backendRefs:\n    - name: portal\n      port: 80\n"
+          },
+          "referenceCommands": [
+            "kubectl apply -f /root/infra/ingress.yaml",
+            "kubectl apply -f /root/infra/gateway.yaml",
+            "kubectl delete ingress portal -n payments",
+            "kubectl delete deployment ingress-nginx-controller -n ingress-nginx",
+            "rm -f /root/infra/ingress.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "gateway-migration.spec.ts",
+            "content": "import { get, list, sh, world } from '@ops/lab';\n\nfunction conditionOf(object, type) {\n  return ((object.status || {}).conditions || []).find((entry) => entry.type === type);\n}\n\ndescribe('从 Ingress 迁到 Gateway API', () => {\n  it('Gateway 建出来了，而且被 program 了', () => {\n    const gateways = list('Gateway', { namespace: 'payments' });\n    expect(gateways.length).toBe(1);\n    expect(conditionOf(gateways[0], 'Programmed').status).toBe('True');\n    expect(gateways[0].status.addresses.length).toBe(1);\n  });\n\n  it('用的是内网 class，不是公网那个', () => {\n    const gateway = list('Gateway', { namespace: 'payments' })[0];\n    expect(gateway.spec.gatewayClassName).toBe('envoy-internal');\n  });\n\n  it('HTTPRoute 的后端解析得到', () => {\n    const routes = list('HTTPRoute', { namespace: 'payments' });\n    expect(routes.length).toBe(1);\n    const parent = routes[0].status.parents[0];\n    const resolved = parent.conditions.find((entry) => entry.type === 'ResolvedRefs');\n    expect(resolved.status).toBe('True');\n  });\n\n  it('办公网访问得到，返回 200', async () => {\n    const gateway = list('Gateway', { namespace: 'payments' })[0];\n    const address = gateway.status.addresses[0].value;\n    // DNS 还没改过来，用 --resolve 直连 Gateway 的地址\n    const result = await sh(\n      'curl -s -o /dev/null -w %{http_code} --resolve portal.corp.internal:80:' + address\n      + ' http://portal.corp.internal/'\n    );\n    expect(result.code).toBe(0);\n    expect(result.stdout).toBe('200');\n  });\n\n  it('公网访问不到', () => {\n    const gateway = list('Gateway', { namespace: 'payments' })[0];\n    const address = gateway.status.addresses[0].value;\n    const outcome = world.cluster.network.connect(\n      { zone: 'internet', label: 'outside', ip: '203.0.113.9' },\n      { host: 'portal.corp.internal', address, headerHost: 'portal.corp.internal', port: 80, path: '/' }\n    );\n    expect(outcome.kind).toBe('no-route');\n  });\n\n  it('老的 Ingress 下线了', () => {\n    expect(list('Ingress', { namespace: 'payments' }).length).toBe(0);\n  });\n\n  it('ingress-nginx 的控制器也下线了', () => {\n    const left = list('Deployment', { namespace: 'ingress-nginx' });\n    expect(left.length).toBe(0);\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "resilience"
+        ],
+        "extension": {
+          "zh": "Gateway API 相对 Ingress 最大的改进是**角色分离**：GatewayClass 归平台，\nGateway 归集群管理员（决定端口、证书、暴露到哪个网段），HTTPRoute 归应用\n团队。Ingress 时代所有这些都挤在一个对象和一堆 annotation 里，\n于是「谁能改什么」根本没法划清。\n\n这一关里「内网还是公网」由 GatewayClass 背后的 EnvoyProxy 参数决定，\n应用团队写 HTTPRoute 时碰不到它 —— 这正是分离的价值：\n应用团队不可能不小心把自己暴露到公网上。\n",
+          "en": "The biggest improvement Gateway API makes over Ingress is **role separation**:\nGatewayClass belongs to the platform, Gateway to the cluster administrator\n(ports, certificates, which network it is exposed on), and HTTPRoute to the\napplication team. Under Ingress all of that was crammed into one object and a\npile of annotations, so \"who may change what\" could not be drawn at all.\n\nHere, internal-versus-public is decided by the EnvoyProxy parameters behind the\nGatewayClass, and the application team never touches it while writing an\nHTTPRoute. That is the point of the separation: an application team cannot\naccidentally publish itself to the internet.\n"
+        },
+        "primer": {
+          "zh": "集群里的服务默认只能在集群内部访问。要让外面进得来，需要一个`入口`。早年的做法是 `Ingress`：一个对象里写着域名、路径和后端 Service，再由某个 Ingress 控制器（nginx、traefik 之类）把它翻译成真正的反向代理配置。Ingress 的规范只覆盖了最基础的 HTTP 路由，超出的部分全靠 annotation，于是每家控制器一套写法，配置无法在实现之间迁移。\n\n`Gateway API` 是它的继任者，2023 年 GA。最大的变化是把一个对象拆成三个，按`角色`分开：`GatewayClass` 由平台方提供，声明「这套入口由哪个控制器实现」；`Gateway` 由集群管理员建，决定监听哪些端口、用什么证书、暴露到哪个网段；`HTTPRoute` 由应用团队自己写，只管路径怎么分发到哪个 Service。谁能改什么，从此在 RBAC 上划得清。\n\n一条请求进来要经过两层匹配。先看 Gateway 的 `listener`：端口对不对、`hostname` 对不对。再看挂在这个 Gateway 上的 HTTPRoute：`hostnames` 对不对、`rules.matches` 里的路径对不对。两层都过了才转给 `backendRefs` 指的 Service。任何一层没匹配上，Gateway 会回 404 而不是拒绝连接，因为 Gateway 本身是活着的。这个区别决定了排查方向：404 去查路由，连不上去查 Gateway。\n\n状态写在两处，都值得先看。Gateway 的 `Programmed` 条件说明控制器有没有把配置下发下去，`status.addresses` 里是真正的访问地址。HTTPRoute 的 `status.parents[].conditions` 里有 `Accepted` 和 `ResolvedRefs`，后者会直接说出后端 Service 是不是不存在，省掉一轮猜测。",
+          "en": "Services in a cluster are only reachable from inside it by default. Letting outside traffic in requires an `ingress point`. The original mechanism was `Ingress`: one object holding hostnames, paths, and backend Services, translated into real reverse-proxy configuration by some Ingress controller (nginx, traefik, and others). The Ingress spec only covered basic HTTP routing, so everything beyond it lived in annotations, every controller invented its own, and configuration could not move between implementations.\n\n`Gateway API` is the successor, GA since 2023. Its central change is splitting that one object into three along `role` lines. `GatewayClass` is offered by the platform and names the controller implementing it. `Gateway` is created by the cluster administrator and decides which ports to listen on, which certificates to use, and which network it is exposed on. `HTTPRoute` is written by the application team and only says which path goes to which Service. Who may change what is finally expressible in RBAC.\n\nAn incoming request passes two matching layers. First the Gateway `listener`: correct port, correct `hostname`. Then the HTTPRoutes attached to that Gateway: correct `hostnames`, correct path in `rules.matches`. Only if both pass does traffic go to the Service in `backendRefs`. If either fails, the Gateway returns 404 rather than refusing the connection, because the Gateway itself is alive. That distinction sets the direction of an investigation: a 404 means look at routing, a refused connection means look at the Gateway.\n\nStatus lives in two places and both are worth reading first. The Gateway `Programmed` condition says whether the controller pushed configuration down, and `status.addresses` holds the real address. An HTTPRoute carries `Accepted` and `ResolvedRefs` in `status.parents[].conditions`, and the latter states outright whether the backend Service is missing, saving a round of guessing."
+        }
+      },
+      {
+        "id": "certificates-and-pki",
+        "title": {
+          "zh": "证书与 PKI",
+          "en": "Certificates and PKI"
+        },
+        "goal": {
+          "zh": "门户要上 HTTPS。前任已经在 Gateway 上配了 443，用的是他手工造的一张证书\n（Secret `portal-tls-manual`）。但从跳板机访问的时候 curl 直接失败了，\n而他坚称「证书是对的，浏览器里能打开」。\n\n公司有自己的 PKI：一个根 CA `Corp Root CA`，下面一个签发用的中间 CA\n`Corp Issuing CA`。cert-manager 已经装好，ClusterIssuer `corp-ca`\n指向那个中间 CA。根 CA 已经装进这台跳板机的信任库了。\n\n## 通关标准\n\n1. 先搞清楚手工那张证书到底哪里不对（`openssl x509` 与 `openssl verify`\n   能把话说明白）；\n2. 用 cert-manager 签一张，Certificate 的 `Ready` 是 True；\n3. Gateway 的 443 用上新证书；\n4. **不加 `-k`** 的 `curl https://portal.corp.internal/` 返回 200；\n5. 证书有效期至少还剩 60 天。\n\n## 会用到的命令\n\n```bash\nkubectl get secret portal-tls-manual -n payments -o jsonpath='{.data.tls.crt}' | base64 -d > /tmp/manual.pem\nopenssl x509 -in /tmp/manual.pem -noout -text\nopenssl verify -CAfile /etc/ssl/certs/ca-certificates.crt /tmp/manual.pem\nkubectl get clusterissuer\nkubectl apply -f infra/tls.yaml\nkubectl describe certificate portal -n payments\ncurl -v --resolve portal.corp.internal:443:<Gateway 地址> https://portal.corp.internal/\n```\n",
+          "en": "The portal needs HTTPS. Your predecessor already configured port 443 on the\nGateway using a certificate he made by hand (Secret `portal-tls-manual`).\ncurl from the jump host fails outright, and he insists the certificate is fine\nbecause \"it opens in the browser\".\n\nThe company runs its own PKI: a root CA `Corp Root CA` with an issuing\nintermediate `Corp Issuing CA` under it. cert-manager is installed and the\nClusterIssuer `corp-ca` points at that intermediate. The root is already in\nthis jump host's trust store.\n\n## Done when\n\n1. you work out what is actually wrong with the hand-made certificate\n   (`openssl x509` and `openssl verify` will say it plainly);\n2. cert-manager issues a replacement and the Certificate reports `Ready` True;\n3. the Gateway's port 443 uses the new certificate;\n4. `curl https://portal.corp.internal/` returns 200 **without `-k`**;\n5. the certificate has at least 60 days of validity left.\n\n## Commands you will need\n\n```bash\nkubectl get secret portal-tls-manual -n payments -o jsonpath='{.data.tls.crt}' | base64 -d > /tmp/manual.pem\nopenssl x509 -in /tmp/manual.pem -noout -text\nopenssl verify -CAfile /etc/ssl/certs/ca-certificates.crt /tmp/manual.pem\nkubectl get clusterissuer\nkubectl apply -f infra/tls.yaml\nkubectl describe certificate portal -n payments\ncurl -v --resolve portal.corp.internal:443:<gateway address> https://portal.corp.internal/\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "看懂手工证书哪里不对",
+            "en": "Diagnose the hand-made certificate"
+          },
+          {
+            "zh": "cert-manager 签出新证书并被 Gateway 用上",
+            "en": "cert-manager issues one and the Gateway uses it"
+          },
+          {
+            "zh": "不加 -k 也能通，有效期充足",
+            "en": "Works without -k, with plenty of validity left"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "`openssl verify` 会直接说 `unable to get local issuer certificate` —— 意思是「顺着这张证书往上找不到签它的那一级」。",
+            "en": "`openssl verify` says `unable to get local issuer certificate` outright: it cannot find the certificate that signed this one."
+          },
+          {
+            "zh": "根 CA 在信任库里，签这张证书的却是中间 CA。`tls.crt` 里应该是**叶子 + 中间**两张，前任只放了一张。",
+            "en": "The root is trusted, but this certificate was signed by the intermediate. `tls.crt` should hold **leaf + intermediate**; your predecessor put in only one."
+          },
+          {
+            "zh": "cert-manager 签发时会自动把签发链接在叶子后面，所以用它就不会犯这个错。",
+            "en": "cert-manager appends the issuing chain after the leaf automatically, so using it avoids the mistake entirely."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "「浏览器里能打开」不能作为证据。浏览器可能缓存过那张中间证书，或者会主动去补齐（AIA chasing）；curl、Go 写的服务、Java 写的服务都不会。这类「我这儿好好的」正是链不完整最典型的表现。",
+            "en": "\"It opens in my browser\" is not evidence. Browsers may have cached the intermediate or fetch it themselves (AIA chasing); curl, Go services, and Java services will not. \"Works on my machine\" is the signature symptom of an incomplete chain."
+          },
+          {
+            "zh": "加 `-k` 让它通过。那不是修好了，是把校验关掉了 —— 中间人攻击也一起放进来了。判定明确要求不加 `-k`。",
+            "en": "Adding `-k` makes it pass. That is not a fix, it is disabling verification, and it lets a man-in-the-middle in too. The grader requires no `-k`."
+          },
+          {
+            "zh": "把中间 CA 也塞进跳板机的信任库。这样确实能通，但你只修好了自己这一台 —— 集群里的服务、别人的机器全都还是坏的。证书链应该由服务端提供完整。",
+            "en": "Adding the intermediate to this jump host’s trust store. It works here and nowhere else: other machines and in-cluster callers still fail. The server is responsible for presenting a complete chain."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.corp.internal"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "files": {
+            "/root/infra/tls.yaml": "apiVersion: gateway.networking.k8s.io/v1\nkind: Gateway\nmetadata:\n  name: corp-gw\n  namespace: payments\nspec:\n  gatewayClassName: envoy-internal\n  listeners:\n  - name: https\n    port: 443\n    protocol: HTTPS\n    hostname: portal.corp.internal\n    tls:\n      mode: Terminate\n      certificateRefs:\n      - name: portal-tls-manual\n  - name: http\n    port: 80\n    protocol: HTTP\n    hostname: portal.corp.internal\n"
+          },
+          "referenceFiles": {
+            "/root/infra/tls.yaml": "apiVersion: cert-manager.io/v1\nkind: Certificate\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  secretName: portal-tls\n  duration: 2160h\n  renewBefore: 720h\n  commonName: portal.corp.internal\n  dnsNames:\n  - portal.corp.internal\n  issuerRef:\n    name: corp-ca\n    kind: ClusterIssuer\n---\napiVersion: gateway.networking.k8s.io/v1\nkind: Gateway\nmetadata:\n  name: corp-gw\n  namespace: payments\nspec:\n  gatewayClassName: envoy-internal\n  listeners:\n  - name: https\n    port: 443\n    protocol: HTTPS\n    hostname: portal.corp.internal\n    tls:\n      mode: Terminate\n      certificateRefs:\n      - name: portal-tls\n  - name: http\n    port: 80\n    protocol: HTTP\n    hostname: portal.corp.internal\n"
+          },
+          "referenceCommands": [
+            "kubectl apply -f /root/infra/tls.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "certificates-and-pki.spec.ts",
+            "content": "import { get, list, sh } from '@ops/lab';\n\nconst DAY = 24 * 60 * 60 * 1000;\n\ndescribe('证书与 PKI', () => {\n  it('cert-manager 签出了证书，Ready 是 True', () => {\n    const certificates = list('Certificate', { namespace: 'payments' });\n    expect(certificates.length).toBe(1);\n    const ready = certificates[0].status.conditions\n      .find((entry) => entry.type === 'Ready');\n    expect(ready.status).toBe('True');\n  });\n\n  it('Gateway 的 443 用的是 cert-manager 签的那张', () => {\n    const gateway = list('Gateway', { namespace: 'payments' })[0];\n    const https = gateway.spec.listeners.find((entry) => entry.protocol === 'HTTPS');\n    expect(https).toBeTruthy();\n\n    const reference = https.tls.certificateRefs[0].name;\n    const certificate = list('Certificate', { namespace: 'payments' })[0];\n    expect(reference).toBe(certificate.spec.secretName);\n  });\n\n  it('不加 -k 也能通，返回 200', async () => {\n    const gateway = list('Gateway', { namespace: 'payments' })[0];\n    const address = gateway.status.addresses[0].value;\n    const result = await sh(\n      'curl -s -o /dev/null -w %{http_code} --resolve portal.corp.internal:443:' + address\n      + ' https://portal.corp.internal/'\n    );\n    expect(result.code).toBe(0);\n    expect(result.stdout).toBe('200');\n  });\n\n  it('证书有效期至少还剩 60 天', () => {\n    const certificate = list('Certificate', { namespace: 'payments' })[0];\n    const notAfter = Date.parse(certificate.status.notAfter);\n    const remaining = (notAfter - Date.parse('2026-03-02T09:00:00Z')) / DAY;\n    expect(remaining >= 60).toBe(true);\n  });\n\n  it('没有靠把中间 CA 塞进本机信任库来蒙过去', async () => {\n    // 信任库里只该有根，多出来的中间 CA 说明修的是自己这一台\n    const bundle = await sh('grep -c BEGIN /etc/ssl/certs/ca-certificates.crt');\n    expect(bundle.stdout.trim()).toBe('1');\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "resilience"
+        ],
+        "extension": {
+          "zh": "「链不完整」之所以难查，是因为它**不是必然失败**。浏览器缓存过那张中间\n证书、或者按证书里的 AIA 扩展自己去下载，都会让它看起来是好的；而 curl、\nGo 与 Java 写的服务不会做这些事。于是现象是「我这儿好好的，你那儿不行」。\n\n判断的办法只有一个：把服务端实际发出来的那串证书拿出来看。\n`openssl s_client -connect host:443 -showcerts` 会把它们全打出来，\n数一数有几张，就知道链有没有断。\n",
+          "en": "An incomplete chain is hard to diagnose precisely because it does not always\nfail. A browser may have cached the intermediate, or fetch it itself through the\nAIA extension; curl, Go services, and Java services do neither. The result is\n\"it works here and not there\".\n\nThere is only one reliable check: look at the certificates the server actually\nsends. `openssl s_client -connect host:443 -showcerts` prints all of them, and\ncounting them tells you whether the chain is complete.\n"
+        },
+        "primer": {
+          "zh": "HTTPS 的信任建立在一条`证书链`上。服务端出示一张`叶子证书`，上面写着它是谁（`Subject`）、能代表哪些域名（`SAN`，Subject Alternative Name）、有效期、以及公钥。这张证书由某个`证书颁发机构`（CA）用私钥签过名。客户端手里有一份`信任库`，里面是它信任的根 CA。验证的过程就是从叶子往上找签它的那一级，一级级找到信任库里的某个根为止。\n\n实际的 PKI 很少只有一层。通常是一个离线保存的根 CA，签出若干个`中间 CA`，日常签发全用中间 CA 做。好处是根的私钥可以锁在保险柜里，中间 CA 泄漏了也能单独吊销。代价是**服务端必须把中间证书一起发给客户端**：客户端信任库里只有根，它不认识那张中间 CA，链就断在那里。\n\n这个坑之所以难查，是因为它不是必然失败。浏览器可能之前访问别的站点时缓存过同一张中间证书，或者按证书里的 AIA 扩展自己去下载补齐；而 curl、Go 与 Java 写的服务都不做这些事。于是现象是「浏览器能打开，服务之间调不通」。判断的办法只有一个：看服务端实际发出来的是几张证书。\n\n`SAN` 是另一处常见问题。2017 年之后所有主流验证器都不再看 `CN` 字段，只认 SAN。一张 CN 写对但 SAN 里没有这个名字的证书会被拒绝，报错是「certificate is valid for A, not B」。Kubernetes 里这些事通常交给 `cert-manager`：`Issuer` 声明用哪个 CA，`Certificate` 声明要签什么，控制器把签好的叶子**连同签发链**一起写进一个 `kubernetes.io/tls` 类型的 Secret，链不完整这个错自然就不会犯。",
+          "en": "HTTPS trust rests on a `certificate chain`. A server presents a `leaf certificate` stating who it is (`Subject`), which names it may represent (`SAN`, Subject Alternative Name), how long it is valid, and its public key. That certificate is signed by some `certificate authority` (CA). The client holds a `trust store` of root CAs it trusts, and verification walks upward from the leaf, level by level, until it reaches one of those roots.\n\nReal PKIs rarely have a single level. The usual shape is an offline root CA that signs several `intermediate CAs`, with day-to-day issuance done by an intermediate. The root private key can then live in a safe, and a compromised intermediate can be revoked on its own. The price is that **the server must send the intermediate along with the leaf**: the client only trusts the root, does not recognise the intermediate, and the chain breaks there.\n\nThis is hard to diagnose because it does not always fail. A browser may have cached the same intermediate from another site, or fetch it itself via the AIA extension in the certificate; curl, Go services, and Java services do neither. The symptom is \"the browser opens it, service-to-service calls fail\". There is one reliable check: look at how many certificates the server actually sends.\n\n`SAN` is the other frequent problem. Since 2017 no mainstream verifier reads the `CN` field; only SAN counts. A certificate with the right CN but a SAN that omits the name is rejected with \"certificate is valid for A, not B\". In Kubernetes this is normally handled by `cert-manager`: an `Issuer` names the CA, a `Certificate` describes what to issue, and the controller writes the leaf **together with its issuing chain** into a `kubernetes.io/tls` Secret, which makes the incomplete-chain mistake impossible to commit."
         }
       }
     ]

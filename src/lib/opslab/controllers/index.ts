@@ -26,3 +26,4 @@ export type {
 } from './runtime';
 export { Cluster, createCluster } from './cluster';
 export type { ClusterOptions, NodeSpec } from './cluster';
+export { createServiceIpDefaulter, DEFAULT_SERVICE_CIDR } from './serviceip';

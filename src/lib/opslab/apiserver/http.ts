@@ -22,9 +22,18 @@ export interface ApiServerDeps {
   now: () => number;
   /** 集群版本，出现在 /version 与 discovery 里 */
   version?: { major: string; minor: string; gitVersion: string };
+  /**
+   * `kubectl exec` 真正执行命令的地方。
+   *
+   * apiserver 只负责协议，命令跑在哪、怎么跑，由集群那边说了算 ——
+   * 和真集群把它转给 kubelet 是同一个分工。
+   */
+  exec?: ExecHandler;
 }
 import { openApiDocument, openApiRoot } from './openapi';
 import type { PatchType } from './patch';
+import { createExecSession, parseExecRequest, type ExecHandler } from './exec';
+import type { StreamSession, UpgradeRequest } from '../net';
 
 interface ParsedPath {
   group: string;
@@ -128,6 +137,7 @@ export class ApiServer {
   private readonly scheme: Scheme;
   private readonly now: () => number;
   private readonly version: { major: string; minor: string; gitVersion: string };
+  private readonly exec?: ExecHandler;
   /** 收到的请求，调试与测试用 */
   readonly requestLog: string[] = [];
 
@@ -136,6 +146,34 @@ export class ApiServer {
     this.scheme = deps.scheme;
     this.now = deps.now;
     this.version = deps.version ?? { major: '1', minor: '36', gitVersion: 'v1.36.0' };
+    this.exec = deps.exec;
+  }
+
+  /**
+   * WebSocket 升级请求。
+   *
+   * `kubectl exec` 走的不是 fetch 而是这条路：真 gorilla 在 wasm 里做握手，
+   * 宿主这边把它接到会话上。
+   */
+  openStream(request: UpgradeRequest): StreamSession | { status: number; reason: string; body: string } | undefined {
+    const parsed = parseExecRequest(request);
+    if (!parsed) {
+      return { status: 404, reason: 'Not Found', body: JSON.stringify(toStatus(notFound('pods', '', ''))) };
+    }
+    if (!this.exec) {
+      return {
+        status: 400, reason: 'Bad Request',
+        body: JSON.stringify({ kind: 'Status', status: 'Failure', message: 'exec is not supported by this server' }),
+      };
+    }
+    if (parsed.command.length === 0) {
+      return {
+        status: 400, reason: 'Bad Request',
+        body: JSON.stringify({ kind: 'Status', status: 'Failure', message: 'you must specify at least one command for the container' }),
+      };
+    }
+    this.requestLog.push(`WS ${request.path}`);
+    return createExecSession(parsed, this.exec);
   }
 
   /** fetch 兼容的入口 —— 真 kubectl 就是通过它打进来的 */

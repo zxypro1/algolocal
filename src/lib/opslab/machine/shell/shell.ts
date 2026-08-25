@@ -116,8 +116,8 @@ export class Shell {
     ].sort();
   }
 
-  /** 跑一行（或一段）脚本 */
-  async run(source: string): Promise<RunResult> {
+  /** 跑一行（或一段）脚本。stdin 是喂给第一段命令的输入。 */
+  async run(source: string, stdin = ''): Promise<RunResult> {
     let node: Node | null;
     try {
       node = await parseShell(source);
@@ -135,7 +135,7 @@ export class Shell {
     this.errSink = (text) => err.push(text);
     let code = 0;
     try {
-      code = await this.exec(node, '', (s) => out.push(s), (s) => err.push(s));
+      code = await this.exec(node, stdin, (s) => out.push(s), (s) => err.push(s));
     } catch (error) {
       if (error instanceof ExitSignal || error instanceof ReturnSignal) code = error.code;
       else throw error;

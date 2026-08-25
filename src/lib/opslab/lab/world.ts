@@ -20,6 +20,7 @@ import { createNetTools } from '../net';
 import { parseChain } from '../crypto';
 import { createOpensslCommand } from './openssl';
 import { materializePki } from './pki';
+import { createExecHandler } from './podshell';
 import { CliRuntime, installClusterCli } from '../wasm';
 import type { KubeObject } from '../apiserver';
 
@@ -163,6 +164,9 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
       return undefined;
     }
   };
+
+  // `kubectl exec` 落到 Pod 里那个 shell 上
+  cluster.execHandler = createExecHandler(cluster);
 
   // 镜像解析装好之后才让控制器跑起来，免得先起来的 kubelet 查到一张空表
   cluster.start();
