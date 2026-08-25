@@ -485,3 +485,90 @@ describe('确定性', () => {
     for (let i = 0; i < 99; i += 1) expect(run()).toBe(first);
   });
 });
+
+/**
+ * 服务端 apply
+ *
+ * 和普通 update 的区别只有一句话：**哪些字段是谁写的**被记了下来。
+ * 有了归属，下一次 apply 少写了某个字段，服务端就知道该删掉它。
+ * 没有这一步，`helm upgrade` 去掉一个 env 之后那个 env 会一直留在集群里，
+ * 而 chart 里已经找不到它了。
+ */
+describe('服务端 apply', () => {
+  const CONFIGMAPS: ResourceDefinition = {
+    group: '', version: 'v1', resource: 'configmaps', singular: 'configmap',
+    kind: 'ConfigMap', namespaced: true, shortNames: ['cm'],
+  };
+
+  function bench() {
+    const store = createStore();
+    const scheme = createScheme([CONFIGMAPS]);
+    let uid = 0;
+    const registry = new Registry({
+      store, scheme,
+      now: () => Date.parse('2026-03-02T09:00:00Z'),
+      uid: () => `uid-${++uid}`,
+    });
+    return { registry };
+  }
+
+  const desired = (data: Record<string, string>) => ({
+    apiVersion: 'v1', kind: 'ConfigMap',
+    metadata: { name: 'settings', namespace: 'default' },
+    data,
+  });
+
+  it('对象不存在就建出来', () => {
+    const { registry } = bench();
+    const applied = registry.apply(CONFIGMAPS, 'default', 'settings', desired({ a: '1' }) as never, {
+      fieldManager: 'helm',
+    });
+    expect((applied as any).data).toEqual({ a: '1' });
+  });
+
+  it('记下谁写了哪些字段', () => {
+    const { registry } = bench();
+    const applied = registry.apply(CONFIGMAPS, 'default', 'settings', desired({ a: '1' }) as never, {
+      fieldManager: 'helm',
+    });
+    const managed = (applied.metadata as any).managedFields;
+    expect(managed).toHaveLength(1);
+    expect(managed[0]).toMatchObject({ manager: 'helm', operation: 'Apply', fieldsType: 'FieldsV1' });
+    expect(managed[0].fieldsV1['f:data']).toEqual({ 'f:a': {} });
+  });
+
+  it('这一次不写的字段会被删掉 —— 这是 SSA 的全部意义', () => {
+    const { registry } = bench();
+    registry.apply(CONFIGMAPS, 'default', 'settings', desired({ a: '1', b: '2' }) as never, {
+      fieldManager: 'helm',
+    });
+    const second = registry.apply(CONFIGMAPS, 'default', 'settings', desired({ a: '9' }) as never, {
+      fieldManager: 'helm',
+    });
+    expect((second as any).data).toEqual({ a: '9' });
+  });
+
+  it('别人写的字段不会被顺手删掉', () => {
+    const { registry } = bench();
+    registry.apply(CONFIGMAPS, 'default', 'settings', desired({ a: '1' }) as never, { fieldManager: 'helm' });
+    registry.apply(CONFIGMAPS, 'default', 'settings', desired({ b: '2' }) as never, { fieldManager: 'kubectl' });
+    // helm 再 apply 一次，只声明 a —— b 是 kubectl 的，留着
+    const third = registry.apply(CONFIGMAPS, 'default', 'settings', desired({ a: '1' }) as never, {
+      fieldManager: 'helm',
+    });
+    expect((third as any).data).toEqual({ a: '1', b: '2' });
+    expect((third.metadata as any).managedFields.map((entry: any) => entry.manager)).toEqual(['helm', 'kubectl']);
+  });
+
+  it('服务端自己写的东西不算客户端声明的', () => {
+    const { registry } = bench();
+    const created = registry.apply(CONFIGMAPS, 'default', 'settings', desired({ a: '1' }) as never, {
+      fieldManager: 'helm',
+    });
+    // uid / creationTimestamp 是服务端补的，不该出现在归属里
+    const fields = (created.metadata as any).managedFields[0].fieldsV1;
+    expect(fields['f:metadata']?.['f:uid']).toBeUndefined();
+    expect(fields['f:metadata']?.['f:creationTimestamp']).toBeUndefined();
+    expect(created.metadata.uid).toBeTruthy();
+  });
+});

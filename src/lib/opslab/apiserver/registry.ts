@@ -9,6 +9,9 @@
  * 会接官方 OpenAPI + ajv。这里管的是**对象生命周期**，两者边界分清。
  */
 import { applyPatch, PatchType } from './patch';
+import {
+  fieldSetOf, mergeApplied, ownedBy, pruneUnowned, recordOwnership, strippedForApply,
+} from './ssa';
 import { Store, WatchEvent } from '../store';
 import {
   alreadyExists,
@@ -323,6 +326,51 @@ export class Registry {
 
     const kv = this.store.put(key, candidate);
     return this.decorate(kv.value as KubeObject, kv.modRevision);
+  }
+
+  /**
+   * 服务端 apply。
+   *
+   * 和 update 的区别是「谁写的」被记了下来（managedFields），于是下一次
+   * apply 少写了某个字段，服务端能自己把它删掉 —— 客户端不用算差异。
+   * helm 4 与 `kubectl apply --server-side` 走的都是这条路。
+   */
+  apply(
+    definition: ResourceDefinition,
+    namespace: string | undefined,
+    name: string,
+    desired: KubeObject,
+    options: { fieldManager: string; dryRun?: boolean }
+  ): KubeObject {
+    this.assertScope(definition, namespace);
+    const key = storageKey(definition, namespace, name);
+    const existing = this.store.get(key);
+    const stripped = strippedForApply(desired);
+    const fields = fieldSetOf(stripped);
+    const apiVersion = Scheme.toApiVersion(definition.group, definition.version);
+
+    if (!existing) {
+      const created = clone(stripped);
+      created.metadata = created.metadata ?? ({} as ObjectMeta);
+      created.metadata.name = name;
+      (created.metadata as unknown as Record<string, unknown>).managedFields =
+        recordOwnership(created, options.fieldManager, apiVersion, formatTimestamp(this.now()), fields);
+      return this.create(definition, namespace, created, { dryRun: options.dryRun });
+    }
+
+    const live = existing.value as KubeObject;
+    const owned = ownedBy(live, options.fieldManager);
+    // 先把自己上一次写过、这次不写的字段摘掉，再合并这一次的
+    const pruned = pruneUnowned(live, owned, fields) as KubeObject;
+    const merged = mergeApplied(pruned, stripped) as KubeObject;
+    merged.metadata = { ...live.metadata, ...merged.metadata };
+    (merged.metadata as unknown as Record<string, unknown>).managedFields =
+      recordOwnership(live, options.fieldManager, apiVersion, formatTimestamp(this.now()), fields);
+    // status 归 status 子资源管，apply 主资源动不了它
+    merged.status = live.status;
+    delete (merged.metadata as unknown as Record<string, unknown>).resourceVersion;
+
+    return this.update(definition, namespace, name, merged, { dryRun: options.dryRun });
   }
 
   /**

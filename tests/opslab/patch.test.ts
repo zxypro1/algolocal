@@ -150,8 +150,9 @@ describe('按 content-type 分发', () => {
     });
   });
 
-  it('服务端 apply 明确不支持，而不是装作支持了', () => {
+  it('服务端 apply 不走这里 —— 它要 fieldManager 与 managedFields', () => {
+    // 走的是 Registry.apply，见 tests/opslab/apiserver.test.ts 里那一组
     expect(() => applyPatch({}, {}, 'application/apply-patch+yaml'))
-      .toThrow(/server-side apply is not supported/);
+      .toThrow(/apply patches must go through server-side apply/);
   });
 });

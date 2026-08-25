@@ -11,7 +11,7 @@
  */
 import { Registry } from './registry';
 import { Scheme, ResourceDefinition } from './scheme';
-import { ApiError, badRequest, notFound, toStatus } from './errors';
+import { ApiError, badRequest, invalid, notFound, toStatus } from './errors';
 import { renderTable, wantsTable } from './tables';
 import type { KubeObject, PropagationPolicy, WatchEventOut } from './types';
 
@@ -34,6 +34,16 @@ import { openApiDocument, openApiRoot } from './openapi';
 import type { PatchType } from './patch';
 import { createExecSession, parseExecRequest, type ExecHandler } from './exec';
 import type { StreamSession, UpgradeRequest } from '../net';
+import { parseYaml } from '../yaml';
+
+/** apply 的载荷：先按 JSON 试，不行再按 YAML */
+function parseYamlBody(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return parseYaml(raw);
+  }
+}
 
 interface ParsedPath {
   group: string;
@@ -409,9 +419,28 @@ export class ApiServer {
     const raw = await this.readBodyRaw(init);
     let patch: unknown;
     try {
-      patch = raw ? JSON.parse(raw) : {};
+      // apply 的载荷是 YAML（JSON 也是合法 YAML，客户端多半就发 JSON）
+      patch = raw
+        ? (patchType === 'application/apply-patch+yaml' ? parseYamlBody(raw) : JSON.parse(raw))
+        : {};
     } catch {
       return statusResponse(badRequest('the object provided is unrecognized (must be of type Patch)'));
+    }
+
+    if (patchType === 'application/apply-patch+yaml') {
+      const fieldManager = params.get('fieldManager');
+      if (!fieldManager) {
+        return statusResponse(invalid(definition.kind, parsed.name, [{
+          reason: 'FieldValueRequired',
+          message: 'Required value: is required for apply patch',
+          field: 'metadata.fieldManager',
+        }], definition.group));
+      }
+      const applied = this.registry.apply(
+        definition, parsed.namespace, parsed.name, patch as never,
+        { fieldManager, dryRun: params.getAll('dryRun').includes('All') }
+      );
+      return json(applied);
     }
 
     const patched = this.registry.patch(definition, parsed.namespace, parsed.name, patch, patchType, {

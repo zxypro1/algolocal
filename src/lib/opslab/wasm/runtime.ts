@@ -168,13 +168,14 @@ export class CliRuntime {
       HOME: '/root',
       KUBECONFIG: '/root/.kube/config',
       PATH: '/usr/local/bin:/usr/bin:/bin',
+      TZ: 'UTC',
       ...(options.env ?? {}),
     };
 
     const host = globalThis as Record<string, unknown>;
     const saved = {
       fs: host.fs, fetch: host.fetch, process: host.process, path: host.path,
-      dial: host.__opslabDial,
+      dial: host.__opslabDial, now: host.__opslabNow,
     };
     const openConnections: WebSocketConnection[] = [];
     // Go 退出之后再 resume 就是 "Go program has already exited"。
@@ -189,6 +190,27 @@ export class CliRuntime {
       env, on: () => {},
     };
     host.fetch = (url: unknown, init: unknown) => options.fetch(String(url), init);
+    /**
+     * Go 的 time.Now()。
+     *
+     * 不接的话 `helm list` 的 UPDATED 列、各种时间戳读的都是宿主的真时间，
+     * 同一串命令重放两遍输出就不一样了。wasm_exec.js 那两个时钟入口
+     * 由构建脚本打了补丁，会先看这个函数。
+     */
+    if (options.now) host.__opslabNow = options.now;
+    else delete host.__opslabNow;
+
+    /**
+     * 时区固定成 UTC。
+     *
+     * Go 在 js/wasm 上不看 `TZ`，它是拿 `new Date().getTimezoneOffset()` 问
+     * 宿主的。不管的话 `helm list` 的 UPDATED 列会带上这台机器的时区，
+     * 同一个世界换台机器重放，输出就不一样了。
+     * 只在这一次运行期间生效，跑完还回去。
+     */
+    const savedOffset = Date.prototype.getTimezoneOffset;
+    // eslint-disable-next-line no-extend-native
+    Date.prototype.getTimezoneOffset = () => 0;
     host.__opslabDial = (address: unknown): DialHandle | null => {
       const server = options.dial?.(String(address));
       if (!server) return null;
@@ -239,6 +261,9 @@ export class CliRuntime {
       host.process = saved.process;
       host.path = saved.path;
       host.__opslabDial = saved.dial;
+      host.__opslabNow = saved.now;
+      // eslint-disable-next-line no-extend-native
+      Date.prototype.getTimezoneOffset = savedOffset;
       // Go 正常退出时自己会 Close；异常退出时别把连接留着，
       // 不然下一条命令跑起来还有上一条的会话在往一个已经没人听的口子写
       finished = true;
