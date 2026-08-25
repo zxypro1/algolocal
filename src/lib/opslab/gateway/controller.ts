@@ -133,10 +133,10 @@ export class GatewayController extends Controller {
    * 看起来像「入口坏了」而不是「入口被删了」。
    */
   private removeService(namespace: string | undefined, name: string): void {
-    for (const [definition, resource] of [[SERVICES, 'svc'], [DEPLOYMENTS, 'deploy']] as const) {
-      void resource;
+    const proxy = `envoy-${namespace}-${name}`;
+    for (const definition of [SERVICES, DEPLOYMENTS]) {
       try {
-        this.registry.delete(definition, 'envoy-gateway-system', `envoy-${namespace}-${name}`);
+        this.registry.delete(definition, 'envoy-gateway-system', proxy);
       } catch (error) {
         if (!isNotFound(error) && !isConflict(error)) throw error;
       }

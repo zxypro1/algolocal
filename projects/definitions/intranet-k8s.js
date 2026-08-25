@@ -2740,22 +2740,17 @@ const stage10 = {
           expect(result.code).toBe(0);
         });
 
-        it('没有靠把命名空间重新打开来蒙过去', () => {
-          const policies = list('NetworkPolicy', { namespace: 'payments' });
-          const protecting = policies.filter((policy) => {
-            const types = policy.spec.policyTypes || [];
-            if (!types.includes('Ingress')) return false;
-            const selector = policy.spec.podSelector || {};
-            const labels = selector.matchLabels || {};
-            return labels.app === 'ledger';
-          });
-          expect(protecting.length).toBeGreaterThan(0);
-          for (const policy of protecting) {
-            for (const rule of policy.spec.ingress || []) {
-              // from 为空 = 谁都能进，那就没保护到
-              expect((rule.from || []).length).toBeGreaterThan(0);
-            }
-          }
+        it('拦住 analytics 靠的是策略，不是把两边拆了', () => {
+          // 把报表机停掉、或者把 ledger 的后端摘空，上一条也会「通过」
+          const reports = list('Deployment', { namespace: 'analytics' })
+            .find((item) => item.metadata.name === 'reports');
+          expect(reports.status.readyReplicas).toBeGreaterThan(0);
+
+          const endpoints = list('Endpoints', { namespace: 'payments' })
+            .find((item) => item.metadata.name === 'ledger');
+          const addresses = (endpoints.subsets || [])
+            .flatMap((subset) => subset.addresses || []);
+          expect(addresses.length).toBe(2);
         });
       });
     `),
