@@ -295,6 +295,21 @@ describe('NetworkPolicy', () => {
     expect(decision.blockedBy).toContain('ingress:');
   });
 
+  it('没写 namespaceSelector 时，podSelector 只在策略自己的命名空间里找', () => {
+    const allow = policy('from-client', 'payments', {
+      podSelector: { matchLabels: { app: 'portal' } },
+      ingress: [{ from: [{ podSelector: { matchLabels: { app: 'client' } } }] }],
+    });
+    const from = (namespace: string) => ({
+      source: { namespace, labels: { app: 'client' } },
+      destination: { namespace: 'payments', labels: { app: 'portal' } },
+      port: 8080,
+    });
+    expect(evaluate([allow], from('payments')).allowed).toBe(true);
+    // 别的命名空间里同名同标签的 Pod 不该被放进来
+    expect(evaluate([allow], from('other')).allowed).toBe(false);
+  });
+
   it('namespaceSelector 认命名空间的标签', () => {
     const allow = policy('from-monitoring', 'payments', {
       podSelector: {},
@@ -440,11 +455,16 @@ describe('网络工具的输出与退出码', () => {
     expect(missing.stdout).toContain('status: NXDOMAIN');
   });
 
-  it('nc -z 报连接成功还是失败', async () => {
+  it('nc -z 报连接成功还是失败，-w 的参数不会被当成端口', async () => {
     const world = await jumpHost();
     const refused = await world.run('nc -z -w 2 10.96.1.10 80');
     expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain('10.96.1.10 port 80');
     expect(refused.stderr).toContain('No route to host');
+
+    // 选项写在后面也要解析对
+    const trailing = await world.run('nc -z 10.96.1.10 80 -w 2');
+    expect(trailing.stderr).toContain('10.96.1.10 port 80');
   });
 
   it('ping 明确说不支持，并指出该用什么', async () => {

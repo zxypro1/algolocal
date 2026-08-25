@@ -250,10 +250,15 @@ function getent(argv: string[], options: NetToolsOptions): CommandResult {
 }
 
 function netcat(argv: string[], options: NetToolsOptions): CommandResult {
-  const values = argv.filter((arg) => !arg.startsWith('-'));
-  // `-w 2` 的 2 会混进位置参数里，取最后两个才对
-  const port = Number(values[values.length - 1]);
-  const host = values[values.length - 2];
+  // `-w` 后面那个数字是超时秒数，不是位置参数 —— 不跳过它，
+  // `nc -z host 80 -w 2` 会被解析成连 80 的 2 端口
+  const values: string[] = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '-w' || argv[i] === '-p' || argv[i] === '-s') { i += 1; continue; }
+    if (!argv[i].startsWith('-')) values.push(argv[i]);
+  }
+  const port = Number(values[1] ?? values[values.length - 1]);
+  const host = values[0];
   if (!host || !Number.isFinite(port)) {
     return { stderr: 'nc: missing hostname and port\n', code: 1 };
   }

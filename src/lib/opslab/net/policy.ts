@@ -60,7 +60,7 @@ export function evaluateEgress(policies: KubeObject[], traffic: Traffic): Policy
   for (const policy of selecting) {
     for (const rule of rulesOf(policy, 'egress')) {
       if (!portMatches(rule.ports, traffic)) continue;
-      if (peerMatches(rule.to, traffic.destination)) {
+      if (peerMatches(rule.to, traffic.destination, policy.metadata.namespace)) {
         return { allowed: true, isolated: true, allowedBy: nameOf(policy), isolatedBy: [] };
       }
     }
@@ -82,7 +82,7 @@ export function evaluateIngress(policies: KubeObject[], traffic: Traffic): Polic
   for (const policy of selecting) {
     for (const rule of rulesOf(policy, 'ingress')) {
       if (!portMatches(rule.ports, traffic)) continue;
-      if (peerMatches(rule.from, traffic.source)) {
+      if (peerMatches(rule.from, traffic.source, policy.metadata.namespace)) {
         return { allowed: true, isolated: true, allowedBy: nameOf(policy), isolatedBy: [] };
       }
     }
@@ -156,9 +156,13 @@ function portMatches(ports: Rule['ports'], traffic: Traffic): boolean {
 }
 
 /** `from` / `to` 不写（或者是空数组）表示所有来源 */
-function peerMatches(peers: unknown[] | undefined, peer: PolicyPeer): boolean {
+function peerMatches(
+  peers: unknown[] | undefined,
+  peer: PolicyPeer,
+  policyNamespace: string | undefined
+): boolean {
   if (!peers || peers.length === 0) return true;
-  return peers.some((entry) => singlePeerMatches(entry as Record<string, any>, peer));
+  return peers.some((entry) => singlePeerMatches(entry as Record<string, any>, peer, policyNamespace));
 }
 
 /**
@@ -168,7 +172,11 @@ function peerMatches(peers: unknown[] | undefined, peer: PolicyPeer): boolean {
  * （「那个命名空间里的这些 Pod」），分成两个元素才是或 —— 这一处写反了，
  * 策略会宽松得多，而且不会报错。
  */
-function singlePeerMatches(entry: Record<string, any>, peer: PolicyPeer): boolean {
+function singlePeerMatches(
+  entry: Record<string, any>,
+  peer: PolicyPeer,
+  policyNamespace: string | undefined
+): boolean {
   if (entry.ipBlock) {
     if (!peer.ip) return false;
     if (!inCidr(peer.ip, entry.ipBlock.cidr)) return false;
@@ -182,8 +190,13 @@ function singlePeerMatches(entry: Record<string, any>, peer: PolicyPeer): boolea
       if (!matchesSelector(labels, peer.namespaceLabels)) return false;
     }
   } else if (entry.podSelector) {
-    // 没写 namespaceSelector 时，podSelector 只在策略自己的命名空间里找
-    // （调用方已经把 peer 的命名空间带进来了，这里交给下面的 podSelector 判断）
+    /**
+     * 没写 namespaceSelector 时，podSelector **只在策略自己的命名空间里**找。
+     *
+     * 漏了这一条，`from: [{podSelector: {app: client}}]` 会把所有命名空间里
+     * 叫这个名字的 Pod 都放进来 —— 策略比写的人以为的宽得多，而且不报错。
+     */
+    if (peer.namespace !== policyNamespace) return false;
   }
 
   if (entry.podSelector) {
