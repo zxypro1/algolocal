@@ -27,6 +27,9 @@ const FLANNEL_IMAGE = 'docker.io/flannel/flannel:v0.28.0';
 const CILIUM_IMAGE = 'quay.io/cilium/cilium:v1.19.2';
 const ARGOCD_IMAGE = 'quay.io/argoproj/argocd:v3.2.4';
 const REPORTS_IMAGE_RC = 'harbor.corp.internal/team/reports:2.2.0-rc1';
+// 第三方的对账 exporter。上游那个地址内网拉不到，只有 harbor 上的镜像能用。
+const EXPORTER_UPSTREAM = 'quay.io/acme/settlement-exporter:1.4.2';
+const EXPORTER_MIRROR = 'harbor.corp.internal/mirror/settlement-exporter:1.4.2';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -165,6 +168,12 @@ const WORLD = {
       enforcesNetworkPolicy: true,
     },
     [ARGOCD_IMAGE]: { pullMs: 500, startupMs: 700, readyAfterMs: 300, listens: [8080] },
+    // 内网镜像仓库上的那份拷贝。上游的 quay.io 地址故意不在这张表里 ——
+    // 内网拉不到外网，第 13 关整关就建立在这一点上。
+    [EXPORTER_MIRROR]: {
+      pullMs: 300, startupMs: 400, readyAfterMs: 200,
+      listens: [9100], routes: { '/metrics': 200 }, memoryUsage: '120Mi',
+    },
     // 报表服务的预发版本
     [REPORTS_IMAGE_RC]: {
       pullMs: 500, startupMs: 800, readyAfterMs: 200,
@@ -206,7 +215,7 @@ const WORLD = {
     {
       host: 'harbor.corp.internal',
       users: { ci: 'Harbor@2026' },
-      projects: ['team', 'library'],
+      projects: ['team', 'library', 'mirror'],
       anonymousPull: false,
     },
   ],
@@ -3580,6 +3589,329 @@ const stage12 = {
   ),
 };
 
+
+/* ------------------------------------------------------------------ */
+/* 第 13 关                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 供应商给的原样 manifest。这两个文件不许改。 */
+const EXPORTER_BASE_KUSTOMIZATION = code`
+  resources:
+  - deployment.yaml
+  - service.yaml
+`;
+
+const EXPORTER_BASE_DEPLOYMENT = code`
+  # 由 ACME 提供，随产品升级一起替换。不要在这里改任何东西。
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: settlement-exporter
+    labels:
+      app: settlement-exporter
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
+        app: settlement-exporter
+    template:
+      metadata:
+        labels:
+          app: settlement-exporter
+      spec:
+        containers:
+        - name: exporter
+          image: ${EXPORTER_UPSTREAM}
+          ports:
+          - containerPort: 9100
+          resources:
+            requests:
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+`;
+
+const EXPORTER_BASE_SERVICE = code`
+  # 由 ACME 提供，随产品升级一起替换。不要在这里改任何东西。
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: settlement-exporter
+  spec:
+    selector:
+      app: settlement-exporter
+    ports:
+    - port: 9100
+      targetPort: 9100
+`;
+
+const OVERLAY_STARTER = code`
+  # 把公司的要求写在这里，别去动 base/
+  resources:
+  - ../../base
+`;
+
+const OVERLAY_REFERENCE = code`
+  namespace: analytics
+
+  resources:
+  - ../../base
+
+  # 公司要求所有平台维护的东西都带上归属标签
+  labels:
+  - pairs:
+      corp.internal/owner: platform
+    includeSelectors: false
+
+  # 内网拉不到 quay.io，换成 harbor 上的那份拷贝
+  images:
+  - name: quay.io/acme/settlement-exporter
+    newName: harbor.corp.internal/mirror/settlement-exporter
+
+  replicas:
+  - name: settlement-exporter
+    count: 2
+
+  patches:
+  - path: proxy-env.yaml
+`;
+
+const OVERLAY_PATCH_REFERENCE = code`
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: settlement-exporter
+  spec:
+    template:
+      spec:
+        containers:
+        # name 是这个列表的 merge key。漏了它，整个 containers 会被替换成
+        # 只有这一项的新列表 —— 镜像、端口、资源全没了，而且不报错。
+        - name: exporter
+          env:
+          - name: HTTPS_PROXY
+            value: http://proxy.corp.internal:3128
+`;
+
+const stage13 = {
+  id: 'kustomize-overlays',
+  title: t('改别人的 manifest，但不动它', 'Change Someone Else’s Manifest Without Touching It'),
+  goal: t(
+    code`
+      财务上了一套第三方的对账 exporter，供应商给的 manifest 在
+      \`/root/k8s/base/\`。这份东西会随产品升级整体替换，**你在里面改的任何
+      东西下次升级都会没**。
+
+      公司这边有四条要求：
+
+      - 跑在 \`analytics\` 命名空间；
+      - 所有对象带上 \`corp.internal/owner: platform\` 标签；
+      - 镜像换成内网 harbor 上的那份拷贝（\`quay.io\` 内网根本拉不到）；
+      - 副本数 2，并且容器要带上 \`HTTPS_PROXY=http://proxy.corp.internal:3128\`。
+
+      \`/root/k8s/overlays/prod/\` 下有一个空壳 kustomization。
+
+      ## 通关标准
+
+      1. \`kubectl kustomize k8s/overlays/prod\` 渲染得出来；
+      2. \`k8s/base/\` 下的文件**一个字都没改**；
+      3. apply 之后 Pod 真的跑起来（说明镜像换对了）；
+      4. 四条要求都落到了集群里的对象上；
+      5. base 里原有的端口与资源限制还在。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl kustomize k8s/overlays/prod
+      kubectl apply -k k8s/overlays/prod
+      kubectl get deploy -n analytics -o yaml
+      \`\`\`
+    `,
+    code`
+      Finance brought in a third-party settlement exporter. The vendor's manifests are
+      in \`/root/k8s/base/\`. That directory gets replaced wholesale on every product
+      upgrade, so **anything you edit inside it disappears next time**.
+
+      Four company requirements:
+
+      - run in the \`analytics\` namespace;
+      - every object carries the \`corp.internal/owner: platform\` label;
+      - the image comes from the internal harbor mirror (\`quay.io\` is unreachable
+        from the intranet);
+      - two replicas, and the container gets
+        \`HTTPS_PROXY=http://proxy.corp.internal:3128\`.
+
+      There is an empty kustomization under \`/root/k8s/overlays/prod/\`.
+
+      ## Done when
+
+      1. \`kubectl kustomize k8s/overlays/prod\` renders;
+      2. nothing under \`k8s/base/\` has been edited, not one character;
+      3. the pods actually run after you apply (which proves the image was rewritten);
+      4. all four requirements show up on the live objects;
+      5. the ports and resource limits from the base are still there.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl kustomize k8s/overlays/prod
+      kubectl apply -k k8s/overlays/prod
+      kubectl get deploy -n analytics -o yaml
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('overlay 渲染得出来，base 一个字没改', 'The overlay renders and the base is untouched'),
+    t('四条要求都落到了集群里', 'All four requirements land on the live objects'),
+    t('base 原有的字段没被冲掉', 'Fields from the base survive the patch'),
+  ],
+  hints: [
+    t(
+      'kustomize 不是模板引擎，它是对 YAML 做结构化修改。所以 base 本身就是能直接 apply 的合法 manifest —— 这也是它能改第三方东西的原因：你不需要对方配合。',
+      'Kustomize is not a template engine; it edits YAML structurally. That is why a base is a valid, directly appliable manifest, and why it can modify third-party content: the other side does not have to cooperate.'
+    ),
+    t(
+      '有些改动不用写 patch：\`namespace\`、\`labels\`、\`images\`、\`replicas\` 都是 kustomization 里的一行声明。只有它们表达不了的（比如往容器里加 env）才需要 \`patches\`。',
+      'Several changes need no patch at all: `namespace`, `labels`, `images`, and `replicas` are one-line declarations in the kustomization. Reach for `patches` only for what they cannot express, such as adding an env var to a container.'
+    ),
+    t(
+      'patch 一个列表里的元素时，必须带上它的 merge key。容器列表的 merge key 是 \`name\`。渲染完先自己看一眼 \`containers\` 还剩什么。',
+      'When patching an element inside a list you must include its merge key. For containers that key is `name`. After rendering, look at what is left under `containers`.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '直接改 \`base/deployment.yaml\`。这一关确实会因此「通过」大部分检查，但判定专门查了 base 有没有被动过 —— 因为下次供应商升级，你的改动会连同整个目录一起被替换掉，而没有人会记得。',
+      'Editing `base/deployment.yaml` directly. It would satisfy most checks, and the grader specifically looks at whether the base changed, because the next vendor upgrade replaces that whole directory and nobody will remember your edit.'
+    ),
+    t(
+      'patch 容器时漏写 \`name\`。kustomize 不会报错，它会把整个 \`containers\` 列表替换成你写的那一项 —— 渲染出来 \`containers: []\` 或者只剩一个没有镜像的容器。这是 kustomize 最经典的一个坑。',
+      'Omitting `name` when patching a container. Kustomize does not complain; it replaces the entire `containers` list with what you wrote, so the render ends up with `containers: []` or a single container with no image. This is the classic kustomize trap.'
+    ),
+    t(
+      '把 base 整个复制一份到 overlay 里再改。那样 overlay 就不再跟着上游走了，供应商修了 bug 你也拿不到。overlay 应该只写差异。',
+      'Copying the whole base into the overlay and editing the copy. The overlay then stops tracking upstream, so vendor bug fixes never reach you. An overlay should contain only the difference.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      CNI_CILIUM,
+      ...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...TLS_PLATFORM,
+      ...PORTAL_WORKLOAD, PORTAL_ROUTE,
+    ],
+    files: {
+      '/root/k8s/base/kustomization.yaml': EXPORTER_BASE_KUSTOMIZATION,
+      '/root/k8s/base/deployment.yaml': EXPORTER_BASE_DEPLOYMENT,
+      '/root/k8s/base/service.yaml': EXPORTER_BASE_SERVICE,
+      '/root/k8s/overlays/prod/kustomization.yaml': OVERLAY_STARTER,
+    },
+    referenceFiles: {
+      '/root/k8s/overlays/prod/kustomization.yaml': OVERLAY_REFERENCE,
+      '/root/k8s/overlays/prod/proxy-env.yaml': OVERLAY_PATCH_REFERENCE,
+    },
+    referenceCommands: [
+      'kubectl apply -k /root/k8s/overlays/prod',
+    ],
+  },
+  specs: [
+    spec('kustomize-overlays.spec.ts', code`
+      import { list, readFile, sh } from '@ops/lab';
+
+      describe('kustomize overlay', () => {
+        it('overlay 渲染得出来', async () => {
+          const result = await sh('kubectl kustomize /root/k8s/overlays/prod');
+          expect(result.code).toBe(0);
+          expect(result.stdout).toContain('kind: Deployment');
+        });
+
+        it('base 一个字都没改', () => {
+          const deployment = readFile('/root/k8s/base/deployment.yaml');
+          // 上游的镜像地址与副本数还是原来的
+          expect(deployment).toContain('image: quay.io/acme/settlement-exporter:1.4.2');
+          expect(deployment).toContain('replicas: 1');
+          // 公司的要求一条都不该出现在 base 里
+          expect(deployment).not.toContain('harbor.corp.internal');
+          expect(deployment).not.toContain('HTTPS_PROXY');
+          expect(deployment).not.toContain('corp.internal/owner');
+          expect(readFile('/root/k8s/base/service.yaml')).not.toContain('corp.internal/owner');
+        });
+
+        it('Pod 真的跑起来了 —— 镜像换对了', () => {
+          const running = list('Pod', { namespace: 'analytics' })
+            .filter((pod) => pod.status.phase === 'Running'
+              && (pod.metadata.labels || {}).app === 'settlement-exporter');
+          expect(running.length).toBe(2);
+        });
+
+        it('四条要求都落到了集群里', () => {
+          const deployment = list('Deployment', { namespace: 'analytics' })
+            .find((item) => item.metadata.name.includes('settlement-exporter'));
+          expect(deployment).toBeTruthy();
+          expect(deployment.metadata.labels['corp.internal/owner']).toBe('platform');
+          expect(deployment.spec.replicas).toBe(2);
+
+          const container = deployment.spec.template.spec.containers[0];
+          expect(container.image).toContain('harbor.corp.internal/mirror/settlement-exporter');
+          const proxy = (container.env || []).find((entry) => entry.name === 'HTTPS_PROXY');
+          expect(proxy.value).toBe('http://proxy.corp.internal:3128');
+        });
+
+        it('base 里原有的端口与资源还在 —— patch 没把容器列表冲掉', () => {
+          const deployment = list('Deployment', { namespace: 'analytics' })
+            .find((item) => item.metadata.name.includes('settlement-exporter'));
+          const container = deployment.spec.template.spec.containers[0];
+          expect(container.ports[0].containerPort).toBe(9100);
+          expect(container.resources.limits.memory).toBe('256Mi');
+        });
+
+        it('overlay 里没有把 base 复制一份', () => {
+          const overlay = readFile('/root/k8s/overlays/prod/kustomization.yaml');
+          expect(overlay).toContain('../../base');
+        });
+      });
+    `),
+  ],
+  focus: ['maintainability', 'correctness'],
+  extension: t(
+    code`
+      Helm 和 kustomize 常被拿来比，但它们解决的其实不是同一个问题。
+      Helm 要求**被打包的一方**先把参数挖好（\`{{ .Values.x }}\`），你只能改
+      对方想到的那些点；kustomize 不需要对方配合，任何一份 YAML 都能被 patch。
+      所以「自己的服务」适合 chart，「别人的东西」适合 overlay。
+
+      真集群里两者常常叠着用：\`helm template\` 渲染出 YAML，再交给 kustomize
+      加一层公司的规矩（统一标签、镜像仓库改写、注入 sidecar）。Argo CD 直接
+      支持这种组合。
+
+      另外值得记住的是 kustomize 的 patch 有两种：strategic merge patch
+      （像上面那样写一份不完整的 YAML）和 JSON patch（\`op/path/value\`，
+      \`patches\` 里带 \`target\` 与 \`patch\`）。前者读起来自然，但列表的行为
+      取决于 merge key；后者啰嗦，但对列表的操作是精确的 ——
+      \`/spec/template/spec/containers/0/env/-\` 明确说了「追加到第 0 个容器的
+      env 末尾」，不存在猜的余地。
+    `,
+    code`
+      Helm and kustomize get compared constantly, but they solve different problems.
+      Helm requires **the packager** to have anticipated the parameter
+      (\`{{ .Values.x }}\`); you can only change what they thought of. Kustomize needs
+      no cooperation: any YAML can be patched. So charts suit your own services, and
+      overlays suit other people's.
+
+      Real clusters often stack both: \`helm template\` renders YAML, then kustomize
+      layers on company rules (standard labels, registry rewriting, sidecar
+      injection). Argo CD supports that combination directly.
+
+      Worth remembering too: kustomize has two kinds of patch. A strategic merge patch
+      is the partial YAML shown above, natural to read but with list behaviour that
+      depends on merge keys. A JSON patch (\`op\`/\`path\`/\`value\`, written with
+      \`target\` and \`patch\`) is more verbose but precise about lists:
+      \`/spec/template/spec/containers/0/env/-\` says exactly "append to the env of
+      container zero", with nothing left to infer.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -3624,6 +3956,6 @@ module.exports = {
   files: [],
   stages: [
     stage1, stage2, stage3, stage4, stage5, stage6,
-    stage7, stage8, stage9, stage10, stage11, stage12,
+    stage7, stage8, stage9, stage10, stage11, stage12, stage13,
   ],
 };

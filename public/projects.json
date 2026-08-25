@@ -5688,6 +5688,18 @@
               8080
             ]
           },
+          "harbor.corp.internal/mirror/settlement-exporter:1.4.2": {
+            "pullMs": 300,
+            "startupMs": 400,
+            "readyAfterMs": 200,
+            "listens": [
+              9100
+            ],
+            "routes": {
+              "/metrics": 200
+            },
+            "memoryUsage": "120Mi"
+          },
           "harbor.corp.internal/team/reports:2.2.0-rc1": {
             "pullMs": 500,
             "startupMs": 800,
@@ -5773,7 +5785,8 @@
             },
             "projects": [
               "team",
-              "library"
+              "library",
+              "mirror"
             ],
             "anonymousPull": false
           }
@@ -8430,6 +8443,427 @@
         "primer": {
           "zh": "同一个服务要在开发、预发、生产各跑一套，manifest 之间只差几个值：副本数、镜像 tag、资源上限。复制粘贴三份是最直接的做法，也是最先坏掉的做法：改一处忘了改另外两处，环境之间就开始漂，而漂到什么程度没人说得清。`Helm` 解决的就是这件事：一份模板，差异全部落在 `values` 里。\n\n一个 `chart` 是一个目录：`Chart.yaml` 写名字与版本，`values.yaml` 是默认值，`templates/` 下是模板。模板用的是 Go 的 `text/template` 加上 `sprig` 函数库，`{{ .Values.replicaCount }}` 取值，`{{ .Release.Name }}` 取这次安装的名字，`{{ .Chart.Name }}` 取 chart 名。装的时候用 `-f values-prod.yaml` 或 `--set key=value` 覆盖默认值，后者优先级更高。\n\n有两个细节几乎人人踩一次。第一是`名字`：对象名里必须带 `.Release.Name`，写死的话同一个 chart 装第二个 release 时会去改第一个的对象，而且没有任何报错。惯例是定义一个 `fullname` 辅助模板，所有对象都用它。第二是`缩进`：模板输出的是文本，缩进错了就是 YAML 错。`nindent N` 会先换行再缩进 N 个空格，`{{- ` 和 ` -}}` 吃掉两侧空白，套在 `include` 与 `toYaml` 外面基本就对了。\n\n排查模板永远从 `helm template <release> <chart> -f <values>` 开始。它只渲染不安装，出来的 YAML 就是最终会被提交的东西，客户端渲染，没有服务端魔法。装上去再看集群是把两类问题混在了一起：模板写错了，和集群拒绝了。另外 Helm 会在集群里记下每次 release 渲染了哪些对象，所以 `helm upgrade` 能删掉上一版有、这一版没有的东西，`helm uninstall` 能收干净一整套。",
           "en": "The same service runs in development, staging, and production, and the manifests differ by a handful of values: replica count, image tag, resource limits. Copying the file three times is the obvious move and the first thing to break, because changing one copy and forgetting the others makes environments drift in ways nobody can enumerate. `Helm` exists for exactly this: one template, with every difference living in `values`.\n\nA `chart` is a directory: `Chart.yaml` names and versions it, `values.yaml` holds defaults, `templates/` holds the templates. Templates are Go `text/template` plus the `sprig` function library. `{{ .Values.replicaCount }}` reads a value, `{{ .Release.Name }}` gives the name of this installation, `{{ .Chart.Name }}` the chart name. At install time `-f values-prod.yaml` or `--set key=value` override the defaults, with `--set` winning.\n\nTwo details catch almost everyone once. First, `naming`: object names must include `.Release.Name`. Hardcode them and installing a second release rewrites the first release objects, silently. The convention is a `fullname` helper template used by every object. Second, `indentation`: templates emit text, so wrong indentation is wrong YAML. `nindent N` emits a newline then indents by N spaces, and `{{- ` / ` -}}` trim surrounding whitespace; wrapping `include` and `toYaml` with those covers most cases.\n\nDebugging templates always starts at `helm template <release> <chart> -f <values>`. It renders without installing, and the YAML it prints is exactly what would be submitted: rendering is client-side, with no server-side magic. Installing first and then inspecting the cluster conflates two different problems, a wrong template and a rejecting cluster. Helm also records in the cluster which objects each release rendered, which is how `helm upgrade` deletes what the previous revision had and this one does not, and how `helm uninstall` cleans up a whole set."
+        }
+      },
+      {
+        "id": "kustomize-overlays",
+        "title": {
+          "zh": "改别人的 manifest，但不动它",
+          "en": "Change Someone Else’s Manifest Without Touching It"
+        },
+        "goal": {
+          "zh": "财务上了一套第三方的对账 exporter，供应商给的 manifest 在\n`/root/k8s/base/`。这份东西会随产品升级整体替换，**你在里面改的任何\n东西下次升级都会没**。\n\n公司这边有四条要求：\n\n- 跑在 `analytics` 命名空间；\n- 所有对象带上 `corp.internal/owner: platform` 标签；\n- 镜像换成内网 harbor 上的那份拷贝（`quay.io` 内网根本拉不到）；\n- 副本数 2，并且容器要带上 `HTTPS_PROXY=http://proxy.corp.internal:3128`。\n\n`/root/k8s/overlays/prod/` 下有一个空壳 kustomization。\n\n## 通关标准\n\n1. `kubectl kustomize k8s/overlays/prod` 渲染得出来；\n2. `k8s/base/` 下的文件**一个字都没改**；\n3. apply 之后 Pod 真的跑起来（说明镜像换对了）；\n4. 四条要求都落到了集群里的对象上；\n5. base 里原有的端口与资源限制还在。\n\n## 会用到的命令\n\n```bash\nkubectl kustomize k8s/overlays/prod\nkubectl apply -k k8s/overlays/prod\nkubectl get deploy -n analytics -o yaml\n```\n",
+          "en": "Finance brought in a third-party settlement exporter. The vendor's manifests are\nin `/root/k8s/base/`. That directory gets replaced wholesale on every product\nupgrade, so **anything you edit inside it disappears next time**.\n\nFour company requirements:\n\n- run in the `analytics` namespace;\n- every object carries the `corp.internal/owner: platform` label;\n- the image comes from the internal harbor mirror (`quay.io` is unreachable\n  from the intranet);\n- two replicas, and the container gets\n  `HTTPS_PROXY=http://proxy.corp.internal:3128`.\n\nThere is an empty kustomization under `/root/k8s/overlays/prod/`.\n\n## Done when\n\n1. `kubectl kustomize k8s/overlays/prod` renders;\n2. nothing under `k8s/base/` has been edited, not one character;\n3. the pods actually run after you apply (which proves the image was rewritten);\n4. all four requirements show up on the live objects;\n5. the ports and resource limits from the base are still there.\n\n## Commands you will need\n\n```bash\nkubectl kustomize k8s/overlays/prod\nkubectl apply -k k8s/overlays/prod\nkubectl get deploy -n analytics -o yaml\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "overlay 渲染得出来，base 一个字没改",
+            "en": "The overlay renders and the base is untouched"
+          },
+          {
+            "zh": "四条要求都落到了集群里",
+            "en": "All four requirements land on the live objects"
+          },
+          {
+            "zh": "base 原有的字段没被冲掉",
+            "en": "Fields from the base survive the patch"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "kustomize 不是模板引擎，它是对 YAML 做结构化修改。所以 base 本身就是能直接 apply 的合法 manifest —— 这也是它能改第三方东西的原因：你不需要对方配合。",
+            "en": "Kustomize is not a template engine; it edits YAML structurally. That is why a base is a valid, directly appliable manifest, and why it can modify third-party content: the other side does not have to cooperate."
+          },
+          {
+            "zh": "有些改动不用写 patch：`namespace`、`labels`、`images`、`replicas` 都是 kustomization 里的一行声明。只有它们表达不了的（比如往容器里加 env）才需要 `patches`。",
+            "en": "Several changes need no patch at all: `namespace`, `labels`, `images`, and `replicas` are one-line declarations in the kustomization. Reach for `patches` only for what they cannot express, such as adding an env var to a container."
+          },
+          {
+            "zh": "patch 一个列表里的元素时，必须带上它的 merge key。容器列表的 merge key 是 `name`。渲染完先自己看一眼 `containers` 还剩什么。",
+            "en": "When patching an element inside a list you must include its merge key. For containers that key is `name`. After rendering, look at what is left under `containers`."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "直接改 `base/deployment.yaml`。这一关确实会因此「通过」大部分检查，但判定专门查了 base 有没有被动过 —— 因为下次供应商升级，你的改动会连同整个目录一起被替换掉，而没有人会记得。",
+            "en": "Editing `base/deployment.yaml` directly. It would satisfy most checks, and the grader specifically looks at whether the base changed, because the next vendor upgrade replaces that whole directory and nobody will remember your edit."
+          },
+          {
+            "zh": "patch 容器时漏写 `name`。kustomize 不会报错，它会把整个 `containers` 列表替换成你写的那一项 —— 渲染出来 `containers: []` 或者只剩一个没有镜像的容器。这是 kustomize 最经典的一个坑。",
+            "en": "Omitting `name` when patching a container. Kustomize does not complain; it replaces the entire `containers` list with what you wrote, so the render ends up with `containers: []` or a single container with no image. This is the classic kustomize trap."
+          },
+          {
+            "zh": "把 base 整个复制一份到 overlay 里再改。那样 overlay 就不再跟着上游走了，供应商修了 bug 你也拿不到。overlay 应该只写差异。",
+            "en": "Copying the whole base into the overlay and editing the copy. The overlay then stops tracking upstream, so vendor bug fixes never reach you. An overlay should contain only the difference."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "cilium",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cilium"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cilium"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cilium"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "cilium-agent",
+                        "image": "quay.io/cilium/cilium:v1.19.2",
+                        "ports": [
+                          {
+                            "containerPort": 9962
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "Certificate",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "secretName": "portal-tls",
+                "duration": "2160h",
+                "renewBefore": "720h",
+                "commonName": "portal.corp.internal",
+                "dnsNames": [
+                  "portal.corp.internal"
+                ],
+                "issuerRef": {
+                  "name": "corp-ca",
+                  "kind": "ClusterIssuer"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "Gateway",
+              "metadata": {
+                "name": "corp-gw",
+                "namespace": "payments"
+              },
+              "spec": {
+                "gatewayClassName": "envoy-internal",
+                "listeners": [
+                  {
+                    "name": "https",
+                    "port": 443,
+                    "protocol": "HTTPS",
+                    "hostname": "portal.corp.internal",
+                    "tls": {
+                      "mode": "Terminate",
+                      "certificateRefs": [
+                        {
+                          "name": "portal-tls"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "http",
+                    "port": 80,
+                    "protocol": "HTTP",
+                    "hostname": "portal.corp.internal"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.corp.internal"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "files": {
+            "/root/k8s/base/kustomization.yaml": "resources:\n- deployment.yaml\n- service.yaml\n",
+            "/root/k8s/base/deployment.yaml": "# 由 ACME 提供，随产品升级一起替换。不要在这里改任何东西。\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: settlement-exporter\n  labels:\n    app: settlement-exporter\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: settlement-exporter\n  template:\n    metadata:\n      labels:\n        app: settlement-exporter\n    spec:\n      containers:\n      - name: exporter\n        image: quay.io/acme/settlement-exporter:1.4.2\n        ports:\n        - containerPort: 9100\n        resources:\n          requests:\n            memory: 128Mi\n          limits:\n            memory: 256Mi\n",
+            "/root/k8s/base/service.yaml": "# 由 ACME 提供，随产品升级一起替换。不要在这里改任何东西。\napiVersion: v1\nkind: Service\nmetadata:\n  name: settlement-exporter\nspec:\n  selector:\n    app: settlement-exporter\n  ports:\n  - port: 9100\n    targetPort: 9100\n",
+            "/root/k8s/overlays/prod/kustomization.yaml": "# 把公司的要求写在这里，别去动 base/\nresources:\n- ../../base\n"
+          },
+          "referenceFiles": {
+            "/root/k8s/overlays/prod/kustomization.yaml": "namespace: analytics\n\nresources:\n- ../../base\n\n# 公司要求所有平台维护的东西都带上归属标签\nlabels:\n- pairs:\n    corp.internal/owner: platform\n  includeSelectors: false\n\n# 内网拉不到 quay.io，换成 harbor 上的那份拷贝\nimages:\n- name: quay.io/acme/settlement-exporter\n  newName: harbor.corp.internal/mirror/settlement-exporter\n\nreplicas:\n- name: settlement-exporter\n  count: 2\n\npatches:\n- path: proxy-env.yaml\n",
+            "/root/k8s/overlays/prod/proxy-env.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: settlement-exporter\nspec:\n  template:\n    spec:\n      containers:\n      # name 是这个列表的 merge key。漏了它，整个 containers 会被替换成\n      # 只有这一项的新列表 —— 镜像、端口、资源全没了，而且不报错。\n      - name: exporter\n        env:\n        - name: HTTPS_PROXY\n          value: http://proxy.corp.internal:3128\n"
+          },
+          "referenceCommands": [
+            "kubectl apply -k /root/k8s/overlays/prod"
+          ]
+        },
+        "specs": [
+          {
+            "path": "kustomize-overlays.spec.ts",
+            "content": "import { list, readFile, sh } from '@ops/lab';\n\ndescribe('kustomize overlay', () => {\n  it('overlay 渲染得出来', async () => {\n    const result = await sh('kubectl kustomize /root/k8s/overlays/prod');\n    expect(result.code).toBe(0);\n    expect(result.stdout).toContain('kind: Deployment');\n  });\n\n  it('base 一个字都没改', () => {\n    const deployment = readFile('/root/k8s/base/deployment.yaml');\n    // 上游的镜像地址与副本数还是原来的\n    expect(deployment).toContain('image: quay.io/acme/settlement-exporter:1.4.2');\n    expect(deployment).toContain('replicas: 1');\n    // 公司的要求一条都不该出现在 base 里\n    expect(deployment).not.toContain('harbor.corp.internal');\n    expect(deployment).not.toContain('HTTPS_PROXY');\n    expect(deployment).not.toContain('corp.internal/owner');\n    expect(readFile('/root/k8s/base/service.yaml')).not.toContain('corp.internal/owner');\n  });\n\n  it('Pod 真的跑起来了 —— 镜像换对了', () => {\n    const running = list('Pod', { namespace: 'analytics' })\n      .filter((pod) => pod.status.phase === 'Running'\n        && (pod.metadata.labels || {}).app === 'settlement-exporter');\n    expect(running.length).toBe(2);\n  });\n\n  it('四条要求都落到了集群里', () => {\n    const deployment = list('Deployment', { namespace: 'analytics' })\n      .find((item) => item.metadata.name.includes('settlement-exporter'));\n    expect(deployment).toBeTruthy();\n    expect(deployment.metadata.labels['corp.internal/owner']).toBe('platform');\n    expect(deployment.spec.replicas).toBe(2);\n\n    const container = deployment.spec.template.spec.containers[0];\n    expect(container.image).toContain('harbor.corp.internal/mirror/settlement-exporter');\n    const proxy = (container.env || []).find((entry) => entry.name === 'HTTPS_PROXY');\n    expect(proxy.value).toBe('http://proxy.corp.internal:3128');\n  });\n\n  it('base 里原有的端口与资源还在 —— patch 没把容器列表冲掉', () => {\n    const deployment = list('Deployment', { namespace: 'analytics' })\n      .find((item) => item.metadata.name.includes('settlement-exporter'));\n    const container = deployment.spec.template.spec.containers[0];\n    expect(container.ports[0].containerPort).toBe(9100);\n    expect(container.resources.limits.memory).toBe('256Mi');\n  });\n\n  it('overlay 里没有把 base 复制一份', () => {\n    const overlay = readFile('/root/k8s/overlays/prod/kustomization.yaml');\n    expect(overlay).toContain('../../base');\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "maintainability",
+          "correctness"
+        ],
+        "extension": {
+          "zh": "Helm 和 kustomize 常被拿来比，但它们解决的其实不是同一个问题。\nHelm 要求**被打包的一方**先把参数挖好（`{{ .Values.x }}`），你只能改\n对方想到的那些点；kustomize 不需要对方配合，任何一份 YAML 都能被 patch。\n所以「自己的服务」适合 chart，「别人的东西」适合 overlay。\n\n真集群里两者常常叠着用：`helm template` 渲染出 YAML，再交给 kustomize\n加一层公司的规矩（统一标签、镜像仓库改写、注入 sidecar）。Argo CD 直接\n支持这种组合。\n\n另外值得记住的是 kustomize 的 patch 有两种：strategic merge patch\n（像上面那样写一份不完整的 YAML）和 JSON patch（`op/path/value`，\n`patches` 里带 `target` 与 `patch`）。前者读起来自然，但列表的行为\n取决于 merge key；后者啰嗦，但对列表的操作是精确的 ——\n`/spec/template/spec/containers/0/env/-` 明确说了「追加到第 0 个容器的\nenv 末尾」，不存在猜的余地。\n",
+          "en": "Helm and kustomize get compared constantly, but they solve different problems.\nHelm requires **the packager** to have anticipated the parameter\n(`{{ .Values.x }}`); you can only change what they thought of. Kustomize needs\nno cooperation: any YAML can be patched. So charts suit your own services, and\noverlays suit other people's.\n\nReal clusters often stack both: `helm template` renders YAML, then kustomize\nlayers on company rules (standard labels, registry rewriting, sidecar\ninjection). Argo CD supports that combination directly.\n\nWorth remembering too: kustomize has two kinds of patch. A strategic merge patch\nis the partial YAML shown above, natural to read but with list behaviour that\ndepends on merge keys. A JSON patch (`op`/`path`/`value`, written with\n`target` and `patch`) is more verbose but precise about lists:\n`/spec/template/spec/containers/0/env/-` says exactly \"append to the env of\ncontainer zero\", with nothing left to infer.\n"
+        },
+        "primer": {
+          "zh": "`kustomize` 和 Helm 常被拿来比，但它们解决的不是同一个问题。Helm 是模板：被打包的一方先把参数挖好（`{{ .Values.x }}`），你只能改对方想到的那些点。kustomize 不是模板，它是对 YAML 做结构化修改：不需要对方配合，任何一份 manifest 都能被改。所以「自己的服务」适合写 chart，「别人给的东西」适合套 overlay。它内置在 `kubectl` 里：`kubectl kustomize <dir>` 只渲染，`kubectl apply -k <dir>` 渲染并提交。\n\n结构是 `base` 加 `overlays`。`base` 是一份能直接 apply 的完整 manifest；每个 overlay 是一个目录，里面的 `kustomization.yaml` 用 `resources: [../../base]` 指回 base，然后只写差异。关键在于 base 保持原样：上游升级时整个目录换掉，你的修改都在 overlay 里，一条都不会丢。\n\n有一批常见改动不用写 patch，`kustomization.yaml` 里一行就够：`namespace` 改命名空间，`namePrefix` / `nameSuffix` 加前后缀，`labels` 打统一标签，`images` 改镜像仓库或 tag，`replicas` 改副本数，`configMapGenerator` 从文件生成 ConfigMap 并自动带上内容哈希后缀（内容一变名字就变，Pod 因此会滚动重启）。只有这些表达不了的，才需要 `patches`。\n\n`patches` 有两种写法，行为差别很大。`strategic merge patch` 是写一份不完整的 YAML，读起来自然，但**列表的合并取决于 merge key**：容器列表的 merge key 是 `name`，patch 里漏写它，kustomize 不会报错，而是把整个 `containers` 替换成你写的那一项，镜像、端口、资源全都没了。`JSON patch`（`op` / `path` / `value`）啰嗦但精确，`/spec/template/spec/containers/0/env/-` 明确表示追加到第 0 个容器的 env 末尾，不存在猜的余地。",
+          "en": "`kustomize` gets compared to Helm constantly, but they solve different problems. Helm is templating: the packager has to anticipate every parameter (`{{ .Values.x }}`), so you can only change what they thought of. Kustomize is not templating; it edits YAML structurally, needing no cooperation from the author, so any manifest can be changed. Charts suit your own services, overlays suit what other people hand you. It ships inside `kubectl`: `kubectl kustomize <dir>` renders, `kubectl apply -k <dir>` renders and submits.\n\nThe structure is a `base` plus `overlays`. The base is a complete, directly appliable manifest. Each overlay is a directory whose `kustomization.yaml` points back with `resources: [../../base]` and then states only the difference. The point is that the base stays pristine: when upstream ships a new version the whole directory is replaced, and because every change of yours lives in the overlay, nothing is lost.\n\nA whole class of changes needs no patch at all, just a line in `kustomization.yaml`: `namespace` moves everything, `namePrefix` / `nameSuffix` rename, `labels` stamps labels, `images` rewrites registry or tag, `replicas` sets counts, and `configMapGenerator` builds a ConfigMap from files with a content hash appended to its name, so changing the content changes the name and rolls the pods. Reach for `patches` only for what these cannot express.\n\n`patches` come in two forms that behave very differently. A `strategic merge patch` is partial YAML, natural to read, but **list merging depends on the merge key**. For containers that key is `name`; omit it and kustomize does not complain, it replaces the entire `containers` list with the single entry you wrote, losing the image, ports, and resources. A `JSON patch` (`op` / `path` / `value`) is verbose but exact: `/spec/template/spec/containers/0/env/-` says append to the env of container zero, with nothing left to infer."
         }
       }
     ]

@@ -1222,6 +1222,21 @@ const primers = {
       )
     ),
 
+    'kustomize-overlays': t(
+      p(
+        '`kustomize` 和 Helm 常被拿来比，但它们解决的不是同一个问题。Helm 是模板：被打包的一方先把参数挖好（`{{ .Values.x }}`），你只能改对方想到的那些点。kustomize 不是模板，它是对 YAML 做结构化修改：不需要对方配合，任何一份 manifest 都能被改。所以「自己的服务」适合写 chart，「别人给的东西」适合套 overlay。它内置在 `kubectl` 里：`kubectl kustomize <dir>` 只渲染，`kubectl apply -k <dir>` 渲染并提交。',
+        '结构是 `base` 加 `overlays`。`base` 是一份能直接 apply 的完整 manifest；每个 overlay 是一个目录，里面的 `kustomization.yaml` 用 `resources: [../../base]` 指回 base，然后只写差异。关键在于 base 保持原样：上游升级时整个目录换掉，你的修改都在 overlay 里，一条都不会丢。',
+        '有一批常见改动不用写 patch，`kustomization.yaml` 里一行就够：`namespace` 改命名空间，`namePrefix` / `nameSuffix` 加前后缀，`labels` 打统一标签，`images` 改镜像仓库或 tag，`replicas` 改副本数，`configMapGenerator` 从文件生成 ConfigMap 并自动带上内容哈希后缀（内容一变名字就变，Pod 因此会滚动重启）。只有这些表达不了的，才需要 `patches`。',
+        '`patches` 有两种写法，行为差别很大。`strategic merge patch` 是写一份不完整的 YAML，读起来自然，但**列表的合并取决于 merge key**：容器列表的 merge key 是 `name`，patch 里漏写它，kustomize 不会报错，而是把整个 `containers` 替换成你写的那一项，镜像、端口、资源全都没了。`JSON patch`（`op` / `path` / `value`）啰嗦但精确，`/spec/template/spec/containers/0/env/-` 明确表示追加到第 0 个容器的 env 末尾，不存在猜的余地。'
+      ),
+      p(
+        '`kustomize` gets compared to Helm constantly, but they solve different problems. Helm is templating: the packager has to anticipate every parameter (`{{ .Values.x }}`), so you can only change what they thought of. Kustomize is not templating; it edits YAML structurally, needing no cooperation from the author, so any manifest can be changed. Charts suit your own services, overlays suit what other people hand you. It ships inside `kubectl`: `kubectl kustomize <dir>` renders, `kubectl apply -k <dir>` renders and submits.',
+        'The structure is a `base` plus `overlays`. The base is a complete, directly appliable manifest. Each overlay is a directory whose `kustomization.yaml` points back with `resources: [../../base]` and then states only the difference. The point is that the base stays pristine: when upstream ships a new version the whole directory is replaced, and because every change of yours lives in the overlay, nothing is lost.',
+        'A whole class of changes needs no patch at all, just a line in `kustomization.yaml`: `namespace` moves everything, `namePrefix` / `nameSuffix` rename, `labels` stamps labels, `images` rewrites registry or tag, `replicas` sets counts, and `configMapGenerator` builds a ConfigMap from files with a content hash appended to its name, so changing the content changes the name and rolls the pods. Reach for `patches` only for what these cannot express.',
+        '`patches` come in two forms that behave very differently. A `strategic merge patch` is partial YAML, natural to read, but **list merging depends on the merge key**. For containers that key is `name`; omit it and kustomize does not complain, it replaces the entire `containers` list with the single entry you wrote, losing the image, ports, and resources. A `JSON patch` (`op` / `path` / `value`) is verbose but exact: `/spec/template/spec/containers/0/env/-` says append to the env of container zero, with nothing left to infer.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',
