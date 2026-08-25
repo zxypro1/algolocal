@@ -5,7 +5,7 @@ export { createOpsWorld, type OpsWorld, type OpsWorldOptions } from './world';
 export { createOpsLabApi, createOpsLabModules, type OpsLabApi } from './modules';
 export { runOpsStage, emptyMetrics, type RunOpsStageOptions } from './runner';
 export {
-  buildTopology, snapshotVersions, diffVersions,
+  buildTopology, snapshotVersions, diffVersions, currentNamespaceOf,
   type TopologyGraph, type TopologyNode, type TopologyEdge, type TopologyLane,
   type TopologyStatus, type TopologyOptions, type ChangeEntry, type ChangeType,
 } from './view';

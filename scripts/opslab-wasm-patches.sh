@@ -279,4 +279,35 @@ func (jsFetchRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 EOF
 
+# --- 5. client-go：只说 JSON，不要 protobuf --------------------------------
+#
+# `kubectl create configmap` 这类走 typed client 的命令会把请求体编成
+# Kubernetes 自己的 protobuf（`k8s\0` 开头的那个封装）。我们的 apiserver 只讲
+# JSON，于是这些命令一律报「the request body is not valid JSON」——
+# 而 `kubectl apply` 因为走 unstructured 客户端反倒是好的，这种「一半命令能用」
+# 最难查。
+#
+# 协商的入口只有一个函数，改成不做事即可。学员那边完全看不出区别：
+# 命令、输出、报错都一样，变的只是线上的编码。
+python3 - "$V" <<'PYEOF'
+import re, sys
+path = f"{sys.argv[1]}/k8s.io/client-go/rest/request.go"
+source = open(path).read()
+old = """func (r *Request) UseProtobufAsDefault() *Request {
+	if r.contentTypeNotSet && len(r.contentConfig.AcceptContentTypes) == 0 {
+		r.contentConfig.AcceptContentTypes = "application/vnd.kubernetes.protobuf,application/json"
+		r.contentConfig.ContentType = "application/vnd.kubernetes.protobuf"
+		r.setAcceptHeader()
+	}
+	return r
+}"""
+new = """func (r *Request) UseProtobufAsDefault() *Request {
+	// opslab: 宿主的 apiserver 只讲 JSON，这里不切 protobuf。
+	return r
+}"""
+if old not in source:
+    raise SystemExit("UseProtobufAsDefault 的样子变了，补丁要重写")
+open(path, "w").write(source.replace(old, new))
+PYEOF
+
 echo "js/wasm 补丁已应用"

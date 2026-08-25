@@ -338,3 +338,35 @@ function parseId(id: string): { kind: string; namespace?: string; name: string }
   const [kind, namespace, name] = id.split('/');
   return { kind, namespace: namespace === '-' ? undefined : namespace, name };
 }
+
+/* ------------------------------------------------------------------ */
+/* kubeconfig                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 当前 context 用的是哪个命名空间。
+ *
+ * 拓扑面板要跟着它走：关卡在 `payments` 里干活、拓扑却盯着 `default`，
+ * 学员会以为自己什么都没建出来。
+ *
+ * 自己扫而不是引 YAML 库：只取两个字段，而且 kubeconfig 是学员会手改的文件，
+ * 半坏的时候也得给个合理答案，而不是抛异常把面板炸掉。
+ */
+export function currentNamespaceOf(kubeconfig: string, fallback = 'default'): string {
+  const current = /^current-context:\s*(\S+)\s*$/m.exec(kubeconfig)?.[1];
+  if (!current) return fallback;
+
+  const contexts = kubeconfig.split(/^contexts:\s*$/m)[1];
+  if (!contexts) return fallback;
+  // 到下一个顶层键为止
+  const section = contexts.split(/^[a-zA-Z]/m)[0];
+
+  const entry = section
+    .split(/^- /m)
+    .find((block) => new RegExp(`^\\s*name:\\s*${escapeForRegExp(current)}\\s*$`, 'm').test(block));
+  return /^\s*namespace:\s*(\S+)\s*$/m.exec(entry ?? '')?.[1] ?? fallback;
+}
+
+function escapeForRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}

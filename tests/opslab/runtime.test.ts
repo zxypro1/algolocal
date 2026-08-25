@@ -239,10 +239,12 @@ async function worldWith(options: {
   registries?: Record<string, any>;
   objects?: KubeObject[];
   deployment?: KubeObject;
+  resolveImage?: (image: string) => any;
 }) {
   const cluster = createCluster({
     images: options.images ?? { [IMAGE]: { listens: [8080], routes: { '/healthz': 200 } } },
     registries: options.registries,
+    resolveImage: options.resolveImage,
   });
   cluster.start();
   const scheme = cluster.scheme;
@@ -303,8 +305,11 @@ describe('集群里真的会这样', () => {
 
   it('私有仓库没凭据 -> ImagePullBackOff，报的是 401', async () => {
     const { pod, cluster } = await worldWith({
+      // 目录里写着的镜像视同「节点上已经有了」，所以这里要用一个只在仓库里的
+      images: {},
       registries: { 'harbor.corp.internal': { requiresAuth: true, users: { ci: 'pw' } } },
       deployment: DEPLOYMENT(),
+      resolveImage: () => ({ listens: [8080] }),
     });
     expect(pod.status.containerStatuses[0].state.waiting.reason).toBe('ImagePullBackOff');
 
@@ -316,6 +321,8 @@ describe('集群里真的会这样', () => {
 
   it('给对 imagePullSecret 就能拉下来', async () => {
     const { pod } = await worldWith({
+      images: {},
+      resolveImage: () => ({ listens: [8080] }),
       registries: { 'harbor.corp.internal': { requiresAuth: true, users: { ci: 'pw' } } },
       objects: [secret('harbor', {
         '.dockerconfigjson': JSON.stringify({

@@ -5,7 +5,9 @@
  * 拓扑与变更流是同一份状态的投影，隐藏用例跑出来的报告结构和代码关卡一致。
  */
 import ts from 'typescript';
-import { createOpsWorld, runOpsStage, buildTopology, snapshotVersions, diffVersions } from '../../src/lib/opslab/lab';
+import {
+  createOpsWorld, runOpsStage, buildTopology, snapshotVersions, diffVersions, currentNamespaceOf,
+} from '../../src/lib/opslab/lab';
 import { createTranspiler } from '../../src/lib/engineering/transpile';
 import type { OpsWorldSpec, SpecFile } from '../../src/lib/engineering/types';
 
@@ -298,5 +300,39 @@ describe('变更流', () => {
     const world = await createOpsWorld({ world: WORLD, stage: { objects: [DEPLOYMENT] } });
     const snapshot = snapshotVersions(world.cluster);
     expect([...snapshot.keys()].some((key) => key.startsWith('Event/'))).toBe(false);
+  });
+});
+
+describe('拓扑跟着 kubeconfig 走', () => {
+  /**
+   * 关卡在 payments 里干活、拓扑却盯着 default，学员会以为自己什么都没建出来。
+   * kubeconfig 是学员会手改的文件，半坏的时候也得给个合理答案。
+   */
+  const kubeconfig = (currentContext: string) => [
+    'apiVersion: v1', 'kind: Config',
+    'clusters:', '- name: c', '  cluster:', '    server: https://apiserver.opslab:6443',
+    'contexts:',
+    '- name: legacy', '  context:', '    cluster: c', '    user: u', '    namespace: default',
+    '- name: prod', '  context:', '    cluster: c', '    user: u', '    namespace: payments',
+    '- name: bare', '  context:', '    cluster: c', '    user: u',
+    `current-context: ${currentContext}`,
+    'users:', '- name: u', '  user:', '    token: t', '',
+  ].join('\n');
+
+  it.each([
+    ['legacy', 'default'],
+    ['prod', 'payments'],
+    // context 没写 namespace，按 default 算，和 kubectl 一样
+    ['bare', 'default'],
+    // 指向一个不存在的 context：不该抛，给个能用的答案
+    ['ghost', 'default'],
+  ])('current-context 是 %s 时看 %s', (context, expected) => {
+    expect(currentNamespaceOf(kubeconfig(context))).toBe(expected);
+  });
+
+  it('文件是空的或者被改坏了也不抛', () => {
+    expect(currentNamespaceOf('')).toBe('default');
+    expect(currentNamespaceOf('current-context: prod')).toBe('default');
+    expect(currentNamespaceOf('这不是 YAML')).toBe('default');
   });
 });

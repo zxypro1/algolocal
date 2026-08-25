@@ -11,7 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { KubeObject } from '../lib/opslab/apiserver';
 import type { CommandRecord } from '../lib/opslab/machine';
 import {
-  buildTopology, createOpsWorld, diffVersions, snapshotVersions,
+  buildTopology, createOpsWorld, currentNamespaceOf, diffVersions, snapshotVersions,
   type ChangeEntry, type OpsWorld, type TopologyGraph,
 } from '../lib/opslab/lab';
 import { sharedCliRuntime } from '../lib/opslab/wasm';
@@ -65,7 +65,9 @@ export function useOpsWorkspace(options: UseOpsWorkspaceOptions): OpsWorkspaceSt
   const [changes, setChanges] = useState<ChangeEntry[]>([]);
   const [generation, setGeneration] = useState(0);
   const [showReplicaSets, setShowReplicaSets] = useState(false);
-  const [namespace, setNamespace] = useState('default');
+  const [namespace, setNamespaceState] = useState('default');
+  /** 学员自己在下拉框里选过之后，就不再跟着 kubeconfig 跑 */
+  const namespacePinned = useRef(false);
 
   /** 上一张拓扑，用来标出「刚才那一下改了什么」 */
   const previousTopology = useRef<TopologyGraph | undefined>(undefined);
@@ -92,6 +94,8 @@ export function useOpsWorkspace(options: UseOpsWorkspaceOptions): OpsWorkspaceSt
         });
         if (cancelled) return;
         versionSnapshot.current = snapshotVersions(next.cluster);
+        namespacePinned.current = false;
+        setNamespaceState(namespaceOf(next));
         setWorld(next);
         setApplets(next.applets);
         setStatus('ready');
@@ -118,6 +122,8 @@ export function useOpsWorkspace(options: UseOpsWorkspaceOptions): OpsWorkspaceSt
     versionSnapshot.current = after;
 
     setChanges(diffVersions(before, after, world.now()));
+    // `kubectl config use-context` / `-n` 会换命名空间，拓扑该跟着走
+    if (!namespacePinned.current) setNamespaceState(namespaceOf(world));
     setRevision((value) => value + 1);
     return (result.stdout + result.stderr).replace(/\n/g, '\r\n');
   }, [world, namespace, showReplicaSets]);
@@ -169,8 +175,20 @@ export function useOpsWorkspace(options: UseOpsWorkspaceOptions): OpsWorkspaceSt
     showReplicaSets,
     setShowReplicaSets,
     namespace,
-    setNamespace,
+    setNamespace: (value: string) => { namespacePinned.current = true; setNamespaceState(value); },
   };
+}
+
+/**
+ * 拓扑该看哪个命名空间。
+ *
+ * 跟着 kubeconfig 的 current-context 走 —— 关卡在 `payments` 里干活，
+ * 拓扑却盯着 `default`，学员会以为自己什么都没建出来。
+ */
+function namespaceOf(world: OpsWorld): string {
+  const path = `${world.machine.shell.env.HOME ?? '/root'}/.kube/config`;
+  if (!world.machine.vfs.exists(path)) return 'default';
+  return currentNamespaceOf(world.machine.vfs.readFile(path));
 }
 
 export default useOpsWorkspace;

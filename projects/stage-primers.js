@@ -1087,6 +1087,66 @@ const primers = {
       )
     ),
 
+    'pull-credentials': t(
+      p(
+        '镜像存放在`仓库`（registry）里。公开的仓库（Docker Hub、registry.k8s.io）谁都能拉，公司内部的仓库（Harbor、Nexus、ECR）通常要认证。认证信息不是「一个密码」这么简单：Docker 生态里它是一份 JSON，按仓库主机名分别记着用户名和密码，存在 `~/.docker/config.json` 里，`docker login` 写的就是它。',
+        '关键在于**谁去拉镜像**。你在跳板机上 `docker login`，那份凭据在跳板机的磁盘上。而 Pod 的镜像是由它所在节点上的 `kubelet` 去拉的，那是另一台机器，它读不到你的家目录。所以集群需要自己的一份凭据。',
+        '这份凭据在 Kubernetes 里就是一个 `Secret`，类型是 `kubernetes.io/dockerconfigjson`，内容和 `~/.docker/config.json` 一模一样。`kubectl create secret docker-registry` 会替你拼出来。Pod 通过 `spec.imagePullSecrets` 引用它，kubelet 拉镜像时就带上。注意 Secret 是命名空间级的，引用只能在同一个命名空间里。',
+        '还要分清两种失败。镜像名字打错、tag 不存在，报的是「manifest unknown」；有镜像但没权限，报的是 401。两者在 `kubectl get pods` 里都显示成 `ImagePullBackOff`，只有 `kubectl describe pod` 底下的 Events 能区分。查错方向完全不同，所以第一件事永远是去看 Events。'
+      ),
+      p(
+        'Images live in a `registry`. Public registries (Docker Hub, registry.k8s.io) serve anyone; internal ones (Harbor, Nexus, ECR) usually require authentication. That credential is not just a password: in the Docker ecosystem it is a JSON document keyed by registry host, stored in `~/.docker/config.json`, which is what `docker login` writes.',
+        'The crucial question is **who does the pulling**. When you run `docker login` on a jump host, the credential lands on that host. A pod image, however, is pulled by the `kubelet` on whichever node runs the pod, which is a different machine that cannot read your home directory. The cluster therefore needs its own copy.',
+        'In Kubernetes that copy is a `Secret` of type `kubernetes.io/dockerconfigjson`, whose contents are exactly a `~/.docker/config.json`. `kubectl create secret docker-registry` assembles it for you. A pod references it through `spec.imagePullSecrets`, and the kubelet presents it when pulling. Secrets are namespaced, so the reference only works within the same namespace.',
+        'Two failures also need separating. A misspelled name or missing tag reports "manifest unknown"; an existing image without permission reports 401. Both surface as `ImagePullBackOff` in `kubectl get pods`, and only the Events at the bottom of `kubectl describe pod` tell them apart. The investigations are completely different, so reading Events is always the first move.'
+      )
+    ),
+
+    'config-and-secrets': t(
+      p(
+        '把配置写死在镜像里，意味着改一个日志级别要重新构建、重新推送、重新部署。Kubernetes 把配置拆出来放在两种对象里：`ConfigMap` 存普通配置，`Secret` 存敏感数据。两者的结构几乎一样，区别在于 Secret 的值是 base64 编码的，并且在集群里有一些额外的保护（可以加密存储、不会被随手打印在事件里）。注意 base64 不是加密，任何人拿到 Secret 都能一行命令解开。',
+        '注入方式有两种。`环境变量`（`env.valueFrom.configMapKeyRef` / `secretKeyRef`，或者 `envFrom` 整份铺进去）在容器启动时一次性写入进程环境，之后不再变化。`卷挂载`把每个键变成一个文件，kubelet 会在后台同步更新它们，所以应用如果自己重新读文件，就能感知到配置变化。',
+        '引用了不存在的 ConfigMap 或 Secret 时，Pod 会停在 `CreateContainerConfigError`。这个状态很值得记住：容器**从未启动**，所以 `kubectl logs` 是空的，去翻应用日志毫无意义。原因写在 `kubectl describe pod` 的 Events 里，而且会区分「对象不存在」和「对象在但键不存在」。',
+        '最后一件反直觉的事：改了 ConfigMap，正在跑的 Pod 不会重启。对环境变量注入来说，这意味着新值根本不会生效。Kubernetes 不会替你做这个决定，因为重启是有代价的。通行做法是在 Pod 模板上放一个配置内容的哈希注解，配置变了哈希就变，模板变了 Deployment 才会滚动出新的一批 Pod。'
+      ),
+      p(
+        'Baking configuration into an image means rebuilding, repushing, and redeploying to change a log level. Kubernetes separates it into two objects: a `ConfigMap` for ordinary settings and a `Secret` for sensitive data. Their structure is nearly identical; a Secret stores base64-encoded values and gets some extra protection in the cluster (it can be encrypted at rest and is not casually printed into events). Note that base64 is not encryption: anyone holding the Secret can decode it in one command.',
+        'There are two ways to inject them. `Environment variables` (`env.valueFrom.configMapKeyRef` or `secretKeyRef`, or `envFrom` for a whole map) are written into the process environment once at container start and never change afterwards. `Volume mounts` turn each key into a file, and the kubelet keeps those files in sync, so an application that rereads the file can notice a change.',
+        'Referencing a ConfigMap or Secret that does not exist leaves the pod in `CreateContainerConfigError`. That state is worth memorising: the container **never started**, so `kubectl logs` is empty and reading application logs is pointless. The reason appears in the pod Events, which distinguish "object not found" from "object exists but the key does not".',
+        'One last counterintuitive fact: editing a ConfigMap does not restart running pods. With environment-variable injection that means the new value simply never takes effect. Kubernetes will not make that decision for you, because restarting has a cost. The common practice is an annotation on the pod template holding a hash of the configuration: the config changes, the hash changes, the template changes, and only then does the Deployment roll out new pods.'
+      )
+    ),
+
+    'probes-and-shutdown': t(
+      p(
+        'kubelet 靠`探针`判断容器的状态，一共三种，回答三个不同的问题。`就绪探针`（readinessProbe）问「现在能不能给它流量」，失败时这个 Pod 会被从 Service 的 Endpoints 里摘掉，但容器不重启。`存活探针`（livenessProbe）问「这个进程还有没有救」，连续失败到阈值就重启容器。`启动探针`（startupProbe）专门照顾启动慢的应用：它没通过之前，存活探针不生效。',
+        '探针的形式有 HTTP、TCP 和执行命令三种。HTTP 探针最常用，也最容易配错：端口写成了应用没在听的那个，或者路径写成了应用没实现的那个。表现是 Pod 一直 Running 但 `READY` 那一列是 `0/1`，应用日志里什么异常都没有，因为应用确实什么问题都没有。证据只在 `kubectl describe pod` 的 Events 里，那里会有一条 `Readiness probe failed`。',
+        '把存活探针配得和就绪探针一样激进是常见的放大器。下游变慢的时候，本该只是「暂时摘掉流量」的情况会变成「整批 Pod 同时重启」，一次抖动就此升级成一次故障。经验做法是：就绪探针可以敏感，存活探针要迟钝。',
+        '`优雅终止`是另一半。删除一个 Pod 时，kubelet 先发 SIGTERM，等 `terminationGracePeriodSeconds`（默认 30 秒），还没退出才发 SIGKILL。但这里有个时间差：摘除 Endpoints 和发送 SIGTERM 是**并行**发生的，Endpoints 的变更传播到所有节点需要时间，这段时间里的新请求仍然会打到正在退出的 Pod 上。所以通行做法是加一个 `preStop` 钩子先睡几秒，把这段传播时间让出来，再让进程开始退出。滚动更新时把 `maxUnavailable` 设成 0，则保证任何时刻可用副本数都不低于期望值。'
+      ),
+      p(
+        'The kubelet judges container state with `probes`. There are three, and they answer three different questions. A `readinessProbe` asks "can this take traffic right now"; when it fails the pod is removed from the Service Endpoints but the container is not restarted. A `livenessProbe` asks "is this process beyond saving"; enough consecutive failures restart the container. A `startupProbe` exists for slow-starting applications: until it passes, liveness is suspended.',
+        'Probes come in HTTP, TCP, and exec forms. HTTP is the most common and the easiest to misconfigure: a port the application does not listen on, or a path it does not implement. The symptom is a pod that stays Running with `0/1` in the READY column while the application logs show nothing wrong, because nothing is wrong with the application. The evidence lives only in the pod Events, as a `Readiness probe failed` line.',
+        'Making liveness as aggressive as readiness is a common amplifier. When a dependency slows down, what should be "temporarily remove from traffic" becomes "restart every pod at once", turning a blip into an outage. The rule of thumb: readiness may be sensitive, liveness should be dull.',
+        '`Graceful termination` is the other half. Deleting a pod makes the kubelet send SIGTERM, wait `terminationGracePeriodSeconds` (30 by default), and then SIGKILL. There is a race in there: Endpoints removal and SIGTERM happen **in parallel**, and the Endpoints change takes time to reach every node, so new requests keep arriving at a pod that is already shutting down. The usual remedy is a `preStop` hook that sleeps for a few seconds, giving that propagation time before the process begins exiting. Setting `maxUnavailable` to 0 during rollouts additionally guarantees the available replica count never dips below the desired one.'
+      )
+    ),
+
+    'resources-and-qos': t(
+      p(
+        '容器声明资源有两个字段，管的是两件事。`requests` 是给调度器看的：调度器按它做装箱，把 Pod 放到「已承诺容量」还够的节点上。`limits` 是运行时的硬约束，落到 cgroup 上。两者可以不相等，也可以只写一个，不同的写法会得到不同的后果。',
+        '内存和 CPU 的超限行为完全不同。内存是不可压缩资源：用量超过 limit，内核直接 OOMKill 这个容器，退出码 137（128+9，SIGKILL），日志经常来不及写完。CPU 是可压缩资源：超过 limit 只是被限流，进程继续跑，只是变慢，表现为 P99 变差而不是进程消失。所以「应用没崩但突然变慢了」和「应用被杀了」要往两个方向查。',
+        '`QoS 等级`不是自己填的，是 kubelet 根据 requests 与 limits 推出来的：每个容器的 cpu 和 memory 都写了且 requests 等于 limits，是 `Guaranteed`；一个都没写，是 `BestEffort`；其余是 `Burstable`。这个等级决定节点内存不够时谁先被赶走：BestEffort 最先，然后是用量超过自己 requests 的 Burstable，Guaranteed 最后。',
+        '于是有一个很容易走进去的死胡同：容器被 OOMKill 了，把 limits 删掉「就不会被杀了」。确实不会，但它同时变成了 BestEffort，节点一紧张第一个被驱逐，只是把一种死法换成了另一种。正确的做法是先量出实际用量再设定数字。生产里有 VPA 的 recommender 帮忙算，以及 LimitRange 给命名空间兜一个默认值。'
+      ),
+      p(
+        'A container declares resources with two fields that govern two different things. `requests` is for the scheduler: it bin-packs by requests, placing pods on nodes that still have promised capacity. `limits` is a runtime constraint enforced by cgroups. The two need not be equal, and either may be omitted, with different consequences.',
+        'Memory and CPU behave completely differently when exceeded. Memory is incompressible: cross the limit and the kernel OOM-kills the container with exit code 137 (128+9, SIGKILL), often before the logs finish flushing. CPU is compressible: crossing the limit only throttles the process, which keeps running but slower, showing up as a degraded P99 rather than a missing process. "The app did not crash but suddenly got slow" and "the app was killed" therefore point in different directions.',
+        'The `QoS class` is derived, not declared. The kubelet computes it from requests and limits: every container declaring both cpu and memory with requests equal to limits is `Guaranteed`; declaring nothing is `BestEffort`; anything else is `Burstable`. That class decides who is evicted first when a node runs short of memory: BestEffort first, then Burstable pods exceeding their own requests, and Guaranteed last.',
+        'This creates an easy dead end. A container gets OOM-killed, so you remove the limit and it stops being killed. True, but it has also become BestEffort and is now first in line for eviction: one way of dying traded for another. The right move is to measure actual usage and set numbers from that. Production adds the VPA recommender to compute them and a LimitRange to give the namespace sane defaults.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',

@@ -50,7 +50,7 @@ const BANNER = [
 export default function OpsWorkspace({ session, registerClearResults }: OpsWorkspaceProps) {
   const { t } = useTranslation();
   const { colorScheme } = useMantineColorScheme();
-  const { project, stage, stageIndex, pick, files, handleFileChange } = session;
+  const { project, stage, stageIndex, progress, pick, files, handleFileChange, goToStage } = session;
 
   // 页面已经挡过一次了，这里再挡一次是给类型看的 —— hooks 必须在返回之前调完，
   // 所以下面所有 hook 都用可空值兜底，真正的空态在最后统一返回。
@@ -136,7 +136,19 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
       const transpile = await resolveTranspiler(
         Object.fromEntries(specs.map((spec) => [spec.path, spec.content]))
       );
-      setReport(await runOpsStage({ world: ops.world, specs, transpile }));
+      const outcome = await runOpsStage({ world: ops.world, specs, transpile });
+      setReport(outcome);
+      // ops 关卡没有指标门槛，分数就按用例通过率算
+      session.recordAttempt({
+        stageId: stage!.id,
+        passed: outcome.status === 'passed',
+        passedCases: outcome.totals.passed,
+        totalCases: outcome.totals.total,
+        gatesPassed: true,
+        score: outcome.totals.total
+          ? Math.round((outcome.totals.passed / outcome.totals.total) * 100)
+          : 0,
+      });
     } catch (error) {
       setReport({
         status: 'error',
@@ -154,7 +166,7 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
     } finally {
       setRunning(false);
     }
-  }, [ops.world, stage?.specs]);
+  }, [ops.world, stage?.specs, session]);
 
   const namespaces = useMemo(() => {
     if (!ops.world) return ['default'];
@@ -197,7 +209,43 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
         }
       />
       <AppShell.Main>
-        <div style={{ height: `calc(100vh - ${HEADER_HEIGHT}px)`, display: 'flex', minHeight: 0 }}>
+        <div style={{ height: `calc(100vh - ${HEADER_HEIGHT}px)`, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          {/*
+            关卡进度条。
+            换关卡会把整个世界重建 —— 每一关都从自己的起始状态开始，
+            这是「反向验证」这件事成立的前提：判定看的是这一关做了什么。
+          */}
+          <Group
+            gap={6}
+            px="md"
+            py={6}
+            wrap="nowrap"
+            style={{ borderBottom: '1px solid var(--app-border)', overflowX: 'auto', flexShrink: 0 }}
+          >
+            {project.stages.map((item, index) => {
+              const done = progress?.completedStages.includes(item.id) ?? false;
+              const current = index === stageIndex;
+              const unlocked = index === 0
+                || (progress?.completedStages.includes(project.stages[index - 1].id) ?? false)
+                || done;
+              return (
+                <Tooltip key={item.id} label={unlocked ? pick(item.title) : '先过上一关'} position="bottom">
+                  <Button
+                    size="compact-xs"
+                    variant={current ? 'filled' : done ? 'light' : 'subtle'}
+                    color={done ? 'teal' : current ? 'brand' : 'gray'}
+                    onClick={() => unlocked && goToStage(index)}
+                    disabled={!unlocked}
+                    style={{ flexShrink: 0 }}
+                  >
+                    {index + 1}. {pick(item.title)}
+                  </Button>
+                </Tooltip>
+              );
+            })}
+          </Group>
+
+        <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
           {/* 任务 */}
           <Paper
             withBorder={false}
@@ -353,6 +401,7 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
               </div>
             </div>
           </div>
+        </div>
         </div>
       </AppShell.Main>
     </AppShell>

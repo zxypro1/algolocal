@@ -15,6 +15,8 @@ const { t, code, spec } = require('./_helpers');
 /* ------------------------------------------------------------------ */
 
 const PORTAL_IMAGE = 'harbor.corp.internal/team/portal:1.4.0';
+const PORTAL_IMAGE_NEXT = 'harbor.corp.internal/team/portal:1.5.0';
+const REPORTS_IMAGE = 'harbor.corp.internal/team/reports:2.1.0';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -89,6 +91,13 @@ const WORLD = {
       memoryUsage: '180Mi',
       handlesSigterm: true,
       runAsUser: 10001,
+    },
+    // 财务的报表任务：吃 900Mi，limits 写小了就会被 OOMKill
+    [REPORTS_IMAGE]: {
+      pullMs: 500, startupMs: 800, readyAfterMs: 200,
+      listens: [9090],
+      routes: { '/healthz': 200 },
+      memoryUsage: '900Mi',
     },
   },
   // 本地已经有的基础镜像，写 Dockerfile 时 FROM 得着
@@ -698,6 +707,950 @@ const stage3 = {
   ),
 };
 
+/* ------------------------------------------------------------------ */
+/* 第 4 关                                                             */
+/* ------------------------------------------------------------------ */
+
+const PORTAL_15_MANIFEST = code`
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    replicas: 2
+    selector:
+      matchLabels:
+        app: portal
+    template:
+      metadata:
+        labels:
+          app: portal
+      spec:
+        containers:
+        - name: web
+          image: ${PORTAL_IMAGE_NEXT}
+          ports:
+          - containerPort: 8080
+`;
+
+/** 参考解：只多两行，密码一个字都没有 */
+const PORTAL_15_WITH_SECRET = PORTAL_15_MANIFEST.replace(
+  '      containers:',
+  '      imagePullSecrets:\n      - name: harbor\n      containers:'
+);
+
+const stage4 = {
+  id: 'pull-credentials',
+  title: t('私有仓库与拉取凭据', 'Private registry and pull credentials'),
+  goal: t(
+    code`
+      上一关你把 \`portal:1.5.0\` 推上了 Harbor，现在要把它部署下去。
+      apply 之后你会看到 Pod 卡在 \`ImagePullBackOff\`。
+
+      注意一件事：你在跳板机上 \`docker login\` 过，那份凭据存在
+      \`~/.docker/config.json\` 里。但**拉镜像的不是跳板机，是节点上的 kubelet**，
+      它不知道你登录过。
+
+      ## 通关标准
+
+      1. Pod 全部 Running；
+      2. 集群里有一个 \`kubernetes.io/dockerconfigjson\` 类型的 Secret；
+      3. Deployment 通过 \`imagePullSecrets\` 引用它；
+      4. **Harbor 的密码不能明文出现在 \`~/infra\` 下的任何文件里**，
+         那个目录是要进 Git 的。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl apply -f infra/portal.yaml
+      kubectl describe pod -n payments -l app=portal
+      kubectl create secret docker-registry harbor \
+        --docker-server=harbor.corp.internal \
+        --docker-username=ci --docker-password='Harbor@2026' -n payments
+      kubectl get secret harbor -n payments -o yaml
+      \`\`\`
+    `,
+    code`
+      In the previous stage you pushed \`portal:1.5.0\` to Harbor. Now deploy it.
+      After you apply, the pods will sit in \`ImagePullBackOff\`.
+
+      One thing to notice: you ran \`docker login\` on the jump host, and those
+      credentials live in \`~/.docker/config.json\`. But **the thing pulling the
+      image is not the jump host, it is the kubelet on each node**, and it has no
+      idea you logged in.
+
+      ## Done when
+
+      1. all pods are Running;
+      2. the cluster has a \`kubernetes.io/dockerconfigjson\` Secret;
+      3. the Deployment references it through \`imagePullSecrets\`;
+      4. **the Harbor password appears in plaintext in no file under \`~/infra\`**,
+         because that directory is going into Git.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl apply -f infra/portal.yaml
+      kubectl describe pod -n payments -l app=portal
+      kubectl create secret docker-registry harbor \
+        --docker-server=harbor.corp.internal \
+        --docker-username=ci --docker-password='Harbor@2026' -n payments
+      kubectl get secret harbor -n payments -o yaml
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('Pod 全部 Running', 'All pods Running'),
+    t('有 dockerconfigjson 类型的 Secret 并被引用', 'A dockerconfigjson Secret exists and is referenced'),
+    t('密码不出现在要进 Git 的文件里', 'The password is in no file bound for Git'),
+  ],
+  hints: [
+    t(
+      '\`kubectl describe pod\` 最下面的 Events 会写清楚是 401 还是「镜像不存在」，两者查法不同。',
+      'The Events at the bottom of \`kubectl describe pod\` distinguish a 401 from "image not found"; they are different investigations.'
+    ),
+    t(
+      '\`kubectl create secret docker-registry\` 会替你生成 \`.dockerconfigjson\`，不用手写。',
+      '\`kubectl create secret docker-registry\` generates the \`.dockerconfigjson\` for you.'
+    ),
+    t(
+      'Secret 用命令创建、manifest 里只写 \`imagePullSecrets\`，密码就不会进 Git。',
+      'Create the Secret with a command and keep only \`imagePullSecrets\` in the manifest; the password never enters Git.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '把 Secret 的 YAML（含 base64 的密码）写进 \`infra/\` 提交上去。base64 不是加密，\`base64 -d\` 一下就出来了。',
+      'Committing the Secret YAML with its base64 password into \`infra/\`. base64 is not encryption; one \`base64 -d\` reveals it.'
+    ),
+    t(
+      'Secret 建在了错的命名空间。imagePullSecrets 只能引用**同一个命名空间**里的 Secret。',
+      'Creating the Secret in the wrong namespace. imagePullSecrets can only reference a Secret in the **same namespace**.'
+    ),
+  ],
+  ops: {
+    setupCommands: [
+      ...PREVIOUS_STAGES,
+      // 上一关的成果：镜像已经在 Harbor 上了
+      "docker login harbor.corp.internal -u ci -p 'Harbor@2026'",
+      'docker build -t harbor.corp.internal/team/portal:1.5.0 /root/app',
+      'docker push harbor.corp.internal/team/portal:1.5.0',
+      // 跳板机上的登录态和集群无关，这一点正是本关要教的
+      'docker logout harbor.corp.internal',
+    ],
+    files: {
+      '/root/infra/portal.yaml': PORTAL_15_MANIFEST,
+      '/root/app/Dockerfile': REFERENCE_DOCKERFILE,
+      '/root/app/.dockerignore': REFERENCE_DOCKERIGNORE,
+      '/root/app/server.js': APP_SERVER,
+      '/root/app/package.json': APP_PACKAGE,
+      '/root/app/package-lock.json': '{"lockfileVersion":3,"name":"portal"}\n',
+    },
+    referenceFiles: { '/root/infra/portal.yaml': PORTAL_15_WITH_SECRET },
+    referenceCommands: [
+      'kubectl create secret docker-registry harbor --docker-server=harbor.corp.internal '
+        + "--docker-username=ci --docker-password='Harbor@2026' -n payments",
+      'kubectl apply -f /root/infra/portal.yaml',
+    ],
+  },
+  specs: [
+    spec('pull-credentials.spec.ts', code`
+      import { get, list, sh } from '@ops/lab';
+
+      describe('私有仓库与拉取凭据', () => {
+        it('Pod 全部 Running', () => {
+          const pods = list('Pod', { namespace: 'payments', labels: { app: 'portal' } });
+          expect(pods.length > 0).toBe(true);
+          for (const pod of pods) expect(pod.status.phase).toBe('Running');
+        });
+
+        it('有一个 dockerconfigjson 类型的 Secret', () => {
+          const secrets = list('Secret', { namespace: 'payments' })
+            .filter((item) => item.type === 'kubernetes.io/dockerconfigjson');
+          expect(secrets.length > 0).toBe(true);
+        });
+
+        it('Deployment 引用了它', () => {
+          const deployment = get('Deployment', 'portal', 'payments');
+          const references = deployment.spec.template.spec.imagePullSecrets || [];
+          expect(references.length > 0).toBe(true);
+
+          const names = list('Secret', { namespace: 'payments' })
+            .filter((item) => item.type === 'kubernetes.io/dockerconfigjson')
+            .map((item) => item.metadata.name);
+          expect(names.includes(references[0].name)).toBe(true);
+        });
+
+        it('密码没写进要进 Git 的文件里', async () => {
+          const found = await sh("grep -rl Harbor@2026 /root/infra");
+          expect(found.stdout.trim()).toBe('');
+        });
+      });
+    `),
+  ],
+  focus: ['correctness', 'resilience'],
+  extension: t(
+    code`
+      「我明明 docker login 过了」是这一关最常见的困惑，它背后是一个值得记住的
+      边界：**镜像是节点拉的，不是你拉的**。同理，\`imagePullSecrets\` 也可以挂在
+      ServiceAccount 上（那样命名空间里所有 Pod 自动带上），生产里通常这么做，
+      免得每个 Deployment 都写一遍。
+    `,
+    code`
+      "But I already ran docker login" is the standard confusion here, and behind it
+      is a boundary worth remembering: **the node pulls the image, not you**.
+      For the same reason, \`imagePullSecrets\` can also be attached to a
+      ServiceAccount so every pod in the namespace inherits it, which is what
+      production usually does rather than repeating it in every Deployment.
+    `
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+/* 第 5 关                                                             */
+/* ------------------------------------------------------------------ */
+
+const PORTAL_CONFIG_MANIFEST = code`
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    replicas: 2
+    selector:
+      matchLabels:
+        app: portal
+    template:
+      metadata:
+        labels:
+          app: portal
+      spec:
+        containers:
+        - name: web
+          image: ${PORTAL_IMAGE}
+          ports:
+          - containerPort: 8080
+          env:
+          - name: LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: portal-config
+                key: LOG_LEVEL
+          - name: UPSTREAM_URL
+            valueFrom:
+              configMapKeyRef:
+                name: portal-config
+                key: UPSTREAM_URL
+          - name: DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: portal-db
+                key: password
+`;
+
+const stage5 = {
+  id: 'config-and-secrets',
+  title: t('配置与机密', 'Configuration and secrets'),
+  goal: t(
+    code`
+      门户要读三个配置：日志级别、上游地址、数据库密码。manifest 里已经写好了
+      引用，但引用的 ConfigMap 和 Secret 都还不存在，apply 之后 Pod 会卡在
+      \`CreateContainerConfigError\`。
+
+      注意这个状态和 \`CrashLoopBackOff\` 的区别：容器**根本没起来**，
+      所以 \`kubectl logs\` 里什么都没有。去看应用日志是白费功夫。
+
+      建好之后还有第二件事：**改一个配置值，让它真的生效**。
+      改 ConfigMap 不会自动重启 Pod，这是设计，不是 bug。
+
+      ## 通关标准
+
+      1. \`portal-config\` 有 \`LOG_LEVEL\` 与 \`UPSTREAM_URL\`；
+      2. \`portal-db\` 是一个 Secret，有 \`password\`，而且**密码不在 ConfigMap 里**；
+      3. Pod 全部 Running 且 Ready；
+      4. 改过配置之后触发了一次滚动更新（这个 Deployment 下面不止一个 ReplicaSet）。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl apply -f infra/portal.yaml
+      kubectl describe pod -n payments -l app=portal
+      kubectl create configmap portal-config -n payments \
+        --from-literal=LOG_LEVEL=info --from-literal=UPSTREAM_URL=http://ledger.payments:8080
+      kubectl create secret generic portal-db -n payments --from-literal=password='pg-9f3aQ2mK'
+      kubectl rollout status deploy/portal -n payments
+      kubectl get rs -n payments
+      \`\`\`
+    `,
+    code`
+      The portal reads three settings: log level, upstream URL, and a database
+      password. The manifest already references them, but neither the ConfigMap nor
+      the Secret exists, so after you apply the pods sit in
+      \`CreateContainerConfigError\`.
+
+      Note how that differs from \`CrashLoopBackOff\`: the container **never
+      started**, so \`kubectl logs\` shows nothing. Reading application logs is
+      wasted effort here.
+
+      Once they exist there is a second task: **change one value and make it take
+      effect**. Editing a ConfigMap does not restart pods. That is by design, not a bug.
+
+      ## Done when
+
+      1. \`portal-config\` holds \`LOG_LEVEL\` and \`UPSTREAM_URL\`;
+      2. \`portal-db\` is a Secret holding \`password\`, and **the password is not
+         in the ConfigMap**;
+      3. all pods are Running and Ready;
+      4. changing the config triggered a rollout (the Deployment owns more than one
+         ReplicaSet).
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl apply -f infra/portal.yaml
+      kubectl describe pod -n payments -l app=portal
+      kubectl create configmap portal-config -n payments \
+        --from-literal=LOG_LEVEL=info --from-literal=UPSTREAM_URL=http://ledger.payments:8080
+      kubectl create secret generic portal-db -n payments --from-literal=password='pg-9f3aQ2mK'
+      kubectl rollout status deploy/portal -n payments
+      kubectl get rs -n payments
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('ConfigMap 与 Secret 都建好并被正确引用', 'ConfigMap and Secret created and referenced'),
+    t('密码只在 Secret 里', 'The password lives only in the Secret'),
+    t('改配置之后真的滚动更新了一次', 'Changing the config actually triggered a rollout'),
+  ],
+  hints: [
+    t(
+      '\`CreateContainerConfigError\` 的具体原因在 \`kubectl describe pod\` 的 Events 里，它会说是「ConfigMap 不存在」还是「key 不存在」。',
+      'The reason behind \`CreateContainerConfigError\` is in the pod Events: it distinguishes "ConfigMap not found" from "key not found".'
+    ),
+    t(
+      '让配置变更生效的通行做法是在 pod template 上加一个注解（比如配置内容的哈希）。模板变了，Deployment 才会建新的 ReplicaSet。',
+      'The common way to make config changes take effect is an annotation on the pod template (a hash of the config). Only a changed template makes the Deployment create a new ReplicaSet.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '把密码放进 ConfigMap。ConfigMap 没有任何访问控制上的特殊待遇，日志、事件、\`describe\` 里都可能带出来。',
+      'Putting the password in a ConfigMap. ConfigMaps get no special access treatment and leak through logs, events, and \`describe\`.'
+    ),
+    t(
+      '改完 ConfigMap 就以为完事了。已经在跑的 Pod 里那份环境变量是启动时注入的，不会自己更新，除非它是以卷挂载的形式读文件。',
+      'Assuming the ConfigMap edit is enough. Environment variables are injected at container start and never update, unless the config is mounted as a volume and re-read.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    files: { '/root/infra/portal.yaml': PORTAL_CONFIG_MANIFEST },
+    referenceCommands: [
+      'kubectl create configmap portal-config -n payments '
+        + '--from-literal=LOG_LEVEL=info --from-literal=UPSTREAM_URL=http://ledger.payments:8080',
+      "kubectl create secret generic portal-db -n payments --from-literal=password=pg-9f3aQ2mK",
+      'kubectl apply -f /root/infra/portal.yaml',
+      // 改一个配置值，并让它真的生效
+      'kubectl create configmap portal-config -n payments '
+        + '--from-literal=LOG_LEVEL=debug --from-literal=UPSTREAM_URL=http://ledger.payments:8080 '
+        + '--dry-run=client -o yaml > /root/infra/portal-config.yaml',
+      'kubectl apply -f /root/infra/portal-config.yaml',
+      'kubectl patch deploy portal -n payments --type=merge -p '
+        + '\'{"spec":{"template":{"metadata":{"annotations":{"checksum/config":"debug-7b3f"}}}}}\'',
+    ],
+  },
+  specs: [
+    spec('config-and-secrets.spec.ts', code`
+      import { get, list } from '@ops/lab';
+
+      describe('配置与机密', () => {
+        it('ConfigMap 有那两个键', () => {
+          const configMap = get('ConfigMap', 'portal-config', 'payments');
+          expect(configMap).toBeTruthy();
+          expect(typeof configMap.data.LOG_LEVEL).toBe('string');
+          expect(typeof configMap.data.UPSTREAM_URL).toBe('string');
+        });
+
+        it('密码在 Secret 里，不在 ConfigMap 里', () => {
+          const secret = get('Secret', 'portal-db', 'payments');
+          expect(secret).toBeTruthy();
+          const keys = Object.keys(secret.data || secret.stringData || {});
+          expect(keys.includes('password')).toBe(true);
+
+          const configMap = get('ConfigMap', 'portal-config', 'payments');
+          const values = Object.values(configMap.data || {}).join(' ');
+          expect(values.includes('pg-9f3aQ2mK')).toBe(false);
+        });
+
+        it('Pod 全部 Running 且 Ready', () => {
+          const pods = list('Pod', { namespace: 'payments', labels: { app: 'portal' } });
+          expect(pods.length > 0).toBe(true);
+          for (const pod of pods) {
+            expect(pod.status.phase).toBe('Running');
+            const ready = (pod.status.conditions || []).find((c) => c.type === 'Ready');
+            expect(ready && ready.status).toBe('True');
+          }
+        });
+
+        it('改过配置之后滚动更新过一次', () => {
+          const deployment = get('Deployment', 'portal', 'payments');
+          const owned = list('ReplicaSet', { namespace: 'payments' }).filter((rs) =>
+            (rs.metadata.ownerReferences || []).some((o) => o.uid === deployment.metadata.uid)
+          );
+          expect(owned.length >= 2).toBe(true);
+        });
+      });
+    `),
+  ],
+  focus: ['correctness', 'resilience'],
+  extension: t(
+    code`
+      「改了 ConfigMap 但没生效」几乎是每个团队都会踩一次的坑。行业里的标准解法
+      是在 pod template 上放一个配置内容的校验和：Helm 里是
+      \`checksum/config: {{ include ... | sha256sum }}\`，Kustomize 则用
+      \`configMapGenerator\` 自动给 ConfigMap 名字加哈希后缀，名字变了，
+      模板自然就变了。
+    `,
+    code`
+      "I changed the ConfigMap and nothing happened" is a rite of passage. The
+      industry answer is a checksum of the config on the pod template: in Helm,
+      \`checksum/config: {{ include ... | sha256sum }}\`; in Kustomize,
+      \`configMapGenerator\` appends a content hash to the ConfigMap name, so the
+      name changes and therefore the template changes.
+    `
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+/* 第 6 关                                                             */
+/* ------------------------------------------------------------------ */
+
+const PORTAL_PROBE_MANIFEST = code`
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    replicas: 3
+    selector:
+      matchLabels:
+        app: portal
+    template:
+      metadata:
+        labels:
+          app: portal
+      spec:
+        containers:
+        - name: web
+          image: ${PORTAL_IMAGE}
+          ports:
+          - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 2
+            periodSeconds: 5
+`;
+
+const PORTAL_PROBE_FIXED = code`
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    replicas: 3
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 0
+        maxSurge: 1
+    selector:
+      matchLabels:
+        app: portal
+    template:
+      metadata:
+        labels:
+          app: portal
+      spec:
+        terminationGracePeriodSeconds: 30
+        containers:
+        - name: web
+          image: ${PORTAL_IMAGE}
+          ports:
+          - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
+`;
+
+const stage6 = {
+  id: 'probes-and-shutdown',
+  title: t('探针、优雅终止与自愈', 'Probes, graceful shutdown, and self-healing'),
+  goal: t(
+    code`
+      前任给门户加了就绪探针，然后 Pod 就再也没 Ready 过 ——
+      \`kubectl get pods\` 里三个 Pod 全是 \`Running\` 但 \`0/1\`，
+      \`kubectl logs\` 里干干净净，应用一切正常。
+
+      问题不在应用，在探针指错了地方。顺便说，这个 Deployment 现在滚动更新时
+      会真的掉流量：默认策略允许同时下线 25% 的副本，而且没有给进程留退出时间。
+
+      ## 通关标准
+
+      1. 三个 Pod 全部 Ready；
+      2. 就绪探针指向应用真正在听的端口和真正存在的路径；
+      3. 配了存活探针（它和就绪探针管的不是一回事）；
+      4. 滚动更新期间不掉可用副本：\`maxUnavailable: 0\`；
+      5. 给进程留了退出时间：\`terminationGracePeriodSeconds\` 不小于 20，
+         并且有 \`preStop\` 钩子先把流量摘掉。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl get pods -n payments
+      kubectl describe pod -n payments -l app=portal
+      kubectl get events -n payments --sort-by=.metadata.creationTimestamp
+      kubectl apply -f infra/portal.yaml
+      kubectl rollout status deploy/portal -n payments
+      \`\`\`
+    `,
+    code`
+      Your predecessor added a readiness probe to the portal, and the pods have not
+      been Ready since. \`kubectl get pods\` shows three pods that are \`Running\`
+      but \`0/1\`, \`kubectl logs\` is clean, and the application is fine.
+
+      The problem is not the application; the probe points at the wrong place.
+      Separately, this Deployment currently drops traffic during a rollout: the
+      default strategy allows a quarter of the replicas to go away at once, and the
+      process is given no time to shut down.
+
+      ## Done when
+
+      1. all three pods are Ready;
+      2. the readiness probe targets the port the app actually listens on and a path
+         that actually exists;
+      3. a liveness probe is configured (it answers a different question than readiness);
+      4. rollouts never lose an available replica: \`maxUnavailable: 0\`;
+      5. the process gets time to exit: \`terminationGracePeriodSeconds\` of at least
+         20, plus a \`preStop\` hook that lets traffic drain first.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl get pods -n payments
+      kubectl describe pod -n payments -l app=portal
+      kubectl get events -n payments --sort-by=.metadata.creationTimestamp
+      kubectl apply -f infra/portal.yaml
+      kubectl rollout status deploy/portal -n payments
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('三个 Pod 全部 Ready', 'All three pods Ready'),
+    t('就绪探针与存活探针都配对了', 'Readiness and liveness probes both configured correctly'),
+    t('maxUnavailable 为 0，并给了优雅退出的时间', 'maxUnavailable is 0 and shutdown has room to happen'),
+  ],
+  hints: [
+    t(
+      '\`kubectl describe pod\` 的 Events 里会有一条 \`Readiness probe failed\`，它把端口写出来了。',
+      'The pod Events contain a \`Readiness probe failed\` line that names the port.'
+    ),
+    t(
+      '容器 \`ports.containerPort\` 写的是 8080，探针写的是别的数字，这两处对不上。',
+      'The container declares \`containerPort: 8080\` while the probe names a different number.'
+    ),
+    t(
+      '就绪探针失败只是把这个 Pod 从 Endpoints 里摘掉；存活探针失败会重启容器。用错了会让一个只是暂时忙的进程被反复杀掉。',
+      'A failing readiness probe only removes the pod from Endpoints; a failing liveness probe restarts the container. Confusing them gets a merely busy process killed over and over.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '把存活探针配得和就绪探针一样激进。依赖的下游慢一点，整批 Pod 会被同时重启，把一次抖动放大成一次故障。',
+      'Making the liveness probe as aggressive as the readiness probe. One slow dependency then restarts every pod at once, turning a blip into an outage.'
+    ),
+    t(
+      '只把 \`terminationGracePeriodSeconds\` 调大而不加 \`preStop\`。收到 SIGTERM 的那一刻，Endpoints 的更新还没传播到所有节点，这段时间里的请求照样会打到正在退出的 Pod 上。',
+      'Raising \`terminationGracePeriodSeconds\` without a \`preStop\` hook. At the moment SIGTERM arrives, the Endpoints removal has not propagated everywhere, and requests still land on the pod that is shutting down.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    files: { '/root/infra/portal.yaml': PORTAL_PROBE_MANIFEST },
+    referenceFiles: { '/root/infra/portal.yaml': PORTAL_PROBE_FIXED },
+    referenceCommands: ['kubectl apply -f /root/infra/portal.yaml'],
+  },
+  specs: [
+    spec('probes-and-shutdown.spec.ts', code`
+      import { get, list } from '@ops/lab';
+
+      describe('探针、优雅终止与自愈', () => {
+        it('三个 Pod 全部 Ready', () => {
+          const pods = list('Pod', { namespace: 'payments', labels: { app: 'portal' } });
+          expect(pods.length).toBe(3);
+          for (const pod of pods) {
+            const ready = (pod.status.conditions || []).find((c) => c.type === 'Ready');
+            expect(ready && ready.status).toBe('True');
+          }
+        });
+
+        it('就绪探针指向应用真正在听的端口', () => {
+          const container = get('Deployment', 'portal', 'payments').spec.template.spec.containers[0];
+          const probe = container.readinessProbe;
+          expect(probe).toBeTruthy();
+          expect(probe.httpGet.port).toBe(8080);
+          expect(['/healthz', '/readyz'].includes(probe.httpGet.path)).toBe(true);
+        });
+
+        it('配了存活探针', () => {
+          const container = get('Deployment', 'portal', 'payments').spec.template.spec.containers[0];
+          expect(container.livenessProbe).toBeTruthy();
+          expect(container.livenessProbe.httpGet.port).toBe(8080);
+        });
+
+        it('滚动更新不掉可用副本', () => {
+          const strategy = get('Deployment', 'portal', 'payments').spec.strategy || {};
+          expect(strategy.type).toBe('RollingUpdate');
+          expect(strategy.rollingUpdate.maxUnavailable).toBe(0);
+        });
+
+        it('给了优雅退出的时间，并且先摘流量', () => {
+          const podSpec = get('Deployment', 'portal', 'payments').spec.template.spec;
+          expect(podSpec.terminationGracePeriodSeconds >= 20).toBe(true);
+          expect(podSpec.containers[0].lifecycle.preStop).toBeTruthy();
+        });
+      });
+    `),
+  ],
+  focus: ['correctness', 'resilience'],
+  extension: t(
+    code`
+      就绪探针和存活探针回答的是两个不同的问题：「现在能不能给我流量」和
+      「这个进程还有没有救」。把它们配成一样，等于让一次下游变慢直接升级成
+      全体重启。生产里还有第三种 \`startupProbe\`，专门给启动慢的应用用：
+      它没通过之前，存活探针不生效，于是不用为了照顾冷启动而把存活探针
+      调得很松。
+    `,
+    code`
+      Readiness and liveness answer different questions: "can I take traffic right
+      now" and "is this process beyond saving". Configuring them identically turns a
+      slow dependency into a fleet-wide restart. Production adds a third,
+      \`startupProbe\`, for slow-starting applications: until it passes, the liveness
+      probe is suspended, so you no longer have to weaken liveness just to survive a
+      cold start.
+    `
+  ),
+};
+
+/* ------------------------------------------------------------------ */
+/* 第 7 关                                                             */
+/* ------------------------------------------------------------------ */
+
+const REPORTS_MANIFEST = code`
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: reports
+    namespace: payments
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
+        app: reports
+    template:
+      metadata:
+        labels:
+          app: reports
+      spec:
+        containers:
+        - name: batch
+          image: ${REPORTS_IMAGE}
+          resources:
+            limits:
+              memory: 256Mi
+`;
+
+const REPORTS_FIXED = code`
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: reports
+    namespace: payments
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
+        app: reports
+    template:
+      metadata:
+        labels:
+          app: reports
+      spec:
+        containers:
+        - name: batch
+          image: ${REPORTS_IMAGE}
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+`;
+
+const PORTAL_SIZED = code`
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    replicas: 3
+    selector:
+      matchLabels:
+        app: portal
+    template:
+      metadata:
+        labels:
+          app: portal
+      spec:
+        containers:
+        - name: web
+          image: ${PORTAL_IMAGE}
+          ports:
+          - containerPort: 8080
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+`;
+
+const PORTAL_UNSIZED = code`
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    replicas: 3
+    selector:
+      matchLabels:
+        app: portal
+    template:
+      metadata:
+        labels:
+          app: portal
+      spec:
+        containers:
+        - name: web
+          image: ${PORTAL_IMAGE}
+          ports:
+          - containerPort: 8080
+`;
+
+const stage7 = {
+  id: 'resources-and-qos',
+  title: t('资源、QoS 与驱逐', 'Resources, QoS, and eviction'),
+  goal: t(
+    code`
+      财务那边新上了一个报表任务 \`reports\`，前任给它配了 \`limits.memory: 256Mi\`。
+      apply 之后它一直在重启，\`kubectl describe\` 里写着 \`OOMKilled\`，退出码 137。
+      而门户 \`portal\` 一个资源声明都没写。
+
+      这两件事是同一个问题的两面：**没量过就写数字**，和**根本不写**。
+
+      不写 requests 的 Pod 是 \`BestEffort\`，节点内存紧张时它第一个被赶走；
+      limits 写小了则会被内核直接杀掉，连日志都来不及打完。
+
+      ## 通关标准
+
+      1. 两个 Deployment 的每个容器都写了 cpu 与 memory 的 requests 和 limits；
+      2. \`portal\` 是 \`Guaranteed\` 等级（requests 与 limits 完全相等），
+         三个 Pod 全部 Ready；
+      3. \`reports\` 不再 OOMKilled，Pod 处于 Running；
+      4. 没有任何 Pod 被驱逐。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl apply -f infra/portal.yaml -f infra/reports.yaml
+      kubectl describe pod -n payments -l app=reports
+      kubectl get pod -n payments -o custom-columns=NAME:.metadata.name,QOS:.status.qosClass
+      kubectl get events -n payments --field-selector reason=Evicted
+      \`\`\`
+    `,
+    code`
+      Finance shipped a new reporting job, \`reports\`, and your predecessor gave it
+      \`limits.memory: 256Mi\`. Since the apply it has been restarting, with
+      \`OOMKilled\` and exit code 137 in \`kubectl describe\`. Meanwhile the portal
+      declares no resources at all.
+
+      These are two sides of one problem: **a number nobody measured**, and
+      **no number at all**.
+
+      A pod without requests is \`BestEffort\` and is the first thing evicted when a
+      node runs short of memory. A limit set too low gets the process killed by the
+      kernel before it can even finish a log line.
+
+      ## Done when
+
+      1. every container in both Deployments declares cpu and memory requests and limits;
+      2. \`portal\` is \`Guaranteed\` (requests exactly equal to limits) and all three
+         pods are Ready;
+      3. \`reports\` is no longer OOMKilled and its pod is Running;
+      4. no pod has been evicted.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl apply -f infra/portal.yaml -f infra/reports.yaml
+      kubectl describe pod -n payments -l app=reports
+      kubectl get pod -n payments -o custom-columns=NAME:.metadata.name,QOS:.status.qosClass
+      kubectl get events -n payments --field-selector reason=Evicted
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('两个负载都写全了 requests 与 limits', 'Both workloads declare requests and limits'),
+    t('portal 是 Guaranteed 且全部 Ready', 'portal is Guaranteed and fully Ready'),
+    t('reports 不再 OOMKilled，也没有 Pod 被驱逐', 'reports is no longer OOMKilled and nothing was evicted'),
+  ],
+  hints: [
+    t(
+      '退出码 137 是 128+9，也就是被 SIGKILL 杀的。容器里唯一会这么干的通常就是 cgroup 的内存上限。',
+      'Exit code 137 is 128+9, meaning SIGKILL. Inside a container that is almost always the cgroup memory limit.'
+    ),
+    t(
+      '\`kubectl describe pod\` 里的 \`Last State: Terminated / Reason: OOMKilled\` 是最直接的证据。',
+      '\`Last State: Terminated / Reason: OOMKilled\` in \`kubectl describe pod\` is the most direct evidence.'
+    ),
+    t(
+      'QoS 等级不是自己写的，是根据 requests 与 limits 算出来的：都写且相等是 Guaranteed，都不写是 BestEffort，其余是 Burstable。',
+      'The QoS class is derived, not declared: requests equal to limits everywhere is Guaranteed, nothing declared is BestEffort, anything else is Burstable.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '把 limits 删掉来「解决」OOM。确实不会被杀了，但这个 Pod 同时变成了 BestEffort，节点一紧张它第一个被驱逐 —— 从一种死法换成了另一种。',
+      'Deleting the limit to "fix" the OOM. It stops being killed, but it also becomes BestEffort and is now first in line for eviction: one way of dying traded for another.'
+    ),
+    t(
+      'requests 写得远小于实际用量。调度器按 requests 装箱，于是它会把远超节点容量的一堆 Pod 排到同一台机器上，然后集体触发驱逐。',
+      'Setting requests far below actual usage. The scheduler bin-packs by requests, happily overcommits a node, and then everything on it gets evicted together.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    files: {
+      '/root/infra/portal.yaml': PORTAL_UNSIZED,
+      '/root/infra/reports.yaml': REPORTS_MANIFEST,
+    },
+    referenceFiles: {
+      '/root/infra/portal.yaml': PORTAL_SIZED,
+      '/root/infra/reports.yaml': REPORTS_FIXED,
+    },
+    referenceCommands: [
+      'kubectl apply -f /root/infra/portal.yaml',
+      'kubectl apply -f /root/infra/reports.yaml',
+    ],
+  },
+  specs: [
+    spec('resources-and-qos.spec.ts', code`
+      import { get, list } from '@ops/lab';
+
+      function containersOf(name) {
+        return get('Deployment', name, 'payments').spec.template.spec.containers;
+      }
+
+      describe('资源、QoS 与驱逐', () => {
+        it('两个负载的每个容器都写全了 requests 与 limits', () => {
+          for (const name of ['portal', 'reports']) {
+            for (const container of containersOf(name)) {
+              const resources = container.resources || {};
+              expect(typeof (resources.requests || {}).cpu).toBe('string');
+              expect(typeof (resources.requests || {}).memory).toBe('string');
+              expect(typeof (resources.limits || {}).cpu).toBe('string');
+              expect(typeof (resources.limits || {}).memory).toBe('string');
+            }
+          }
+        });
+
+        it('portal 是 Guaranteed，三个 Pod 全部 Ready', () => {
+          const pods = list('Pod', { namespace: 'payments', labels: { app: 'portal' } });
+          expect(pods.length).toBe(3);
+          for (const pod of pods) {
+            expect(pod.status.qosClass).toBe('Guaranteed');
+            const ready = (pod.status.conditions || []).find((c) => c.type === 'Ready');
+            expect(ready && ready.status).toBe('True');
+          }
+        });
+
+        it('reports 不再被 OOMKilled', () => {
+          const pods = list('Pod', { namespace: 'payments', labels: { app: 'reports' } });
+          expect(pods.length > 0).toBe(true);
+          for (const pod of pods) {
+            expect(pod.status.phase).toBe('Running');
+            for (const status of pod.status.containerStatuses || []) {
+              const last = (status.lastState || {}).terminated;
+              expect(last && last.reason).not.toBe('OOMKilled');
+            }
+          }
+        });
+
+        it('没有 Pod 被驱逐', () => {
+          const evicted = list('Pod', { namespace: 'payments' })
+            .filter((pod) => pod.status.reason === 'Evicted');
+          expect(evicted.length).toBe(0);
+        });
+      });
+    `),
+  ],
+  focus: ['correctness', 'resilience', 'latency'],
+  extension: t(
+    code`
+      requests 和 limits 各管一件事，很多人把它们混为一谈：**requests 决定调度**
+      （节点上还剩多少「已承诺」的容量），**limits 决定运行时约束**
+      （cgroup 的上限）。内存 limit 超了直接 OOMKill，CPU limit 超了则是被限流
+      （节流而不是杀死），表现为 P99 变差而不是进程消失。
+      现实里的做法是先用监控量出实际用量，再据此设定，而不是拍脑袋。
+      更进一步有 VPA 的 recommender 帮你算，以及 LimitRange
+      给整个命名空间兜一个默认值。
+    `,
+    code`
+      Requests and limits govern different things and are routinely confused:
+      **requests drive scheduling** (how much promised capacity a node has left),
+      **limits are runtime constraints** (the cgroup ceiling). Exceeding a memory
+      limit gets the process OOM-killed; exceeding a CPU limit gets it throttled
+      rather than killed, which shows up as a worse P99 instead of a missing process.
+      Real practice is to measure actual usage first and set numbers from that. Going
+      further, VPA's recommender computes them for you, and a LimitRange gives a
+      namespace sane defaults.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -740,5 +1693,5 @@ module.exports = {
   ),
   workspace: { kind: 'ops', world: WORLD },
   files: [],
-  stages: [stage1, stage2, stage3],
+  stages: [stage1, stage2, stage3, stage4, stage5, stage6, stage7],
 };

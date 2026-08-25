@@ -198,12 +198,17 @@ describe('open files', () => {
     expect(next.activePath).toBe('src/fetcher.ts');
   });
 
-  /** 预置题目里每一关都有自己的 openByDefault 文件，换关卡就该跟着换 */
+  /**
+   * 预置题目里每一关都有自己的 openByDefault 文件，换关卡就该跟着换。
+   *
+   * ops 形态不在此列：那些关卡没有「工作区文件」，学员编辑的是机器磁盘上的
+   * 文件，由 stage.ops.files 铺下去，编辑器打开哪个由工作台自己决定。
+   */
   it('每一关的主文件都能被认出来（预置题目）', () => {
     const presets: EngineeringProject[] = JSON.parse(
       fs.readFileSync(path.join(process.cwd(), 'projects', 'projects.json'), 'utf8')
     );
-    for (const rawProject of presets) {
+    for (const rawProject of presets.filter((item) => (item.workspace?.kind ?? 'code') === 'code')) {
       for (const language of availableLanguages(rawProject)) {
         const view = projectView(rawProject, language);
         const mains = view.stages.map((_, index) => defaultOpenPath(buildStageFiles(view, index)));

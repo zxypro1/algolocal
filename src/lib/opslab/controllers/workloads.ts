@@ -760,8 +760,16 @@ export class KubeletController extends Controller {
       return;
     }
 
-    // 2. 私有仓库的凭据
+    /**
+     * 2. 私有仓库的凭据。
+     *
+     * 只查**要从仓库拉**的镜像。题目 `images` 目录里写着的那些，语义上是
+     * 「节点上已经有了」（真集群里也常见：基础镜像预热过，或者 kubelet
+     * 配了节点级凭据）。不这么分的话，每一关都得先教一遍 imagePullSecret，
+     * 而那是第 4 关的事。
+     */
     const denied = containers
+      .filter((container) => !(container.image in this.images))
       .map((container) => canPullImage({
         image: container.image,
         namespace: namespace ?? 'default',
@@ -771,10 +779,11 @@ export class KubeletController extends Controller {
       }))
       .find((result) => !result.allowed);
     if (denied) {
+      const pulled = containers.find((container) => !(container.image in this.images))!;
       this.holdPending(key, pod, containers, {
         reason: 'ImagePullBackOff',
-        message: `Back-off pulling image "${containers[0].image}"`,
-        event: `Failed to pull image "${containers[0].image}": ${denied.message}`,
+        message: `Back-off pulling image "${pulled.image}"`,
+        event: `Failed to pull image "${pulled.image}": ${denied.message}`,
       });
       return;
     }

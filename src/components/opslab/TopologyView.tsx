@@ -9,7 +9,7 @@
  */
 import { useEffect, useMemo } from 'react';
 import {
-  Background, Controls, MiniMap, ReactFlow, useEdgesState, useNodesState,
+  Background, Controls, Handle, MiniMap, Position, ReactFlow, useEdgesState, useNodesState,
   type Edge, type Node, type NodeProps,
 } from '@xyflow/react';
 import { Badge, Group, Stack, Text } from '@mantine/core';
@@ -38,6 +38,15 @@ type ResourceData = {
   changed?: boolean;
 };
 
+/**
+ * 连线要有锚点才画得出来。
+ *
+ * 自定义节点不放 Handle 的话，xyflow 会**静默地**一条边都不画：节点都在，
+ * 关系全没了。而这张图的意义恰恰就在关系上（Service 连不连得到 Pod）。
+ * 锚点本身不需要被看见，也不允许拖拽连线，所以做成透明的。
+ */
+const HANDLE_STYLE = { opacity: 0, width: 1, height: 1, border: 'none', background: 'transparent' };
+
 function ResourceNode({ data }: NodeProps) {
   const item = data as ResourceData;
   return (
@@ -52,9 +61,11 @@ function ResourceNode({ data }: NodeProps) {
         boxShadow: item.changed ? '0 0 0 3px rgba(255,146,43,0.18)' : 'none',
       }}
     >
+      <Handle type="target" position={Position.Top} style={HANDLE_STYLE} isConnectable={false} />
       <Text size="10px" c="dimmed" tt="uppercase" lh={1.2}>{item.kind}</Text>
       <Text size="xs" fw={600} truncate lh={1.3}>{item.name}</Text>
       <Text size="10px" c="dimmed" truncate lh={1.3}>{item.detail}</Text>
+      <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} isConnectable={false} />
     </div>
   );
 }

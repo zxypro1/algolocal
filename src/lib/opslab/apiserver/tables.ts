@@ -186,6 +186,70 @@ export const TABLE_PRINTERS: Record<string, TablePrinter> = {
       ];
     },
   },
+
+  /**
+   * Endpoints 的这一列是排查「服务不通」时最该看的东西。
+   *
+   * 空的时候显示 `<none>`，一眼就知道是标签没匹配上，而不是网络问题。
+   * 真集群超过 3 个地址会折成 `a,b,c + 2 more...`，这里照做 —— 学员会
+   * 拿两边的输出对照。
+   */
+  endpoints: {
+    columns: [
+      NAME_COLUMN,
+      col('Endpoints', 'The addresses of the endpoints.'),
+      AGE_COLUMN,
+    ],
+    cells: (object, age) => {
+      const subsets: any[] = (object.subsets ?? []) as any[];
+      const addresses: string[] = [];
+      for (const subset of subsets) {
+        for (const address of subset.addresses ?? []) {
+          for (const port of subset.ports ?? [{}]) {
+            addresses.push(port.port ? `${address.ip}:${port.port}` : String(address.ip));
+          }
+        }
+      }
+      const shown = addresses.slice(0, 3).join(',');
+      const rest = addresses.length - 3;
+      return [
+        object.metadata.name,
+        addresses.length === 0 ? '<none>' : rest > 0 ? `${shown} + ${rest} more...` : shown,
+        age,
+      ];
+    },
+  },
+
+  configmaps: {
+    columns: [
+      NAME_COLUMN,
+      col('Data', 'The number of keys in this config map.'),
+      AGE_COLUMN,
+    ],
+    cells: (object, age) => [
+      object.metadata.name,
+      String(Object.keys((object.data ?? {}) as Record<string, unknown>).length),
+      age,
+    ],
+  },
+
+  secrets: {
+    columns: [
+      NAME_COLUMN,
+      col('Type', 'The type of this secret.'),
+      col('Data', 'The number of keys in this secret.'),
+      AGE_COLUMN,
+    ],
+    cells: (object, age) => [
+      object.metadata.name,
+      String(object.type ?? 'Opaque'),
+      String(Object.keys({
+        ...((object.data ?? {}) as Record<string, unknown>),
+        ...((object.stringData ?? {}) as Record<string, unknown>),
+      }).length),
+      age,
+    ],
+  },
 };
 
 /**
