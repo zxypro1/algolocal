@@ -1267,6 +1267,21 @@ const primers = {
       )
     ),
 
+    'identity-and-rbac': t(
+      p(
+        '一个请求打到 apiserver，要过两道关，它们回答的是完全不同的问题。`认证`回答「你是谁」：客户端证书、ServiceAccount 的 token、或者 OIDC 发下来的 id_token，形式不同，产物都是同一个东西：一个用户名加一组 `group`。`鉴权`回答「你能不能做这件事」，这才是 RBAC 的活。所以「接了 OIDC 之后大家还是什么都干不了」是正常的中间状态，不是接错了。',
+        'RBAC 有四个对象，两两成对：`Role` 与 `ClusterRole` 描述「能对什么资源做什么动作」，`RoleBinding` 与 `ClusterRoleBinding` 描述「谁拿到这套权限」。最容易记混的组合是 `RoleBinding` 引用 `ClusterRole`：这时权限的**范围由 Binding 决定**，拿到的只是那一个命名空间里的权限。这是「一套只读角色复用到每个命名空间」的标准写法，不必给每个命名空间各抄一份 Role。',
+        '规则里有几处不是望文生义的。动词上，`get` 和 `list` 是两件事，只写 `get` 的规则挡不住也放不开 `list`；`watch` 又是第三件。资源上，看日志和进容器是**子资源**，要写成 `pods/log`（动词 `get`）和 `pods/exec`（动词 `create`，不是 get）。`resourceNames` 能把权限限定到具体对象，但它只对指名道姓的请求生效；`list` 与 `watch` 没有名字，带 `resourceNames` 的规则对它们一律不匹配。',
+        '最关键的一条：RBAC **只有允许，没有拒绝**。写不出「除了 Secret 之外都可以」，只能把 Secret 之外的都列出来。这意味着加规则永远只会让权限变大，收权限的唯一办法是改掉或删掉已有的绑定；在一条 cluster-admin 绑定旁边再写一个小角色，一点用都没有。检查的办法是 `kubectl auth can-i <动词> <资源> --as=<用户> --as-group=<组>`，加 `--list` 会把这个身份能做的事全列出来。人对自己写的 RBAC 判断准确率相当低，这条命令是直接问服务端要答案。'
+      ),
+      p(
+        'A request reaching the apiserver passes two gates that answer completely different questions. `Authentication` answers "who are you": a client certificate, a ServiceAccount token, or an OIDC id_token, all producing the same thing, a username plus a set of `groups`. `Authorization` answers "may you do this", and that is RBAC job. So "we wired up OIDC and everyone still cannot do anything" is a normal intermediate state, not a broken integration.',
+        'RBAC has four objects in two pairs. `Role` and `ClusterRole` describe what verbs apply to what resources; `RoleBinding` and `ClusterRoleBinding` describe who gets them. The combination people misremember is a `RoleBinding` referencing a `ClusterRole`: **scope comes from the binding**, so the subject gains those permissions in that one namespace. This is the standard way to reuse one read-only role across namespaces instead of copying a Role into each.',
+        'Several details in a rule are not what they look like. On verbs, `get` and `list` are separate, so a rule granting only `get` neither blocks nor permits `list`, and `watch` is a third. On resources, reading logs and execing are **subresources**, written `pods/log` (verb `get`) and `pods/exec` (verb `create`, not get). `resourceNames` narrows a rule to specific objects, but only for requests that name one: `list` and `watch` carry no name, so such rules never match them.',
+        'The most important property: RBAC **only allows, it never denies**. There is no way to say "anything except Secrets"; you enumerate everything else. Adding rules can therefore only widen access, and the only way to reduce it is to change or delete an existing binding, which is why writing a smaller role next to a cluster-admin binding accomplishes nothing. To check, use `kubectl auth can-i <verb> <resource> --as=<user> --as-group=<group>`, and add `--list` to print everything that identity can do. People predict their own RBAC badly; this command asks the server instead.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',

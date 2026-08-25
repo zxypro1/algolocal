@@ -11,7 +11,7 @@
  */
 import { Registry } from './registry';
 import { Scheme, ResourceDefinition } from './scheme';
-import { ApiError, badRequest, invalid, notFound, toStatus } from './errors';
+import { ApiError, badRequest, forbidden, invalid, notFound, toStatus } from './errors';
 import { renderTable, wantsTable } from './tables';
 import type { KubeObject, PropagationPolicy, WatchEventOut } from './types';
 
@@ -29,12 +29,44 @@ export interface ApiServerDeps {
    * 和真集群把它转给 kubelet 是同一个分工。
    */
   exec?: ExecHandler;
+  /**
+   * token -> 身份。不给就是「这个世界没配认证」，所有请求都是 cluster-admin。
+   *
+   * 真集群里这一步由 OIDC / 客户端证书 / ServiceAccount token 完成，形式不同，
+   * 产物都是同一个东西：一个用户名加一组 group。
+   */
+  authenticate?(token: string | undefined): UserInfo | undefined;
+  /** 鉴权。不给就是不鉴权。 */
+  authorize?(user: UserInfo, attributes: ResourceAttributes): { allowed: boolean; reason: string };
 }
 import { openApiDocument, openApiRoot } from './openapi';
 import type { PatchType } from './patch';
 import { createExecSession, parseExecRequest, type ExecHandler } from './exec';
 import type { StreamSession, UpgradeRequest } from '../net';
 import { parseYaml } from '../yaml';
+import {
+  ANONYMOUS, CLUSTER_ADMIN, forbiddenMessage,
+  type ResourceAttributes, type UserInfo,
+} from '../rbac';
+
+/**
+ * HTTP 方法 -> RBAC 的 verb。
+ *
+ * 有两处不是一一对应：GET 不带名字是 list（带名字才是 get），
+ * DELETE 不带名字是 deletecollection。规则里只写了 `get` 的人
+ * 常常发现自己 list 不了。
+ */
+export function verbFor(method: string, parsed: ParsedPath, params: URLSearchParams): string {
+  if (params.get('watch') === 'true' || params.get('watch') === '1') return 'watch';
+  switch (method) {
+    case 'GET': return parsed.name ? 'get' : 'list';
+    case 'POST': return 'create';
+    case 'PUT': return 'update';
+    case 'PATCH': return 'patch';
+    case 'DELETE': return parsed.name ? 'delete' : 'deletecollection';
+    default: return method.toLowerCase();
+  }
+}
 
 /** apply 的载荷：先按 JSON 试，不行再按 YAML */
 function parseYamlBody(raw: string): unknown {
@@ -148,6 +180,8 @@ export class ApiServer {
   private readonly now: () => number;
   private readonly version: { major: string; minor: string; gitVersion: string };
   private readonly exec?: ExecHandler;
+  private readonly authenticate?: ApiServerDeps['authenticate'];
+  private readonly authorizeFn?: ApiServerDeps['authorize'];
   /** 收到的请求，调试与测试用 */
   readonly requestLog: string[] = [];
 
@@ -157,6 +191,102 @@ export class ApiServer {
     this.now = deps.now;
     this.version = deps.version ?? { major: '1', minor: '36', gitVersion: 'v1.36.0' };
     this.exec = deps.exec;
+    this.authenticate = deps.authenticate;
+    this.authorizeFn = deps.authorize;
+  }
+
+  /**
+   * `kubectl auth can-i`。
+   *
+   * SelfSubjectAccessReview 问的是「**我**能不能」，SubjectAccessReview 问的是
+   * 「某某能不能」（后者本身需要权限，一般只有管理员用得了）。
+   * 两者的回答都写在 `status.allowed` 里，HTTP 状态码永远是 201 ——
+   * 「不允许」不是一个错误，是一个答案。
+   */
+  private async handleAccessReview(init: RequestInit, forOther: boolean): Promise<Response> {
+    const raw = await this.readBodyRaw(init);
+    let body: any;
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch {
+      return statusResponse(badRequest('the object provided is unrecognized'));
+    }
+    const requester = this.identify(init);
+    const spec = body.spec ?? {};
+    const subject: UserInfo = forOther
+      ? { username: spec.user ?? 'system:anonymous', groups: spec.groups ?? [] }
+      : requester;
+
+    const attributes: ResourceAttributes = spec.resourceAttributes
+      ? {
+          verb: spec.resourceAttributes.verb ?? 'get',
+          group: spec.resourceAttributes.group ?? '',
+          resource: spec.resourceAttributes.resource,
+          subresource: spec.resourceAttributes.subresource,
+          namespace: spec.resourceAttributes.namespace,
+          name: spec.resourceAttributes.name,
+        }
+      : {
+          verb: spec.nonResourceAttributes?.verb ?? 'get',
+          path: spec.nonResourceAttributes?.path ?? '/',
+        };
+
+    const result = this.authorizeFn
+      ? this.authorizeFn(subject, attributes)
+      : { allowed: true, reason: 'no authorizer configured' };
+
+    return json({
+      kind: forOther ? 'SubjectAccessReview' : 'SelfSubjectAccessReview',
+      apiVersion: 'authorization.k8s.io/v1',
+      metadata: { creationTimestamp: null },
+      spec,
+      status: { allowed: result.allowed, reason: result.reason },
+    }, 201);
+  }
+
+  /**
+   * 认证。
+   *
+   * 从 `Authorization: Bearer <token>` 取身份。没有配认证器的世界里，
+   * 每个请求都是 cluster-admin —— 前面十几关不需要为此各配一套 RBAC。
+   */
+  private identify(init: RequestInit): UserInfo {
+    if (!this.authenticate) return CLUSTER_ADMIN;
+    const header = headerOf(init, 'authorization') ?? '';
+    const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : undefined;
+    const user = this.authenticate(token) ?? ANONYMOUS;
+
+    /**
+     * `--as` / `--as-group`：冒充。
+     *
+     * 这是检查别人权限的标准做法 —— 管理员不用拿到对方的凭据，就能问
+     * 「他到底能不能做这件事」。真集群里冒充本身也是一种权限
+     * （对 users / groups 的 impersonate），不是谁都能用。
+     */
+    const impersonateUser = headerOf(init, 'impersonate-user');
+    if (!impersonateUser) return user;
+    const allowed = this.authorizeFn?.(user, {
+      verb: 'impersonate', group: '', resource: 'users', name: impersonateUser,
+    });
+    if (allowed && !allowed.allowed) return user;   // 没这个权限就按自己的身份来，随后会被拒
+    const groups = headerOf(init, 'impersonate-group');
+    return {
+      username: impersonateUser,
+      groups: [...(groups ? groups.split(',').map((entry) => entry.trim()) : []), 'system:authenticated'],
+    };
+  }
+
+  /**
+   * 鉴权。允许就返回 undefined，拒绝就返回一个 403 响应。
+   *
+   * 消息一字不差抄真 apiserver —— 学员会把它直接搜出去，
+   * 而这句话本身把「谁、想做什么、在哪个组、哪个命名空间」说全了。
+   */
+  private checkAccess(user: UserInfo, attributes: ResourceAttributes): Response | undefined {
+    if (!this.authorizeFn) return undefined;
+    const result = this.authorizeFn(user, attributes);
+    if (result.allowed) return undefined;
+    return statusResponse(forbidden(forbiddenMessage(user, attributes)));
   }
 
   /**
@@ -234,6 +364,14 @@ export class ApiServer {
       return json(this.apiResourceList(groupVersionMatch[1], groupVersionMatch[2]));
     }
 
+    // `kubectl auth can-i` 走这条路。它问的是「我能不能」，不是「给我」。
+    if (path === '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews' && method === 'POST') {
+      return this.handleAccessReview(init, false);
+    }
+    if (path === '/apis/authorization.k8s.io/v1/subjectaccessreviews' && method === 'POST') {
+      return this.handleAccessReview(init, true);
+    }
+
     const parsed = parsePath(path);
     if (!parsed) {
       return statusResponse(badRequest(`the server could not find the requested resource (${path})`));
@@ -251,6 +389,17 @@ export class ApiServer {
     }
 
     const params = url.searchParams;
+    const user = this.identify(init);
+    const denied = this.checkAccess(user, {
+      verb: verbFor(method, parsed, params),
+      group: parsed.group,
+      resource: parsed.resource,
+      subresource: parsed.subresource,
+      namespace: parsed.namespace,
+      name: parsed.name,
+    });
+    if (denied) return denied;
+
     if (params.get('watch') === 'true' || params.get('watch') === '1') {
       return this.handleWatch(definition, parsed, params);
     }

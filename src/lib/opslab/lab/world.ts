@@ -102,6 +102,7 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     resolveImage: (image) => lookupPushedImage(image),
     externalHosts,
     addressPools: spec.addressPools,
+    users: spec.users,
     /**
      * Argo CD 从这里取仓库内容。
      *

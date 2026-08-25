@@ -277,6 +277,13 @@ export interface OpsWorldSpec {
    */
   baseImages?: Record<string, 'node' | 'python' | 'static'>;
   registries?: OpsRegistrySpec[];
+  /**
+   * 集群认哪些身份。
+   *
+   * key 是 kubeconfig 里的 token。一旦声明了这张表，集群就开始按 RBAC 鉴权 ——
+   * 不声明就是「这个世界不讲 RBAC」，所有请求都是 cluster-admin。
+   */
+  users?: Record<string, { username: string; groups?: string[] }>;
   /** 内网的 Git 仓库。GitOps 里那份 YAML 就住在这儿。 */
   gitRepositories?: OpsGitRepositorySpec[];
   machine?: OpsMachineSpec;

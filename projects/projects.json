@@ -5821,6 +5821,38 @@
             "anonymousPull": false
           }
         ],
+        "users": {
+          "admin-token": {
+            "username": "kubernetes-admin",
+            "groups": [
+              "system:masters"
+            ]
+          },
+          "opslab-token": {
+            "username": "kubernetes-admin",
+            "groups": [
+              "system:masters"
+            ]
+          },
+          "oidc-liu": {
+            "username": "oidc:liu@corp.internal",
+            "groups": [
+              "oidc:developers"
+            ]
+          },
+          "oidc-chen": {
+            "username": "oidc:chen@corp.internal",
+            "groups": [
+              "oidc:sre"
+            ]
+          },
+          "ci-token": {
+            "username": "system:serviceaccount:argocd:deployer",
+            "groups": [
+              "system:serviceaccounts"
+            ]
+          }
+        },
         "gitRepositories": [
           {
             "url": "https://git.corp.internal/platform/apps",
@@ -10075,6 +10107,505 @@
         "primer": {
           "zh": "`NetworkPolicy` 判的是「这个 IP 属于一个带某某标签的 Pod」，而标签只是 apiserver 里的一个字段，有权限的人随时能改。服务网格判的是另一件事：**对面出示的证书属于谁**。每个工作负载拿到一张由集群 CA 签发的证书，身份写在 SAN 里，格式是 `SPIFFE`：`spiffe://cluster.local/ns/<命名空间>/sa/<ServiceAccount>`。注意身份来自 ServiceAccount，不是 Pod 名也不是标签；所有服务都用 `default` 这个 SA 的集群，上了网格也分不出谁是谁。\n\n`Istio ambient` 是 2026 年的主流形态，和早年的 sidecar 模式差别很大：不再给每个 Pod 塞一个 Envoy，而是每个节点跑一个 `ztunnel`（DaemonSet）负责 L4：建立 mTLS、校验对端身份、按身份与端口授权。接入方式是给命名空间打一个标签 `istio.io/dataplane-mode=ambient`，Pod 不用改、不用重启。`istioctl ztunnel-config workload` 里 PROTOCOL 那一列是 HBONE 就说明接进来了。\n\n要按 HTTP 方法或路径授权、要重试与熔断，就得再加一层 `waypoint`，也就是一个 `gatewayClassName: istio-waypoint` 的 Gateway，按命名空间或按服务挂。这条分层是 ambient 最常见的困惑来源：带 `methods` 或 `paths` 的 `AuthorizationPolicy` 在没有 waypoint 的时候**根本不会被求值**，而 apiserver 照样收下它。`istioctl analyze` 会把这类问题直接报出来。\n\n`AuthorizationPolicy` 的判定顺序值得单独记：任何一条 DENY 命中就拒绝；没有任何 ALLOW 策略选中这个工作负载则放行；一旦有 ALLOW 策略选中它，只有命中某条 rule 才放行，**其余一律拒绝**。所以给一个服务加第一条 ALLOW 策略，等于同时把「默认拒绝」也打开了，很多人以为自己只是多放行了一个来源。还有一点：被网格拒绝表现为连接被重置（ztunnel 回 RST），而不是超时；超时是丢包，指向 NetworkPolicy 那一层。",
           "en": "`NetworkPolicy` decides based on \"this IP belongs to a pod carrying that label\", and a label is just a field in the apiserver that anyone with access can change. A service mesh answers a different question: **whose certificate did the peer present**. Each workload gets a certificate from the cluster CA with its identity in the SAN, in `SPIFFE` form: `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`. Identity comes from the ServiceAccount, not the pod name or its labels, so a cluster where everything runs as `default` gains nothing by enrolling.\n\n`Istio ambient` is the mainstream shape in 2026 and differs sharply from the older sidecar model: instead of an Envoy beside every pod, one `ztunnel` per node (a DaemonSet) handles L4, establishing mTLS, verifying peer identity, and authorizing by identity and port. Enrolling is a namespace label, `istio.io/dataplane-mode=ambient`, with no pod changes and no restarts. In `istioctl ztunnel-config workload`, a PROTOCOL of HBONE means enrolled.\n\nAuthorizing by HTTP method or path, or doing retries and circuit breaking, needs one more layer: a `waypoint`, a Gateway with `gatewayClassName: istio-waypoint`, attached per namespace or per service. This layering is the most common confusion in ambient, because an `AuthorizationPolicy` with `methods` or `paths` is **never evaluated** without a waypoint, while the apiserver accepts it happily. `istioctl analyze` reports exactly this class of problem.\n\nThe evaluation order of `AuthorizationPolicy` is worth memorising: any matching DENY refuses; with no ALLOW policy selecting the workload, traffic is permitted; once some ALLOW policy selects it, only traffic matching a rule is permitted and **everything else is refused**. So adding the first ALLOW policy to a service also turns on default-deny, which surprises people who thought they were merely permitting one more caller. One more distinction: a mesh denial arrives as a connection reset, because ztunnel answers with an RST, whereas a timeout means dropped packets and points at the NetworkPolicy layer."
+        }
+      },
+      {
+        "id": "identity-and-rbac",
+        "title": {
+          "zh": "把 cluster-admin 收回来",
+          "en": "Take cluster-admin Back"
+        },
+        "goal": {
+          "zh": "公司接了 OIDC，两个人已经能登录集群了：`liu`（开发，组\n`oidc:developers`）和 `chen`（SRE，组 `oidc:sre`）。但集群这边一个\n角色都没配 —— 他们登录之后什么都干不了。\n\n与此同时，前任把 CI 用的 ServiceAccount `argocd/deployer` 直接绑了\n`cluster-admin`。也就是说，一条流水线拿到的权限比任何一个人都大。\n\n按最小权限把这三个主体配好。\n\n## 通关标准\n\n1. `liu`：在 `payments` 里读得到工作负载、看得了日志、进得去容器排查；\n   **改不动任何东西**，也读不到 Secret；\n2. `chen`：全集群只读，另外在 `payments` 里能改 Deployment 与删 Pod；\n   但删不掉命名空间；\n3. `argocd/deployer`：只在 `payments` 里发布工作负载；碰不到 RBAC，\n   也读不到 Secret；\n4. `cluster-admin` 不再绑给这三个主体里的任何一个。\n\n## 会用到的命令\n\n```bash\nkubectl auth can-i --list --as=oidc:liu@corp.internal --as-group=oidc:developers -n payments\nkubectl auth can-i create pods --subresource=exec -n payments --as=oidc:liu@corp.internal --as-group=oidc:developers\nkubectl get clusterrolebindings\nkubectl apply -f /root/infra/rbac.yaml\n```\n",
+          "en": "The company wired up OIDC and two people can now log in: `liu` (a developer in\ngroup `oidc:developers`) and `chen` (an SRE in `oidc:sre`). No roles exist on\nthe cluster side, so once logged in they can do nothing at all.\n\nMeanwhile your predecessor bound the CI ServiceAccount `argocd/deployer`\nstraight to `cluster-admin`. A pipeline therefore holds more power than any\nhuman does.\n\nGive all three least privilege.\n\n## Done when\n\n1. `liu` can read workloads in `payments`, read logs, and exec into containers\n   to debug, but **cannot change anything** and cannot read Secrets;\n2. `chen` has cluster-wide read plus the ability to modify Deployments and\n   delete Pods in `payments`, but cannot delete namespaces;\n3. `argocd/deployer` can ship workloads in `payments` only, cannot touch RBAC,\n   and cannot read Secrets;\n4. `cluster-admin` is no longer bound to any of the three.\n\n## Commands you will need\n\n```bash\nkubectl auth can-i --list --as=oidc:liu@corp.internal --as-group=oidc:developers -n payments\nkubectl auth can-i create pods --subresource=exec -n payments --as=oidc:liu@corp.internal --as-group=oidc:developers\nkubectl get clusterrolebindings\nkubectl apply -f /root/infra/rbac.yaml\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "三个主体各自拿到该有的权限",
+            "en": "Each of the three gets what it needs"
+          },
+          {
+            "zh": "都拿不到不该有的",
+            "en": "And none of them gets what it should not"
+          },
+          {
+            "zh": "cluster-admin 收回来了",
+            "en": "cluster-admin taken back"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "`kubectl auth can-i ... --as=<user> --as-group=<group>` 是检查别人权限的标准做法 —— 不需要拿到对方的凭据。`--list` 会把这个身份在这个命名空间里能做的事全列出来。",
+            "en": "`kubectl auth can-i ... --as=<user> --as-group=<group>` is how you check someone else’s permissions without holding their credentials. `--list` prints everything that identity can do in that namespace."
+          },
+          {
+            "zh": "`RoleBinding` 可以引用 `ClusterRole`。权限的范围由 **Binding** 决定 —— 这就是「一套只读角色，绑到每个需要的命名空间」的标准写法，不用给每个命名空间各写一份 Role。",
+            "en": "A `RoleBinding` may reference a `ClusterRole`. Scope comes from the **binding**, which is the standard way to reuse one read-only role across namespaces without writing a Role in each."
+          },
+          {
+            "zh": "看日志和进容器是两个**子资源**：`pods/log` 的 `get`、`pods/exec` 的 `create`。只写 `pods` 是不够的，而且 exec 的动词是 create 不是 get。问的时候要用 `--subresource=log`：写成 `can-i get pods/log` 的话，kubectl 会把 log 当成 Pod 的**名字**。",
+            "en": "Logs and exec are **subresources**: `get` on `pods/log`, `create` on `pods/exec`. Listing `pods` alone is not enough, and the verb for exec is create, not get. Ask with `--subresource=log`: written as `can-i get pods/log`, kubectl reads log as the pod **name** instead."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "给开发绑 `edit` 或 `admin` 这种内置角色图省事。它们包含对 Secret 的读权限 —— 而「只读」的要求里，最要紧的恰恰是读不到 Secret。判定专门查了这一条。",
+            "en": "Reaching for built-in roles like `edit` or `admin`. They include read access to Secrets, and not reading Secrets is the most important half of \"read only\". The grader checks exactly that."
+          },
+          {
+            "zh": "把 `ci-admin` 那条 ClusterRoleBinding 留着，另外再加一条小权限。多加的那条不会削减已有的 —— RBAC 是取并集的，只要还有一条给了 cluster-admin，前面写的全部白搭。",
+            "en": "Leaving the `ci-admin` ClusterRoleBinding in place and adding a smaller role next to it. Adding never subtracts: RBAC unions its rules, so one remaining cluster-admin binding voids everything else you wrote."
+          },
+          {
+            "zh": "用 `resourceNames` 去限制 list。它只对指名道姓的请求生效，list 与 watch 没有名字，带 `resourceNames` 的规则对它们一律不匹配 —— 于是「我明明允许了这个 Secret」但列不出来。",
+            "en": "Using `resourceNames` to scope a list. It only applies to requests that name an object; list and watch carry no name, so such rules never match them, which is why \"I clearly allowed that Secret\" still cannot be listed."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "cilium",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cilium"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cilium"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cilium"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "cilium-agent",
+                        "image": "quay.io/cilium/cilium:v1.19.2",
+                        "ports": [
+                          {
+                            "containerPort": 9962
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "Certificate",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "secretName": "portal-tls",
+                "duration": "2160h",
+                "renewBefore": "720h",
+                "commonName": "portal.corp.internal",
+                "dnsNames": [
+                  "portal.corp.internal"
+                ],
+                "issuerRef": {
+                  "name": "corp-ca",
+                  "kind": "ClusterIssuer"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "Gateway",
+              "metadata": {
+                "name": "corp-gw",
+                "namespace": "payments"
+              },
+              "spec": {
+                "gatewayClassName": "envoy-internal",
+                "listeners": [
+                  {
+                    "name": "https",
+                    "port": 443,
+                    "protocol": "HTTPS",
+                    "hostname": "portal.corp.internal",
+                    "tls": {
+                      "mode": "Terminate",
+                      "certificateRefs": [
+                        {
+                          "name": "portal-tls"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "http",
+                    "port": 80,
+                    "protocol": "HTTP",
+                    "hostname": "portal.corp.internal"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.corp.internal"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "rbac.authorization.k8s.io/v1",
+              "kind": "ClusterRole",
+              "metadata": {
+                "name": "cluster-admin"
+              },
+              "rules": [
+                {
+                  "apiGroups": [
+                    "*"
+                  ],
+                  "resources": [
+                    "*"
+                  ],
+                  "verbs": [
+                    "*"
+                  ]
+                }
+              ]
+            },
+            {
+              "apiVersion": "rbac.authorization.k8s.io/v1",
+              "kind": "ClusterRole",
+              "metadata": {
+                "name": "view"
+              },
+              "rules": [
+                {
+                  "apiGroups": [
+                    "",
+                    "apps",
+                    "networking.k8s.io",
+                    "gateway.networking.k8s.io"
+                  ],
+                  "resources": [
+                    "pods",
+                    "services",
+                    "endpoints",
+                    "configmaps",
+                    "deployments",
+                    "replicasets",
+                    "daemonsets",
+                    "networkpolicies",
+                    "gateways",
+                    "httproutes"
+                  ],
+                  "verbs": [
+                    "get",
+                    "list",
+                    "watch"
+                  ]
+                }
+              ]
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "ServiceAccount",
+              "metadata": {
+                "name": "deployer",
+                "namespace": "argocd"
+              }
+            },
+            {
+              "apiVersion": "rbac.authorization.k8s.io/v1",
+              "kind": "ClusterRoleBinding",
+              "metadata": {
+                "name": "ci-admin"
+              },
+              "subjects": [
+                {
+                  "kind": "ServiceAccount",
+                  "name": "deployer",
+                  "namespace": "argocd"
+                }
+              ],
+              "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "ClusterRole",
+                "name": "cluster-admin"
+              }
+            }
+          ],
+          "files": {
+            "/root/infra/rbac.yaml": "# 这里什么都还没有。想清楚每个人到底需要什么，再写。\n#\n#   liu  —— 开发，组 oidc:developers\n#   chen —— SRE，组 oidc:sre\n#   argocd/deployer —— CI 用的 ServiceAccount\n"
+          },
+          "referenceFiles": {
+            "/root/infra/rbac.yaml": "# 开发：payments 里只读 + 看日志 + 进容器排查\napiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: developer\n  namespace: payments\nrules:\n- apiGroups: [\"\"]\n  resources: [\"pods\", \"services\", \"configmaps\", \"endpoints\"]\n  verbs: [\"get\", \"list\", \"watch\"]\n- apiGroups: [\"apps\"]\n  resources: [\"deployments\", \"replicasets\"]\n  verbs: [\"get\", \"list\", \"watch\"]\n- apiGroups: [\"\"]\n  resources: [\"pods/log\"]\n  verbs: [\"get\"]\n- apiGroups: [\"\"]\n  resources: [\"pods/exec\"]\n  verbs: [\"create\"]\n---\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: developers\n  namespace: payments\nsubjects:\n- kind: Group\n  name: oidc:developers\n  apiGroup: rbac.authorization.k8s.io\nroleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: Role\n  name: developer\n---\n# SRE：全集群只读\napiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n  name: sre-view\nsubjects:\n- kind: Group\n  name: oidc:sre\n  apiGroup: rbac.authorization.k8s.io\nroleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n  name: view\n---\n# SRE：payments 里还能动工作负载\napiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: workload-operator\n  namespace: payments\nrules:\n- apiGroups: [\"apps\"]\n  resources: [\"deployments\", \"deployments/scale\", \"statefulsets\"]\n  verbs: [\"get\", \"list\", \"watch\", \"update\", \"patch\"]\n- apiGroups: [\"\"]\n  resources: [\"pods\"]\n  verbs: [\"get\", \"list\", \"watch\", \"delete\"]\n---\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: sre-operator\n  namespace: payments\nsubjects:\n- kind: Group\n  name: oidc:sre\n  apiGroup: rbac.authorization.k8s.io\nroleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: Role\n  name: workload-operator\n---\n# CI：只在 payments 里发布工作负载，碰不到 RBAC 与 Secret\napiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: deployer\n  namespace: payments\nrules:\n- apiGroups: [\"apps\"]\n  resources: [\"deployments\", \"replicasets\", \"daemonsets\", \"statefulsets\"]\n  verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\"]\n- apiGroups: [\"\"]\n  resources: [\"services\", \"configmaps\"]\n  verbs: [\"get\", \"list\", \"watch\", \"create\", \"update\", \"patch\"]\n---\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: ci-deployer\n  namespace: payments\nsubjects:\n- kind: ServiceAccount\n  name: deployer\n  namespace: argocd\nroleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: Role\n  name: deployer\n"
+          },
+          "referenceCommands": [
+            "kubectl apply -f /root/infra/rbac.yaml",
+            "kubectl delete clusterrolebinding ci-admin"
+          ]
+        },
+        "specs": [
+          {
+            "path": "identity-and-rbac.spec.ts",
+            "content": "import { list, sh } from '@ops/lab';\n\nconst LIU = '--as=oidc:liu@corp.internal --as-group=oidc:developers';\nconst CHEN = '--as=oidc:chen@corp.internal --as-group=oidc:sre';\nconst CI = '--as=system:serviceaccount:argocd:deployer';\n\nconst canI = async (what, who) => {\n  const result = await sh('kubectl auth can-i ' + what + ' ' + who);\n  return result.stdout.trim();\n};\n\ndescribe('身份与 RBAC', () => {\n  it('开发在 payments 里读得到工作负载', async () => {\n    expect(await canI('list pods -n payments', LIU)).toBe('yes');\n    expect(await canI('list deployments -n payments', LIU)).toBe('yes');\n  });\n\n  it('开发看得了日志、进得去容器', async () => {\n    // 子资源要用 --subresource 问；写成 pods/log 的话 kubectl 会把 log\n    // 当成 Pod 的**名字**，问的就完全是另一件事了\n    expect(await canI('get pods --subresource=log -n payments', LIU)).toBe('yes');\n    expect(await canI('create pods --subresource=exec -n payments', LIU)).toBe('yes');\n  });\n\n  it('开发改不动东西，也读不到 Secret', async () => {\n    expect(await canI('delete pods -n payments', LIU)).toBe('no');\n    expect(await canI('patch deployments -n payments', LIU)).toBe('no');\n    expect(await canI('create deployments -n payments', LIU)).toBe('no');\n    expect(await canI('get secrets -n payments', LIU)).toBe('no');\n  });\n\n  it('开发的权限没有溢出到别的命名空间', async () => {\n    expect(await canI('list pods -n argocd', LIU)).toBe('no');\n  });\n\n  it('SRE 全集群只读', async () => {\n    expect(await canI('list pods --all-namespaces', CHEN)).toBe('yes');\n    expect(await canI('list deployments -n argocd', CHEN)).toBe('yes');\n  });\n\n  it('SRE 在 payments 里动得了工作负载，但删不掉命名空间', async () => {\n    expect(await canI('patch deployments -n payments', CHEN)).toBe('yes');\n    expect(await canI('delete pods -n payments', CHEN)).toBe('yes');\n    expect(await canI('delete namespaces', CHEN)).toBe('no');\n  });\n\n  it('CI 只能在 payments 里发布，碰不到 RBAC 与 Secret', async () => {\n    expect(await canI('create deployments -n payments', CI)).toBe('yes');\n    expect(await canI('create deployments -n argocd', CI)).toBe('no');\n    expect(await canI('create rolebindings -n payments', CI)).toBe('no');\n    expect(await canI('get secrets -n payments', CI)).toBe('no');\n  });\n\n  it('cluster-admin 不再绑给这三个主体', () => {\n    const bindings = list('ClusterRoleBinding')\n      .filter((binding) => binding.roleRef.name === 'cluster-admin');\n    const risky = bindings.flatMap((binding) => binding.subjects || [])\n      .filter((subject) => subject.kind !== 'Group' || !subject.name.startsWith('system:'));\n    expect(risky).toEqual([]);\n  });\n\n  it('管理员自己还进得去 —— 别把自己锁在外面', async () => {\n    const result = await sh('kubectl get pods -n payments');\n    expect(result.code).toBe(0);\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "maintainability"
+        ],
+        "extension": {
+          "zh": "RBAC 和前面几关的策略有一个根本区别：**它只有允许，没有拒绝**。\n写不出「除了 Secret 之外都可以」这种规则 —— 想表达它，只能把 Secret 之外\n的都列出来。所以「加一条规则」永远只会让权限变大，收权限的唯一办法是\n**改或删已有的绑定**。前任那条 `ci-admin` 就是这个道理：在旁边再写一个\n小角色，一点用都没有。\n\n另一个值得记住的是**认证与鉴权是两件事**。OIDC 只负责回答「你是谁」——\n它给出一个用户名和一组 group，之后集群里发生什么，全看 RBAC。\n所以「接了 OIDC 之后大家还是什么都干不了」是完全正常的中间状态，\n不是接错了。反过来，OIDC 那边改了 group claim 的映射，集群这边的\n绑定会突然对不上 —— 这类故障查起来很费劲，因为两边都「没改过」。\n\n最后一条实践：`kubectl auth can-i --list --as=<user>` 应该成为交付前的\n固定动作。人对自己写的 RBAC 的判断准确率相当低，而这条命令是直接问\n服务端要答案，不是猜。\n",
+          "en": "RBAC differs from the policies in earlier stages in one fundamental way: **it\nonly allows, it never denies**. There is no way to write \"anything except\nSecrets\"; you must enumerate everything else. So adding a rule can only widen\naccess, and the only way to reduce it is to **change or delete an existing\nbinding**. That is why the leftover `ci-admin` matters: writing a smaller role\nbeside it accomplishes nothing.\n\nThe other thing worth internalising is that **authentication and authorization\nare separate**. OIDC only answers \"who are you\", producing a username and a set\nof groups; what happens next is entirely RBAC. \"Everyone can log in and still do\nnothing\" is therefore a perfectly normal intermediate state, not a broken\nintegration. Conversely, when the identity provider changes how it maps group\nclaims, cluster bindings silently stop matching, and that is painful to diagnose\nbecause neither side \"changed anything\".\n\nOne practice worth adopting: run `kubectl auth can-i --list --as=<user>` before\ncalling an RBAC change done. People are remarkably bad at predicting what their\nown rules permit, and this asks the server instead of guessing.\n"
+        },
+        "primer": {
+          "zh": "一个请求打到 apiserver，要过两道关，它们回答的是完全不同的问题。`认证`回答「你是谁」：客户端证书、ServiceAccount 的 token、或者 OIDC 发下来的 id_token，形式不同，产物都是同一个东西：一个用户名加一组 `group`。`鉴权`回答「你能不能做这件事」，这才是 RBAC 的活。所以「接了 OIDC 之后大家还是什么都干不了」是正常的中间状态，不是接错了。\n\nRBAC 有四个对象，两两成对：`Role` 与 `ClusterRole` 描述「能对什么资源做什么动作」，`RoleBinding` 与 `ClusterRoleBinding` 描述「谁拿到这套权限」。最容易记混的组合是 `RoleBinding` 引用 `ClusterRole`：这时权限的**范围由 Binding 决定**，拿到的只是那一个命名空间里的权限。这是「一套只读角色复用到每个命名空间」的标准写法，不必给每个命名空间各抄一份 Role。\n\n规则里有几处不是望文生义的。动词上，`get` 和 `list` 是两件事，只写 `get` 的规则挡不住也放不开 `list`；`watch` 又是第三件。资源上，看日志和进容器是**子资源**，要写成 `pods/log`（动词 `get`）和 `pods/exec`（动词 `create`，不是 get）。`resourceNames` 能把权限限定到具体对象，但它只对指名道姓的请求生效；`list` 与 `watch` 没有名字，带 `resourceNames` 的规则对它们一律不匹配。\n\n最关键的一条：RBAC **只有允许，没有拒绝**。写不出「除了 Secret 之外都可以」，只能把 Secret 之外的都列出来。这意味着加规则永远只会让权限变大，收权限的唯一办法是改掉或删掉已有的绑定；在一条 cluster-admin 绑定旁边再写一个小角色，一点用都没有。检查的办法是 `kubectl auth can-i <动词> <资源> --as=<用户> --as-group=<组>`，加 `--list` 会把这个身份能做的事全列出来。人对自己写的 RBAC 判断准确率相当低，这条命令是直接问服务端要答案。",
+          "en": "A request reaching the apiserver passes two gates that answer completely different questions. `Authentication` answers \"who are you\": a client certificate, a ServiceAccount token, or an OIDC id_token, all producing the same thing, a username plus a set of `groups`. `Authorization` answers \"may you do this\", and that is RBAC job. So \"we wired up OIDC and everyone still cannot do anything\" is a normal intermediate state, not a broken integration.\n\nRBAC has four objects in two pairs. `Role` and `ClusterRole` describe what verbs apply to what resources; `RoleBinding` and `ClusterRoleBinding` describe who gets them. The combination people misremember is a `RoleBinding` referencing a `ClusterRole`: **scope comes from the binding**, so the subject gains those permissions in that one namespace. This is the standard way to reuse one read-only role across namespaces instead of copying a Role into each.\n\nSeveral details in a rule are not what they look like. On verbs, `get` and `list` are separate, so a rule granting only `get` neither blocks nor permits `list`, and `watch` is a third. On resources, reading logs and execing are **subresources**, written `pods/log` (verb `get`) and `pods/exec` (verb `create`, not get). `resourceNames` narrows a rule to specific objects, but only for requests that name one: `list` and `watch` carry no name, so such rules never match them.\n\nThe most important property: RBAC **only allows, it never denies**. There is no way to say \"anything except Secrets\"; you enumerate everything else. Adding rules can therefore only widen access, and the only way to reduce it is to change or delete an existing binding, which is why writing a smaller role next to a cluster-admin binding accomplishes nothing. To check, use `kubectl auth can-i <verb> <resource> --as=<user> --as-group=<group>`, and add `--list` to print everything that identity can do. People predict their own RBAC badly; this command asks the server instead."
         }
       }
     ]

@@ -230,6 +230,20 @@ const WORLD = {
       anonymousPull: false,
     },
   ],
+  /**
+   * 集群认哪些身份。
+   *
+   * key 是 kubeconfig 里的 token。一旦声明了这张表，集群就开始按 RBAC 鉴权。
+   * 前面十几关的 kubeconfig 用的是 admin 那把，所以行为不变。
+   */
+  users: {
+    'admin-token': { username: 'kubernetes-admin', groups: ['system:masters'] },
+    'opslab-token': { username: 'kubernetes-admin', groups: ['system:masters'] },
+    // OIDC 发下来的：用户名带 issuer 前缀，组来自 id_token 里的 groups claim
+    'oidc-liu': { username: 'oidc:liu@corp.internal', groups: ['oidc:developers'] },
+    'oidc-chen': { username: 'oidc:chen@corp.internal', groups: ['oidc:sre'] },
+    'ci-token': { username: 'system:serviceaccount:argocd:deployer', groups: ['system:serviceaccounts'] },
+  },
   // 内网的 Git 服务。平台仓库是「本来就在」的东西，第 11 关往后都从它来。
   gitRepositories: [
     {
@@ -4661,6 +4675,379 @@ const stage15 = {
   ),
 };
 
+
+/* ------------------------------------------------------------------ */
+/* 第 16 关                                                            */
+/* ------------------------------------------------------------------ */
+
+/** 前任图省事，把 CI 的 ServiceAccount 直接绑了 cluster-admin */
+const CI_ADMIN_BINDING = {
+  apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRoleBinding',
+  metadata: { name: 'ci-admin' },
+  subjects: [{ kind: 'ServiceAccount', name: 'deployer', namespace: 'argocd' }],
+  roleRef: { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'cluster-admin' },
+};
+
+/** 集群自带的那几个角色，真集群里也是预置的 */
+const BUILTIN_ROLES = [
+  {
+    apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole',
+    metadata: { name: 'cluster-admin' },
+    rules: [{ apiGroups: ['*'], resources: ['*'], verbs: ['*'] }],
+  },
+  {
+    apiVersion: 'rbac.authorization.k8s.io/v1', kind: 'ClusterRole',
+    metadata: { name: 'view' },
+    rules: [
+      {
+        apiGroups: ['', 'apps', 'networking.k8s.io', 'gateway.networking.k8s.io'],
+        resources: ['pods', 'services', 'endpoints', 'configmaps', 'deployments', 'replicasets',
+          'daemonsets', 'networkpolicies', 'gateways', 'httproutes'],
+        verbs: ['get', 'list', 'watch'],
+      },
+    ],
+  },
+  { apiVersion: 'v1', kind: 'ServiceAccount', metadata: { name: 'deployer', namespace: 'argocd' } },
+];
+
+const RBAC_STARTER = code`
+  # 这里什么都还没有。想清楚每个人到底需要什么，再写。
+  #
+  #   liu  —— 开发，组 oidc:developers
+  #   chen —— SRE，组 oidc:sre
+  #   argocd/deployer —— CI 用的 ServiceAccount
+`;
+
+const RBAC_REFERENCE = code`
+  # 开发：payments 里只读 + 看日志 + 进容器排查
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: Role
+  metadata:
+    name: developer
+    namespace: payments
+  rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  ---
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: developers
+    namespace: payments
+  subjects:
+  - kind: Group
+    name: oidc:developers
+    apiGroup: rbac.authorization.k8s.io
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+    name: developer
+  ---
+  # SRE：全集群只读
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRoleBinding
+  metadata:
+    name: sre-view
+  subjects:
+  - kind: Group
+    name: oidc:sre
+    apiGroup: rbac.authorization.k8s.io
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: ClusterRole
+    name: view
+  ---
+  # SRE：payments 里还能动工作负载
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: Role
+  metadata:
+    name: workload-operator
+    namespace: payments
+  rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale", "statefulsets"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  ---
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: sre-operator
+    namespace: payments
+  subjects:
+  - kind: Group
+    name: oidc:sre
+    apiGroup: rbac.authorization.k8s.io
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+    name: workload-operator
+  ---
+  # CI：只在 payments 里发布工作负载，碰不到 RBAC 与 Secret
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: Role
+  metadata:
+    name: deployer
+    namespace: payments
+  rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  ---
+  apiVersion: rbac.authorization.k8s.io/v1
+  kind: RoleBinding
+  metadata:
+    name: ci-deployer
+    namespace: payments
+  subjects:
+  - kind: ServiceAccount
+    name: deployer
+    namespace: argocd
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+    name: deployer
+`;
+
+const stage16 = {
+  id: 'identity-and-rbac',
+  title: t('把 cluster-admin 收回来', 'Take cluster-admin Back'),
+  goal: t(
+    code`
+      公司接了 OIDC，两个人已经能登录集群了：\`liu\`（开发，组
+      \`oidc:developers\`）和 \`chen\`（SRE，组 \`oidc:sre\`）。但集群这边一个
+      角色都没配 —— 他们登录之后什么都干不了。
+
+      与此同时，前任把 CI 用的 ServiceAccount \`argocd/deployer\` 直接绑了
+      \`cluster-admin\`。也就是说，一条流水线拿到的权限比任何一个人都大。
+
+      按最小权限把这三个主体配好。
+
+      ## 通关标准
+
+      1. \`liu\`：在 \`payments\` 里读得到工作负载、看得了日志、进得去容器排查；
+         **改不动任何东西**，也读不到 Secret；
+      2. \`chen\`：全集群只读，另外在 \`payments\` 里能改 Deployment 与删 Pod；
+         但删不掉命名空间；
+      3. \`argocd/deployer\`：只在 \`payments\` 里发布工作负载；碰不到 RBAC，
+         也读不到 Secret；
+      4. \`cluster-admin\` 不再绑给这三个主体里的任何一个。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl auth can-i --list --as=oidc:liu@corp.internal --as-group=oidc:developers -n payments
+      kubectl auth can-i create pods --subresource=exec -n payments --as=oidc:liu@corp.internal --as-group=oidc:developers
+      kubectl get clusterrolebindings
+      kubectl apply -f /root/infra/rbac.yaml
+      \`\`\`
+    `,
+    code`
+      The company wired up OIDC and two people can now log in: \`liu\` (a developer in
+      group \`oidc:developers\`) and \`chen\` (an SRE in \`oidc:sre\`). No roles exist on
+      the cluster side, so once logged in they can do nothing at all.
+
+      Meanwhile your predecessor bound the CI ServiceAccount \`argocd/deployer\`
+      straight to \`cluster-admin\`. A pipeline therefore holds more power than any
+      human does.
+
+      Give all three least privilege.
+
+      ## Done when
+
+      1. \`liu\` can read workloads in \`payments\`, read logs, and exec into containers
+         to debug, but **cannot change anything** and cannot read Secrets;
+      2. \`chen\` has cluster-wide read plus the ability to modify Deployments and
+         delete Pods in \`payments\`, but cannot delete namespaces;
+      3. \`argocd/deployer\` can ship workloads in \`payments\` only, cannot touch RBAC,
+         and cannot read Secrets;
+      4. \`cluster-admin\` is no longer bound to any of the three.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl auth can-i --list --as=oidc:liu@corp.internal --as-group=oidc:developers -n payments
+      kubectl auth can-i create pods --subresource=exec -n payments --as=oidc:liu@corp.internal --as-group=oidc:developers
+      kubectl get clusterrolebindings
+      kubectl apply -f /root/infra/rbac.yaml
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('三个主体各自拿到该有的权限', 'Each of the three gets what it needs'),
+    t('都拿不到不该有的', 'And none of them gets what it should not'),
+    t('cluster-admin 收回来了', 'cluster-admin taken back'),
+  ],
+  hints: [
+    t(
+      '\`kubectl auth can-i ... --as=<user> --as-group=<group>\` 是检查别人权限的标准做法 —— 不需要拿到对方的凭据。\`--list\` 会把这个身份在这个命名空间里能做的事全列出来。',
+      '`kubectl auth can-i ... --as=<user> --as-group=<group>` is how you check someone else’s permissions without holding their credentials. `--list` prints everything that identity can do in that namespace.'
+    ),
+    t(
+      '\`RoleBinding\` 可以引用 \`ClusterRole\`。权限的范围由 **Binding** 决定 —— 这就是「一套只读角色，绑到每个需要的命名空间」的标准写法，不用给每个命名空间各写一份 Role。',
+      'A `RoleBinding` may reference a `ClusterRole`. Scope comes from the **binding**, which is the standard way to reuse one read-only role across namespaces without writing a Role in each.'
+    ),
+    t(
+      '看日志和进容器是两个**子资源**：\`pods/log\` 的 \`get\`、\`pods/exec\` 的 \`create\`。只写 \`pods\` 是不够的，而且 exec 的动词是 create 不是 get。问的时候要用 \`--subresource=log\`：写成 \`can-i get pods/log\` 的话，kubectl 会把 log 当成 Pod 的**名字**。',
+      'Logs and exec are **subresources**: `get` on `pods/log`, `create` on `pods/exec`. Listing `pods` alone is not enough, and the verb for exec is create, not get. Ask with `--subresource=log`: written as `can-i get pods/log`, kubectl reads log as the pod **name** instead.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '给开发绑 \`edit\` 或 \`admin\` 这种内置角色图省事。它们包含对 Secret 的读权限 —— 而「只读」的要求里，最要紧的恰恰是读不到 Secret。判定专门查了这一条。',
+      'Reaching for built-in roles like `edit` or `admin`. They include read access to Secrets, and not reading Secrets is the most important half of "read only". The grader checks exactly that.'
+    ),
+    t(
+      '把 \`ci-admin\` 那条 ClusterRoleBinding 留着，另外再加一条小权限。多加的那条不会削减已有的 —— RBAC 是取并集的，只要还有一条给了 cluster-admin，前面写的全部白搭。',
+      'Leaving the `ci-admin` ClusterRoleBinding in place and adding a smaller role next to it. Adding never subtracts: RBAC unions its rules, so one remaining cluster-admin binding voids everything else you wrote.'
+    ),
+    t(
+      '用 \`resourceNames\` 去限制 list。它只对指名道姓的请求生效，list 与 watch 没有名字，带 \`resourceNames\` 的规则对它们一律不匹配 —— 于是「我明明允许了这个 Secret」但列不出来。',
+      'Using `resourceNames` to scope a list. It only applies to requests that name an object; list and watch carry no name, so such rules never match them, which is why "I clearly allowed that Secret" still cannot be listed.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      CNI_CILIUM,
+      ...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...TLS_PLATFORM,
+      ...PORTAL_WORKLOAD, PORTAL_ROUTE,
+      ...BUILTIN_ROLES, CI_ADMIN_BINDING,
+    ],
+    files: { '/root/infra/rbac.yaml': RBAC_STARTER },
+    referenceFiles: { '/root/infra/rbac.yaml': RBAC_REFERENCE },
+    referenceCommands: [
+      'kubectl apply -f /root/infra/rbac.yaml',
+      'kubectl delete clusterrolebinding ci-admin',
+    ],
+  },
+  specs: [
+    spec('identity-and-rbac.spec.ts', code`
+      import { list, sh } from '@ops/lab';
+
+      const LIU = '--as=oidc:liu@corp.internal --as-group=oidc:developers';
+      const CHEN = '--as=oidc:chen@corp.internal --as-group=oidc:sre';
+      const CI = '--as=system:serviceaccount:argocd:deployer';
+
+      const canI = async (what, who) => {
+        const result = await sh('kubectl auth can-i ' + what + ' ' + who);
+        return result.stdout.trim();
+      };
+
+      describe('身份与 RBAC', () => {
+        it('开发在 payments 里读得到工作负载', async () => {
+          expect(await canI('list pods -n payments', LIU)).toBe('yes');
+          expect(await canI('list deployments -n payments', LIU)).toBe('yes');
+        });
+
+        it('开发看得了日志、进得去容器', async () => {
+          // 子资源要用 --subresource 问；写成 pods/log 的话 kubectl 会把 log
+          // 当成 Pod 的**名字**，问的就完全是另一件事了
+          expect(await canI('get pods --subresource=log -n payments', LIU)).toBe('yes');
+          expect(await canI('create pods --subresource=exec -n payments', LIU)).toBe('yes');
+        });
+
+        it('开发改不动东西，也读不到 Secret', async () => {
+          expect(await canI('delete pods -n payments', LIU)).toBe('no');
+          expect(await canI('patch deployments -n payments', LIU)).toBe('no');
+          expect(await canI('create deployments -n payments', LIU)).toBe('no');
+          expect(await canI('get secrets -n payments', LIU)).toBe('no');
+        });
+
+        it('开发的权限没有溢出到别的命名空间', async () => {
+          expect(await canI('list pods -n argocd', LIU)).toBe('no');
+        });
+
+        it('SRE 全集群只读', async () => {
+          expect(await canI('list pods --all-namespaces', CHEN)).toBe('yes');
+          expect(await canI('list deployments -n argocd', CHEN)).toBe('yes');
+        });
+
+        it('SRE 在 payments 里动得了工作负载，但删不掉命名空间', async () => {
+          expect(await canI('patch deployments -n payments', CHEN)).toBe('yes');
+          expect(await canI('delete pods -n payments', CHEN)).toBe('yes');
+          expect(await canI('delete namespaces', CHEN)).toBe('no');
+        });
+
+        it('CI 只能在 payments 里发布，碰不到 RBAC 与 Secret', async () => {
+          expect(await canI('create deployments -n payments', CI)).toBe('yes');
+          expect(await canI('create deployments -n argocd', CI)).toBe('no');
+          expect(await canI('create rolebindings -n payments', CI)).toBe('no');
+          expect(await canI('get secrets -n payments', CI)).toBe('no');
+        });
+
+        it('cluster-admin 不再绑给这三个主体', () => {
+          const bindings = list('ClusterRoleBinding')
+            .filter((binding) => binding.roleRef.name === 'cluster-admin');
+          const risky = bindings.flatMap((binding) => binding.subjects || [])
+            .filter((subject) => subject.kind !== 'Group' || !subject.name.startsWith('system:'));
+          expect(risky).toEqual([]);
+        });
+
+        it('管理员自己还进得去 —— 别把自己锁在外面', async () => {
+          const result = await sh('kubectl get pods -n payments');
+          expect(result.code).toBe(0);
+        });
+      });
+    `),
+  ],
+  focus: ['correctness', 'maintainability'],
+  extension: t(
+    code`
+      RBAC 和前面几关的策略有一个根本区别：**它只有允许，没有拒绝**。
+      写不出「除了 Secret 之外都可以」这种规则 —— 想表达它，只能把 Secret 之外
+      的都列出来。所以「加一条规则」永远只会让权限变大，收权限的唯一办法是
+      **改或删已有的绑定**。前任那条 \`ci-admin\` 就是这个道理：在旁边再写一个
+      小角色，一点用都没有。
+
+      另一个值得记住的是**认证与鉴权是两件事**。OIDC 只负责回答「你是谁」——
+      它给出一个用户名和一组 group，之后集群里发生什么，全看 RBAC。
+      所以「接了 OIDC 之后大家还是什么都干不了」是完全正常的中间状态，
+      不是接错了。反过来，OIDC 那边改了 group claim 的映射，集群这边的
+      绑定会突然对不上 —— 这类故障查起来很费劲，因为两边都「没改过」。
+
+      最后一条实践：\`kubectl auth can-i --list --as=<user>\` 应该成为交付前的
+      固定动作。人对自己写的 RBAC 的判断准确率相当低，而这条命令是直接问
+      服务端要答案，不是猜。
+    `,
+    code`
+      RBAC differs from the policies in earlier stages in one fundamental way: **it
+      only allows, it never denies**. There is no way to write "anything except
+      Secrets"; you must enumerate everything else. So adding a rule can only widen
+      access, and the only way to reduce it is to **change or delete an existing
+      binding**. That is why the leftover \`ci-admin\` matters: writing a smaller role
+      beside it accomplishes nothing.
+
+      The other thing worth internalising is that **authentication and authorization
+      are separate**. OIDC only answers "who are you", producing a username and a set
+      of groups; what happens next is entirely RBAC. "Everyone can log in and still do
+      nothing" is therefore a perfectly normal intermediate state, not a broken
+      integration. Conversely, when the identity provider changes how it maps group
+      claims, cluster bindings silently stop matching, and that is painful to diagnose
+      because neither side "changed anything".
+
+      One practice worth adopting: run \`kubectl auth can-i --list --as=<user>\` before
+      calling an RBAC change done. People are remarkably bad at predicting what their
+      own rules permit, and this asks the server instead of guessing.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -4705,6 +5092,7 @@ module.exports = {
   files: [],
   stages: [
     stage1, stage2, stage3, stage4, stage5, stage6,
-    stage7, stage8, stage9, stage10, stage11, stage12, stage13, stage14, stage15,
+    stage7, stage8, stage9, stage10, stage11, stage12,
+    stage13, stage14, stage15, stage16,
   ],
 };
