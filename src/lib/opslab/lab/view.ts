@@ -1,0 +1,340 @@
+/**
+ * 给面板看的两个投影：拓扑图与变更流
+ *
+ * 都是从集群当前状态算出来的纯函数，不持有状态。这样「面板之间单向数据流、
+ * 单一数据源」这条约束才成立 —— 面板不互相发消息，各自从同一份世界里取自己要的。
+ *
+ * 坐标自己算，不交给布局引擎：泳道固定、每层内按名字排序，
+ * 于是同样的集群状态每次画出来位置完全一样。学员盯着一张会跳来跳去的图
+ * 是看不出「刚才那一下改了什么」的。
+ */
+import type { Cluster } from '../controllers';
+import type { KubeObject } from '../apiserver';
+
+export type TopologyStatus = 'ok' | 'pending' | 'warn' | 'error';
+
+export interface TopologyNode {
+  id: string;
+  kind: string;
+  name: string;
+  namespace?: string;
+  /** 节点下面那行小字，如 `3/3` 或 `ImagePullBackOff` */
+  detail: string;
+  status: TopologyStatus;
+  /** 点一下往终端里插的命令 */
+  command: string;
+  x: number;
+  y: number;
+  /** 上一次之后变过 */
+  changed?: boolean;
+}
+
+export interface TopologyEdge {
+  id: string;
+  from: string;
+  to: string;
+  kind: 'owns' | 'routes' | 'schedules';
+}
+
+export interface TopologyLane {
+  id: string;
+  title: string;
+  y: number;
+  height: number;
+}
+
+export interface TopologyGraph {
+  lanes: TopologyLane[];
+  nodes: TopologyNode[];
+  edges: TopologyEdge[];
+  width: number;
+  height: number;
+}
+
+const NODE_WIDTH = 168;
+const NODE_HEIGHT = 56;
+const GAP_X = 24;
+const LANE_HEIGHT = 112;
+const LANE_PADDING = 28;
+
+/** 泳道从上到下：流量怎么进来 → 谁在提供服务 → 实例 → 落在哪台机器 */
+const LANES: Array<{ id: string; title: string; kinds: string[] }> = [
+  { id: 'ingress', title: '入口', kinds: ['Gateway', 'HTTPRoute', 'Ingress', 'Service'] },
+  { id: 'workload', title: '工作负载', kinds: ['Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob', 'ReplicaSet'] },
+  { id: 'pod', title: '实例', kinds: ['Pod'] },
+  { id: 'node', title: '节点', kinds: ['Node'] },
+];
+
+export interface TopologyOptions {
+  namespace?: string;
+  /** 上一张图，用来标出「刚才那一下改了什么」 */
+  previous?: TopologyGraph;
+  /** ReplicaSet 平时是噪音，排查滚动更新时才需要 */
+  showReplicaSets?: boolean;
+}
+
+export function buildTopology(cluster: Cluster, options: TopologyOptions = {}): TopologyGraph {
+  const namespace = options.namespace ?? 'default';
+  const objects = collect(cluster, namespace);
+
+  const byLane = new Map<string, KubeObject[]>();
+  for (const lane of LANES) byLane.set(lane.id, []);
+  for (const object of objects) {
+    if (object.kind === 'ReplicaSet' && !options.showReplicaSets) continue;
+    const lane = LANES.find((item) => item.kinds.includes(object.kind));
+    if (lane) byLane.get(lane.id)!.push(object);
+  }
+
+  const previousVersions = new Map(
+    (options.previous?.nodes ?? []).map((node) => [node.id, node.detail + node.status])
+  );
+
+  const nodes: TopologyNode[] = [];
+  const lanes: TopologyLane[] = [];
+  let widest = 1;
+  let y = LANE_PADDING;
+
+  for (const lane of LANES) {
+    const items = (byLane.get(lane.id) ?? []).sort(byName);
+    lanes.push({ id: lane.id, title: lane.title, y: y - LANE_PADDING / 2, height: LANE_HEIGHT });
+    widest = Math.max(widest, items.length);
+
+    items.forEach((object, index) => {
+      const node = toNode(object, index, y);
+      const before = previousVersions.get(node.id);
+      node.changed = before !== undefined && before !== node.detail + node.status;
+      nodes.push(node);
+    });
+    y += LANE_HEIGHT;
+  }
+
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const edges = buildEdges(objects, nodeIds, namespace);
+
+  return {
+    lanes,
+    nodes,
+    edges,
+    width: LANE_PADDING * 2 + widest * (NODE_WIDTH + GAP_X),
+    height: y + LANE_PADDING,
+  };
+}
+
+function collect(cluster: Cluster, namespace: string): KubeObject[] {
+  const out: KubeObject[] = [];
+  for (const definition of cluster.scheme.list()) {
+    if (!LANES.some((lane) => lane.kinds.includes(definition.kind))) continue;
+    const list = cluster.registry.list(definition, {
+      namespace: definition.namespaced ? namespace : undefined,
+    });
+    out.push(...list.items);
+  }
+  return out;
+}
+
+function byName(a: KubeObject, b: KubeObject): number {
+  return a.metadata.name < b.metadata.name ? -1 : a.metadata.name > b.metadata.name ? 1 : 0;
+}
+
+function toNode(object: KubeObject, index: number, y: number): TopologyNode {
+  const { detail, status } = describe(object);
+  return {
+    id: `${object.kind}/${object.metadata.namespace ?? '-'}/${object.metadata.name}`,
+    kind: object.kind,
+    name: object.metadata.name,
+    namespace: object.metadata.namespace,
+    detail,
+    status,
+    command: commandFor(object),
+    x: LANE_PADDING + index * (NODE_WIDTH + GAP_X),
+    y,
+  };
+}
+
+/** 节点上那行小字，抄的是 `kubectl get` 里最要紧的那一列 */
+function describe(object: KubeObject): { detail: string; status: TopologyStatus } {
+  const status = (object.status ?? {}) as Record<string, unknown>;
+  const spec = (object.spec ?? {}) as Record<string, unknown>;
+
+  switch (object.kind) {
+    case 'Deployment':
+    case 'StatefulSet': {
+      const ready = Number(status.readyReplicas ?? 0);
+      const desired = Number(spec.replicas ?? 0);
+      return {
+        detail: `${ready}/${desired}`,
+        status: desired === 0 ? 'pending' : ready === desired ? 'ok' : ready === 0 ? 'error' : 'warn',
+      };
+    }
+    case 'ReplicaSet': {
+      const ready = Number(status.readyReplicas ?? 0);
+      const desired = Number(spec.replicas ?? 0);
+      return { detail: `${ready}/${desired}`, status: ready === desired ? 'ok' : 'warn' };
+    }
+    case 'Pod': {
+      const phase = String(status.phase ?? 'Pending');
+      const containers = (status.containerStatuses ?? []) as Array<{ ready?: boolean; state?: Record<string, unknown> }>;
+      const waiting = containers
+        .map((item) => (item.state?.waiting as { reason?: string } | undefined)?.reason)
+        .find(Boolean);
+      if (waiting) return { detail: waiting, status: 'error' };
+      const ready = containers.filter((item) => item.ready).length;
+      return {
+        detail: `${ready}/${containers.length || 1} ${phase}`,
+        status: phase === 'Running' && ready === containers.length ? 'ok'
+          : phase === 'Failed' ? 'error' : 'pending',
+      };
+    }
+    case 'Service': {
+      const type = String(spec.type ?? 'ClusterIP');
+      return { detail: type, status: 'ok' };
+    }
+    case 'Node': {
+      const conditions = (status.conditions ?? []) as Array<{ type?: string; status?: string }>;
+      const ready = conditions.find((item) => item.type === 'Ready')?.status === 'True';
+      const cordoned = spec.unschedulable === true;
+      return {
+        detail: cordoned ? 'Ready,SchedulingDisabled' : ready ? 'Ready' : 'NotReady',
+        status: !ready ? 'error' : cordoned ? 'warn' : 'ok',
+      };
+    }
+    default:
+      return { detail: object.kind, status: 'ok' };
+  }
+}
+
+/** 点一下拓扑上的节点，往终端里插这条命令 —— 只读检查，不改状态 */
+function commandFor(object: KubeObject): string {
+  const namespace = object.metadata.namespace ? ` -n ${object.metadata.namespace}` : '';
+  const lower = object.kind.toLowerCase();
+  return object.kind === 'Pod'
+    ? `kubectl describe pod ${object.metadata.name}${namespace}`
+    : `kubectl describe ${lower} ${object.metadata.name}${namespace}`;
+}
+
+function buildEdges(objects: KubeObject[], nodeIds: Set<string>, namespace: string): TopologyEdge[] {
+  const edges: TopologyEdge[] = [];
+  const idOf = (kind: string, name: string, ns?: string) => `${kind}/${ns ?? '-'}/${name}`;
+  const push = (from: string, to: string, kind: TopologyEdge['kind']) => {
+    if (!nodeIds.has(from) || !nodeIds.has(to)) return;
+    const id = `${kind}:${from}->${to}`;
+    if (!edges.some((edge) => edge.id === id)) edges.push({ id, from, to, kind });
+  };
+
+  const byUid = new Map(objects.map((object) => [object.metadata.uid ?? '', object]));
+
+  for (const object of objects) {
+    // 属主链：Deployment → ReplicaSet → Pod。ReplicaSet 被折叠时直接连到 Deployment。
+    for (const owner of object.metadata.ownerReferences ?? []) {
+      const parent = byUid.get(owner.uid);
+      const parentId = parent
+        ? idOf(parent.kind, parent.metadata.name, parent.metadata.namespace)
+        : idOf(owner.kind, owner.name, object.metadata.namespace);
+      const childId = idOf(object.kind, object.metadata.name, object.metadata.namespace);
+
+      if (nodeIds.has(parentId)) { push(parentId, childId, 'owns'); continue; }
+      // 折叠掉的中间层：往上再找一级
+      const grandparent = parent?.metadata.ownerReferences?.[0];
+      if (grandparent) {
+        push(idOf(grandparent.kind, grandparent.name, object.metadata.namespace), childId, 'owns');
+      }
+    }
+
+    // Service → Pod：按 selector 匹配，这正是「标签写错了就没有端点」看得见的地方
+    if (object.kind === 'Service') {
+      const selector = ((object.spec ?? {}) as { selector?: Record<string, string> }).selector;
+      if (!selector || Object.keys(selector).length === 0) continue;
+      for (const pod of objects) {
+        if (pod.kind !== 'Pod') continue;
+        const labels = pod.metadata.labels ?? {};
+        if (!Object.entries(selector).every(([key, value]) => labels[key] === value)) continue;
+        push(
+          idOf('Service', object.metadata.name, object.metadata.namespace),
+          idOf('Pod', pod.metadata.name, pod.metadata.namespace),
+          'routes'
+        );
+      }
+    }
+
+    // Pod → Node
+    if (object.kind === 'Pod') {
+      const nodeName = ((object.spec ?? {}) as { nodeName?: string }).nodeName;
+      if (nodeName) {
+        push(
+          idOf('Pod', object.metadata.name, object.metadata.namespace),
+          idOf('Node', nodeName, undefined),
+          'schedules'
+        );
+      }
+    }
+  }
+
+  return edges.sort((a, b) => (a.id < b.id ? -1 : 1));
+}
+
+/* ------------------------------------------------------------------ */
+/* 变更流                                                              */
+/* ------------------------------------------------------------------ */
+
+export interface ObjectVersion {
+  /** `Kind/namespace/name` */
+  id: string;
+  resourceVersion: string;
+}
+
+export type ChangeType = 'added' | 'modified' | 'deleted';
+
+export interface ChangeEntry {
+  type: ChangeType;
+  kind: string;
+  name: string;
+  namespace?: string;
+  /** 虚拟墙钟 */
+  at: number;
+}
+
+/** 当前集群里所有对象的版本快照 —— 变更流靠对比两张快照算出来 */
+export function snapshotVersions(cluster: Cluster): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const definition of cluster.scheme.list()) {
+    // Event 本身就是变更记录，再算一遍就成了自我指涉的噪音
+    if (definition.kind === 'Event') continue;
+    for (const object of cluster.registry.list(definition).items) {
+      out.set(
+        `${object.kind}/${object.metadata.namespace ?? '-'}/${object.metadata.name}`,
+        object.metadata.resourceVersion ?? ''
+      );
+    }
+  }
+  return out;
+}
+
+/** 两张快照之间发生了什么。顺序稳定：先按类型再按 id。 */
+export function diffVersions(
+  before: Map<string, string>,
+  after: Map<string, string>,
+  at: number
+): ChangeEntry[] {
+  const changes: ChangeEntry[] = [];
+
+  for (const [id, version] of after) {
+    const previous = before.get(id);
+    if (previous === undefined) changes.push({ ...parseId(id), type: 'added', at });
+    else if (previous !== version) changes.push({ ...parseId(id), type: 'modified', at });
+  }
+  for (const id of before.keys()) {
+    if (!after.has(id)) changes.push({ ...parseId(id), type: 'deleted', at });
+  }
+
+  const order: Record<ChangeType, number> = { added: 0, modified: 1, deleted: 2 };
+  return changes.sort((a, b) =>
+    order[a.type] !== order[b.type]
+      ? order[a.type] - order[b.type]
+      : `${a.kind}/${a.namespace}/${a.name}` < `${b.kind}/${b.namespace}/${b.name}` ? -1 : 1
+  );
+}
+
+function parseId(id: string): { kind: string; namespace?: string; name: string } {
+  const [kind, namespace, name] = id.split('/');
+  return { kind, namespace: namespace === '-' ? undefined : namespace, name };
+}

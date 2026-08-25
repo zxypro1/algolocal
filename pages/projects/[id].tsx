@@ -9,6 +9,7 @@
  * 也就是搬进 CodeWorkspace 的那套原有布局。
  */
 import { useCallback, useRef } from 'react';
+import dynamic from 'next/dynamic';
 import { useRouter } from 'next/router';
 import { Alert, AppShell, Button, Center, Loader, Stack, Text } from '@mantine/core';
 import { IconRefresh } from '@tabler/icons-react';
@@ -18,6 +19,12 @@ import CodeWorkspace from '../../src/components/engineering/CodeWorkspace';
 import { useProjectSession, type ResultScope } from '../../src/hooks/useProjectSession';
 import { workspaceKindOf } from '../../src/lib/engineering/workspace';
 import { resetProgress } from '../../src/lib/engineering/progress';
+
+/**
+ * ops 工作台按需加载：它带着 xterm、Monaco、拓扑渲染和 135MB 的 wasm 运行时，
+ * 不该让只做代码关卡的人也付这份代价。
+ */
+const OpsWorkspace = dynamic(() => import('../../src/components/opslab/OpsWorkspace'), { ssr: false });
 
 export default function ProjectWorkspacePage() {
   const router = useRouter();
@@ -96,13 +103,18 @@ export default function ProjectWorkspacePage() {
     );
   }
 
+  const kind = workspaceKindOf(project);
+  if (kind === 'ops') {
+    return <OpsWorkspace session={session} registerClearResults={registerClearResults} />;
+  }
+
   /**
    * 形态未知时不能白屏。
    *
    * 题目可能来自更新的版本（用户导入的、或者降级安装之后留下的），
    * 这时要说清楚是「这个版本不支持这种工作台」，而不是渲染半个坏掉的页面。
    */
-  if (workspaceKindOf(project) !== 'code') {
+  if (kind !== 'code') {
     return (
       <AppShell header={{ height: HEADER_HEIGHT }}>
         <AppHeader backHref="/projects" title={session.pick(project.title)} />
