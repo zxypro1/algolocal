@@ -40,7 +40,7 @@ export function parseExecRequest(request: UpgradeRequest): ExecRequest | undefin
   const query = new URLSearchParams(request.path.split('?')[1] ?? '');
   return {
     namespace: match[1],
-    pod: decodeURIComponent(match[2].split('?')[0]),
+    pod: decodeURIComponent(match[2]),
     container: query.get('container') ?? undefined,
     command: query.getAll('command'),
     stdin: query.get('stdin') === 'true',
@@ -58,6 +58,7 @@ export function createExecSession(request: ExecRequest, handler: ExecHandler): S
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   let stdin = '';
+  let launch: (() => void) | undefined;
 
   return {
     protocol: EXEC_PROTOCOL,
@@ -65,6 +66,18 @@ export function createExecSession(request: ExecRequest, handler: ExecHandler): S
     onFrame(opcode, payload) {
       if (opcode !== OPCODE.BINARY || payload.length === 0) return;
       if (payload[0] === CHANNEL.STDIN) stdin += decoder.decode(payload.subarray(1));
+      /**
+       * 255 通道是 v5 加的「某条流关了」。
+       *
+       * `-i` 的时候要等 stdin 关掉才开跑：我们的命令是一次性执行的，
+       * 提前跑就等于把 stdin 当成空的 —— `kubectl exec -i pod -- cat`
+       * 会静默输出空，比报错还难查。
+       */
+      if (payload[0] === CHANNEL.CLOSE && payload[1] === CHANNEL.STDIN) {
+        const start = launch;
+        launch = undefined;
+        start?.();
+      }
     },
 
     start(send, close) {
@@ -77,9 +90,7 @@ export function createExecSession(request: ExecRequest, handler: ExecHandler): S
         send(OPCODE.BINARY, frame);
       };
 
-      // stdin 是流式送来的，但我们的命令是一次性执行的：
-      // 等一个微任务批次，让已经在路上的 stdin 帧先落地
-      void Promise.resolve().then(async () => {
+      const run = async () => {
         let result: ExecResult;
         try {
           result = await handler(request, stdin);
@@ -90,7 +101,16 @@ export function createExecSession(request: ExecRequest, handler: ExecHandler): S
         write(CHANNEL.STDERR, result.stderr);
         write(CHANNEL.ERROR, JSON.stringify(statusOf(result.code, request)));
         close();
-      });
+      };
+
+      // 不带 -i 时没人会送 stdin，等一个微任务批次就开跑
+      if (request.stdin) launch = () => { void run(); };
+      else void Promise.resolve().then(run);
+    },
+
+    onClose() {
+      // 连接先断了：stdin 不会再来了，别把会话晾在那儿
+      launch = undefined;
     },
   };
 }

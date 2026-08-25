@@ -265,6 +265,16 @@ describe('Pod 里的 shell', () => {
     expect(result.stdout).toContain('options ndots:5');
   });
 
+  it('stdin 喂得进去', async () => {
+    const { world, pod } = await podWorld();
+    const exec = createExecHandler(world.cluster);
+    const result = await exec(
+      { namespace: 'shop', pod: pod.metadata.name!, command: ['cat'], stdin: true, tty: false },
+      'from outside\n'
+    );
+    expect(result.stdout).toBe('from outside\n');
+  });
+
   it('容器的 env 进得来', async () => {
     const { world, pod } = await podWorld();
     const exec = createExecHandler(world.cluster);

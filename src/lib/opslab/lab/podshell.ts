@@ -108,8 +108,7 @@ export function createExecHandler(cluster: Cluster) {
 
     // `kubectl exec pod -- sh -c '...'` 与 `kubectl exec pod -- curl x` 都要能跑
     const command = normalizeCommand(request.command);
-    const result = await shell.run(command);
-    void stdin;
+    const result = await shell.run(command, stdin);
     return { stdout: result.stdout, stderr: result.stderr, code: result.code };
   };
 }

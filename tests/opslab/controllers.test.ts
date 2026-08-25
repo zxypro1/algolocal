@@ -400,7 +400,7 @@ describe('ClusterIP 分配器', () => {
     const cluster = fresh();
     const created = cluster.registry.create(SERVICES, 'default', svc('portal') as never);
     const ip = (created.spec as { clusterIP: string }).clusterIP;
-    expect(ip).toMatch(/^10\.(9[6-9]|10\d|11\d)\.\d+\.\d+$/);
+    expect(ip).toMatch(/^10\.(9[6-9]|10\d|11[01])\.\d+\.\d+$/);
     expect((created.spec as { clusterIPs: string[] }).clusterIPs).toEqual([ip]);
   });
 

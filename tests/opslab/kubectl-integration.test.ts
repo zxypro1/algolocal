@@ -276,6 +276,20 @@ describeIfBuilt('真 kubectl exec 走 WebSocket 通道', () => {
     expect(result.code).toBe(127);
   });
 
+  it('kubectl exec -i —— stdin 从 0 号通道进去', async () => {
+    const { server } = buildWorld();
+    const vfs = createVfs(() => VIRTUAL_NOW);
+    vfs.writeFile('/root/.kube/config', renderKubeconfig(defaultKubeconfig()));
+    const result = await runtime().run('kubectl', ['exec', '-i', 'payments-7f4-2xk', '--', 'cat'], {
+      vfs, cwd: '/root', stdin: 'from the outside\n',
+      fetch: (url, init) => server.handle(url, init as never),
+      dial: () => ({ open: (request) => server.openStream(request) }),
+      now: () => VIRTUAL_NOW,
+    });
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe('from the outside\n');
+  });
+
   it('宿主不给通道时报的是升级失败，不是「Pod 不存在」', async () => {
     const { server } = buildWorld();
     const vfs = createVfs(() => VIRTUAL_NOW);
@@ -345,6 +359,13 @@ describeIfBuilt('跳板机 -> Pod -> 集群网络', () => {
     );
     expect(result.stderr).toBe('');
     expect(result.stdout).toBe('200');
+  });
+
+  it('管道能穿过 kubectl exec -i 进到容器里', async () => {
+    const world = await createOpsWorld({ world: WORLD as never, runtime: runtime() });
+    const result = await world.run("echo 'hello from jump-01' | kubectl exec -i -n shop deploy/portal -- cat");
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe('hello from jump-01\n');
   });
 
   it('同一条 curl 在跳板机上打不通 —— 办公网够不到 ClusterIP', async () => {

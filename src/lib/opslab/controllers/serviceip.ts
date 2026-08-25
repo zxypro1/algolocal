@@ -51,8 +51,9 @@ export interface ServiceIpOptions {
  */
 export function createServiceIpDefaulter(options: ServiceIpOptions): Defaulter {
   const { base, size } = parseCidr(options.cidr ?? DEFAULT_SERVICE_CIDR);
-  // .0 是网络地址，.1 留给 kubernetes 这个 Service，从 2 开始分
-  const usable = size - 2;
+  // .0 是网络地址，.1 留给 kubernetes 这个 Service，最后一个也不用，
+  // 所以可分的是 [base+2, base+size-2]
+  const usable = size - 3;
 
   const taken = (): Set<string> => {
     const definition = options.scheme.get({ group: '', version: 'v1', resource: 'services' });
