@@ -112,7 +112,7 @@ export function issueCertificate(
 
   return {
     ...parseCertificate(der),
-    privateKeyPem: toPem('PRIVATE KEY', base64urlToBytes(key.d)),
+    privateKeyPem: encodePrivateKeyPem(key),
     key,
   };
 }
@@ -179,6 +179,37 @@ function encodePublicKey(key: RsaKeyPair): Uint8Array {
     encode(TAG.SEQUENCE, concat(encodeOid(OID.rsaEncryption), encode(TAG.NULL, new Uint8Array(0)))),
     encodeBitString(rsaKey)
   ));
+}
+
+/**
+ * 导出成 PKCS#1 的 `RSA PRIVATE KEY`。
+ *
+ * 结构完整（带 CRT 参数），openssl 读得懂，我们自己也解析得回来 ——
+ * cert-manager 那边就是从 Secret 的 `tls.key` 里把 CA 的私钥读出来签下一级的，
+ * 靠猜是猜不回来的。
+ */
+export function encodePrivateKeyPem(key: RsaKeyPair): string {
+  const der = encode(TAG.SEQUENCE, concat(
+    encodeInteger(0n),
+    ...(['n', 'e', 'd', 'p', 'q', 'dp', 'dq', 'qi'] as const)
+      .map((field) => encodeInteger(bytesToBigInt(base64urlToBytes(key[field]))))
+  ));
+  return toPem('RSA PRIVATE KEY', der);
+}
+
+/** 从 PEM 里把私钥读回来 */
+export function parsePrivateKeyPem(pem: string): RsaKeyPair | undefined {
+  const match = /-----BEGIN RSA PRIVATE KEY-----([\s\S]*?)-----END RSA PRIVATE KEY-----/.exec(pem);
+  if (!match) return undefined;
+  try {
+    const der = base64ToBytes(match[1].replace(/\s+/g, ''));
+    const root = parseDer(der);
+    const values = root.children!.slice(1, 9).map((node) => bytesToBase64url(trimLeadingZeros(node.value)));
+    const [n, e, d, p, q, dp, dq, qi] = values;
+    return { n, e, d, p, q, dp, dq, qi };
+  } catch {
+    return undefined;
+  }
 }
 
 /* ------------------------------------------------------------------ */

@@ -12,8 +12,10 @@ import {
   Controller, ControllerContext, Informer, isConflict, isNotFound, objectKey, splitKey,
 } from '../controllers/framework';
 import { DEPLOYMENTS, SECRETS } from '../controllers/resources';
-import { issueCertificate, parseChain, toPem, type Certificate, type RsaKeyPair } from '../crypto';
-import { keyFor } from '../crypto';
+import {
+  issueCertificate, parseChain, parsePrivateKeyPem, toPem,
+  type Certificate, type RsaKeyPair,
+} from '../crypto';
 import { CERTIFICATES, CLUSTERISSUERS, ISSUERS } from './resources';
 
 export const CERT_MANAGER_LABEL = { key: 'app.kubernetes.io/name', value: 'cert-manager' };
@@ -160,10 +162,14 @@ export class CertManagerController extends Controller {
     const chain = parseChain(data['tls.crt'] ?? '');
     if (chain.length === 0) return undefined;
 
+    // 私钥从 Secret 的 tls.key 里读出来 —— 真 cert-manager 也是这么做的，
+    // 靠「按名字再推导一次」是一种隐式耦合，换一把外来的 CA 就会悄悄签出废证书
+    const key = parsePrivateKeyPem(data['tls.key'] ?? '');
+    if (!key) return undefined;
+
     return {
       certificate: chain[0],
-      // CA 的私钥按它自己的名字取，和签发时用的是同一把
-      key: keyFor(`${chain[0].subject.commonName}|${chain[0].notBefore}`),
+      key,
       chainPem: data['tls.crt'] ?? '',
       rootPem: data['ca.crt'] ?? chain[chain.length - 1].pem,
     };

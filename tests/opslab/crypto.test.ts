@@ -11,8 +11,8 @@
  * 能分清才谈得上会查，所以这一套用例逐条钉住报错文本。
  */
 import {
-  issueCertificate, matchesHostname, parseCertificate, parseChain, signedBy,
-  sign, toPem, verify, verifyChain, KEY_POOL,
+  issueCertificate, matchesHostname, parseCertificate, parseChain, parsePrivateKeyPem,
+  signedBy, sign, toPem, verify, verifyChain, KEY_POOL,
 } from '../../src/lib/opslab/crypto';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -112,6 +112,28 @@ describe('证书的编解码', () => {
     const a = leaf('portal', ca('Corp Root CA'), { dnsNames: ['portal.corp.internal'] });
     const b = leaf('portal', ca('Corp Root CA'), { dnsNames: ['portal.corp.internal'] });
     expect(Array.from(a.der)).toEqual(Array.from(b.der));
+  });
+});
+
+describe('私钥导出与读回', () => {
+  it('导出的是结构完整的 PKCS#1，能原样读回来', () => {
+    const root = ca('Corp Root CA');
+    expect(root.privateKeyPem.startsWith('-----BEGIN RSA PRIVATE KEY-----')).toBe(true);
+
+    const back = parsePrivateKeyPem(root.privateKeyPem);
+    expect(back).toEqual(root.key);
+  });
+
+  it('读回来的私钥签出来的东西，用证书里的公钥验得过', () => {
+    const root = ca('Corp Root CA');
+    const back = parsePrivateKeyPem(root.privateKeyPem)!;
+    const message = new TextEncoder().encode('signed with the reloaded key');
+    expect(verify(root.publicKey, message, sign(back, message))).toBe(true);
+  });
+
+  it('不是私钥的 PEM 读回来是 undefined，不抛', () => {
+    expect(parsePrivateKeyPem('not a pem')).toBeUndefined();
+    expect(parsePrivateKeyPem(ca('X').pem)).toBeUndefined();
   });
 });
 

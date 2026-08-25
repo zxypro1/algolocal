@@ -6,7 +6,7 @@ export { sign, verify, modPow, equalBytes } from './rsa';
 export { KEY_POOL, keyFor, type RsaKeyPair } from './keys';
 export {
   issueCertificate, parseCertificate, parseChain, verifyChain, signedBy, matchesHostname,
-  toPem, fromPem,
+  toPem, fromPem, encodePrivateKeyPem, parsePrivateKeyPem,
   type Certificate, type CertificateSpec, type IssuedCertificate,
   type VerifyOptions, type VerifyResult,
 } from './x509';
