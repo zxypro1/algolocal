@@ -5618,7 +5618,8 @@
           "ingress-nginx",
           "cert-manager",
           "argocd",
-          "istio-system"
+          "istio-system",
+          "kyverno"
         ],
         "images": {
           "harbor.corp.internal/team/portal:1.4.0": {
@@ -5715,6 +5716,22 @@
             "readyAfterMs": 200,
             "listens": [
               15008
+            ]
+          },
+          "ghcr.io/kyverno/kyverno:v1.16.0": {
+            "pullMs": 500,
+            "startupMs": 700,
+            "readyAfterMs": 300,
+            "listens": [
+              9443
+            ]
+          },
+          "docker.io/library/redis:7.4": {
+            "pullMs": 300,
+            "startupMs": 400,
+            "readyAfterMs": 200,
+            "listens": [
+              6379
             ]
           },
           "harbor.corp.internal/team/sessions:1.8.0": {
@@ -10606,6 +10623,516 @@
         "primer": {
           "zh": "一个请求打到 apiserver，要过两道关，它们回答的是完全不同的问题。`认证`回答「你是谁」：客户端证书、ServiceAccount 的 token、或者 OIDC 发下来的 id_token，形式不同，产物都是同一个东西：一个用户名加一组 `group`。`鉴权`回答「你能不能做这件事」，这才是 RBAC 的活。所以「接了 OIDC 之后大家还是什么都干不了」是正常的中间状态，不是接错了。\n\nRBAC 有四个对象，两两成对：`Role` 与 `ClusterRole` 描述「能对什么资源做什么动作」，`RoleBinding` 与 `ClusterRoleBinding` 描述「谁拿到这套权限」。最容易记混的组合是 `RoleBinding` 引用 `ClusterRole`：这时权限的**范围由 Binding 决定**，拿到的只是那一个命名空间里的权限。这是「一套只读角色复用到每个命名空间」的标准写法，不必给每个命名空间各抄一份 Role。\n\n规则里有几处不是望文生义的。动词上，`get` 和 `list` 是两件事，只写 `get` 的规则挡不住也放不开 `list`；`watch` 又是第三件。资源上，看日志和进容器是**子资源**，要写成 `pods/log`（动词 `get`）和 `pods/exec`（动词 `create`，不是 get）。`resourceNames` 能把权限限定到具体对象，但它只对指名道姓的请求生效；`list` 与 `watch` 没有名字，带 `resourceNames` 的规则对它们一律不匹配。\n\n最关键的一条：RBAC **只有允许，没有拒绝**。写不出「除了 Secret 之外都可以」，只能把 Secret 之外的都列出来。这意味着加规则永远只会让权限变大，收权限的唯一办法是改掉或删掉已有的绑定；在一条 cluster-admin 绑定旁边再写一个小角色，一点用都没有。检查的办法是 `kubectl auth can-i <动词> <资源> --as=<用户> --as-group=<组>`，加 `--list` 会把这个身份能做的事全列出来。人对自己写的 RBAC 判断准确率相当低，这条命令是直接问服务端要答案。",
           "en": "A request reaching the apiserver passes two gates that answer completely different questions. `Authentication` answers \"who are you\": a client certificate, a ServiceAccount token, or an OIDC id_token, all producing the same thing, a username plus a set of `groups`. `Authorization` answers \"may you do this\", and that is RBAC job. So \"we wired up OIDC and everyone still cannot do anything\" is a normal intermediate state, not a broken integration.\n\nRBAC has four objects in two pairs. `Role` and `ClusterRole` describe what verbs apply to what resources; `RoleBinding` and `ClusterRoleBinding` describe who gets them. The combination people misremember is a `RoleBinding` referencing a `ClusterRole`: **scope comes from the binding**, so the subject gains those permissions in that one namespace. This is the standard way to reuse one read-only role across namespaces instead of copying a Role into each.\n\nSeveral details in a rule are not what they look like. On verbs, `get` and `list` are separate, so a rule granting only `get` neither blocks nor permits `list`, and `watch` is a third. On resources, reading logs and execing are **subresources**, written `pods/log` (verb `get`) and `pods/exec` (verb `create`, not get). `resourceNames` narrows a rule to specific objects, but only for requests that name one: `list` and `watch` carry no name, so such rules never match them.\n\nThe most important property: RBAC **only allows, it never denies**. There is no way to say \"anything except Secrets\"; you enumerate everything else. Adding rules can therefore only widen access, and the only way to reduce it is to change or delete an existing binding, which is why writing a smaller role next to a cluster-admin binding accomplishes nothing. To check, use `kubectl auth can-i <verb> <resource> --as=<user> --as-group=<group>`, and add `--list` to print everything that identity can do. People predict their own RBAC badly; this command asks the server instead."
+        }
+      },
+      {
+        "id": "policy-as-code",
+        "title": {
+          "zh": "把规矩写成策略",
+          "en": "Turn the Rules Into Policy"
+        },
+        "goal": {
+          "zh": "安全评审给了三条规矩，从今往后由集群自己把关，不靠人 review：\n\n1. `payments` 里不许跑特权容器，不许挂 hostPath；\n2. 每个工作负载都要带 `owner` 标签；\n3. 镜像只能来自 `harbor.corp.internal`，而且必须**签过名**。\n\n现场有个反面教材：前任跑起来的 `cache`，用的是公网拉的 redis、\n开了特权、挂了宿主机目录、没有 owner 标签 —— 四条全占。\n\nKyverno 已经装好。签名用 `cosign`，密钥自己生成。\n\n## 通关标准\n\n1. 三条规矩都落成策略并且真的拦得住；\n2. `cache` 改好并跑起来（不是删掉了事）；\n3. 违规的东西 apply 上去会被拒，报错能看懂；\n4. 第 1 条用 PSA 的档位做，不是自己写 Kyverno 规则重复造一遍。\n\n## 会用到的命令\n\n```bash\nkubectl label namespace payments pod-security.kubernetes.io/enforce=restricted\ncosign generate-key-pair\ncosign sign --key cosign.key harbor.corp.internal/team/sessions:1.8.0\nkubectl apply -f /root/infra/policy.yaml\nkubectl get cpol\nkubectl apply -f /root/infra/cache.yaml\n```\n",
+          "en": "The security review handed down three rules, to be enforced by the cluster from\nnow on rather than by human review:\n\n1. no privileged containers and no hostPath volumes in `payments`;\n2. every workload carries an `owner` label;\n3. images come only from `harbor.corp.internal`, and must be **signed**.\n\nThere is a live counter-example: the `cache` your predecessor started runs a\nredis pulled from the public internet, privileged, with a host directory mounted,\nand no owner label. All four at once.\n\nKyverno is installed. Use `cosign` for signatures and generate your own key.\n\n## Done when\n\n1. all three rules exist as policy and actually block;\n2. `cache` is fixed and running, not deleted;\n3. a violating manifest is rejected with a message you can act on;\n4. rule 1 uses PSA levels rather than a hand-written Kyverno rule reimplementing\n   them.\n\n## Commands you will need\n\n```bash\nkubectl label namespace payments pod-security.kubernetes.io/enforce=restricted\ncosign generate-key-pair\ncosign sign --key cosign.key harbor.corp.internal/team/sessions:1.8.0\nkubectl apply -f /root/infra/policy.yaml\nkubectl get cpol\nkubectl apply -f /root/infra/cache.yaml\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "三条规矩都由集群自己把关",
+            "en": "All three rules enforced by the cluster"
+          },
+          {
+            "zh": "反面教材改好了，不是删掉了事",
+            "en": "The counter-example is fixed, not deleted"
+          },
+          {
+            "zh": "该用 PSA 的用 PSA",
+            "en": "PSA where PSA belongs"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "PSA 是三档预置标准，靠命名空间标签开启，不写规则：`restricted` 已经包含「不许特权、不许 hostPath」以及更多。它挡不住的是「必须有 owner 标签」这种公司自定义的规矩 —— 那才是 Kyverno 的活。",
+            "en": "PSA offers three preset levels switched on by a namespace label, with no rules to write: `restricted` already covers \"no privileged, no hostPath\" and more. What it cannot express is a company-specific rule like \"must carry an owner label\", and that is what Kyverno is for."
+          },
+          {
+            "zh": "PSA 只看 **Pod**。给命名空间打上 `enforce=restricted` 之后，违规的 Deployment 照样 apply 得进去 —— 然后一个 Pod 都起不来，原因在 ReplicaSet 的事件里（`kubectl describe rs`）。",
+            "en": "PSA only inspects **Pods**. After labelling the namespace `enforce=restricted`, a violating Deployment still applies cleanly and then produces no pods at all; the reason sits in the ReplicaSet events (`kubectl describe rs`)."
+          },
+          {
+            "zh": "签名签的是镜像的 **digest**，不是 tag。所以先把镜像推进内网仓库、再签，顺序反了签的就是另一个东西。Kyverno 的 `verifyImages` 里填的是公钥，不是私钥。",
+            "en": "A signature covers the image **digest**, not the tag. Push to the internal registry first and sign after; the other order signs something else. The `publicKeys` field in Kyverno `verifyImages` takes the public key, not the private one."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "用 Kyverno 再写一遍「不许特权容器」。能用，但那是在维护一份和上游 PSA 并行的实现 —— 上游加了新的提权途径，你的规则不会跟着更新。能交给 PSA 的就交给它。",
+            "en": "Reimplementing \"no privileged containers\" as a Kyverno rule. It works, but it means maintaining a parallel copy of upstream PSA: when upstream adds a newly discovered escalation path, your rule does not follow. Hand to PSA what PSA covers."
+          },
+          {
+            "zh": "把 `validationFailureAction` 写成 `Audit` 就以为拦住了。Audit 只记录，对象照样进集群 —— 和 PSA 那边只打 `warn` 标签是同一个误会。",
+            "en": "Setting `validationFailureAction: Audit` and believing it blocks. Audit only records; the object still lands. It is the same misunderstanding as labelling a namespace with only `warn` on the PSA side."
+          },
+          {
+            "zh": "把违规的 `cache` 删掉交差。删掉当然不违规了，但业务也没了 —— 判定要求它跑着。策略的意义是让人把东西改对，不是把东西删光。",
+            "en": "Deleting the offending `cache` and calling it done. Nothing violates once nothing runs, but the workload is gone too, and the grader requires it running. Policy exists to make things correct, not to make them disappear."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "cilium",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cilium"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cilium"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cilium"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "cilium-agent",
+                        "image": "quay.io/cilium/cilium:v1.19.2",
+                        "ports": [
+                          {
+                            "containerPort": 9962
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "Certificate",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "secretName": "portal-tls",
+                "duration": "2160h",
+                "renewBefore": "720h",
+                "commonName": "portal.corp.internal",
+                "dnsNames": [
+                  "portal.corp.internal"
+                ],
+                "issuerRef": {
+                  "name": "corp-ca",
+                  "kind": "ClusterIssuer"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "Gateway",
+              "metadata": {
+                "name": "corp-gw",
+                "namespace": "payments"
+              },
+              "spec": {
+                "gatewayClassName": "envoy-internal",
+                "listeners": [
+                  {
+                    "name": "https",
+                    "port": 443,
+                    "protocol": "HTTPS",
+                    "hostname": "portal.corp.internal",
+                    "tls": {
+                      "mode": "Terminate",
+                      "certificateRefs": [
+                        {
+                          "name": "portal-tls"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "http",
+                    "port": 80,
+                    "protocol": "HTTP",
+                    "hostname": "portal.corp.internal"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "kyverno-admission-controller",
+                "namespace": "kyverno",
+                "labels": {
+                  "app.kubernetes.io/name": "kyverno"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "kyverno"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "kyverno"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "kyverno",
+                        "image": "ghcr.io/kyverno/kyverno:v1.16.0",
+                        "ports": [
+                          {
+                            "containerPort": 9443
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.corp.internal"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cache",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app": "cache"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "cache"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "redis",
+                        "image": "docker.io/library/redis:7.4",
+                        "ports": [
+                          {
+                            "containerPort": 6379
+                          }
+                        ],
+                        "securityContext": {
+                          "privileged": true
+                        }
+                      }
+                    ],
+                    "volumes": [
+                      {
+                        "name": "data",
+                        "hostPath": {
+                          "path": "/var/lib/redis"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ],
+          "files": {
+            "/root/infra/policy.yaml": "# 三条规矩要落成策略。想清楚哪一条该交给 PSA，哪一条只能靠 Kyverno。\n#\n#   1. 不许特权容器、不许 hostPath\n#   2. 每个工作负载都要有 owner 标签\n#   3. 镜像只能来自内网仓库，而且必须签过名\n",
+            "/root/infra/cache.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: cache\n  namespace: payments\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: cache\n  template:\n    metadata:\n      labels:\n        app: cache\n        owner: payments\n    spec:\n      securityContext:\n        runAsNonRoot: true\n        seccompProfile:\n          type: RuntimeDefault\n      containers:\n      - name: redis\n        image: harbor.corp.internal/team/sessions:1.8.0\n        ports:\n        - containerPort: 8080\n        securityContext:\n          allowPrivilegeEscalation: false\n          runAsNonRoot: true\n          capabilities:\n            drop:\n            - ALL\n"
+          },
+          "referenceFiles": {
+            "/root/infra/policy.yaml": "# 第 2、3 条：PSA 表达不了，交给 Kyverno\napiVersion: kyverno.io/v1\nkind: ClusterPolicy\nmetadata:\n  name: require-owner\nspec:\n  validationFailureAction: Enforce\n  rules:\n  - name: owner-label\n    match:\n      any:\n      - resources:\n          kinds:\n          - Pod\n          namespaces:\n          - payments\n    validate:\n      message: \"每个工作负载都要带 owner 标签\"\n      pattern:\n        metadata:\n          labels:\n            owner: \"?*\"\n---\napiVersion: kyverno.io/v1\nkind: ClusterPolicy\nmetadata:\n  name: internal-registry-only\nspec:\n  validationFailureAction: Enforce\n  rules:\n  - name: registry\n    match:\n      any:\n      - resources:\n          kinds:\n          - Pod\n          namespaces:\n          - payments\n    validate:\n      message: \"镜像只能来自 harbor.corp.internal\"\n      pattern:\n        spec:\n          containers:\n          - image: \"harbor.corp.internal/*\"\n"
+          },
+          "referenceCommands": [
+            "cosign generate-key-pair",
+            "cosign sign --key cosign.key harbor.corp.internal/team/sessions:1.8.0",
+            "cat > /root/infra/verify.yaml <<EOF\napiVersion: kyverno.io/v1\nkind: ClusterPolicy\nmetadata:\n  name: verify-images\nspec:\n  validationFailureAction: Enforce\n  rules:\n  - name: signed\n    match:\n      any:\n      - resources:\n          kinds:\n          - Pod\n          namespaces:\n          - payments\n    verifyImages:\n    - imageReferences:\n      - \"harbor.corp.internal/*\"\n      attestors:\n      - entries:\n        - keys:\n            publicKeys: |\n$(sed 's/^/              /' /root/cosign.pub)\nEOF",
+            "kubectl label namespace payments pod-security.kubernetes.io/enforce=restricted",
+            "kubectl apply -f /root/infra/policy.yaml",
+            "kubectl apply -f /root/infra/verify.yaml",
+            "kubectl replace -f /root/infra/cache.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "policy-as-code.spec.ts",
+            "content": "import { get, list, sh } from '@ops/lab';\n\nconst violating = (name, patch) => JSON.stringify({\n  apiVersion: 'v1', kind: 'Pod',\n  metadata: { name, namespace: 'payments', labels: { owner: 'payments' } },\n  spec: {\n    securityContext: { runAsNonRoot: true, seccompProfile: { type: 'RuntimeDefault' } },\n    containers: [{\n      name: 'app', image: 'harbor.corp.internal/team/sessions:1.8.0',\n      securityContext: {\n        allowPrivilegeEscalation: false, runAsNonRoot: true,\n        capabilities: { drop: ['ALL'] },\n      },\n    }],\n    ...patch,\n  },\n});\n\nconst apply = async (json) => sh(\"echo '\" + json + \"' | kubectl apply -f -\");\n\ndescribe('策略即代码', () => {\n  it('特权容器进不来', async () => {\n    const result = await apply(violating('privileged-probe', {\n      containers: [{\n        name: 'app', image: 'harbor.corp.internal/team/sessions:1.8.0',\n        securityContext: { privileged: true },\n      }],\n    }));\n    expect(result.code).not.toBe(0);\n    expect(result.stderr).toContain('PodSecurity');\n  });\n\n  it('hostPath 进不来', async () => {\n    const result = await apply(violating('hostpath-probe', {\n      volumes: [{ name: 'root', hostPath: { path: '/' } }],\n    }));\n    expect(result.code).not.toBe(0);\n  });\n\n  it('没有 owner 标签进不来', async () => {\n    const json = violating('no-owner', {}).replace('\"owner\":\"payments\"', '\"tier\":\"cache\"');\n    const result = await apply(json);\n    expect(result.code).not.toBe(0);\n    expect(result.stderr).toContain('owner');\n  });\n\n  it('公网镜像进不来', async () => {\n    const json = violating('public-image', {})\n      .replace(/harbor.corp.internal\\/team\\/sessions:1.8.0/g, 'docker.io/library/redis:7.4');\n    const result = await apply(json);\n    expect(result.code).not.toBe(0);\n  });\n\n  it('没签名的内网镜像也进不来', async () => {\n    const json = violating('unsigned', {})\n      .replace(/harbor.corp.internal\\/team\\/sessions:1.8.0/g, 'harbor.corp.internal/team/reports:2.1.0');\n    const result = await apply(json);\n    expect(result.code).not.toBe(0);\n    expect(result.stderr).toContain('not signed');\n  });\n\n  it('规规矩矩的 Pod 进得来', async () => {\n    const result = await apply(violating('good-probe', {}));\n    expect(result.code).toBe(0);\n  });\n\n  it('cache 改好了并且跑着 —— 不是删掉了事', () => {\n    const deployment = get('Deployment', 'cache', 'payments');\n    expect(deployment).toBeTruthy();\n    expect(deployment.status.readyReplicas).toBeGreaterThan(0);\n  });\n\n  it('第 1 条交给了 PSA，不是自己写一遍', () => {\n    const namespace = get('Namespace', 'payments');\n    const level = namespace.metadata.labels['pod-security.kubernetes.io/enforce'];\n    expect(['baseline', 'restricted']).toContain(level);\n  });\n\n  it('策略是 Enforce 不是 Audit', () => {\n    const policies = list('ClusterPolicy');\n    expect(policies.length).toBeGreaterThan(0);\n    for (const policy of policies) {\n      expect(policy.spec.validationFailureAction || 'Enforce').toBe('Enforce');\n    }\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "maintainability"
+        ],
+        "extension": {
+          "zh": "两层策略的分工值得记清楚。**PSA** 是 Kubernetes 内置的，三档预置标准，\n靠命名空间标签开关，卸不掉也改不了 —— 它的价值恰恰在这里：上游发现了\n新的提权途径，你升级集群就自动跟上，不需要维护任何规则。\n**Kyverno**（以及 ValidatingAdmissionPolicy）管的是公司自己的规矩：\n标签、镜像来源、命名约定、成本归属。能交给 PSA 的别自己写。\n\n供应链那条最容易被做成摆设。签名签的是 **digest**，所以它保证的是\n「这一坨字节被某把私钥认过」，不多也不少。它**不**保证镜像里没有漏洞，\n也不保证签它的人有资格签。真正要配套的是：谁持有私钥、密钥怎么轮转、\n以及验签之外还要看 SBOM 与来源证明（SLSA provenance）。\n只做验签而不管密钥归属，安全性等于「有人签过」这四个字。\n\n最后一点关于推行：策略上线永远从 `Audit` 开始，看几天报表，\n把存量违规改完，再切 `Enforce`。直接 Enforce 的后果不是策略被绕过，\n是有人半夜把策略删了 —— 那比没有策略更糟，因为没人知道它被删了。\n",
+          "en": "The division of labour between the two layers is worth internalising. **PSA** is\nbuilt into Kubernetes: three preset levels toggled by a namespace label, neither\nremovable nor customisable, and that rigidity is the point. When upstream learns\nof a new escalation path, upgrading the cluster picks it up with no rules for you\nto maintain. **Kyverno** (and ValidatingAdmissionPolicy) covers company-specific\nrules: labels, image provenance, naming conventions, cost attribution. Hand to\nPSA what PSA covers.\n\nThe supply-chain rule is the easiest to turn into theatre. A signature covers the\n**digest**, so it guarantees exactly one thing: these bytes were vouched for by\nsome private key. It does **not** say the image is free of vulnerabilities, nor\nthat whoever signed was entitled to. What has to come with it is key custody, a\nrotation story, and looking beyond signatures at SBOMs and build provenance\n(SLSA). Verifying signatures without governing the keys means the guarantee is\nliterally \"somebody signed this\".\n\nOne note on rollout: ship policies as `Audit` first, watch the reports for a few\ndays, fix the existing violations, then switch to `Enforce`. Going straight to\nEnforce does not get the policy bypassed; it gets the policy deleted at 2am,\nwhich is worse than having none, because nobody knows it is gone.\n"
+        },
+        "primer": {
+          "zh": "`准入`是对象写进 etcd 之前的最后一道关。它和鉴权回答的问题不同：鉴权看「谁在做什么」，准入看**对象本身长什么样**：特权容器、没写 limits、镜像没签名，都是在这一层被拦下来的。这一层分两块：Kubernetes 内置的插件，和以 webhook 形式接进来的外部组件。\n\n`PSA`（Pod Security Admission）是内置的那块，2025 年起替代了被删掉的 PodSecurityPolicy。它只有三档预置标准：`privileged` 什么都不管，`baseline` 挡住已知的提权途径（特权容器、hostPath、host 命名空间、额外 capability），`restricted` 再加上强化要求（非 root、丢掉所有 capability、seccomp、禁止提权）。开关是命名空间上的标签，三种模式各自独立：`enforce` 拦下来，`audit` 记日志，`warn` 回一条警告。只打 `warn` 而以为拦住了，是这一层最常见的误会。另一件要记住的：**PSA 只看 Pod**，违规的 Deployment 照样 apply 得进去，然后一个 Pod 都起不来，原因在 ReplicaSet 的事件里。\n\n`Kyverno` 是外部那块，管的是 PSA 表达不了的公司自定义规矩：必须有 owner 标签、镜像只能来自内网仓库、名字要符合约定。规则写在 `ClusterPolicy` 里，`validate.pattern` 是它自己那套结构匹配（`?*` 表示要有值，`!` 表示不能等于，`|` 是或），`validate.cel` 直接写 CEL 表达式。它是集群里的一个工作负载：停掉它，所有策略立刻失效，而 `kubectl get cpol` 照样看得见。能交给 PSA 的规则不要在这里重写一遍：上游发现新的提权途径时，PSA 会跟着升级，你的规则不会。\n\n供应链那条靠 `cosign`。要点是它签的是镜像的 **digest** 而不是 tag：换个 tag 指向同一个 digest，签名依然有效；tag 不变而 digest 变了，签名立刻失效。准入时由 Kyverno 的 `verifyImages` 拿公钥验。但这条保证的边界要说清楚：它只证明「这坨字节被某把私钥认过」，不证明镜像里没有漏洞，也不证明签它的人有资格签。所以密钥归属、轮转、以及 SBOM 与来源证明是配套的，只做验签的话，安全性就等于「有人签过」这四个字。",
+          "en": "`Admission` is the last gate before an object reaches etcd. It answers a different question from authorization: authorization looks at who is doing what, while admission looks at **what the object contains**: a privileged container, missing limits, an unsigned image. The layer splits in two: plugins built into Kubernetes, and external components wired in as webhooks.\n\n`PSA` (Pod Security Admission) is the built-in half, replacing the removed PodSecurityPolicy. It offers exactly three preset levels: `privileged` checks nothing, `baseline` blocks known escalation paths (privileged containers, hostPath, host namespaces, extra capabilities), and `restricted` adds hardening (non-root, drop all capabilities, seccomp, no privilege escalation). The switch is a namespace label, and the three modes are independent: `enforce` blocks, `audit` records, `warn` returns a warning. Labelling only `warn` and believing it blocks is the classic mistake here. Also remember that **PSA only inspects Pods**: a violating Deployment applies cleanly and then yields no pods, with the reason sitting in the ReplicaSet events.\n\n`Kyverno` is the external half, covering what PSA cannot express: an owner label must exist, images must come from the internal registry, names must follow a convention. Rules live in a `ClusterPolicy`; `validate.pattern` is its own structural matching (`?*` requires a value, `!` negates, `|` is or) and `validate.cel` takes CEL expressions directly. It runs as a workload in the cluster, so stopping it disables every policy while `kubectl get cpol` still lists them. Do not reimplement PSA rules here: when upstream learns of a new escalation path, PSA follows on upgrade and your copy does not.\n\nThe supply-chain rule uses `cosign`. The key fact is that it signs the image **digest**, not the tag: retagging the same digest keeps the signature valid, while pushing new content under the same tag invalidates it immediately. At admission time Kyverno `verifyImages` checks it with the public key. Be clear about the boundary of that guarantee: it proves these bytes were vouched for by some private key, not that the image is free of vulnerabilities nor that the signer was entitled to sign. Key custody, rotation, SBOMs, and build provenance go with it; signature checking alone guarantees only that somebody signed."
         }
       }
     ]

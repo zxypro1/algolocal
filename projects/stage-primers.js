@@ -1282,6 +1282,21 @@ const primers = {
       )
     ),
 
+    'policy-as-code': t(
+      p(
+        '`准入`是对象写进 etcd 之前的最后一道关。它和鉴权回答的问题不同：鉴权看「谁在做什么」，准入看**对象本身长什么样**：特权容器、没写 limits、镜像没签名，都是在这一层被拦下来的。这一层分两块：Kubernetes 内置的插件，和以 webhook 形式接进来的外部组件。',
+        '`PSA`（Pod Security Admission）是内置的那块，2025 年起替代了被删掉的 PodSecurityPolicy。它只有三档预置标准：`privileged` 什么都不管，`baseline` 挡住已知的提权途径（特权容器、hostPath、host 命名空间、额外 capability），`restricted` 再加上强化要求（非 root、丢掉所有 capability、seccomp、禁止提权）。开关是命名空间上的标签，三种模式各自独立：`enforce` 拦下来，`audit` 记日志，`warn` 回一条警告。只打 `warn` 而以为拦住了，是这一层最常见的误会。另一件要记住的：**PSA 只看 Pod**，违规的 Deployment 照样 apply 得进去，然后一个 Pod 都起不来，原因在 ReplicaSet 的事件里。',
+        '`Kyverno` 是外部那块，管的是 PSA 表达不了的公司自定义规矩：必须有 owner 标签、镜像只能来自内网仓库、名字要符合约定。规则写在 `ClusterPolicy` 里，`validate.pattern` 是它自己那套结构匹配（`?*` 表示要有值，`!` 表示不能等于，`|` 是或），`validate.cel` 直接写 CEL 表达式。它是集群里的一个工作负载：停掉它，所有策略立刻失效，而 `kubectl get cpol` 照样看得见。能交给 PSA 的规则不要在这里重写一遍：上游发现新的提权途径时，PSA 会跟着升级，你的规则不会。',
+        '供应链那条靠 `cosign`。要点是它签的是镜像的 **digest** 而不是 tag：换个 tag 指向同一个 digest，签名依然有效；tag 不变而 digest 变了，签名立刻失效。准入时由 Kyverno 的 `verifyImages` 拿公钥验。但这条保证的边界要说清楚：它只证明「这坨字节被某把私钥认过」，不证明镜像里没有漏洞，也不证明签它的人有资格签。所以密钥归属、轮转、以及 SBOM 与来源证明是配套的，只做验签的话，安全性就等于「有人签过」这四个字。'
+      ),
+      p(
+        '`Admission` is the last gate before an object reaches etcd. It answers a different question from authorization: authorization looks at who is doing what, while admission looks at **what the object contains**: a privileged container, missing limits, an unsigned image. The layer splits in two: plugins built into Kubernetes, and external components wired in as webhooks.',
+        '`PSA` (Pod Security Admission) is the built-in half, replacing the removed PodSecurityPolicy. It offers exactly three preset levels: `privileged` checks nothing, `baseline` blocks known escalation paths (privileged containers, hostPath, host namespaces, extra capabilities), and `restricted` adds hardening (non-root, drop all capabilities, seccomp, no privilege escalation). The switch is a namespace label, and the three modes are independent: `enforce` blocks, `audit` records, `warn` returns a warning. Labelling only `warn` and believing it blocks is the classic mistake here. Also remember that **PSA only inspects Pods**: a violating Deployment applies cleanly and then yields no pods, with the reason sitting in the ReplicaSet events.',
+        '`Kyverno` is the external half, covering what PSA cannot express: an owner label must exist, images must come from the internal registry, names must follow a convention. Rules live in a `ClusterPolicy`; `validate.pattern` is its own structural matching (`?*` requires a value, `!` negates, `|` is or) and `validate.cel` takes CEL expressions directly. It runs as a workload in the cluster, so stopping it disables every policy while `kubectl get cpol` still lists them. Do not reimplement PSA rules here: when upstream learns of a new escalation path, PSA follows on upgrade and your copy does not.',
+        'The supply-chain rule uses `cosign`. The key fact is that it signs the image **digest**, not the tag: retagging the same digest keeps the signature valid, while pushing new content under the same tag invalidates it immediately. At admission time Kyverno `verifyImages` checks it with the public key. Be clear about the boundary of that guarantee: it proves these bytes were vouched for by some private key, not that the image is free of vulnerabilities nor that the signer was entitled to sign. Key custody, rotation, SBOMs, and build provenance go with it; signature checking alone guarantees only that somebody signed.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',

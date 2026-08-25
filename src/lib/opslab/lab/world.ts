@@ -22,6 +22,7 @@ import { createOpensslCommand } from './openssl';
 import { materializePki } from './pki';
 import { GitNetwork, createGitCommand, parseCommit, readTree, seedRepository } from '../git';
 import { createIstioctlCommand } from '../mesh';
+import { SignatureStore, createCosignCommand } from '../admission';
 import { currentNamespaceOf } from './view';
 import { DEFAULT_KUBECONFIG_PATH } from '../wasm';
 import { createExecHandler } from './podshell';
@@ -42,6 +43,8 @@ export interface OpsWorld {
   registries: RegistryNetwork;
   /** 内网 Git 服务 */
   git: GitNetwork;
+  /** 镜像签名 */
+  signatures: SignatureStore;
   /** 装上的真 CLI 名字，如 ['kubectl','helm'] */
   applets: string[];
   /** 敲一条命令，然后让世界自己往前走到静止 */
@@ -63,6 +66,12 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
   const clusterAgeMs = spec.clusterAgeDays !== undefined
     ? spec.clusterAgeDays * 24 * 60 * 60_000
     : DEFAULT_CLUSTER_AGE_MS;
+
+  // 镜像签名。和镜像仓库一样是集群外的东西，cosign 往里写，Kyverno 从里读。
+  const signatures = new SignatureStore();
+  const declaredImages = new Set(
+    Object.keys(mergeImages(spec.images, stage.images)).map(normalizeReference)
+  );
 
   // 先声明，下面 createCluster 要用；仓库对象在它之后才建得出来
   let lookupPushedImage: (image: string) => ReturnType<typeof behaviorOfImage> | undefined = () => undefined;
@@ -103,6 +112,7 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     externalHosts,
     addressPools: spec.addressPools,
     users: spec.users,
+    signatures,
     /**
      * Argo CD 从这里取仓库内容。
      *
@@ -191,6 +201,23 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
 
   machine.install('openssl', createOpensslCommand());
 
+  machine.install('cosign', createCosignCommand({
+    signatures,
+    /**
+     * 签之前先确认这个镜像存在。
+     *
+     * 三个来源：本地构建出来的、关卡声明过的、以及推到内网仓库里的。
+     * 不存在的镜像 cosign 会直接报错 —— 不然「签了但签的是个不存在的东西」
+     * 会一路混到准入那一层才炸。
+     */
+    hasImage: (image) => {
+      if (images.get(image)) return true;
+      if (declaredImages.has(normalizeReference(image))) return true;
+      const parsed = parseReference(image);
+      return Boolean(parsed && registries.has(parsed.registry));
+    },
+  }));
+
   machine.install('istioctl', createIstioctlCommand({
     view: () => cluster.istioView(),
     namespace: () => (machine.vfs.exists(DEFAULT_KUBECONFIG_PATH)
@@ -277,6 +304,7 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     images,
     registries,
     git,
+    signatures,
     applets,
     now: () => cluster.wallClock(),
     async run(command: string) {

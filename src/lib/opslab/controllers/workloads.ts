@@ -6,7 +6,7 @@
  * Endpoints 里只有 Ready 的 Pod）自然就对，不用逐个去仿。
  */
 import { Priority } from '../kernel';
-import { formatTimestamp, KubeObject, Registry, ResourceDefinition } from '../apiserver';
+import { ApiError, formatTimestamp, KubeObject, Registry, ResourceDefinition } from '../apiserver';
 import {
   Controller,
   ControllerContext,
@@ -316,9 +316,29 @@ export class ReplicaSetController extends Controller {
         message: `Created pod: ${pod.metadata.name}`,
       });
     } catch (error) {
-      if (!isConflict(error)) throw error;
+      if (isConflict(error)) return;
+      /**
+       * 被准入拦下来了（PodSecurity、Kyverno…）。
+       *
+       * 这不是控制器的错，重试也没用 —— 记一条事件就停手。真集群里
+       * `kubectl get deploy` 会一直显示 0/N，而原因只在 ReplicaSet 的
+       * 事件里，这一条不记的话现场就彻底没线索了。
+       */
+      if (isForbidden(error)) {
+        this.context.recordEvent({
+          object: replicaSet, type: 'Warning', reason: 'FailedCreate',
+          message: `Error creating: ${(error as Error).message}`,
+        });
+        return;
+      }
+      throw error;
     }
   }
+}
+
+/** 403：准入拒绝。重试没有意义，得让人看见。 */
+function isForbidden(error: unknown): boolean {
+  return error instanceof ApiError && (error as ApiError).code === 403;
 }
 
 export function isPodReady(pod: KubeObject): boolean {
@@ -402,11 +422,32 @@ export class DeploymentController extends Controller {
       return sum + Math.max(0, alive - intended);
     }, 0);
 
+    /**
+     * 先把旧 RS 里「本来就起不来」的那部分收掉。
+     *
+     * 一个旧 RS 声称要 3 个副本、实际一个 ready 的都没有（镜像拉不到、
+     * 被准入拦下、探针一直不过），那 3 个名额纯粹是占着位置：缩掉它们
+     * 不会让可用数下降一分。不做这一步的话，滚动更新会卡死 ——
+     * 新版本要等旧版本腾位置，而旧版本永远腾不出来，因为它压根没起来。
+     * 真 k8s 里这一步叫 cleanupUnhealthyReplicas。
+     */
+    for (const rs of old) {
+      const intended = (rs.spec as any)?.replicas ?? 0;
+      if (intended === 0) continue;
+      const healthy = this.readyOf(rs);
+      if (healthy >= intended) continue;
+      this.scale(rs, healthy);
+    }
+
+    const oldReplicasNow = this.ownedReplicaSets(deployment)
+      .filter((rs) => rs.metadata.uid !== current.metadata.uid)
+      .reduce((sum, rs) => sum + ((rs.spec as any)?.replicas ?? 0), 0);
+
     // 先扩新的（不超过 desired + maxSurge）
-    const surgeRoom = desired + maxSurge - (currentReplicas + oldReplicas);
+    const surgeRoom = desired + maxSurge - (currentReplicas + oldReplicasNow);
     if (currentReplicas < desired && surgeRoom > 0) {
       this.scale(current, Math.min(desired, currentReplicas + surgeRoom));
-    } else if (oldReplicas > 0) {
+    } else if (oldReplicasNow > 0) {
       // 再缩旧的，但一次最多缩到「可用数不低于 desired - maxUnavailable」为止
       const room = availableNow - inFlightScaleDown - (desired - maxUnavailable);
       if (room > 0) {
