@@ -43,7 +43,9 @@
   ],
   "scripts": {
     "dev": "next dev",
+    "predev": "node scripts/copy-opslab-assets.js",
     "build": "next build",
+    "prebuild": "node scripts/copy-opslab-assets.js",
     "start": "next start",
     "deploy-local": "npm run build && npm start",
     "setup": "npm install && npm run build",
@@ -108,7 +110,9 @@
     "rehype-raw": "^7.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
-    "typescript": "5.1.6"
+    "tree-sitter-bash": "^0.25.1",
+    "typescript": "5.1.6",
+    "web-tree-sitter": "^0.26.13"
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",

@@ -26,7 +26,18 @@ const nextConfig = {
     // Handle .wasm files
     config.module.rules.push({
       test: /\.wasm$/,
+      exclude: /node_modules[\\/]web-tree-sitter[\\/]/,
       type: 'webassembly/async',
+    });
+
+    // web-tree-sitter 的 wasm 是 emscripten 产物，导入 GOT.mem / env 这些
+    // 只有它自己的胶水代码才提供的东西。当成 webpack 的 wasm 模块去解析必然失败，
+    // 按普通资源拷出去就行 —— 运行期我们本来就是自己按 URL 取的
+    // （见 scripts/copy-opslab-assets.js）。
+    config.module.rules.push({
+      test: /\.wasm$/,
+      include: /node_modules[\\/]web-tree-sitter[\\/]/,
+      type: 'asset/resource',
     });
 
     // Web Worker 里没有 window/document，默认的 JSONP chunk 加载会直接崩。
@@ -49,6 +60,19 @@ const nextConfig = {
           /^(perf_hooks|fs|os|path|crypto|inspector|child_process)$/,
           (resource) => {
             if (/node_modules[\\/]typescript[\\/]/.test(resource.context || '')) {
+              resource.request = require.resolve('./src/lib/emptyModule.js');
+            }
+          }
+        )
+      );
+
+      // web-tree-sitter 同理：它的 ESM 产物里有 Node 分支，会 import fs/promises
+      // 和 module。这些分支被 ENVIRONMENT_IS_NODE 挡着，浏览器里不会走到。
+      config.plugins.push(
+        new webpack.NormalModuleReplacementPlugin(
+          /^(fs\/promises|module)$/,
+          (resource) => {
+            if (/node_modules[\\/]web-tree-sitter(?:[\\/]|$)/.test(resource.context || '')) {
               resource.request = require.resolve('./src/lib/emptyModule.js');
             }
           }
