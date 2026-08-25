@@ -32,7 +32,7 @@ export default function ProjectWorkspacePage() {
    * 登记进来，会话通过这个稳定的转接函数调用它。
    */
   const clearResultsRef = useRef<((scope: ResultScope) => void) | null>(null);
-  const registerClearResults = useCallback((fn: (scope: ResultScope) => void) => {
+  const registerClearResults = useCallback((fn: ((scope: ResultScope) => void) | null) => {
     clearResultsRef.current = fn;
   }, []);
   const onClearResults = useCallback((scope: ResultScope) => {

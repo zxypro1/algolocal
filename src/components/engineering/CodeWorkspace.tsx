@@ -93,8 +93,9 @@ export interface CodeWorkspaceProps {
    *
    * 页面把 useProjectSession 的 onClearResults 转接到这里 —— 结果状态住在
    * 工作台里，而触发清理的动作（换关卡、换语言、重置）住在会话里。
+   * 传 null 表示注销（卸载时）。
    */
-  registerClearResults: (fn: (scope: ResultScope) => void) => void;
+  registerClearResults: (fn: ((scope: ResultScope) => void) | null) => void;
 }
 
 export default function CodeWorkspace({ session, registerClearResults }: CodeWorkspaceProps) {
@@ -163,6 +164,8 @@ export default function CodeWorkspace({ session, registerClearResults }: CodeWor
 
   useEffect(() => {
     registerClearResults(clearResults);
+    // 卸载时注销：换到别的工作台形态之后，会话不该再往这个已经卸载的组件里写状态
+    return () => registerClearResults(null);
   }, [clearResults, registerClearResults]);
 
   /* ---------------- 拖拽分栏 ---------------- */
