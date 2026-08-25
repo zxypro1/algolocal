@@ -118,12 +118,34 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 /**
  * 问一句「远端那份还是不是缓存里那份」。
  *
- * HEAD 拿不到就返回 undefined，调用方据此决定「离线，先用缓存里的」。
+ * 先试 HEAD。实测有的开发服务器对着 142MB 的静态文件会把 HEAD 中止掉
+ * （net::ERR_ABORTED），所以还准备了一条退路：要一个字节的 Range GET，
+ * 从 `Content-Range` 里读总长度。两条都不行才返回 undefined，
+ * 调用方据此决定「离线，先用缓存里的」。
  */
 export async function remoteSignature(url: string, fetchImpl = fetch): Promise<string | undefined> {
+  const fromHead = await trySignature(() => fetchImpl(url, { method: 'HEAD', cache: 'no-store' }));
+  if (fromHead) return fromHead;
+
+  return trySignature(async () => {
+    const response = await fetchImpl(url, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { Range: 'bytes=0-0' },
+    });
+    // Content-Range: bytes 0-0/142281929
+    const range = response.headers.get('content-range');
+    const total = range?.split('/')[1];
+    return total
+      ? new Response(null, { status: response.status, headers: { 'content-length': total } })
+      : response;
+  });
+}
+
+async function trySignature(request: () => Promise<Response>): Promise<string | undefined> {
   try {
-    const response = await fetchImpl(url, { method: 'HEAD' });
-    if (!response.ok) return undefined;
+    const response = await request();
+    if (!response.ok && response.status !== 206) return undefined;
     const etag = response.headers.get('etag');
     const length = response.headers.get('content-length');
     if (!etag && !length) return undefined;

@@ -21,9 +21,16 @@ function fail(message) {
 }
 
 function validate(project, source) {
-  const required = ['id', 'title', 'summary', 'difficulty', 'brief', 'files', 'stages'];
+  const ops = project.workspace?.kind === 'ops';
+  // ops 形态没有「工作区文件」这个概念：学员编辑的是机器磁盘上的文件，
+  // 由 stage.ops.files 铺下去
+  const required = ['id', 'title', 'summary', 'difficulty', 'brief', 'stages']
+    .concat(ops ? [] : ['files']);
   for (const field of required) {
     if (!project[field]) fail(`${source}: 缺少字段 ${field}`);
+  }
+  if (ops && !project.workspace.world) {
+    fail(`${source}: ops 形态必须声明 workspace.world`);
   }
   if (!Array.isArray(project.stages) || project.stages.length === 0) {
     fail(`${source}: stages 不能为空`);
@@ -57,8 +64,9 @@ function main() {
     const project = attachStagePrimers(require(modulePath));
     validate(project, name);
 
-    // 题目只写一份 TypeScript，JS 版在这里自动派生，避免两份内容漂移
-    if (project.language !== 'javascript') {
+    // 题目只写一份 TypeScript，JS 版在这里自动派生，避免两份内容漂移。
+    // ops 形态没有「用另一种语言重做一遍」这回事 —— 学员写的是 YAML 和命令。
+    if (project.language !== 'javascript' && project.workspace?.kind !== 'ops') {
       project.variants = { javascript: deriveJavaScriptVariant(project) };
     }
 

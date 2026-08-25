@@ -244,6 +244,30 @@ describeIfBuilt('真 kubectl 打到真集群上', () => {
     expect((await machine.exec('kubectl get deploy portal -o jsonpath={.spec.replicas}')).stdout).toBe('3');
   });
 
+  it('Endpoints 那一列：匹配上就列地址，匹配不上就 <none>', async () => {
+    const service = (name: string, app: string) => [
+      'apiVersion: v1', 'kind: Service',
+      `metadata:`, `  name: ${name}`, '  namespace: default',
+      'spec:', '  selector:', `    app: ${app}`,
+      '  ports:', '  - port: 80', '    targetPort: 8080', '',
+    ].join('\n');
+
+    const { machine, cluster } = await world({
+      '/root/portal.yaml': DEPLOYMENT,
+      // 一个 selector 对得上，一个故意写错
+      '/root/good.yaml': service('good', 'portal'),
+      '/root/typo.yaml': service('typo', 'protal'),
+    });
+    await machine.exec('kubectl apply -f portal.yaml -f good.yaml -f typo.yaml');
+    await cluster.settle();
+
+    const table = await machine.exec('kubectl get endpoints');
+    expect(table.stdout.split('\n')[0]).toMatch(/^NAME\s+ENDPOINTS\s+AGE$/);
+    // 排查「服务不通」的第一眼看的就是这个 <none>
+    expect(table.stdout).toMatch(/typo\s+<none>/);
+    expect(table.stdout).toMatch(/good\s+10\.42\.[0-9.]+:8080,10\.42\.[0-9.]+:8080/);
+  });
+
   it('同一串命令重放两次，逐字节一致', async () => {
     const script = [
       'kubectl apply -f portal.yaml',

@@ -7,13 +7,21 @@
 export { Controller, Informer, WorkQueue, objectKey, splitKey, isConflict, isNotFound } from './framework';
 export type { ControllerContext, WorkQueueOptions } from './framework';
 export {
-  CORE_RESOURCES, DEPLOYMENTS, ENDPOINTS, EVENTS, NAMESPACES, NODES, PODS,
-  REPLICASETS, SERVICES, POD_TEMPLATE_HASH, matchesSelector, templateHash,
+  CORE_RESOURCES, CONFIGMAPS, DEPLOYMENTS, ENDPOINTS, EVENTS, NAMESPACES, NODES, PODS,
+  REPLICASETS, SECRETS, SERVICEACCOUNTS, SERVICES, POD_TEMPLATE_HASH,
+  matchesSelector, templateHash,
 } from './resources';
 export {
-  DeploymentController, EndpointsController, KubeletController,
+  DeploymentController, EndpointsController, KubeletController, NodePressureController,
   ReplicaSetController, SchedulerController, isPodReady, parseCpu, resolveCount,
 } from './workloads';
 export type { ImageSpec, KubeletOptions } from './workloads';
+export {
+  canPullImage, dockerConfigCredentials, exceedsMemoryLimit, parseQuantity,
+  probeSucceeds, qosClassOf, registryHostOf, resolveEnv, resolveVolumes, secretData,
+} from './runtime';
+export type {
+  ConfigLookup, ContainerSpec, ImageBehavior, Probe, QosClass, RegistryAuth,
+} from './runtime';
 export { Cluster, createCluster } from './cluster';
 export type { ClusterOptions, NodeSpec } from './cluster';

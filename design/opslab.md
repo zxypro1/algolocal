@@ -249,6 +249,45 @@ L0 内核、shell、容器进程运行时、镜像与 registry、apiserver 与�
 | 出题成本 | 共享 `world-presets.js` 描述这家公司的内网，每关只写增量 |
 | AI 生成这类项目 | 前三期明确不支持，生成器继续只产 `kind: 'code'` |
 
+## 一期已交付（2026-08-26）
+
+四块面板 + 前 7 关已经做完并合入 main。这一节记的是**实际做出来的东西**，
+和上面的计划有出入的地方也写在这里。
+
+| 层 | 位置 | 状态 |
+| --- | --- | --- |
+| 确定性内核 | `src/lib/opslab/kernel/` | 虚拟时钟、优先级、settle/死锁检测、快照 |
+| etcd 语义存储 | `src/lib/opslab/store/` | MVCC、revision、watch、compaction |
+| apiserver | `src/lib/opslab/apiserver/` | REST 语义、服务端表格、discovery、**OpenAPI v3**、**PATCH 四种**、scale 子资源 |
+| 控制器 | `src/lib/opslab/controllers/` | 调度器、ReplicaSet、Deployment、Endpoints、kubelet、节点压力驱逐 |
+| 机器层 | `src/lib/opslab/machine/` | VFS、tree-sitter shell、30 个 coreutils、OCI 构建与仓库 |
+| 多合一 CLI | `src/lib/opslab/wasm/` | kubectl v1.36 + helm v4，按 argv[0] 分发 |
+| 关卡运行时 | `src/lib/opslab/lab/` | 世界装配、`@ops/lab`、拓扑与变更流投影 |
+| 工作台 | `src/components/opslab/` | 任务 / 终端 / IDE / 拓扑四块面板 |
+| 内容 | `projects/definitions/intranet-k8s.js` | 第 1–7 关，含反向验证 |
+
+### 和计划不一样的地方
+
+| 计划 | 实际 | 原因 |
+| --- | --- | --- |
+| shell 用 `sh-syntax` | `web-tree-sitter` + `tree-sitter-bash` | sh-syntax 的 AST 跨 WASM 边界后只剩位置信息，能重新打印不能解释执行 |
+| 每个 CLI 一个 wasm | 一个 136MB 的多合一（14MB brotli） | client-go 的 5.5MB 地板只付一次 |
+| 缓存编译后的 Module | 缓存字节 | 浏览器实测 `WebAssembly.Module can not be serialized for storage` |
+| 第 2 关用 curl 验服务可达 | 验 Endpoints 有没有地址 | 没有做 HTTP 转发层；而 `kubectl get endpoints` 本来就是现实里排查这件事的第一条命令，教学上更对 |
+| 第 7 关演示驱逐 | 演示 OOMKilled，驱逐作为「删掉 limits 之后会怎样」的陷阱 | 驱逐引擎做了（`NodePressureController`），但让一关同时演两种死法会散 |
+
+### 只有在浏览器里跑才会暴露的四个问题
+
+记在这里是因为它们都不是「写错了」，而是「在 Node 里跑测试永远看不见」：
+
+1. **142MB 的响应写不进 HTTP 缓存**：Chrome 报 `ERR_CACHE_WRITE_FAILURE`，
+   fetch 直接抛 `Failed to fetch`。加 `cache: 'no-store'`。
+2. **React 严格模式把副作用跑两遍**，于是下载两份 136MB。运行时改成全局单例。
+3. **`@xyflow/react` 12.11.x 自己是坏的**：它 import 了配套的 `@xyflow/system@0.0.80`
+   并不导出的 `handleAttributionWarning`。钉到 12.10.2。
+4. **自定义节点不放 `Handle`，xyflow 一条边都不画**，而且不报错。
+   节点都在、关系全没了 —— 而这张图的意义恰恰在关系上。
+
 ## 已定的设计决策
 
 | 决策 | 结论 |

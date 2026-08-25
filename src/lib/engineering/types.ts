@@ -132,6 +132,8 @@ export interface ProjectStage {
   gates?: MetricGate[];
   /** lab 网络模拟配置 */
   lab?: LabNetworkConfig;
+  /** ops 形态的关卡增量（workspace.kind === 'ops' 时才有意义） */
+  ops?: OpsStageSpec;
   /** 本关重点考察的维度，用于 AI 评审聚焦 */
   focus?: DimensionKey[];
   /**
@@ -167,11 +169,110 @@ export interface CodeWorkspaceSpec {
 /**
  * 内网设施形态：终端 + IDE + 拓扑图 + 任务。
  *
- * 世界定义（主机、网络分区、集群初态）后续补，目前只占位，
- * 好让分发器的两条分支都是真的而不是死代码。
+ * 世界定义放在项目上而不是每关一份：一个项目就是「一家公司的内网」，
+ * 关卡是这张网上依次发生的事情，各关只写自己的增量。
  */
 export interface OpsWorkspaceSpec {
   kind: 'ops';
+  world?: OpsWorldSpec;
+}
+
+/** 集群里的一台节点 */
+export interface OpsNodeSpec {
+  name: string;
+  /** 可分配 CPU，如 `4` 或 `4000m` */
+  cpu?: string;
+  memory?: string;
+  labels?: Record<string, string>;
+  /** 打上之后调度器不再往这里放新 Pod */
+  unschedulable?: boolean;
+}
+
+/** 镜像目录里的一条：不在目录里的镜像拉不到，会进 ImagePullBackOff */
+export interface OpsImageSpec {
+  /** 拉取耗时（虚拟毫秒） */
+  pullMs?: number;
+  /** 启动到进程就绪的耗时 */
+  startupMs?: number;
+  /** 就绪探针通过还要多久 */
+  readyAfterMs?: number;
+  /** 缺了这些环境变量就崩 */
+  needsEnv?: string[];
+}
+
+/** 一个私有镜像仓库 */
+export interface OpsRegistrySpec {
+  host: string;
+  /** 用户名 -> 密码。空表示匿名可用。 */
+  users?: Record<string, string>;
+  /** 允许推送到哪些项目（第一段路径） */
+  projects?: string[];
+  anonymousPull?: boolean;
+}
+
+/** 学员面前那台跳板机 */
+export interface OpsMachineSpec {
+  hostname?: string;
+  user?: string;
+  cwd?: string;
+  /** 开局就在磁盘上的文件 */
+  files?: Record<string, string>;
+}
+
+/** 这家公司的内网长什么样 */
+export interface OpsWorldSpec {
+  seed?: number;
+  /** 世界的起始时刻，ISO8601。固定住，AGE 列才可复现。 */
+  startTime?: string;
+  /** 这个集群已经跑了多少天。不填按 32 天算 —— 接手的从来不是新集群。 */
+  clusterAgeDays?: number;
+  nodes?: OpsNodeSpec[];
+  namespaces?: string[];
+  images?: Record<string, OpsImageSpec>;
+  /**
+   * 本地已经有的基础镜像，`FROM` 得着。
+   *
+   * 值是工具链的名字：`node` 的镜像里有 npm，`python` 的有 pip。
+   * 具体命令的行为写在 src/lib/opslab/lab/toolchains.ts 里 —— 行为写不进 JSON。
+   */
+  baseImages?: Record<string, 'node' | 'python' | 'static'>;
+  registries?: OpsRegistrySpec[];
+  machine?: OpsMachineSpec;
+  /**
+   * 哪些主机名解析得到 apiserver。
+   *
+   * 不填就是 `apiserver.opslab`。写错 server 的 kubeconfig 应该连不上，
+   * 否则「context 选错了」这种题目根本没法出。
+   */
+  endpoints?: string[];
+  /** 开局就存在的集群对象 */
+  objects?: Record<string, unknown>[];
+}
+
+/**
+ * 一关在世界上加的增量。
+ *
+ * 判定仍然走隐藏用例（`stage.specs`），只是那些 TS 里 import 的是
+ * `@ops/lab` 而不是 `@lab/net`。
+ */
+export interface OpsStageSpec {
+  /** 进入本关时往机器磁盘上放的文件 */
+  files?: Record<string, string>;
+  /** 进入本关时往集群里塞的对象 */
+  objects?: Record<string, unknown>[];
+  /** 进入本关时先替学员跑一遍的命令（布置现场，比如「上一关留下的烂摊子」） */
+  setupCommands?: string[];
+  /** 额外的镜像目录条目 */
+  images?: Record<string, OpsImageSpec>;
+  /**
+   * 参考解：把这一关做对需要敲的命令。
+   *
+   * 反向验证靠它：跑完这串命令，隐藏用例必须全绿；不跑，必须挂。
+   * 一关的题面和判定对不对，只有这一条能说了算。
+   */
+  referenceCommands?: string[];
+  /** 参考解顺带写下的文件（比如学员要自己写的 manifest） */
+  referenceFiles?: Record<string, string>;
 }
 
 export type WorkspaceSpec = CodeWorkspaceSpec | OpsWorkspaceSpec;

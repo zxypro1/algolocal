@@ -113,7 +113,15 @@ export class CliRuntime {
     if (hit?.module) return hit.module;
     if (hit?.bytes) return WebAssembly.compile(hit.bytes);
 
-    const response = await fetch(url);
+    /**
+     * `cache: 'no-store'` 不是可有可无的。
+     *
+     * 142MB 的响应超过了浏览器 HTTP 缓存单条记录的上限，Chrome 会在写缓存时
+     * 失败并把整个请求判死：`net::ERR_CACHE_WRITE_FAILURE` → fetch 抛
+     * `TypeError: Failed to fetch`。我们本来就有自己的 IndexedDB 缓存，
+     * 让浏览器别插手。
+     */
+    const response = await fetch(url, { cache: 'no-store' });
     if (!response.ok) {
       throw new Error(`${url} 取不到（${response.status}）—— 先跑 scripts/build-opslab-wasm.sh`);
     }
@@ -242,4 +250,18 @@ function releaseInstance(go: GoInstance): void {
 
 export function createCliRuntime(options?: CliRuntimeOptions): CliRuntime {
   return new CliRuntime(options);
+}
+
+let shared: CliRuntime | null = null;
+
+/**
+ * 整个应用共用一个运行时。
+ *
+ * 每个工作台自己 new 一个的话，React 严格模式把副作用跑两遍就会**下载两份
+ * 142MB**，第二份还会把第一份的缓存写坏。编译好的模块本来就是无状态的，
+ * 共用没有任何坏处。
+ */
+export function sharedCliRuntime(options?: CliRuntimeOptions): CliRuntime {
+  if (!shared) shared = new CliRuntime(options);
+  return shared;
 }

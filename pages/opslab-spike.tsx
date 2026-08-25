@@ -14,7 +14,7 @@ import { AppShell, Badge, Code, Group, Stack, Text } from '@mantine/core';
 import { AppHeader, HEADER_HEIGHT } from '../src/components/AppHeader';
 import { createCluster } from '../src/lib/opslab/controllers';
 import { createMachine, Machine } from '../src/lib/opslab/machine';
-import { createCliRuntime, installClusterCli } from '../src/lib/opslab/wasm';
+import { installClusterCli, sharedCliRuntime } from '../src/lib/opslab/wasm';
 
 const OpsTerminal = dynamic(() => import('../src/components/opslab/OpsTerminal'), { ssr: false });
 
@@ -85,7 +85,7 @@ export default function OpsLabSpikePage() {
       worldRef.current = world;
       readyRef.current = installClusterCli({
         machine: world.machine,
-        runtime: createCliRuntime(),
+        runtime: sharedCliRuntime(),
         apiServer: world.cluster.apiServer,
         now: () => world.cluster.wallClock(),
       }).then(() => undefined).catch((error) => {

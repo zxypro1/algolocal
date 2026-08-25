@@ -17,6 +17,7 @@ import {
   splitKey,
 } from './framework';
 import {
+  CONFIGMAPS,
   DEPLOYMENTS,
   ENDPOINTS,
   matchesSelector,
@@ -24,9 +25,26 @@ import {
   PODS,
   POD_TEMPLATE_HASH,
   REPLICASETS,
+  SECRETS,
   SERVICES,
   templateHash,
 } from './resources';
+import {
+  canPullImage,
+  exceedsMemoryLimit,
+  livenessFailureMs,
+  probeDelayMs,
+  parseQuantity,
+  probeSucceeds,
+  qosClassOf,
+  resolveEnv,
+  resolveVolumes,
+  type ConfigLookup,
+  type ContainerSpec,
+  type ImageBehavior,
+  type Probe,
+  type RegistryAuth,
+} from './runtime';
 
 /** 一次 reconcile 里改 status 时，冲突就放弃这一轮 —— 下一轮会带着新版本重来 */
 async function ignoreConflict(action: () => void): Promise<void> {
@@ -624,12 +642,12 @@ export class EndpointsController extends Controller {
 /* kubelet                                                             */
 /* ------------------------------------------------------------------ */
 
-export interface ImageSpec {
+export interface ImageSpec extends ImageBehavior {
   /** 拉取耗时（虚拟毫秒） */
   pullMs?: number;
   /** 启动到进程就绪的耗时 */
   startupMs?: number;
-  /** 就绪探针通过还要多久 */
+  /** 没有就绪探针时，起来之后多久算 Ready */
   readyAfterMs?: number;
   /** 缺了这些环境变量就崩 */
   needsEnv?: string[];
@@ -638,18 +656,35 @@ export interface ImageSpec {
 export interface KubeletOptions {
   /** 镜像目录。不在目录里的镜像 = 拉不到，进 ImagePullBackOff */
   images?: Record<string, ImageSpec>;
+  /** 每个仓库要不要认证。私有仓库没凭据就拉不下来。 */
+  registries?: Record<string, RegistryAuth>;
+  /**
+   * 目录里没有时再问一次。
+   *
+   * 学员自己 `docker build` + `docker push` 上去的镜像不在题目写死的目录里，
+   * 但它确实存在于仓库中 —— 「自己造的镜像部署不上去」会让第 3、4 关白做。
+   */
+  resolveImage?: (image: string) => ImageSpec | undefined;
 }
 
 /**
  * 每个节点上的 kubelet：推进落在自己身上的 Pod 的生命周期。
  *
- * Pending → ContainerCreating → Running → Ready，
- * 拉不到镜像进 ImagePullBackOff，缺环境变量进 CrashLoopBackOff。
+ * 起一个容器要按顺序过四关，每一关失败的表现都不一样 —— 这四种表现分得清，
+ * 才谈得上会排查：
+ *
+ *   1. 配置凑不齐（ConfigMap / Secret 缺了）→ `CreateContainerConfigError`
+ *   2. 镜像拉不到（不存在，或私有仓库没凭据）→ `ImagePullBackOff`
+ *   3. 起来就崩（缺环境变量、内存超 limit）→ `CrashLoopBackOff`
+ *   4. 起来了但探针不过 → `Running` 但 `0/1`，日志里什么都看不出来
+ *
  * 所有耗时都走虚拟时钟，所以「等 5 秒看它起来没」是一次快进，不是真的等。
  */
 export class KubeletController extends Controller {
   private pods: Informer;
   private readonly images: Record<string, ImageSpec>;
+  private readonly registries: Record<string, RegistryAuth>;
+  private readonly resolveImage?: (image: string) => ImageSpec | undefined;
   /** 已经在推进中的 Pod，避免重复排定时器 */
   private advancing = new Set<string>();
   /** 每个 Pod 崩了几次，决定退避时长与 restartCount */
@@ -658,8 +693,37 @@ export class KubeletController extends Controller {
   constructor(context: ControllerContext, private readonly nodeName: string, options: KubeletOptions = {}) {
     super(context, `kubelet:${nodeName}`);
     this.images = options.images ?? {};
+    this.registries = options.registries ?? {};
+    this.resolveImage = options.resolveImage;
     this.pods = new Informer(this.registry, PODS);
     this.watch(this.pods, (pod, key) => ((pod.spec as any)?.nodeName === nodeName ? key : null));
+  }
+
+  /** 这个镜像存不存在、它的行为是什么 */
+  private imageOf(image: string | undefined): ImageSpec | undefined {
+    if (image === undefined) return undefined;
+    return this.images[image] ?? this.resolveImage?.(image);
+  }
+
+  /** ConfigMap / Secret 由 registry 直接读，不另开 informer —— 读的是同一份状态 */
+  private get lookup(): ConfigLookup {
+    return {
+      configMap: (namespace, name) => this.tryGet(CONFIGMAPS, namespace, name),
+      secret: (namespace, name) => this.tryGet(SECRETS, namespace, name),
+    };
+  }
+
+  private tryGet(
+    definition: ResourceDefinition,
+    namespace: string,
+    name: string
+  ): KubeObject | undefined {
+    try {
+      return this.registry.get(definition, namespace, name);
+    } catch (error) {
+      if (isNotFound(error)) return undefined;
+      throw error;
+    }
   }
 
   protected async reconcile(key: string): Promise<void> {
@@ -668,7 +732,7 @@ export class KubeletController extends Controller {
     try {
       pod = this.registry.get(PODS, namespace, name);
     } catch (error) {
-      if (isNotFound(error)) { this.advancing.delete(key); return; }
+      if (isNotFound(error)) { this.advancing.delete(key); this.restartCount.delete(key); return; }
       throw error;
     }
     if ((pod.spec as any)?.nodeName !== this.nodeName) return;
@@ -678,144 +742,321 @@ export class KubeletController extends Controller {
       return;
     }
     const status = (pod.status ?? {}) as any;
-    if (status.phase === 'Running' || status.phase === 'Failed') return;
+    if (status.phase === 'Running' || status.phase === 'Failed' || status.phase === 'Succeeded') return;
     if (this.advancing.has(key)) return;
     this.advancing.add(key);
 
-    const containers: any[] = (pod.spec as any)?.containers ?? [];
-    const missingImage = containers.find((c) => !(c.image in this.images));
+    const containers: ContainerSpec[] = (pod.spec as any)?.containers ?? [];
+    const behavior = this.imageOf(containers[0]?.image) ?? {};
+
+    // 1. 镜像在不在（题目写死的目录，或者学员自己推上去的）
+    const missingImage = containers.find((c) => this.imageOf(c.image) === undefined);
     if (missingImage) {
-      await ignoreConflict(() => {
-        const latest = this.registry.get(PODS, namespace, name);
-        updateStatusIfChanged(this.registry, PODS, namespace, name, {
-          ...(latest.status as any), phase: 'Pending',
-          containerStatuses: containers.map((c) => ({
-            name: c.name, ready: false, restartCount: 0,
-            state: { waiting: { reason: 'ImagePullBackOff', message: `Back-off pulling image "${c.image}"` } },
-          })),
-        });
+      this.holdPending(key, pod, containers, {
+        reason: 'ImagePullBackOff',
+        message: `Back-off pulling image "${missingImage.image}"`,
+        event: `Failed to pull image "${missingImage.image}": image not found in registry`,
       });
-      this.context.recordEvent({
-        object: pod, type: 'Warning', reason: 'Failed',
-        message: `Failed to pull image "${missingImage.image}": image not found in registry`,
-      });
-      this.advancing.delete(key);
       return;
     }
 
-    const spec = this.images[containers[0]?.image] ?? {};
-    const env: any[] = containers[0]?.env ?? [];
-    const provided = new Set(env.map((e) => e.name));
-    const missingEnv = (spec.needsEnv ?? []).filter((needed) => !provided.has(needed));
+    /**
+     * 2. 私有仓库的凭据。
+     *
+     * 只查**要从仓库拉**的镜像。题目 `images` 目录里写着的那些，语义上是
+     * 「节点上已经有了」（真集群里也常见：基础镜像预热过，或者 kubelet
+     * 配了节点级凭据）。不这么分的话，每一关都得先教一遍 imagePullSecret，
+     * 而那是第 4 关的事。
+     */
+    const denied = containers
+      .filter((container) => !(container.image in this.images))
+      .map((container) => canPullImage({
+        image: container.image,
+        namespace: namespace ?? 'default',
+        imagePullSecrets: ((pod.spec as any)?.imagePullSecrets ?? []) as Array<{ name: string }>,
+        registries: this.registries,
+        lookup: this.lookup,
+      }))
+      .find((result) => !result.allowed);
+    if (denied) {
+      const pulled = containers.find((container) => !(container.image in this.images))!;
+      this.holdPending(key, pod, containers, {
+        reason: 'ImagePullBackOff',
+        message: `Back-off pulling image "${pulled.image}"`,
+        event: `Failed to pull image "${pulled.image}": ${denied.message}`,
+      });
+      return;
+    }
 
-    const pullMs = spec.pullMs ?? 200;
-    const startupMs = spec.startupMs ?? 300;
-    const readyAfterMs = spec.readyAfterMs ?? 200;
+    // 3. 配置凑不凑得齐
+    const configError = this.configErrorOf(pod, containers, namespace ?? 'default');
+    if (configError) {
+      this.holdPending(key, pod, containers, {
+        reason: 'CreateContainerConfigError',
+        message: configError,
+        event: `Error: ${configError}`,
+      });
+      return;
+    }
 
-    // ContainerCreating
+    const pullMs = behavior.pullMs ?? 200;
+    const startupMs = behavior.startupMs ?? 300;
+
     this.kernel.setTimeout(() => {
       ignoreConflict(() => {
         const latest = this.registry.get(PODS, namespace, name);
         if (latest.metadata.deletionTimestamp) return;
         updateStatusIfChanged(this.registry, PODS, namespace, name, {
-          ...(latest.status as any), phase: 'Pending',
+          ...(latest.status as any),
+          phase: 'Pending',
+          qosClass: qosClassOf(containers),
           containerStatuses: containers.map((c) => ({
-            name: c.name, ready: false, restartCount: 0,
+            name: c.name, ready: false, restartCount: this.restartCount.get(key) ?? 0,
             state: { waiting: { reason: 'ContainerCreating' } },
           })),
         });
       });
     }, pullMs, { priority: Priority.NODE, label: `${this.name}:creating:${key}` });
 
-    if (missingEnv.length > 0) {
-      const restarts = (this.restartCount.get(key) ?? 0) + 1;
-      this.restartCount.set(key, restarts);
-      this.kernel.setTimeout(() => {
-        ignoreConflict(() => {
-          const latest = this.registry.get(PODS, namespace, name);
-          if (latest.metadata.deletionTimestamp) return;
-          updateStatusIfChanged(this.registry, PODS, namespace, name, {
-            ...(latest.status as any), phase: 'Pending',
-            containerStatuses: containers.map((c) => ({
-              name: c.name, ready: false, restartCount: restarts,
-              state: {
-                waiting: {
-                  reason: 'CrashLoopBackOff',
-                  message: `back-off ${backoffOf(restarts) / 1000}s restarting failed container=${c.name} pod=${name}_${namespace}`,
-                },
-              },
-              lastState: { terminated: { exitCode: 1, reason: 'Error' } },
-            })),
-          });
-        });
-        if (restarts === 1) {
-          this.context.recordEvent({
-            object: pod, type: 'Warning', reason: 'BackOff',
-            message: `Back-off restarting failed container app in pod ${name}_${namespace}`,
-          });
-        }
-        // 注意这里**不**清 advancing —— 清了的话，status 变化会经 informer
-        // 立刻把这个 Pod 重新入队，前台链路马上又跑一遍，世界永远静不下来。
-        // 只有下面那个后台退避定时器才有资格把它放出来。
+    // 4. 起来就崩：缺环境变量，或者声明的内存超过 limit
+    const env: any[] = containers[0]?.env ?? [];
+    const provided = new Set(env.map((e) => e.name));
+    const missingEnv = (behavior.needsEnv ?? []).filter((needed) => !provided.has(needed));
+    const oomContainer = containers.find((container) => exceedsMemoryLimit(container, behavior));
 
-        /**
-         * 排下一次重启，**后台定时器**。
-         *
-         * 真 kubelet 会一直按指数退避重启崩溃的容器，永不放弃 —— 语义上世界确实
-         * 「永远有事要做」。但如果把它算成前台工作，settle() 就再也返回不了，
-         * 而「Pod 卡在 CrashLoopBackOff」恰恰是一个稳定的、要给学员看的终态。
-         * 所以标成 background：静止判定不看它，快进时间时照常重启。
-         */
-        this.kernel.setTimeout(
-          () => {
-            this.advancing.delete(key);
-            this.queue.add(key);
-          },
-          backoffOf(restarts),
-          { priority: Priority.NODE, background: true, label: `${this.name}:restart:${key}` }
-        );
-      }, pullMs + startupMs, { priority: Priority.NODE, label: `${this.name}:crash:${key}` });
+    if (missingEnv.length > 0 || oomContainer) {
+      this.crashLoop(key, pod, containers, namespace ?? 'default', name, pullMs + startupMs, oomContainer
+        ? {
+          reason: 'OOMKilled', exitCode: 137,
+          event: `Container ${oomContainer.name} exceeded its memory limit ` +
+            `(${oomContainer.resources?.limits?.memory}) and was killed`,
+        }
+        : { reason: 'Error', exitCode: 1 });
       return;
     }
 
-    // Running（还没 Ready）
+    // 5. Running
     this.kernel.setTimeout(() => {
       ignoreConflict(() => {
         const latest = this.registry.get(PODS, namespace, name);
         if (latest.metadata.deletionTimestamp) return;
         updateStatusIfChanged(this.registry, PODS, namespace, name, {
-            ...(latest.status as any),
-            phase: 'Running',
-            podIP: this.assignPodIp(latest),
-            startTime: formatTimestamp(this.context.now()),
-            containerStatuses: containers.map((c) => ({
-              name: c.name, ready: false, restartCount: 0,
-              state: { running: { startedAt: formatTimestamp(this.context.now()) } },
-            })),
-            conditions: [{ type: 'Ready', status: 'False', reason: 'ContainersNotReady' }],
+          ...(latest.status as any),
+          phase: 'Running',
+          qosClass: qosClassOf(containers),
+          podIP: this.assignPodIp(latest),
+          startTime: formatTimestamp(this.context.now()),
+          containerStatuses: containers.map((c) => ({
+            name: c.name, ready: false, restartCount: this.restartCount.get(key) ?? 0,
+            state: { running: { startedAt: formatTimestamp(this.context.now()) } },
+          })),
+          conditions: [{ type: 'Ready', status: 'False', reason: 'ContainersNotReady' }],
         });
       });
     }, pullMs + startupMs, { priority: Priority.NODE, label: `${this.name}:running:${key}` });
 
-    // Ready
+    // 6. 探针
+    this.scheduleProbes(key, pod, containers, behavior, namespace ?? 'default', name, pullMs + startupMs);
+  }
+
+  /** 配置凑不齐时那条报错，文本抄真 kubelet */
+  private configErrorOf(
+    pod: KubeObject,
+    containers: ContainerSpec[],
+    namespace: string
+  ): string | undefined {
+    for (const container of containers) {
+      const resolved = resolveEnv(container, namespace, this.lookup);
+      if (resolved.error) return resolved.error;
+    }
+    return resolveVolumes(pod, namespace, this.lookup).error;
+  }
+
+  /**
+   * 卡在 Pending 的那几种：拉不到镜像、配置凑不齐。
+   *
+   * 真 kubelet 会一直退避重试（ConfigMap 可能过一会儿就建出来了），
+   * 所以重试定时器标成 background —— 静止判定不看它，但快进时间时照常重试。
+   */
+  private holdPending(
+    key: string,
+    pod: KubeObject,
+    containers: ContainerSpec[],
+    failure: { reason: string; message: string; event: string }
+  ): void {
+    const namespace = pod.metadata.namespace;
+    const name = pod.metadata.name;
+    const attempts = (this.restartCount.get(`${key}:pending`) ?? 0) + 1;
+    this.restartCount.set(`${key}:pending`, attempts);
+
+    ignoreConflict(() => {
+      const latest = this.registry.get(PODS, namespace, name);
+      updateStatusIfChanged(this.registry, PODS, namespace, name, {
+        ...(latest.status as any),
+        phase: 'Pending',
+        qosClass: qosClassOf(containers),
+        containerStatuses: containers.map((c) => ({
+          name: c.name, ready: false, restartCount: 0,
+          state: { waiting: { reason: failure.reason, message: failure.message } },
+        })),
+        conditions: [{ type: 'Ready', status: 'False', reason: 'ContainersNotReady' }],
+      });
+    });
+
+    if (attempts === 1) {
+      this.context.recordEvent({
+        object: pod, type: 'Warning',
+        reason: failure.reason === 'CreateContainerConfigError' ? 'Failed' : 'Failed',
+        message: failure.event,
+      });
+    }
+
+    this.kernel.setTimeout(
+      () => { this.advancing.delete(key); this.queue.add(key); },
+      backoffOf(attempts),
+      { priority: Priority.NODE, background: true, label: `${this.name}:retry:${key}` }
+    );
+  }
+
+  /** 起来就崩：写 CrashLoopBackOff，排一个后台的重启定时器 */
+  private crashLoop(
+    key: string,
+    pod: KubeObject,
+    containers: ContainerSpec[],
+    namespace: string,
+    name: string,
+    afterMs: number,
+    failure: { reason: string; exitCode: number; event?: string }
+  ): void {
+    const restarts = (this.restartCount.get(key) ?? 0) + 1;
+    this.restartCount.set(key, restarts);
+
     this.kernel.setTimeout(() => {
       ignoreConflict(() => {
         const latest = this.registry.get(PODS, namespace, name);
         if (latest.metadata.deletionTimestamp) return;
-        const current = (latest.status ?? {}) as any;
         updateStatusIfChanged(this.registry, PODS, namespace, name, {
-          ...current,
-          containerStatuses: (current.containerStatuses ?? []).map((c: any) => ({ ...c, ready: true })),
-          conditions: [
-            { type: 'Initialized', status: 'True' },
-            { type: 'Ready', status: 'True' },
-            { type: 'ContainersReady', status: 'True' },
-            { type: 'PodScheduled', status: 'True' },
-          ],
+          ...(latest.status as any),
+          phase: 'Pending',
+          qosClass: qosClassOf(containers),
+          containerStatuses: containers.map((c) => ({
+            name: c.name, ready: false, restartCount: restarts,
+            state: {
+              waiting: {
+                reason: 'CrashLoopBackOff',
+                message: `back-off ${backoffOf(restarts) / 1000}s restarting failed ` +
+                  `container=${c.name} pod=${name}_${namespace}`,
+              },
+            },
+            lastState: { terminated: { exitCode: failure.exitCode, reason: failure.reason } },
+          })),
+          conditions: [{ type: 'Ready', status: 'False', reason: 'ContainersNotReady' }],
         });
       });
-      this.advancing.delete(key);
-    }, pullMs + startupMs + readyAfterMs, { priority: Priority.NODE, label: `${this.name}:ready:${key}` });
+      if (restarts === 1) {
+        this.context.recordEvent({
+          object: pod, type: 'Warning', reason: 'BackOff',
+          message: failure.event
+            ?? `Back-off restarting failed container ${containers[0]?.name} in pod ${name}_${namespace}`,
+        });
+      }
+      // 注意这里**不**清 advancing —— 清了的话，status 变化会经 informer
+      // 立刻把这个 Pod 重新入队，前台链路马上又跑一遍，世界永远静不下来。
+      // 只有下面那个后台退避定时器才有资格把它放出来。
+      this.kernel.setTimeout(
+        () => { this.advancing.delete(key); this.queue.add(key); },
+        backoffOf(restarts),
+        { priority: Priority.NODE, background: true, label: `${this.name}:restart:${key}` }
+      );
+    }, afterMs, { priority: Priority.NODE, label: `${this.name}:crash:${key}` });
+  }
+
+  /**
+   * 探针。
+   *
+   * 就绪探针过不了，Pod 会一直是 `Running` 但 `0/1` —— 端口写错、路径写错
+   * 都长这样，而应用日志里什么都看不出来。存活探针连续失败则重启容器。
+   */
+  private scheduleProbes(
+    key: string,
+    pod: KubeObject,
+    containers: ContainerSpec[],
+    behavior: ImageBehavior,
+    namespace: string,
+    name: string,
+    runningAtMs: number
+  ): void {
+    const readiness = containers[0]?.readinessProbe;
+    const liveness = containers[0]?.livenessProbe;
+    const spec = this.imageOf(containers[0]?.image) ?? {};
+
+    const readyOk = probeSucceeds(readiness, behavior);
+    const liveOk = probeSucceeds(liveness, behavior);
+    const readyAfter = readiness
+      ? runningAtMs + probeDelayMs(readiness)
+      : runningAtMs + (spec.readyAfterMs ?? 200);
+
+    if (readyOk) {
+      this.kernel.setTimeout(() => {
+        ignoreConflict(() => {
+          const latest = this.registry.get(PODS, namespace, name);
+          if (latest.metadata.deletionTimestamp) return;
+          const current = (latest.status ?? {}) as any;
+          if (current.phase !== 'Running') return;
+          updateStatusIfChanged(this.registry, PODS, namespace, name, {
+            ...current,
+            containerStatuses: (current.containerStatuses ?? []).map((c: any) => ({ ...c, ready: true })),
+            conditions: [
+              { type: 'Initialized', status: 'True' },
+              { type: 'Ready', status: 'True' },
+              { type: 'ContainersReady', status: 'True' },
+              { type: 'PodScheduled', status: 'True' },
+            ],
+          });
+        });
+        if (!liveness || liveOk) this.advancing.delete(key);
+      }, readyAfter, { priority: Priority.NODE, label: `${this.name}:ready:${key}` });
+    } else {
+      // 探针不过：留在 Running 但不 Ready，并把原因写成 Event
+      this.kernel.setTimeout(() => {
+        this.context.recordEvent({
+          object: pod, type: 'Warning', reason: 'Unhealthy',
+          message: `Readiness probe failed: ${describeProbe(readiness)}`,
+        });
+        this.advancing.delete(key);
+      }, readyAfter, { priority: Priority.NODE, label: `${this.name}:unhealthy:${key}` });
+    }
+
+    if (liveness && !liveOk) {
+      const restarts = (this.restartCount.get(key) ?? 0) + 1;
+      this.restartCount.set(key, restarts);
+      this.kernel.setTimeout(() => {
+        this.context.recordEvent({
+          object: pod, type: 'Warning', reason: 'Unhealthy',
+          message: `Liveness probe failed: ${describeProbe(liveness)}`,
+        });
+        ignoreConflict(() => {
+          const latest = this.registry.get(PODS, namespace, name);
+          if (latest.metadata.deletionTimestamp) return;
+          const current = (latest.status ?? {}) as any;
+          updateStatusIfChanged(this.registry, PODS, namespace, name, {
+            ...current,
+            containerStatuses: (current.containerStatuses ?? []).map((c: any) => ({
+              ...c, ready: false, restartCount: restarts,
+              lastState: { terminated: { exitCode: 137, reason: 'Error' } },
+            })),
+            conditions: [{ type: 'Ready', status: 'False', reason: 'ContainersNotReady' }],
+          });
+        });
+        this.kernel.setTimeout(
+          () => { this.advancing.delete(key); },
+          1_000,
+          { priority: Priority.NODE, background: true, label: `${this.name}:liveness:${key}` }
+        );
+      }, runningAtMs + livenessFailureMs(liveness), {
+        priority: Priority.NODE, label: `${this.name}:livenessfail:${key}`,
+      });
+    }
   }
 
   /**
@@ -833,4 +1074,132 @@ export class KubeletController extends Controller {
     }
     return `10.42.${(hash >>> 8) % 256}.${(hash % 254) + 1}`;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 节点压力与驱逐                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 节点内存不够时把 Pod 赶走。
+ *
+ * 驱逐顺序按 QoS：BestEffort 先走，然后是用超了 requests 的 Burstable，
+ * Guaranteed 最后。这不是我们编的策略，是 kubelet 的实际行为 ——
+ * 第 7 关要学员亲眼看到「不写 requests 的那个先死」。
+ *
+ * 被驱逐的 Pod 变成 `Failed` 且 `reason: Evicted`，不会原地重启；
+ * 上层的 ReplicaSet 会在别的节点上补一个，这也是真集群的样子。
+ */
+export class NodePressureController extends Controller {
+  private pods: Informer;
+  private nodes: Informer;
+
+  constructor(
+    private readonly nodeName: string,
+    context: ControllerContext,
+    private readonly images: Record<string, ImageSpec>
+  ) {
+    super(context, `eviction:${nodeName}`);
+    this.pods = new Informer(this.registry, PODS);
+    this.nodes = this.track(new Informer(this.registry, NODES));
+    this.watch(this.pods, (pod, key) => ((pod.spec as any)?.nodeName === nodeName ? key : null));
+  }
+
+  protected async reconcile(): Promise<void> {
+    const node = this.nodes.list().find((item) => item.metadata.name === this.nodeName);
+    if (!node) return;
+    const allocatable = parseQuantity((node.status as any)?.allocatable?.memory);
+    if (!allocatable) return;
+
+    const running = this.pods
+      .list()
+      .filter((pod) => (pod.spec as any)?.nodeName === this.nodeName)
+      .filter((pod) => (pod.status as any)?.phase === 'Running')
+      .filter((pod) => !pod.metadata.deletionTimestamp);
+
+    let used = running.reduce((sum, pod) => sum + this.memoryOf(pod), 0);
+    if (used <= allocatable) return;
+
+    // 先走 BestEffort，再走超了 requests 的 Burstable，Guaranteed 最后
+    const order: Record<string, number> = { BestEffort: 0, Burstable: 1, Guaranteed: 2 };
+    const victims = [...running].sort((a, b) => {
+      const byQos = order[qosOf(a)] - order[qosOf(b)];
+      if (byQos !== 0) return byQos;
+      // 同一档里超得越多越先走；再平手就按名字，保证可复现
+      const overA = this.memoryOf(a) - requestedMemory(a);
+      const overB = this.memoryOf(b) - requestedMemory(b);
+      if (overA !== overB) return overB - overA;
+      return a.metadata.name < b.metadata.name ? -1 : 1;
+    });
+
+    for (const pod of victims) {
+      if (used <= allocatable) break;
+      used -= this.memoryOf(pod);
+      this.evict(pod, allocatable);
+    }
+  }
+
+  private memoryOf(pod: KubeObject): number {
+    const containers: ContainerSpec[] = (pod.spec as any)?.containers ?? [];
+    return containers.reduce((sum, container) => {
+      const declared = this.images[container.image]?.memoryUsage;
+      // 镜像没声明用量就按它自己要的算
+      return sum + (declared
+        ? parseQuantity(declared)
+        : parseQuantity(container.resources?.requests?.memory));
+    }, 0);
+  }
+
+  private evict(pod: KubeObject, allocatable: number): void {
+    const namespace = pod.metadata.namespace ?? 'default';
+    ignoreConflict(() => {
+      const latest = this.registry.get(PODS, namespace, pod.metadata.name);
+      if ((latest.status as any)?.phase !== 'Running') return;
+      updateStatusIfChanged(this.registry, PODS, namespace, pod.metadata.name, {
+        ...(latest.status as any),
+        phase: 'Failed',
+        reason: 'Evicted',
+        message:
+          `The node was low on resource: memory. Threshold quantity: ${formatMi(allocatable)}, ` +
+          `available: 0Mi. Container ${(pod.spec as any)?.containers?.[0]?.name} was using ` +
+          `${formatMi(this.memoryOf(pod))}, request is ${formatMi(requestedMemory(pod))}.`,
+        containerStatuses: ((latest.status as any)?.containerStatuses ?? []).map((c: any) => ({
+          ...c, ready: false, state: { terminated: { exitCode: 137, reason: 'Evicted' } },
+        })),
+        conditions: [{ type: 'Ready', status: 'False', reason: 'PodFailed' }],
+      });
+    });
+    this.context.recordEvent({
+      object: pod, type: 'Warning', reason: 'Evicted',
+      message: `The node was low on resource: memory. Container ${(pod.spec as any)?.containers?.[0]?.name} was using more than its request.`,
+    });
+  }
+}
+
+function qosOf(pod: KubeObject): string {
+  return (pod.status as any)?.qosClass
+    ?? qosClassOf(((pod.spec as any)?.containers ?? []) as ContainerSpec[]);
+}
+
+function requestedMemory(pod: KubeObject): number {
+  const containers: ContainerSpec[] = (pod.spec as any)?.containers ?? [];
+  return containers.reduce(
+    (sum, container) => sum + parseQuantity(container.resources?.requests?.memory),
+    0
+  );
+}
+
+function formatMi(bytes: number): string {
+  return `${Math.round(bytes / (1024 * 1024))}Mi`;
+}
+
+/** 探针失败的 Event 里那句描述，和真 kubelet 一个格式 */
+function describeProbe(probe: Probe | undefined): string {
+  if (probe?.httpGet) {
+    return `HTTP probe failed with statuscode: 404 (GET ${probe.httpGet.path ?? '/'} on port ${probe.httpGet.port})`;
+  }
+  if (probe?.tcpSocket) {
+    return `dial tcp: connect: connection refused (port ${probe.tcpSocket.port})`;
+  }
+  return 'command failed';
 }

@@ -28,10 +28,18 @@ export interface OpsTerminalProps {
   onCommand: (line: string) => Promise<string>;
   /** 终端就绪后打印的欢迎信息 */
   banner?: string;
+  /**
+   * 把「往输入行里插一条命令」这个能力交给外面。
+   *
+   * 拓扑图上点一个节点要把 `kubectl describe ...` 送进来 —— 但只是**填进去**，
+   * 不替学员回车。命令是他自己敲下去的，这一点在教学上不能含糊。
+   */
+  registerInsert?: (insert: ((command: string) => void) | null) => void;
 }
 
-export default function OpsTerminal({ prompt, onCommand, banner }: OpsTerminalProps) {
+export default function OpsTerminal({ prompt, onCommand, banner, registerInsert }: OpsTerminalProps) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const termRef = useRef<Terminal | null>(null);
   // 命令执行期间不接受新输入，也不重画提示符
   const busyRef = useRef(false);
   const lineRef = useRef('');
@@ -69,6 +77,7 @@ export default function OpsTerminal({ prompt, onCommand, banner }: OpsTerminalPr
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(hostRef.current);
+      termRef.current = term;
       fit.fit();
 
       resizeObserver = new ResizeObserver(() => {
@@ -146,8 +155,22 @@ export default function OpsTerminal({ prompt, onCommand, banner }: OpsTerminalPr
       disposed = true;
       resizeObserver?.disconnect();
       term?.dispose();
+      termRef.current = null;
     };
   }, [banner, prompt, writePrompt]);
+
+  // 只填进输入行，不替学员回车
+  useEffect(() => {
+    if (!registerInsert) return;
+    registerInsert((command: string) => {
+      const term = termRef.current;
+      if (!term || busyRef.current) return;
+      lineRef.current = command;
+      term.write(`\r${CLEAR_LINE}${BLUE}${prompt}${RESET}${command}`);
+      term.focus();
+    });
+    return () => registerInsert(null);
+  }, [registerInsert, prompt]);
 
   return <div ref={hostRef} style={{ width: '100%', height: '100%', background: '#12161f', padding: 8 }} />;
 }

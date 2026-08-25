@@ -116,7 +116,12 @@ export function allProjectFiles(project: EngineeringProject): Record<string, str
   };
 
   collect(project.files);
-  for (const stage of project.stages || []) collect(stage.starterFiles);
+  for (const stage of project.stages || []) {
+    collect(stage.starterFiles);
+    // ops 关卡的文件放在 stage.ops.files 里（机器磁盘上的 manifest / 脚本），
+    // 不收进来的话它们的草稿会在下次载入时被当成孤儿清掉，等于白改
+    for (const [path, content] of Object.entries(stage.ops?.files ?? {})) files[path] = content;
+  }
 
   for (const variant of Object.values(project.variants || {})) {
     collect(variant?.files);

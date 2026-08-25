@@ -22,9 +22,11 @@ import {
   EndpointsController,
   ImageSpec,
   KubeletController,
+  NodePressureController,
   ReplicaSetController,
   SchedulerController,
 } from './workloads';
+import type { RegistryAuth } from './runtime';
 
 export interface NodeSpec {
   name: string;
@@ -44,6 +46,18 @@ export interface ClusterOptions {
   namespaces?: string[];
   /** 镜像目录：不在里面的镜像拉不到 */
   images?: Record<string, ImageSpec>;
+  /** 每个仓库要不要认证 —— 私有仓库没 imagePullSecret 就拉不下来 */
+  registries?: Record<string, RegistryAuth>;
+  /** 目录里没有时再问一次（学员自己 push 上去的镜像） */
+  resolveImage?: (image: string) => ImageSpec | undefined;
+  /**
+   * 集群「已经跑了多久」。
+   *
+   * 节点和命名空间是世界的初态，不是刚刚建出来的。不给它们一个合理的年龄，
+   * `kubectl get nodes` 的 AGE 列会显示 0s —— 一个跑了半年的生产集群
+   * 节点年龄是 0 秒，一眼假。
+   */
+  clusterAgeMs?: number;
   extraResources?: ResourceDefinition[];
 }
 
@@ -57,12 +71,14 @@ export class Cluster {
   private controllers: Controller[] = [];
   private uidSeq = 0;
   private started = false;
+  /** 铺初态时把时钟往回拨这么多，让「本来就在」的东西有个合理年龄 */
+  private backdate = 0;
 
   constructor(private readonly options: ClusterOptions = {}) {
     this.kernel = createKernel({ seed: options.seed ?? 1 });
     // 世界的起始时刻是一个偏移量，内核的时钟从 0 开始走
     const startTime = options.startTime ?? Date.parse('2026-01-01T00:00:00Z');
-    const now = () => startTime + this.kernel.now();
+    const now = () => startTime + this.kernel.now() - this.backdate;
 
     this.store = createStore();
     this.scheme = createScheme([...CORE_RESOURCES, ...(options.extraResources ?? [])]);
@@ -98,6 +114,30 @@ export class Cluster {
 
   /** 建好命名空间与节点。这些是世界的初态，不是控制器造出来的。 */
   private seed(): void {
+    this.backdate = this.options.clusterAgeMs ?? 0;
+    try {
+      this.seedInfrastructure();
+    } finally {
+      this.backdate = 0;
+    }
+  }
+
+  /**
+   * 按「世界本来就有」的时间铺一批对象。
+   *
+   * 关卡的初态对象（上一任留下的 Deployment 之类）也该用它，
+   * 否则学员一进来就看到一个 0 秒前刚建出来的「历史遗留」。
+   */
+  seedExisting<T>(ageMs: number, run: () => T): T {
+    this.backdate = ageMs;
+    try {
+      return run();
+    } finally {
+      this.backdate = 0;
+    }
+  }
+
+  private seedInfrastructure(): void {
     const namespaces = this.options.namespaces ?? ['default', 'kube-system'];
     for (const name of namespaces) {
       this.registry.create(NAMESPACES, undefined, {
@@ -185,9 +225,14 @@ export class Cluster {
       new ReplicaSetController(context),
       new DeploymentController(context),
       new EndpointsController(context),
-      ...this.nodeSpecs.map(
-        (node) => new KubeletController(context, node.name, { images: this.options.images })
-      ),
+      ...this.nodeSpecs.flatMap((node) => [
+        new KubeletController(context, node.name, {
+          images: this.options.images,
+          registries: this.options.registries,
+          resolveImage: this.options.resolveImage,
+        }),
+        new NodePressureController(node.name, context, this.options.images ?? {}),
+      ]),
     ];
     for (const controller of this.controllers) controller.start();
   }

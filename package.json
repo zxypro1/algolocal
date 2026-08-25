@@ -94,6 +94,7 @@
     "@types/react-syntax-highlighter": "^15.5.13",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "@xyflow/react": "12.10.2",
     "d3-sankey": "^0.12.3",
     "isomorphic-dompurify": "^2.26.0",
     "katex": "^0.16.22",

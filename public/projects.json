@@ -5555,6 +5555,705 @@
     }
   },
   {
+    "id": "intranet-k8s",
+    "title": {
+      "zh": "内网设施实战：接手一家公司的 Kubernetes",
+      "en": "Intranet Infrastructure: Inheriting a Kubernetes Cluster"
+    },
+    "summary": {
+      "zh": "在一台跳板机上接手真实规模的内网集群：真 kubectl、真 helm、真 docker，真的会坏。",
+      "en": "Take over a company intranet cluster from a jump host: real kubectl, real helm, real docker — and real breakage."
+    },
+    "difficulty": "Hard",
+    "domain": "infrastructure",
+    "tags": [
+      "kubernetes",
+      "sre",
+      "containers",
+      "gitops"
+    ],
+    "estimatedMinutes": 240,
+    "language": "typescript",
+    "brief": {
+      "zh": "你入职一家公司做基础设施。前任留下一台跳板机、一个 Kubernetes 集群，\n和一份不太靠谱的交接文档。\n\n这个项目里的东西都是真的：终端里的 shell 是 bash 语法（tree-sitter 解析），\n`kubectl` 与 `helm` 是官方二进制编译成 WebAssembly 的，\n`docker build` 真的按 Dockerfile 分层并算 sha256。\n集群是内存里的 apiserver + 控制器循环，Pod 会真的被调度、拉镜像、就绪、崩溃。\n\n**判定看的是集群的真实状态**，不是你敲了什么命令。\n怎么达成随你，达成了就算过。\n",
+      "en": "You have joined a company as an infrastructure engineer. Your predecessor\nleft behind a jump host, a Kubernetes cluster, and a handover document of\nquestionable accuracy.\n\nEverything here is real: the shell parses bash with tree-sitter, `kubectl`\nand `helm` are the upstream binaries compiled to WebAssembly, and\n`docker build` really layers your Dockerfile and computes sha256 digests.\nThe cluster is an in-memory apiserver plus controller loops — pods really do\nget scheduled, pull images, become ready, and crash.\n\n**Grading looks at the cluster's actual state**, not at what you typed.\nHow you get there is up to you.\n"
+    },
+    "workspace": {
+      "kind": "ops",
+      "world": {
+        "seed": 1,
+        "startTime": "2026-03-02T09:00:00Z",
+        "nodes": [
+          {
+            "name": "node-a1",
+            "cpu": "4",
+            "memory": "8Gi",
+            "labels": {
+              "topology.kubernetes.io/zone": "a"
+            }
+          },
+          {
+            "name": "node-a2",
+            "cpu": "4",
+            "memory": "8Gi",
+            "labels": {
+              "topology.kubernetes.io/zone": "a"
+            }
+          },
+          {
+            "name": "node-b1",
+            "cpu": "4",
+            "memory": "8Gi",
+            "labels": {
+              "topology.kubernetes.io/zone": "b"
+            }
+          }
+        ],
+        "namespaces": [
+          "default",
+          "kube-system",
+          "payments"
+        ],
+        "images": {
+          "harbor.corp.internal/team/portal:1.4.0": {
+            "pullMs": 400,
+            "startupMs": 600,
+            "readyAfterMs": 300,
+            "listens": [
+              8080
+            ],
+            "routes": {
+              "/": 200,
+              "/healthz": 200,
+              "/readyz": 200
+            },
+            "memoryUsage": "180Mi",
+            "handlesSigterm": true,
+            "runAsUser": 10001
+          },
+          "harbor.corp.internal/team/reports:2.1.0": {
+            "pullMs": 500,
+            "startupMs": 800,
+            "readyAfterMs": 200,
+            "listens": [
+              9090
+            ],
+            "routes": {
+              "/healthz": 200
+            },
+            "memoryUsage": "900Mi"
+          }
+        },
+        "baseImages": {
+          "node:22-alpine": "node"
+        },
+        "registries": [
+          {
+            "host": "harbor.corp.internal",
+            "users": {
+              "ci": "Harbor@2026"
+            },
+            "projects": [
+              "team",
+              "library"
+            ],
+            "anonymousPull": false
+          }
+        ],
+        "endpoints": [
+          "apiserver.opslab"
+        ],
+        "machine": {
+          "hostname": "jump-01",
+          "user": "root",
+          "cwd": "/root",
+          "files": {
+            "/root/.kube/config": "apiVersion: v1\nkind: Config\nclusters:\n- name: corp-legacy\n  cluster:\n    server: https://apiserver.legacy.corp.internal:6443\n    insecure-skip-tls-verify: true\n- name: corp-prod\n  cluster:\n    server: https://apiserver.opslab:6443\n    insecure-skip-tls-verify: true\n- name: corp-staging\n  cluster:\n    server: https://apiserver.staging.corp.internal:6443\n    insecure-skip-tls-verify: true\ncontexts:\n- name: legacy\n  context:\n    cluster: corp-legacy\n    user: ops\n    namespace: default\n- name: prod\n  context:\n    cluster: corp-prod\n    user: ops\n    namespace: payments\n- name: staging\n  context:\n    cluster: corp-staging\n    user: ops\n    namespace: default\ncurrent-context: legacy\nusers:\n- name: ops\n  user:\n    token: opslab-token\n",
+            "/root/HANDOVER.md": "# 交接说明（前任留下的）\n\n集群是 v1.36，三台节点，都在机房 A。\n跳板机上的 kubeconfig 里有三套环境，生产那套的名字我忘了，你自己看一下。\nlegacy 那套上个月已经下线，别去连它。\n\n第一件事：确认三台节点都是 Ready，把结果记到 handover/nodes.txt 里。\n"
+          }
+        }
+      }
+    },
+    "files": [],
+    "stages": [
+      {
+        "id": "take-over-cluster",
+        "title": {
+          "zh": "接手集群",
+          "en": "Take over the cluster"
+        },
+        "goal": {
+          "zh": "前任把跳板机的账号给你就走了。终端里已经登好了，`~/.kube/config` 也在，\n但 `current-context` 指着一套**上个月就下线**的老集群 —— 敲什么都连不上。\n\n先把自己接进生产集群，再确认它是好的。\n\n## 通关标准\n\n1. `kubectl config get-contexts` 看清楚有哪几套环境，把 current-context\n   切到生产那一套（提示：`HANDOVER.md` 里说了怎么分辨）；\n2. 三台节点都是 `Ready`；\n3. 把 `kubectl get nodes -o wide` 的输出存到 `~/handover/nodes.txt`。\n\n## 会用到的命令\n\n```bash\ncat HANDOVER.md\nkubectl config get-contexts\nkubectl config use-context <name>\nkubectl get nodes -o wide\nmkdir -p handover && kubectl get nodes -o wide > handover/nodes.txt\n```\n",
+          "en": "Your predecessor handed you the jump host and left. The terminal is already\nlogged in and `~/.kube/config` is there, but `current-context` points at a\ncluster that was **decommissioned last month** — every command times out.\n\nGet yourself into the production cluster, then confirm it is healthy.\n\n## Done when\n\n1. `kubectl config get-contexts` shows the environments and current-context\n   is switched to production (`HANDOVER.md` says how to tell them apart);\n2. all three nodes report `Ready`;\n3. the output of `kubectl get nodes -o wide` is saved to `~/handover/nodes.txt`.\n\n## Commands you will need\n\n```bash\ncat HANDOVER.md\nkubectl config get-contexts\nkubectl config use-context <name>\nkubectl get nodes -o wide\nmkdir -p handover && kubectl get nodes -o wide > handover/nodes.txt\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "current-context 指向生产集群",
+            "en": "current-context points at production"
+          },
+          {
+            "zh": "三台节点都是 Ready",
+            "en": "All three nodes are Ready"
+          },
+          {
+            "zh": "handover/nodes.txt 里有三台节点",
+            "en": "handover/nodes.txt lists all three nodes"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "`kubectl config get-contexts` 会把三套环境列出来，带星号的是当前那套。",
+            "en": "`kubectl config get-contexts` lists all three; the starred one is current."
+          },
+          {
+            "zh": "连不上的时候 kubectl 报的是 `Unable to connect to the server` —— 这说明 server 地址解析不到，不是权限问题。",
+            "en": "When it cannot connect kubectl says `Unable to connect to the server` — that is name resolution, not permissions."
+          },
+          {
+            "zh": "`kubectl get nodes -o wide > handover/nodes.txt` 之前记得 `mkdir -p handover`。",
+            "en": "Run `mkdir -p handover` before redirecting into `handover/nodes.txt`."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "直接 `kubectl config use-context prod` 之前先确认名字 —— 三个 context 的名字不是 legacy/prod/staging 就是集群名，猜错了照样连不上。",
+            "en": "Confirm the context name before switching — guessing wrong leaves you on an unreachable cluster."
+          },
+          {
+            "zh": "`kubectl get nodes` 报 `Unable to connect to the server` 时，去改 kubeconfig 里的 server 地址是错的方向：生产那套地址本来就是对的，你只是没切过去。",
+            "en": "When you see `Unable to connect to the server`, editing the server URL is the wrong move: production’s URL is already correct, you simply are not on it."
+          }
+        ],
+        "ops": {
+          "referenceCommands": [
+            "kubectl config use-context prod",
+            "mkdir -p /root/handover",
+            "kubectl get nodes -o wide > /root/handover/nodes.txt"
+          ]
+        },
+        "specs": [
+          {
+            "path": "take-over.spec.ts",
+            "content": "import { sh, list, readFile, exists } from '@ops/lab';\n\ndescribe('接手集群', () => {\n  it('current-context 切到了生产集群', async () => {\n    const result = await sh('kubectl config current-context');\n    expect(result.code).toBe(0);\n    expect(result.stdout.trim()).toBe('prod');\n  });\n\n  it('三台节点都是 Ready', () => {\n    const nodes = list('Node');\n    expect(nodes.length).toBe(3);\n    for (const node of nodes) {\n      const ready = (node.status.conditions || []).find((c) => c.type === 'Ready');\n      expect(ready && ready.status).toBe('True');\n    }\n  });\n\n  it('handover/nodes.txt 里记着这三台', () => {\n    expect(exists('/root/handover/nodes.txt')).toBe(true);\n    const text = readFile('/root/handover/nodes.txt') || '';\n    for (const name of ['node-a1', 'node-a2', 'node-b1']) {\n      expect(text.includes(name)).toBe(true);\n    }\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness"
+        ],
+        "extension": {
+          "zh": "真实世界里「接手一个集群」第一件事就是搞清楚自己连的是哪一套。\n`kubectl config get-contexts` 之外，值得养成的习惯是把当前 context\n放进 shell 提示符（kube-ps1、starship 都支持）——\n**在生产集群上敲了本该在测试环境跑的命令**，是这一行里最常见的事故类型。\n",
+          "en": "In the real world the first thing you do with an inherited cluster is\nwork out which one you are actually talking to. Beyond\n`kubectl config get-contexts`, it is worth putting the current context in\nyour shell prompt (kube-ps1, starship). **Running a staging command against\nproduction** is one of the most common incidents in this line of work.\n"
+        },
+        "primer": {
+          "zh": "`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。\n\n和集群打交道的入口是 `kubectl`，它读一个叫 `kubeconfig` 的文件（默认在 `~/.kube/config`）来决定：连哪个集群（`cluster`，一个 API 地址）、用什么身份（`user`，一份凭据）、默认在哪个命名空间里操作（`namespace`）。这三样打包成一个 `context`，一份 kubeconfig 里可以有很多个 context，`current-context` 指着当前用哪个。\n\n一个人手里同时有生产、预发、测试几套环境是常态，所以「我现在连的是哪一套」是每次操作前都要确认的事。`kubectl config get-contexts` 列出全部，带星号的是当前那个；`kubectl config use-context <name>` 切换。切错了不会有任何提示，命令照样执行，只是打在了别的集群上。\n\n`节点`（Node）是集群里的一台机器。`kubectl get nodes` 列出它们和各自的状态；`Ready` 表示这台机器上的 kubelet 正常上报、可以接收工作负载。接手一个陌生集群，先看节点是最省事的健康检查：三台里挂了一台，很多现象都能从这里解释。",
+          "en": "`Kubernetes` manages containers. Instead of telling it \"start a process on this machine\", you declare \"I want three replicas like this\" and controllers keep working until three exist. That idea, declaring the desired state and letting controllers converge toward it, underpins every later stage.\n\nYou talk to a cluster through `kubectl`, which reads a `kubeconfig` file (`~/.kube/config` by default) to decide which cluster to reach (`cluster`, an API endpoint), which identity to use (`user`, a credential), and which namespace to default to. Those three are bundled into a `context`; one kubeconfig can hold many contexts, and `current-context` selects the active one.\n\nHolding production, staging, and test environments at once is normal, so \"which one am I on?\" is a question to answer before every operation. `kubectl config get-contexts` lists them all with a star on the current one; `kubectl config use-context <name>` switches. Picking the wrong one produces no warning: commands still run, just against a different cluster.\n\nA `Node` is a machine in the cluster. `kubectl get nodes` lists them with their status; `Ready` means that machine’s kubelet is reporting in and can accept workloads. When inheriting an unfamiliar cluster, checking nodes first is the cheapest health check available: one dead node out of three explains a surprising number of symptoms."
+        }
+      },
+      {
+        "id": "first-workload",
+        "title": {
+          "zh": "第一个工作负载",
+          "en": "The first workload"
+        },
+        "goal": {
+          "zh": "前任在 `infra/portal.yaml` 里留了门户的部署清单，但从来没 apply 过。\n你的活儿是把它跑起来，并且**确认它真的能被访问到**。\n\n注意：三个副本 Running 不等于服务可用。Service 靠 `selector` 找 Pod，\n找不到就是一个指向空气的入口，而这件事在 `kubectl get svc` 里\n**完全看不出来**，它照样有 ClusterIP。\n\n## 通关标准\n\n1. `portal` 这个 Deployment 三个副本全部 Ready；\n2. `portal` 这个 Service 的 Endpoints 里有三个地址；\n3. 修的是 `infra/portal.yaml` 这个文件，不是只在集群里改一把\n   （下一关开始一切以文件为准）。\n\n## 会用到的命令\n\n```bash\nkubectl apply -f infra/portal.yaml\nkubectl get deploy,svc,endpoints -n payments\nkubectl get pods -n payments --show-labels\nkubectl describe svc portal -n payments\n```\n",
+          "en": "Your predecessor left the portal manifest in `infra/portal.yaml` but never\napplied it. Your job is to bring it up and **confirm it can actually be reached**.\n\nNote: three Running replicas do not mean the service works. A Service finds\npods through its `selector`; if it matches nothing you have an entrypoint\npointing at thin air, and `kubectl get svc` **will not show it**. The\nClusterIP is there either way.\n\n## Done when\n\n1. the `portal` Deployment has three ready replicas;\n2. the `portal` Service has three endpoint addresses;\n3. you fixed `infra/portal.yaml` itself, not just the live object\n   (from the next stage on, the file is the source of truth).\n\n## Commands you will need\n\n```bash\nkubectl apply -f infra/portal.yaml\nkubectl get deploy,svc,endpoints -n payments\nkubectl get pods -n payments --show-labels\nkubectl describe svc portal -n payments\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "Deployment 三个副本 Ready",
+            "en": "Deployment has three ready replicas"
+          },
+          {
+            "zh": "Service 的 Endpoints 里有三个地址",
+            "en": "The Service has three endpoints"
+          },
+          {
+            "zh": "改的是文件，不是只改集群",
+            "en": "The manifest file is fixed, not only the live object"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "`kubectl get endpoints portal -n payments` 如果显示 `<none>`，说明 selector 没匹配上任何 Pod。",
+            "en": "If `kubectl get endpoints portal -n payments` shows `<none>`, the selector matches no pods."
+          },
+          {
+            "zh": "把 `kubectl get pods --show-labels` 的输出和 Service 的 selector 逐字比一遍。",
+            "en": "Compare `kubectl get pods --show-labels` against the Service selector, character by character."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "用 `kubectl edit svc` 改完就走：集群是好了，但文件还是错的，下一次 apply 又会把它改回去。",
+            "en": "Fixing it with `kubectl edit svc` leaves the file wrong, and the next apply undoes your fix."
+          },
+          {
+            "zh": "Deployment 的 `spec.selector.matchLabels` 和 Service 的 `spec.selector` 是两件不同的事，前者对了不代表后者也对。",
+            "en": "A Deployment`s `spec.selector.matchLabels` and a Service`s `spec.selector` are different things; getting one right says nothing about the other."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "files": {
+            "/root/infra/portal.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: portal\n  namespace: payments\n  labels:\n    app: portal\nspec:\n  replicas: 3\n  selector:\n    matchLabels:\n      app: portal\n  template:\n    metadata:\n      labels:\n        app: portal\n    spec:\n      containers:\n      - name: web\n        image: harbor.corp.internal/team/portal:1.4.0\n        ports:\n        - containerPort: 8080\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  selector:\n    app: protal\n  ports:\n  - port: 80\n    targetPort: 8080\n"
+          },
+          "referenceCommands": [
+            "sed -i s/protal/portal/ /root/infra/portal.yaml",
+            "kubectl apply -f /root/infra/portal.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "first-workload.spec.ts",
+            "content": "import { get, readFile } from '@ops/lab';\n\ndescribe('第一个工作负载', () => {\n  it('Deployment 三个副本都 Ready', () => {\n    const deployment = get('Deployment', 'portal', 'payments');\n    expect(deployment).toBeTruthy();\n    expect(deployment.status.readyReplicas).toBe(3);\n  });\n\n  it('Service 建出来了，端口对得上', () => {\n    const service = get('Service', 'portal', 'payments');\n    expect(service).toBeTruthy();\n    expect(service.spec.ports[0].port).toBe(80);\n    expect(service.spec.ports[0].targetPort).toBe(8080);\n  });\n\n  it('Endpoints 里有三个地址，说明 selector 真的匹配上了', () => {\n    const endpoints = get('Endpoints', 'portal', 'payments');\n    expect(endpoints).toBeTruthy();\n    const addresses = (endpoints.subsets || []).flatMap((s) => s.addresses || []);\n    expect(addresses.length).toBe(3);\n  });\n\n  it('文件里的 selector 也改对了，不是只在集群里改了一把', () => {\n    const manifest = readFile('/root/infra/portal.yaml') || '';\n    expect(manifest.includes('protal')).toBe(false);\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness"
+        ],
+        "extension": {
+          "zh": "「Pod 都在跑但服务不通」在生产里的第一诊断动作永远是\n`kubectl get endpoints <svc>`：它把「Service 认不认这些 Pod」这个问题\n从「网络通不通」里摘出来。Endpoints 为空是标签问题，Endpoints 有地址\n但访问不通才轮到网络策略、探针、端口。\n",
+          "en": "When pods are running but the service is unreachable, the first diagnostic in\nproduction is always `kubectl get endpoints <svc>`. It separates \"does the\nService recognise these pods\" from \"is the network working\". Empty endpoints\nis a label problem; endpoints present but unreachable is when network policy,\nprobes, and ports become suspects.\n"
+        },
+        "primer": {
+          "zh": "直接创建 `Pod` 很少见，因为它不会自愈：节点挂了它就没了。日常用的是 `Deployment`，你声明「要三个这样的副本」，它建一个 `ReplicaSet`，ReplicaSet 负责让 Pod 的数量始终等于三。改了镜像版本，Deployment 会新建一个 ReplicaSet 并逐步把流量从旧的挪过去，这就是`滚动更新`。\n\n`标签`（label）是这套机制的粘合剂。ReplicaSet 靠 `selector` 认领属于自己的 Pod，Pod 靠 `metadata.labels` 表明身份。两边对不上，ReplicaSet 就会以为一个 Pod 都没有，于是不停地建新的。\n\n`Service` 是集群内部的稳定入口。Pod 的 IP 随时会变（重建一次就换一个），Service 有一个固定的 ClusterIP 和一个 DNS 名字。它同样靠 `selector` 找后端，匹配到的 Pod 地址被写进一个叫 `Endpoints` 的对象里，转发时就查这张表。\n\n于是有一种很典型的故障：Pod 全部 Running，Service 也有 ClusterIP，但访问不通。原因是 Service 的 selector 和 Pod 的标签对不上，Endpoints 是空的。`kubectl get svc` 看不出这件事，`kubectl get endpoints` 一眼就能看出来。这是排查「服务不通」时该敲的第一条命令。",
+          "en": "Creating a `Pod` directly is rare because a bare pod does not heal: if its node dies, it is gone. Day to day you use a `Deployment`. You declare \"I want three replicas like this\", it creates a `ReplicaSet`, and the ReplicaSet keeps the pod count at three. Change the image version and the Deployment creates a new ReplicaSet, gradually shifting traffic from the old one. That is a `rolling update`.\n\n`Labels` are the glue. A ReplicaSet claims its pods through a `selector`; pods declare their identity through `metadata.labels`. When the two disagree, the ReplicaSet believes it owns no pods and keeps creating more.\n\nA `Service` is a stable in-cluster entrypoint. Pod IPs change constantly (every recreation brings a new one), while a Service has a fixed ClusterIP and DNS name. It also finds backends through a `selector`, and the matching pod addresses are written into an `Endpoints` object that forwarding consults.\n\nThis produces a very characteristic failure: every pod is Running, the Service has a ClusterIP, and nothing can reach it. The Service selector does not match the pod labels, so Endpoints is empty. `kubectl get svc` will not reveal this; `kubectl get endpoints` shows it immediately. It is the first command to run when a service is unreachable."
+        }
+      },
+      {
+        "id": "containerize",
+        "title": {
+          "zh": "把应用容器化",
+          "en": "Containerise the application"
+        },
+        "goal": {
+          "zh": "门户的源码在 `~/app`。前任写过一个 Dockerfile，能 build 出来，\n但有三个问题。其中一个是**安全问题**：build 日志里看不出来，\n`docker run` 也看不出来，只有翻镜像层才发现。\n\n把它改好，build 成 `harbor.corp.internal/team/portal:1.5.0` 并推上去。\n\n## 通关标准\n\n1. 镜像 build 出来了，tag 是 `harbor.corp.internal/team/portal:1.5.0`；\n2. **不以 root 运行**（`USER` 写了一个非 0 的 uid）；\n3. 声明了 `EXPOSE 8080`，`CMD` 用 exec form\n   （`[\"node\",\"server.js\"]` 而不是 `node server.js`）；\n4. `~/app/.npmrc` 里那个 npm token **不在任何一层里**。\n   注意「最终文件系统里没有」不等于「层里没有」；\n5. 推到了 Harbor（凭据：用户 `ci`，密码 `Harbor@2026`）。\n\n## 会用到的命令\n\n```bash\ncat app/Dockerfile app/.npmrc\ndocker login harbor.corp.internal -u ci -p 'Harbor@2026'\ndocker build -t harbor.corp.internal/team/portal:1.5.0 app\ndocker history harbor.corp.internal/team/portal:1.5.0\ndocker inspect harbor.corp.internal/team/portal:1.5.0\ndocker push harbor.corp.internal/team/portal:1.5.0\n```\n",
+          "en": "The portal source is in `~/app`. Your predecessor wrote a Dockerfile that\nbuilds, but it has three problems. One of them is a **security problem** that\nthe build log will not show you, that `docker run` will not show you, and\nthat only appears when you look inside the layers.\n\nFix it, build `harbor.corp.internal/team/portal:1.5.0`, and push it.\n\n## Done when\n\n1. the image is built and tagged `harbor.corp.internal/team/portal:1.5.0`;\n2. it **does not run as root** (`USER` set to a non-zero uid);\n3. it declares `EXPOSE 8080` and uses exec form for `CMD`\n   (`[\"node\",\"server.js\"]`, not `node server.js`);\n4. the npm token in `~/app/.npmrc` is **in none of the layers**. Note that\n   \"absent from the final filesystem\" is not the same as \"absent from the layers\";\n5. it is pushed to Harbor (user `ci`, password `Harbor@2026`).\n\n## Commands you will need\n\n```bash\ncat app/Dockerfile app/.npmrc\ndocker login harbor.corp.internal -u ci -p 'Harbor@2026'\ndocker build -t harbor.corp.internal/team/portal:1.5.0 app\ndocker history harbor.corp.internal/team/portal:1.5.0\ndocker inspect harbor.corp.internal/team/portal:1.5.0\ndocker push harbor.corp.internal/team/portal:1.5.0\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "镜像 build 出来并推上 Harbor",
+            "en": "Image built and pushed to Harbor"
+          },
+          {
+            "zh": "非 root 运行、EXPOSE 8080、exec form 的 CMD",
+            "en": "Non-root, EXPOSE 8080, exec-form CMD"
+          },
+          {
+            "zh": "npm token 不在任何一层里",
+            "en": "The npm token is in none of the layers"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "`docker history` 一行一层，能看出哪条指令产生了多大的层。",
+            "en": "`docker history` shows one line per layer and which instruction produced it."
+          },
+          {
+            "zh": "`COPY . /app` 会把 `.npmrc` 一起拷进去。即使后面 `RUN rm .npmrc`，那一层里还留着。",
+            "en": "`COPY . /app` brings `.npmrc` along. Even a later `RUN rm .npmrc` leaves it in the earlier layer."
+          },
+          {
+            "zh": "`.dockerignore` 决定哪些文件根本不进构建上下文，这是唯一真正干净的做法。",
+            "en": "`.dockerignore` decides what never enters the build context. That is the only genuinely clean fix."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "`RUN rm -f .npmrc` 看起来解决了问题：最终镜像里确实没有这个文件。但 `docker history` 里那一层还在，任何人 `docker save` 之后都能捞出来。",
+            "en": "`RUN rm -f .npmrc` looks like a fix: the final image really does not contain the file. But the earlier layer still holds it, and anyone who runs `docker save` can recover it."
+          },
+          {
+            "zh": "`CMD npm start` 是 shell form，进程树里 PID 1 是 `/bin/sh`，SIGTERM 不会传给 node，第 6 关会因此挂。",
+            "en": "`CMD npm start` is shell form: PID 1 becomes `/bin/sh` and SIGTERM never reaches node. Stage 6 will fail because of it."
+          },
+          {
+            "zh": "先 `COPY . .` 再 `npm ci`，任何一次源码改动都会让依赖重新装一遍。",
+            "en": "Copying everything before `npm ci` means any source change reinstalls all dependencies."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "files": {
+            "/root/app/Dockerfile": "# 前任写的。能 build 出来，但有三个问题，你自己找。\nFROM node:22-alpine\nCOPY . /app\nWORKDIR /app\nRUN npm install\nCMD npm start\n",
+            "/root/app/server.js": "const http = require('http');\n\nconst port = Number(process.env.PORT || 8080);\nconst server = http.createServer((request, response) => {\n  if (request.url === '/healthz' || request.url === '/readyz') {\n    response.writeHead(200, { 'content-type': 'text/plain' });\n    response.end('ok');\n    return;\n  }\n  response.writeHead(200, { 'content-type': 'text/plain' });\n  response.end('portal');\n});\n\nserver.listen(port);\n\nprocess.on('SIGTERM', () => {\n  server.close(() => process.exit(0));\n});\n",
+            "/root/app/package.json": "{\n  \"name\": \"portal\",\n  \"version\": \"1.5.0\",\n  \"private\": true,\n  \"main\": \"server.js\",\n  \"scripts\": { \"start\": \"node server.js\" },\n  \"dependencies\": { \"express\": \"^5.1.0\" }\n}\n",
+            "/root/app/package-lock.json": "{\"lockfileVersion\":3,\"name\":\"portal\"}\n",
+            "/root/app/.npmrc": "//harbor.corp.internal/repository/npm/:_authToken=npm_9f3aQ2mKpL0xVt7RwEeYbN\nregistry=https://harbor.corp.internal/repository/npm/\n"
+          },
+          "referenceFiles": {
+            "/root/app/Dockerfile": "FROM node:22-alpine AS deps\nWORKDIR /app\nCOPY package.json package-lock.json ./\nRUN npm ci --omit=dev\n\nFROM node:22-alpine\nWORKDIR /app\nENV NODE_ENV=production\nCOPY --from=deps /app/node_modules /app/node_modules\nCOPY server.js package.json ./\nEXPOSE 8080\nUSER 10001\nCMD [\"node\", \"server.js\"]\n",
+            "/root/app/.dockerignore": ".npmrc\nnode_modules\n.git\n"
+          },
+          "referenceCommands": [
+            "docker login harbor.corp.internal -u ci -p 'Harbor@2026'",
+            "docker build -t harbor.corp.internal/team/portal:1.5.0 /root/app",
+            "docker push harbor.corp.internal/team/portal:1.5.0"
+          ]
+        },
+        "specs": [
+          {
+            "path": "containerize.spec.ts",
+            "content": "import { image, layerContents, imageFiles, sh } from '@ops/lab';\n\nconst REFERENCE = 'harbor.corp.internal/team/portal:1.5.0';\nconst TOKEN = 'npm_9f3aQ2mKpL0xVt7RwEeYbN';\n\ndescribe('把应用容器化', () => {\n  it('镜像 build 出来了', () => {\n    const built = image(REFERENCE);\n    expect(built).toBeTruthy();\n    expect(built.layers.length > 1).toBe(true);\n  });\n\n  it('不以 root 运行', () => {\n    const user = image(REFERENCE).config.User || '';\n    expect(user).not.toBe('');\n    expect(user).not.toBe('0');\n    expect(user).not.toBe('root');\n  });\n\n  it('声明了 EXPOSE 8080', () => {\n    expect(Object.keys(image(REFERENCE).config.ExposedPorts || {})).toContain('8080/tcp');\n  });\n\n  it('CMD 用的是 exec form，否则 PID 1 是 sh，收不到 SIGTERM', () => {\n    const config = image(REFERENCE).config;\n    const command = config.Entrypoint || config.Cmd || [];\n    expect(command.length > 0).toBe(true);\n    expect(command[0]).not.toBe('/bin/sh');\n  });\n\n  it('npm token 不在最终文件系统里', () => {\n    const files = imageFiles(REFERENCE);\n    const leaked = Object.values(files).filter((content) => content.includes(TOKEN));\n    expect(leaked.length).toBe(0);\n  });\n\n  it('npm token 也不在任何一层里，删掉不等于没进去过', () => {\n    const leaked = layerContents(REFERENCE).filter((content) => content.includes(TOKEN));\n    expect(leaked.length).toBe(0);\n  });\n\n  it('推到 Harbor 了', async () => {\n    const result = await sh('docker pull ' + REFERENCE);\n    expect(result.code).toBe(0);\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ],
+        "extension": {
+          "zh": "「密钥进了镜像层」是容器化里最常见的一类事故，因为它在所有常规检查里都\n隐形：应用跑得好好的，最终文件系统是干净的，只有把镜像层导出来才看得见。\n现实里的对策有三层：`.dockerignore` 从源头拦住、多阶段构建让构建期\n产物不进最终镜像、以及 BuildKit 的 `--mount=type=secret`（挂载进单条\nRUN，不落层）。前两个这一关都用得上。\n",
+          "en": "\"Secret baked into a layer\" is one of the most common containerisation\nincidents, precisely because it is invisible to every routine check: the app\nruns fine and the final filesystem is clean. Only exporting the layers reveals\nit. Real defences come in three layers: `.dockerignore` keeps it out of the\nbuild context, multi-stage builds keep build-time artefacts out of the final\nimage, and BuildKit`s `--mount=type=secret` mounts a secret into a single\nRUN without ever creating a layer. The first two apply directly here.\n"
+        },
+        "primer": {
+          "zh": "一个容器镜像是若干`层`叠起来的。Dockerfile 里每条会改动文件系统的指令（`COPY`、`ADD`、`RUN`）产生一层，每层只记录相对上一层的差异。运行时把这些层按顺序叠成一个完整的根文件系统，上面再盖一个可写层。\n\n分层带来两个后果，一好一坏。好的是`构建缓存`：只要某一层的输入没变，这一层就直接复用。所以先 `COPY package.json` 再 `npm ci`、最后才 `COPY` 源码，改一行业务代码不会让依赖重装一遍；顺序反过来则每次都重装。\n\n坏的是`层是不可变的历史`。某一层里写进去的文件，后面的层只能用一条「删除标记」把它遮住，字节本身还在镜像里。所以 `COPY . .` 把密钥带进去、再 `RUN rm` 删掉，最终文件系统确实干净，但 `docker save` 导出来一翻就找得到。真正的做法是让它根本不进构建上下文（`.dockerignore`），或者用`多阶段构建`把构建期的东西留在前一个阶段。\n\n还有两个和运行时直接相关的字段。`USER` 决定容器里的进程以谁的身份跑，默认是 root，而以 root 跑容器是绝大多数安全基线的第一条禁令。`CMD` 有两种写法：exec form（`[\"node\",\"server.js\"]`）让应用进程直接成为容器里的 1 号进程，shell form（`node server.js`）会先起一个 `/bin/sh`，信号只发给 sh，应用收不到，优雅退出就无从谈起。",
+          "en": "A container image is a stack of `layers`. Every Dockerfile instruction that changes the filesystem (`COPY`, `ADD`, `RUN`) produces one, and each layer records only its difference from the one below. At runtime the layers are stacked into a complete root filesystem with a writable layer on top.\n\nLayering has two consequences, one good and one bad. The good one is the `build cache`: as long as a layer’s inputs are unchanged, it is reused. That is why you `COPY package.json` first, then `npm ci`, and only then copy the source: changing one line of business code no longer reinstalls every dependency. Reverse the order and it reinstalls every time.\n\nThe bad one is that `layers are immutable history`. A file written into one layer can only be hidden by a deletion marker in a later layer; the bytes remain in the image. So copying a secret in and then removing it leaves a genuinely clean final filesystem, and a recoverable secret for anyone who runs `docker save`. The real fixes are keeping it out of the build context entirely (`.dockerignore`) or using a `multi-stage build` so build-time material stays in an earlier stage.\n\nTwo more fields matter at runtime. `USER` decides which identity the process runs as; the default is root, and running as root is the first thing nearly every security baseline forbids. `CMD` has two forms: exec form (`[\"node\",\"server.js\"]`) makes your application PID 1 inside the container, while shell form (`node server.js`) starts a `/bin/sh` first, so signals go to the shell and never reach your application, which makes graceful shutdown impossible."
+        }
+      },
+      {
+        "id": "pull-credentials",
+        "title": {
+          "zh": "私有仓库与拉取凭据",
+          "en": "Private registry and pull credentials"
+        },
+        "goal": {
+          "zh": "上一关你把 `portal:1.5.0` 推上了 Harbor，现在要把它部署下去。\napply 之后你会看到 Pod 卡在 `ImagePullBackOff`。\n\n注意一件事：你在跳板机上 `docker login` 过，那份凭据存在\n`~/.docker/config.json` 里。但**拉镜像的不是跳板机，是节点上的 kubelet**，\n它不知道你登录过。\n\n## 通关标准\n\n1. Pod 全部 Running；\n2. 集群里有一个 `kubernetes.io/dockerconfigjson` 类型的 Secret；\n3. Deployment 通过 `imagePullSecrets` 引用它；\n4. **Harbor 的密码不能明文出现在 `~/infra` 下的任何文件里**，\n   那个目录是要进 Git 的。\n\n## 会用到的命令\n\n```bash\nkubectl apply -f infra/portal.yaml\nkubectl describe pod -n payments -l app=portal\nkubectl create secret docker-registry harbor         --docker-server=harbor.corp.internal         --docker-username=ci --docker-password='Harbor@2026' -n payments\nkubectl get secret harbor -n payments -o yaml\n```\n",
+          "en": "In the previous stage you pushed `portal:1.5.0` to Harbor. Now deploy it.\nAfter you apply, the pods will sit in `ImagePullBackOff`.\n\nOne thing to notice: you ran `docker login` on the jump host, and those\ncredentials live in `~/.docker/config.json`. But **the thing pulling the\nimage is not the jump host, it is the kubelet on each node**, and it has no\nidea you logged in.\n\n## Done when\n\n1. all pods are Running;\n2. the cluster has a `kubernetes.io/dockerconfigjson` Secret;\n3. the Deployment references it through `imagePullSecrets`;\n4. **the Harbor password appears in plaintext in no file under `~/infra`**,\n   because that directory is going into Git.\n\n## Commands you will need\n\n```bash\nkubectl apply -f infra/portal.yaml\nkubectl describe pod -n payments -l app=portal\nkubectl create secret docker-registry harbor         --docker-server=harbor.corp.internal         --docker-username=ci --docker-password='Harbor@2026' -n payments\nkubectl get secret harbor -n payments -o yaml\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "Pod 全部 Running",
+            "en": "All pods Running"
+          },
+          {
+            "zh": "有 dockerconfigjson 类型的 Secret 并被引用",
+            "en": "A dockerconfigjson Secret exists and is referenced"
+          },
+          {
+            "zh": "密码不出现在要进 Git 的文件里",
+            "en": "The password is in no file bound for Git"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "`kubectl describe pod` 最下面的 Events 会写清楚是 401 还是「镜像不存在」，两者查法不同。",
+            "en": "The Events at the bottom of `kubectl describe pod` distinguish a 401 from \"image not found\"; they are different investigations."
+          },
+          {
+            "zh": "`kubectl create secret docker-registry` 会替你生成 `.dockerconfigjson`，不用手写。",
+            "en": "`kubectl create secret docker-registry` generates the `.dockerconfigjson` for you."
+          },
+          {
+            "zh": "Secret 用命令创建、manifest 里只写 `imagePullSecrets`，密码就不会进 Git。",
+            "en": "Create the Secret with a command and keep only `imagePullSecrets` in the manifest; the password never enters Git."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "把 Secret 的 YAML（含 base64 的密码）写进 `infra/` 提交上去。base64 不是加密，`base64 -d` 一下就出来了。",
+            "en": "Committing the Secret YAML with its base64 password into `infra/`. base64 is not encryption; one `base64 -d` reveals it."
+          },
+          {
+            "zh": "Secret 建在了错的命名空间。imagePullSecrets 只能引用**同一个命名空间**里的 Secret。",
+            "en": "Creating the Secret in the wrong namespace. imagePullSecrets can only reference a Secret in the **same namespace**."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod",
+            "docker login harbor.corp.internal -u ci -p 'Harbor@2026'",
+            "docker build -t harbor.corp.internal/team/portal:1.5.0 /root/app",
+            "docker push harbor.corp.internal/team/portal:1.5.0",
+            "docker logout harbor.corp.internal"
+          ],
+          "files": {
+            "/root/infra/portal.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: portal\n  template:\n    metadata:\n      labels:\n        app: portal\n    spec:\n      containers:\n      - name: web\n        image: harbor.corp.internal/team/portal:1.5.0\n        ports:\n        - containerPort: 8080\n",
+            "/root/app/Dockerfile": "FROM node:22-alpine AS deps\nWORKDIR /app\nCOPY package.json package-lock.json ./\nRUN npm ci --omit=dev\n\nFROM node:22-alpine\nWORKDIR /app\nENV NODE_ENV=production\nCOPY --from=deps /app/node_modules /app/node_modules\nCOPY server.js package.json ./\nEXPOSE 8080\nUSER 10001\nCMD [\"node\", \"server.js\"]\n",
+            "/root/app/.dockerignore": ".npmrc\nnode_modules\n.git\n",
+            "/root/app/server.js": "const http = require('http');\n\nconst port = Number(process.env.PORT || 8080);\nconst server = http.createServer((request, response) => {\n  if (request.url === '/healthz' || request.url === '/readyz') {\n    response.writeHead(200, { 'content-type': 'text/plain' });\n    response.end('ok');\n    return;\n  }\n  response.writeHead(200, { 'content-type': 'text/plain' });\n  response.end('portal');\n});\n\nserver.listen(port);\n\nprocess.on('SIGTERM', () => {\n  server.close(() => process.exit(0));\n});\n",
+            "/root/app/package.json": "{\n  \"name\": \"portal\",\n  \"version\": \"1.5.0\",\n  \"private\": true,\n  \"main\": \"server.js\",\n  \"scripts\": { \"start\": \"node server.js\" },\n  \"dependencies\": { \"express\": \"^5.1.0\" }\n}\n",
+            "/root/app/package-lock.json": "{\"lockfileVersion\":3,\"name\":\"portal\"}\n"
+          },
+          "referenceFiles": {
+            "/root/infra/portal.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: portal\n  template:\n    metadata:\n      labels:\n        app: portal\n    spec:\n      imagePullSecrets:\n      - name: harbor\n      containers:\n      - name: web\n        image: harbor.corp.internal/team/portal:1.5.0\n        ports:\n        - containerPort: 8080\n"
+          },
+          "referenceCommands": [
+            "kubectl create secret docker-registry harbor --docker-server=harbor.corp.internal --docker-username=ci --docker-password='Harbor@2026' -n payments",
+            "kubectl apply -f /root/infra/portal.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "pull-credentials.spec.ts",
+            "content": "import { get, list, sh } from '@ops/lab';\n\ndescribe('私有仓库与拉取凭据', () => {\n  it('Pod 全部 Running', () => {\n    const pods = list('Pod', { namespace: 'payments', labels: { app: 'portal' } });\n    expect(pods.length > 0).toBe(true);\n    for (const pod of pods) expect(pod.status.phase).toBe('Running');\n  });\n\n  it('有一个 dockerconfigjson 类型的 Secret', () => {\n    const secrets = list('Secret', { namespace: 'payments' })\n      .filter((item) => item.type === 'kubernetes.io/dockerconfigjson');\n    expect(secrets.length > 0).toBe(true);\n  });\n\n  it('Deployment 引用了它', () => {\n    const deployment = get('Deployment', 'portal', 'payments');\n    const references = deployment.spec.template.spec.imagePullSecrets || [];\n    expect(references.length > 0).toBe(true);\n\n    const names = list('Secret', { namespace: 'payments' })\n      .filter((item) => item.type === 'kubernetes.io/dockerconfigjson')\n      .map((item) => item.metadata.name);\n    expect(names.includes(references[0].name)).toBe(true);\n  });\n\n  it('密码没写进要进 Git 的文件里', async () => {\n    const found = await sh(\"grep -rl Harbor@2026 /root/infra\");\n    expect(found.stdout.trim()).toBe('');\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "resilience"
+        ],
+        "extension": {
+          "zh": "「我明明 docker login 过了」是这一关最常见的困惑，它背后是一个值得记住的\n边界：**镜像是节点拉的，不是你拉的**。同理，`imagePullSecrets` 也可以挂在\nServiceAccount 上（那样命名空间里所有 Pod 自动带上），生产里通常这么做，\n免得每个 Deployment 都写一遍。\n",
+          "en": "\"But I already ran docker login\" is the standard confusion here, and behind it\nis a boundary worth remembering: **the node pulls the image, not you**.\nFor the same reason, `imagePullSecrets` can also be attached to a\nServiceAccount so every pod in the namespace inherits it, which is what\nproduction usually does rather than repeating it in every Deployment.\n"
+        },
+        "primer": {
+          "zh": "镜像存放在`仓库`（registry）里。公开的仓库（Docker Hub、registry.k8s.io）谁都能拉，公司内部的仓库（Harbor、Nexus、ECR）通常要认证。认证信息不是「一个密码」这么简单：Docker 生态里它是一份 JSON，按仓库主机名分别记着用户名和密码，存在 `~/.docker/config.json` 里，`docker login` 写的就是它。\n\n关键在于**谁去拉镜像**。你在跳板机上 `docker login`，那份凭据在跳板机的磁盘上。而 Pod 的镜像是由它所在节点上的 `kubelet` 去拉的，那是另一台机器，它读不到你的家目录。所以集群需要自己的一份凭据。\n\n这份凭据在 Kubernetes 里就是一个 `Secret`，类型是 `kubernetes.io/dockerconfigjson`，内容和 `~/.docker/config.json` 一模一样。`kubectl create secret docker-registry` 会替你拼出来。Pod 通过 `spec.imagePullSecrets` 引用它，kubelet 拉镜像时就带上。注意 Secret 是命名空间级的，引用只能在同一个命名空间里。\n\n还要分清两种失败。镜像名字打错、tag 不存在，报的是「manifest unknown」；有镜像但没权限，报的是 401。两者在 `kubectl get pods` 里都显示成 `ImagePullBackOff`，只有 `kubectl describe pod` 底下的 Events 能区分。查错方向完全不同，所以第一件事永远是去看 Events。",
+          "en": "Images live in a `registry`. Public registries (Docker Hub, registry.k8s.io) serve anyone; internal ones (Harbor, Nexus, ECR) usually require authentication. That credential is not just a password: in the Docker ecosystem it is a JSON document keyed by registry host, stored in `~/.docker/config.json`, which is what `docker login` writes.\n\nThe crucial question is **who does the pulling**. When you run `docker login` on a jump host, the credential lands on that host. A pod image, however, is pulled by the `kubelet` on whichever node runs the pod, which is a different machine that cannot read your home directory. The cluster therefore needs its own copy.\n\nIn Kubernetes that copy is a `Secret` of type `kubernetes.io/dockerconfigjson`, whose contents are exactly a `~/.docker/config.json`. `kubectl create secret docker-registry` assembles it for you. A pod references it through `spec.imagePullSecrets`, and the kubelet presents it when pulling. Secrets are namespaced, so the reference only works within the same namespace.\n\nTwo failures also need separating. A misspelled name or missing tag reports \"manifest unknown\"; an existing image without permission reports 401. Both surface as `ImagePullBackOff` in `kubectl get pods`, and only the Events at the bottom of `kubectl describe pod` tell them apart. The investigations are completely different, so reading Events is always the first move."
+        }
+      },
+      {
+        "id": "config-and-secrets",
+        "title": {
+          "zh": "配置与机密",
+          "en": "Configuration and secrets"
+        },
+        "goal": {
+          "zh": "门户要读三个配置：日志级别、上游地址、数据库密码。manifest 里已经写好了\n引用，但引用的 ConfigMap 和 Secret 都还不存在，apply 之后 Pod 会卡在\n`CreateContainerConfigError`。\n\n注意这个状态和 `CrashLoopBackOff` 的区别：容器**根本没起来**，\n所以 `kubectl logs` 里什么都没有。去看应用日志是白费功夫。\n\n建好之后还有第二件事：**改一个配置值，让它真的生效**。\n改 ConfigMap 不会自动重启 Pod，这是设计，不是 bug。\n\n## 通关标准\n\n1. `portal-config` 有 `LOG_LEVEL` 与 `UPSTREAM_URL`；\n2. `portal-db` 是一个 Secret，有 `password`，而且**密码不在 ConfigMap 里**；\n3. Pod 全部 Running 且 Ready；\n4. 改过配置之后触发了一次滚动更新（这个 Deployment 下面不止一个 ReplicaSet）。\n\n## 会用到的命令\n\n```bash\nkubectl apply -f infra/portal.yaml\nkubectl describe pod -n payments -l app=portal\nkubectl create configmap portal-config -n payments         --from-literal=LOG_LEVEL=info --from-literal=UPSTREAM_URL=http://ledger.payments:8080\nkubectl create secret generic portal-db -n payments --from-literal=password='pg-9f3aQ2mK'\nkubectl rollout status deploy/portal -n payments\nkubectl get rs -n payments\n```\n",
+          "en": "The portal reads three settings: log level, upstream URL, and a database\npassword. The manifest already references them, but neither the ConfigMap nor\nthe Secret exists, so after you apply the pods sit in\n`CreateContainerConfigError`.\n\nNote how that differs from `CrashLoopBackOff`: the container **never\nstarted**, so `kubectl logs` shows nothing. Reading application logs is\nwasted effort here.\n\nOnce they exist there is a second task: **change one value and make it take\neffect**. Editing a ConfigMap does not restart pods. That is by design, not a bug.\n\n## Done when\n\n1. `portal-config` holds `LOG_LEVEL` and `UPSTREAM_URL`;\n2. `portal-db` is a Secret holding `password`, and **the password is not\n   in the ConfigMap**;\n3. all pods are Running and Ready;\n4. changing the config triggered a rollout (the Deployment owns more than one\n   ReplicaSet).\n\n## Commands you will need\n\n```bash\nkubectl apply -f infra/portal.yaml\nkubectl describe pod -n payments -l app=portal\nkubectl create configmap portal-config -n payments         --from-literal=LOG_LEVEL=info --from-literal=UPSTREAM_URL=http://ledger.payments:8080\nkubectl create secret generic portal-db -n payments --from-literal=password='pg-9f3aQ2mK'\nkubectl rollout status deploy/portal -n payments\nkubectl get rs -n payments\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "ConfigMap 与 Secret 都建好并被正确引用",
+            "en": "ConfigMap and Secret created and referenced"
+          },
+          {
+            "zh": "密码只在 Secret 里",
+            "en": "The password lives only in the Secret"
+          },
+          {
+            "zh": "改配置之后真的滚动更新了一次",
+            "en": "Changing the config actually triggered a rollout"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "`CreateContainerConfigError` 的具体原因在 `kubectl describe pod` 的 Events 里，它会说是「ConfigMap 不存在」还是「key 不存在」。",
+            "en": "The reason behind `CreateContainerConfigError` is in the pod Events: it distinguishes \"ConfigMap not found\" from \"key not found\"."
+          },
+          {
+            "zh": "让配置变更生效的通行做法是在 pod template 上加一个注解（比如配置内容的哈希）。模板变了，Deployment 才会建新的 ReplicaSet。",
+            "en": "The common way to make config changes take effect is an annotation on the pod template (a hash of the config). Only a changed template makes the Deployment create a new ReplicaSet."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "把密码放进 ConfigMap。ConfigMap 没有任何访问控制上的特殊待遇，日志、事件、`describe` 里都可能带出来。",
+            "en": "Putting the password in a ConfigMap. ConfigMaps get no special access treatment and leak through logs, events, and `describe`."
+          },
+          {
+            "zh": "改完 ConfigMap 就以为完事了。已经在跑的 Pod 里那份环境变量是启动时注入的，不会自己更新，除非它是以卷挂载的形式读文件。",
+            "en": "Assuming the ConfigMap edit is enough. Environment variables are injected at container start and never update, unless the config is mounted as a volume and re-read."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "files": {
+            "/root/infra/portal.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: portal\n  template:\n    metadata:\n      labels:\n        app: portal\n    spec:\n      containers:\n      - name: web\n        image: harbor.corp.internal/team/portal:1.4.0\n        ports:\n        - containerPort: 8080\n        env:\n        - name: LOG_LEVEL\n          valueFrom:\n            configMapKeyRef:\n              name: portal-config\n              key: LOG_LEVEL\n        - name: UPSTREAM_URL\n          valueFrom:\n            configMapKeyRef:\n              name: portal-config\n              key: UPSTREAM_URL\n        - name: DB_PASSWORD\n          valueFrom:\n            secretKeyRef:\n              name: portal-db\n              key: password\n"
+          },
+          "referenceCommands": [
+            "kubectl create configmap portal-config -n payments --from-literal=LOG_LEVEL=info --from-literal=UPSTREAM_URL=http://ledger.payments:8080",
+            "kubectl create secret generic portal-db -n payments --from-literal=password=pg-9f3aQ2mK",
+            "kubectl apply -f /root/infra/portal.yaml",
+            "kubectl create configmap portal-config -n payments --from-literal=LOG_LEVEL=debug --from-literal=UPSTREAM_URL=http://ledger.payments:8080 --dry-run=client -o yaml > /root/infra/portal-config.yaml",
+            "kubectl apply -f /root/infra/portal-config.yaml",
+            "kubectl patch deploy portal -n payments --type=merge -p '{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"checksum/config\":\"debug-7b3f\"}}}}}'"
+          ]
+        },
+        "specs": [
+          {
+            "path": "config-and-secrets.spec.ts",
+            "content": "import { get, list } from '@ops/lab';\n\ndescribe('配置与机密', () => {\n  it('ConfigMap 有那两个键', () => {\n    const configMap = get('ConfigMap', 'portal-config', 'payments');\n    expect(configMap).toBeTruthy();\n    expect(typeof configMap.data.LOG_LEVEL).toBe('string');\n    expect(typeof configMap.data.UPSTREAM_URL).toBe('string');\n  });\n\n  it('密码在 Secret 里，不在 ConfigMap 里', () => {\n    const secret = get('Secret', 'portal-db', 'payments');\n    expect(secret).toBeTruthy();\n    const keys = Object.keys(secret.data || secret.stringData || {});\n    expect(keys.includes('password')).toBe(true);\n\n    const configMap = get('ConfigMap', 'portal-config', 'payments');\n    const values = Object.values(configMap.data || {}).join(' ');\n    expect(values.includes('pg-9f3aQ2mK')).toBe(false);\n  });\n\n  it('Pod 全部 Running 且 Ready', () => {\n    const pods = list('Pod', { namespace: 'payments', labels: { app: 'portal' } });\n    expect(pods.length > 0).toBe(true);\n    for (const pod of pods) {\n      expect(pod.status.phase).toBe('Running');\n      const ready = (pod.status.conditions || []).find((c) => c.type === 'Ready');\n      expect(ready && ready.status).toBe('True');\n    }\n  });\n\n  it('改过配置之后滚动更新过一次', () => {\n    const deployment = get('Deployment', 'portal', 'payments');\n    const owned = list('ReplicaSet', { namespace: 'payments' }).filter((rs) =>\n      (rs.metadata.ownerReferences || []).some((o) => o.uid === deployment.metadata.uid)\n    );\n    expect(owned.length >= 2).toBe(true);\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "resilience"
+        ],
+        "extension": {
+          "zh": "「改了 ConfigMap 但没生效」几乎是每个团队都会踩一次的坑。行业里的标准解法\n是在 pod template 上放一个配置内容的校验和：Helm 里是\n`checksum/config: {{ include ... | sha256sum }}`，Kustomize 则用\n`configMapGenerator` 自动给 ConfigMap 名字加哈希后缀，名字变了，\n模板自然就变了。\n",
+          "en": "\"I changed the ConfigMap and nothing happened\" is a rite of passage. The\nindustry answer is a checksum of the config on the pod template: in Helm,\n`checksum/config: {{ include ... | sha256sum }}`; in Kustomize,\n`configMapGenerator` appends a content hash to the ConfigMap name, so the\nname changes and therefore the template changes.\n"
+        },
+        "primer": {
+          "zh": "把配置写死在镜像里，意味着改一个日志级别要重新构建、重新推送、重新部署。Kubernetes 把配置拆出来放在两种对象里：`ConfigMap` 存普通配置，`Secret` 存敏感数据。两者的结构几乎一样，区别在于 Secret 的值是 base64 编码的，并且在集群里有一些额外的保护（可以加密存储、不会被随手打印在事件里）。注意 base64 不是加密，任何人拿到 Secret 都能一行命令解开。\n\n注入方式有两种。`环境变量`（`env.valueFrom.configMapKeyRef` / `secretKeyRef`，或者 `envFrom` 整份铺进去）在容器启动时一次性写入进程环境，之后不再变化。`卷挂载`把每个键变成一个文件，kubelet 会在后台同步更新它们，所以应用如果自己重新读文件，就能感知到配置变化。\n\n引用了不存在的 ConfigMap 或 Secret 时，Pod 会停在 `CreateContainerConfigError`。这个状态很值得记住：容器**从未启动**，所以 `kubectl logs` 是空的，去翻应用日志毫无意义。原因写在 `kubectl describe pod` 的 Events 里，而且会区分「对象不存在」和「对象在但键不存在」。\n\n最后一件反直觉的事：改了 ConfigMap，正在跑的 Pod 不会重启。对环境变量注入来说，这意味着新值根本不会生效。Kubernetes 不会替你做这个决定，因为重启是有代价的。通行做法是在 Pod 模板上放一个配置内容的哈希注解，配置变了哈希就变，模板变了 Deployment 才会滚动出新的一批 Pod。",
+          "en": "Baking configuration into an image means rebuilding, repushing, and redeploying to change a log level. Kubernetes separates it into two objects: a `ConfigMap` for ordinary settings and a `Secret` for sensitive data. Their structure is nearly identical; a Secret stores base64-encoded values and gets some extra protection in the cluster (it can be encrypted at rest and is not casually printed into events). Note that base64 is not encryption: anyone holding the Secret can decode it in one command.\n\nThere are two ways to inject them. `Environment variables` (`env.valueFrom.configMapKeyRef` or `secretKeyRef`, or `envFrom` for a whole map) are written into the process environment once at container start and never change afterwards. `Volume mounts` turn each key into a file, and the kubelet keeps those files in sync, so an application that rereads the file can notice a change.\n\nReferencing a ConfigMap or Secret that does not exist leaves the pod in `CreateContainerConfigError`. That state is worth memorising: the container **never started**, so `kubectl logs` is empty and reading application logs is pointless. The reason appears in the pod Events, which distinguish \"object not found\" from \"object exists but the key does not\".\n\nOne last counterintuitive fact: editing a ConfigMap does not restart running pods. With environment-variable injection that means the new value simply never takes effect. Kubernetes will not make that decision for you, because restarting has a cost. The common practice is an annotation on the pod template holding a hash of the configuration: the config changes, the hash changes, the template changes, and only then does the Deployment roll out new pods."
+        }
+      },
+      {
+        "id": "probes-and-shutdown",
+        "title": {
+          "zh": "探针、优雅终止与自愈",
+          "en": "Probes, graceful shutdown, and self-healing"
+        },
+        "goal": {
+          "zh": "前任给门户加了就绪探针，然后 Pod 就再也没 Ready 过 ——\n`kubectl get pods` 里三个 Pod 全是 `Running` 但 `0/1`，\n`kubectl logs` 里干干净净，应用一切正常。\n\n问题不在应用，在探针指错了地方。顺便说，这个 Deployment 现在滚动更新时\n会真的掉流量：默认策略允许同时下线 25% 的副本，而且没有给进程留退出时间。\n\n## 通关标准\n\n1. 三个 Pod 全部 Ready；\n2. 就绪探针指向应用真正在听的端口和真正存在的路径；\n3. 配了存活探针（它和就绪探针管的不是一回事）；\n4. 滚动更新期间不掉可用副本：`maxUnavailable: 0`；\n5. 给进程留了退出时间：`terminationGracePeriodSeconds` 不小于 20，\n   并且有 `preStop` 钩子先把流量摘掉。\n\n## 会用到的命令\n\n```bash\nkubectl get pods -n payments\nkubectl describe pod -n payments -l app=portal\nkubectl get events -n payments --sort-by=.metadata.creationTimestamp\nkubectl apply -f infra/portal.yaml\nkubectl rollout status deploy/portal -n payments\n```\n",
+          "en": "Your predecessor added a readiness probe to the portal, and the pods have not\nbeen Ready since. `kubectl get pods` shows three pods that are `Running`\nbut `0/1`, `kubectl logs` is clean, and the application is fine.\n\nThe problem is not the application; the probe points at the wrong place.\nSeparately, this Deployment currently drops traffic during a rollout: the\ndefault strategy allows a quarter of the replicas to go away at once, and the\nprocess is given no time to shut down.\n\n## Done when\n\n1. all three pods are Ready;\n2. the readiness probe targets the port the app actually listens on and a path\n   that actually exists;\n3. a liveness probe is configured (it answers a different question than readiness);\n4. rollouts never lose an available replica: `maxUnavailable: 0`;\n5. the process gets time to exit: `terminationGracePeriodSeconds` of at least\n   20, plus a `preStop` hook that lets traffic drain first.\n\n## Commands you will need\n\n```bash\nkubectl get pods -n payments\nkubectl describe pod -n payments -l app=portal\nkubectl get events -n payments --sort-by=.metadata.creationTimestamp\nkubectl apply -f infra/portal.yaml\nkubectl rollout status deploy/portal -n payments\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "三个 Pod 全部 Ready",
+            "en": "All three pods Ready"
+          },
+          {
+            "zh": "就绪探针与存活探针都配对了",
+            "en": "Readiness and liveness probes both configured correctly"
+          },
+          {
+            "zh": "maxUnavailable 为 0，并给了优雅退出的时间",
+            "en": "maxUnavailable is 0 and shutdown has room to happen"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "`kubectl describe pod` 的 Events 里会有一条 `Readiness probe failed`，它把端口写出来了。",
+            "en": "The pod Events contain a `Readiness probe failed` line that names the port."
+          },
+          {
+            "zh": "容器 `ports.containerPort` 写的是 8080，探针写的是别的数字，这两处对不上。",
+            "en": "The container declares `containerPort: 8080` while the probe names a different number."
+          },
+          {
+            "zh": "就绪探针失败只是把这个 Pod 从 Endpoints 里摘掉；存活探针失败会重启容器。用错了会让一个只是暂时忙的进程被反复杀掉。",
+            "en": "A failing readiness probe only removes the pod from Endpoints; a failing liveness probe restarts the container. Confusing them gets a merely busy process killed over and over."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "把存活探针配得和就绪探针一样激进。依赖的下游慢一点，整批 Pod 会被同时重启，把一次抖动放大成一次故障。",
+            "en": "Making the liveness probe as aggressive as the readiness probe. One slow dependency then restarts every pod at once, turning a blip into an outage."
+          },
+          {
+            "zh": "只把 `terminationGracePeriodSeconds` 调大而不加 `preStop`。收到 SIGTERM 的那一刻，Endpoints 的更新还没传播到所有节点，这段时间里的请求照样会打到正在退出的 Pod 上。",
+            "en": "Raising `terminationGracePeriodSeconds` without a `preStop` hook. At the moment SIGTERM arrives, the Endpoints removal has not propagated everywhere, and requests still land on the pod that is shutting down."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "files": {
+            "/root/infra/portal.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  replicas: 3\n  selector:\n    matchLabels:\n      app: portal\n  template:\n    metadata:\n      labels:\n        app: portal\n    spec:\n      containers:\n      - name: web\n        image: harbor.corp.internal/team/portal:1.4.0\n        ports:\n        - containerPort: 8080\n        readinessProbe:\n          httpGet:\n            path: /healthz\n            port: 8081\n          initialDelaySeconds: 2\n          periodSeconds: 5\n"
+          },
+          "referenceFiles": {
+            "/root/infra/portal.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  replicas: 3\n  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxUnavailable: 0\n      maxSurge: 1\n  selector:\n    matchLabels:\n      app: portal\n  template:\n    metadata:\n      labels:\n        app: portal\n    spec:\n      terminationGracePeriodSeconds: 30\n      containers:\n      - name: web\n        image: harbor.corp.internal/team/portal:1.4.0\n        ports:\n        - containerPort: 8080\n        readinessProbe:\n          httpGet:\n            path: /readyz\n            port: 8080\n          initialDelaySeconds: 2\n          periodSeconds: 5\n        livenessProbe:\n          httpGet:\n            path: /healthz\n            port: 8080\n          initialDelaySeconds: 10\n          periodSeconds: 10\n          failureThreshold: 3\n        lifecycle:\n          preStop:\n            exec:\n              command: [\"sleep\", \"10\"]\n"
+          },
+          "referenceCommands": [
+            "kubectl apply -f /root/infra/portal.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "probes-and-shutdown.spec.ts",
+            "content": "import { get, list } from '@ops/lab';\n\ndescribe('探针、优雅终止与自愈', () => {\n  it('三个 Pod 全部 Ready', () => {\n    const pods = list('Pod', { namespace: 'payments', labels: { app: 'portal' } });\n    expect(pods.length).toBe(3);\n    for (const pod of pods) {\n      const ready = (pod.status.conditions || []).find((c) => c.type === 'Ready');\n      expect(ready && ready.status).toBe('True');\n    }\n  });\n\n  it('就绪探针指向应用真正在听的端口', () => {\n    const container = get('Deployment', 'portal', 'payments').spec.template.spec.containers[0];\n    const probe = container.readinessProbe;\n    expect(probe).toBeTruthy();\n    expect(probe.httpGet.port).toBe(8080);\n    expect(['/healthz', '/readyz'].includes(probe.httpGet.path)).toBe(true);\n  });\n\n  it('配了存活探针', () => {\n    const container = get('Deployment', 'portal', 'payments').spec.template.spec.containers[0];\n    expect(container.livenessProbe).toBeTruthy();\n    expect(container.livenessProbe.httpGet.port).toBe(8080);\n  });\n\n  it('滚动更新不掉可用副本', () => {\n    const strategy = get('Deployment', 'portal', 'payments').spec.strategy || {};\n    expect(strategy.type).toBe('RollingUpdate');\n    expect(strategy.rollingUpdate.maxUnavailable).toBe(0);\n  });\n\n  it('给了优雅退出的时间，并且先摘流量', () => {\n    const podSpec = get('Deployment', 'portal', 'payments').spec.template.spec;\n    expect(podSpec.terminationGracePeriodSeconds >= 20).toBe(true);\n    expect(podSpec.containers[0].lifecycle.preStop).toBeTruthy();\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "resilience"
+        ],
+        "extension": {
+          "zh": "就绪探针和存活探针回答的是两个不同的问题：「现在能不能给我流量」和\n「这个进程还有没有救」。把它们配成一样，等于让一次下游变慢直接升级成\n全体重启。生产里还有第三种 `startupProbe`，专门给启动慢的应用用：\n它没通过之前，存活探针不生效，于是不用为了照顾冷启动而把存活探针\n调得很松。\n",
+          "en": "Readiness and liveness answer different questions: \"can I take traffic right\nnow\" and \"is this process beyond saving\". Configuring them identically turns a\nslow dependency into a fleet-wide restart. Production adds a third,\n`startupProbe`, for slow-starting applications: until it passes, the liveness\nprobe is suspended, so you no longer have to weaken liveness just to survive a\ncold start.\n"
+        },
+        "primer": {
+          "zh": "kubelet 靠`探针`判断容器的状态，一共三种，回答三个不同的问题。`就绪探针`（readinessProbe）问「现在能不能给它流量」，失败时这个 Pod 会被从 Service 的 Endpoints 里摘掉，但容器不重启。`存活探针`（livenessProbe）问「这个进程还有没有救」，连续失败到阈值就重启容器。`启动探针`（startupProbe）专门照顾启动慢的应用：它没通过之前，存活探针不生效。\n\n探针的形式有 HTTP、TCP 和执行命令三种。HTTP 探针最常用，也最容易配错：端口写成了应用没在听的那个，或者路径写成了应用没实现的那个。表现是 Pod 一直 Running 但 `READY` 那一列是 `0/1`，应用日志里什么异常都没有，因为应用确实什么问题都没有。证据只在 `kubectl describe pod` 的 Events 里，那里会有一条 `Readiness probe failed`。\n\n把存活探针配得和就绪探针一样激进是常见的放大器。下游变慢的时候，本该只是「暂时摘掉流量」的情况会变成「整批 Pod 同时重启」，一次抖动就此升级成一次故障。经验做法是：就绪探针可以敏感，存活探针要迟钝。\n\n`优雅终止`是另一半。删除一个 Pod 时，kubelet 先发 SIGTERM，等 `terminationGracePeriodSeconds`（默认 30 秒），还没退出才发 SIGKILL。但这里有个时间差：摘除 Endpoints 和发送 SIGTERM 是**并行**发生的，Endpoints 的变更传播到所有节点需要时间，这段时间里的新请求仍然会打到正在退出的 Pod 上。所以通行做法是加一个 `preStop` 钩子先睡几秒，把这段传播时间让出来，再让进程开始退出。滚动更新时把 `maxUnavailable` 设成 0，则保证任何时刻可用副本数都不低于期望值。",
+          "en": "The kubelet judges container state with `probes`. There are three, and they answer three different questions. A `readinessProbe` asks \"can this take traffic right now\"; when it fails the pod is removed from the Service Endpoints but the container is not restarted. A `livenessProbe` asks \"is this process beyond saving\"; enough consecutive failures restart the container. A `startupProbe` exists for slow-starting applications: until it passes, liveness is suspended.\n\nProbes come in HTTP, TCP, and exec forms. HTTP is the most common and the easiest to misconfigure: a port the application does not listen on, or a path it does not implement. The symptom is a pod that stays Running with `0/1` in the READY column while the application logs show nothing wrong, because nothing is wrong with the application. The evidence lives only in the pod Events, as a `Readiness probe failed` line.\n\nMaking liveness as aggressive as readiness is a common amplifier. When a dependency slows down, what should be \"temporarily remove from traffic\" becomes \"restart every pod at once\", turning a blip into an outage. The rule of thumb: readiness may be sensitive, liveness should be dull.\n\n`Graceful termination` is the other half. Deleting a pod makes the kubelet send SIGTERM, wait `terminationGracePeriodSeconds` (30 by default), and then SIGKILL. There is a race in there: Endpoints removal and SIGTERM happen **in parallel**, and the Endpoints change takes time to reach every node, so new requests keep arriving at a pod that is already shutting down. The usual remedy is a `preStop` hook that sleeps for a few seconds, giving that propagation time before the process begins exiting. Setting `maxUnavailable` to 0 during rollouts additionally guarantees the available replica count never dips below the desired one."
+        }
+      },
+      {
+        "id": "resources-and-qos",
+        "title": {
+          "zh": "资源、QoS 与驱逐",
+          "en": "Resources, QoS, and eviction"
+        },
+        "goal": {
+          "zh": "财务那边新上了一个报表任务 `reports`，前任给它配了 `limits.memory: 256Mi`。\napply 之后它一直在重启，`kubectl describe` 里写着 `OOMKilled`，退出码 137。\n而门户 `portal` 一个资源声明都没写。\n\n这两件事是同一个问题的两面：**没量过就写数字**，和**根本不写**。\n\n不写 requests 的 Pod 是 `BestEffort`，节点内存紧张时它第一个被赶走；\nlimits 写小了则会被内核直接杀掉，连日志都来不及打完。\n\n## 通关标准\n\n1. 两个 Deployment 的每个容器都写了 cpu 与 memory 的 requests 和 limits；\n2. `portal` 是 `Guaranteed` 等级（requests 与 limits 完全相等），\n   三个 Pod 全部 Ready；\n3. `reports` 不再 OOMKilled，Pod 处于 Running；\n4. 没有任何 Pod 被驱逐。\n\n## 会用到的命令\n\n```bash\nkubectl apply -f infra/portal.yaml -f infra/reports.yaml\nkubectl describe pod -n payments -l app=reports\nkubectl get pod -n payments -o custom-columns=NAME:.metadata.name,QOS:.status.qosClass\nkubectl get events -n payments --field-selector reason=Evicted\n```\n",
+          "en": "Finance shipped a new reporting job, `reports`, and your predecessor gave it\n`limits.memory: 256Mi`. Since the apply it has been restarting, with\n`OOMKilled` and exit code 137 in `kubectl describe`. Meanwhile the portal\ndeclares no resources at all.\n\nThese are two sides of one problem: **a number nobody measured**, and\n**no number at all**.\n\nA pod without requests is `BestEffort` and is the first thing evicted when a\nnode runs short of memory. A limit set too low gets the process killed by the\nkernel before it can even finish a log line.\n\n## Done when\n\n1. every container in both Deployments declares cpu and memory requests and limits;\n2. `portal` is `Guaranteed` (requests exactly equal to limits) and all three\n   pods are Ready;\n3. `reports` is no longer OOMKilled and its pod is Running;\n4. no pod has been evicted.\n\n## Commands you will need\n\n```bash\nkubectl apply -f infra/portal.yaml -f infra/reports.yaml\nkubectl describe pod -n payments -l app=reports\nkubectl get pod -n payments -o custom-columns=NAME:.metadata.name,QOS:.status.qosClass\nkubectl get events -n payments --field-selector reason=Evicted\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "两个负载都写全了 requests 与 limits",
+            "en": "Both workloads declare requests and limits"
+          },
+          {
+            "zh": "portal 是 Guaranteed 且全部 Ready",
+            "en": "portal is Guaranteed and fully Ready"
+          },
+          {
+            "zh": "reports 不再 OOMKilled，也没有 Pod 被驱逐",
+            "en": "reports is no longer OOMKilled and nothing was evicted"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "退出码 137 是 128+9，也就是被 SIGKILL 杀的。容器里唯一会这么干的通常就是 cgroup 的内存上限。",
+            "en": "Exit code 137 is 128+9, meaning SIGKILL. Inside a container that is almost always the cgroup memory limit."
+          },
+          {
+            "zh": "`kubectl describe pod` 里的 `Last State: Terminated / Reason: OOMKilled` 是最直接的证据。",
+            "en": "`Last State: Terminated / Reason: OOMKilled` in `kubectl describe pod` is the most direct evidence."
+          },
+          {
+            "zh": "QoS 等级不是自己写的，是根据 requests 与 limits 算出来的：都写且相等是 Guaranteed，都不写是 BestEffort，其余是 Burstable。",
+            "en": "The QoS class is derived, not declared: requests equal to limits everywhere is Guaranteed, nothing declared is BestEffort, anything else is Burstable."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "把 limits 删掉来「解决」OOM。确实不会被杀了，但这个 Pod 同时变成了 BestEffort，节点一紧张它第一个被驱逐 —— 从一种死法换成了另一种。",
+            "en": "Deleting the limit to \"fix\" the OOM. It stops being killed, but it also becomes BestEffort and is now first in line for eviction: one way of dying traded for another."
+          },
+          {
+            "zh": "requests 写得远小于实际用量。调度器按 requests 装箱，于是它会把远超节点容量的一堆 Pod 排到同一台机器上，然后集体触发驱逐。",
+            "en": "Setting requests far below actual usage. The scheduler bin-packs by requests, happily overcommits a node, and then everything on it gets evicted together."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "files": {
+            "/root/infra/portal.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  replicas: 3\n  selector:\n    matchLabels:\n      app: portal\n  template:\n    metadata:\n      labels:\n        app: portal\n    spec:\n      containers:\n      - name: web\n        image: harbor.corp.internal/team/portal:1.4.0\n        ports:\n        - containerPort: 8080\n",
+            "/root/infra/reports.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: reports\n  namespace: payments\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: reports\n  template:\n    metadata:\n      labels:\n        app: reports\n    spec:\n      containers:\n      - name: batch\n        image: harbor.corp.internal/team/reports:2.1.0\n        resources:\n          limits:\n            memory: 256Mi\n"
+          },
+          "referenceFiles": {
+            "/root/infra/portal.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  replicas: 3\n  selector:\n    matchLabels:\n      app: portal\n  template:\n    metadata:\n      labels:\n        app: portal\n    spec:\n      containers:\n      - name: web\n        image: harbor.corp.internal/team/portal:1.4.0\n        ports:\n        - containerPort: 8080\n        resources:\n          requests:\n            cpu: 250m\n            memory: 256Mi\n          limits:\n            cpu: 250m\n            memory: 256Mi\n",
+            "/root/infra/reports.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: reports\n  namespace: payments\nspec:\n  replicas: 1\n  selector:\n    matchLabels:\n      app: reports\n  template:\n    metadata:\n      labels:\n        app: reports\n    spec:\n      containers:\n      - name: batch\n        image: harbor.corp.internal/team/reports:2.1.0\n        resources:\n          requests:\n            cpu: 200m\n            memory: 1Gi\n          limits:\n            cpu: 500m\n            memory: 1Gi\n"
+          },
+          "referenceCommands": [
+            "kubectl apply -f /root/infra/portal.yaml",
+            "kubectl apply -f /root/infra/reports.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "resources-and-qos.spec.ts",
+            "content": "import { get, list } from '@ops/lab';\n\nfunction containersOf(name) {\n  return get('Deployment', name, 'payments').spec.template.spec.containers;\n}\n\ndescribe('资源、QoS 与驱逐', () => {\n  it('两个负载的每个容器都写全了 requests 与 limits', () => {\n    for (const name of ['portal', 'reports']) {\n      for (const container of containersOf(name)) {\n        const resources = container.resources || {};\n        expect(typeof (resources.requests || {}).cpu).toBe('string');\n        expect(typeof (resources.requests || {}).memory).toBe('string');\n        expect(typeof (resources.limits || {}).cpu).toBe('string');\n        expect(typeof (resources.limits || {}).memory).toBe('string');\n      }\n    }\n  });\n\n  it('portal 是 Guaranteed，三个 Pod 全部 Ready', () => {\n    const pods = list('Pod', { namespace: 'payments', labels: { app: 'portal' } });\n    expect(pods.length).toBe(3);\n    for (const pod of pods) {\n      expect(pod.status.qosClass).toBe('Guaranteed');\n      const ready = (pod.status.conditions || []).find((c) => c.type === 'Ready');\n      expect(ready && ready.status).toBe('True');\n    }\n  });\n\n  it('reports 不再被 OOMKilled', () => {\n    const pods = list('Pod', { namespace: 'payments', labels: { app: 'reports' } });\n    expect(pods.length > 0).toBe(true);\n    for (const pod of pods) {\n      expect(pod.status.phase).toBe('Running');\n      for (const status of pod.status.containerStatuses || []) {\n        const last = (status.lastState || {}).terminated;\n        expect(last && last.reason).not.toBe('OOMKilled');\n      }\n    }\n  });\n\n  it('没有 Pod 被驱逐', () => {\n    const evicted = list('Pod', { namespace: 'payments' })\n      .filter((pod) => pod.status.reason === 'Evicted');\n    expect(evicted.length).toBe(0);\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "resilience",
+          "latency"
+        ],
+        "extension": {
+          "zh": "requests 和 limits 各管一件事，很多人把它们混为一谈：**requests 决定调度**\n（节点上还剩多少「已承诺」的容量），**limits 决定运行时约束**\n（cgroup 的上限）。内存 limit 超了直接 OOMKill，CPU limit 超了则是被限流\n（节流而不是杀死），表现为 P99 变差而不是进程消失。\n现实里的做法是先用监控量出实际用量，再据此设定，而不是拍脑袋。\n更进一步有 VPA 的 recommender 帮你算，以及 LimitRange\n给整个命名空间兜一个默认值。\n",
+          "en": "Requests and limits govern different things and are routinely confused:\n**requests drive scheduling** (how much promised capacity a node has left),\n**limits are runtime constraints** (the cgroup ceiling). Exceeding a memory\nlimit gets the process OOM-killed; exceeding a CPU limit gets it throttled\nrather than killed, which shows up as a worse P99 instead of a missing process.\nReal practice is to measure actual usage first and set numbers from that. Going\nfurther, VPA's recommender computes them for you, and a LimitRange gives a\nnamespace sane defaults.\n"
+        },
+        "primer": {
+          "zh": "容器声明资源有两个字段，管的是两件事。`requests` 是给调度器看的：调度器按它做装箱，把 Pod 放到「已承诺容量」还够的节点上。`limits` 是运行时的硬约束，落到 cgroup 上。两者可以不相等，也可以只写一个，不同的写法会得到不同的后果。\n\n内存和 CPU 的超限行为完全不同。内存是不可压缩资源：用量超过 limit，内核直接 OOMKill 这个容器，退出码 137（128+9，SIGKILL），日志经常来不及写完。CPU 是可压缩资源：超过 limit 只是被限流，进程继续跑，只是变慢，表现为 P99 变差而不是进程消失。所以「应用没崩但突然变慢了」和「应用被杀了」要往两个方向查。\n\n`QoS 等级`不是自己填的，是 kubelet 根据 requests 与 limits 推出来的：每个容器的 cpu 和 memory 都写了且 requests 等于 limits，是 `Guaranteed`；一个都没写，是 `BestEffort`；其余是 `Burstable`。这个等级决定节点内存不够时谁先被赶走：BestEffort 最先，然后是用量超过自己 requests 的 Burstable，Guaranteed 最后。\n\n于是有一个很容易走进去的死胡同：容器被 OOMKill 了，把 limits 删掉「就不会被杀了」。确实不会，但它同时变成了 BestEffort，节点一紧张第一个被驱逐，只是把一种死法换成了另一种。正确的做法是先量出实际用量再设定数字。生产里有 VPA 的 recommender 帮忙算，以及 LimitRange 给命名空间兜一个默认值。",
+          "en": "A container declares resources with two fields that govern two different things. `requests` is for the scheduler: it bin-packs by requests, placing pods on nodes that still have promised capacity. `limits` is a runtime constraint enforced by cgroups. The two need not be equal, and either may be omitted, with different consequences.\n\nMemory and CPU behave completely differently when exceeded. Memory is incompressible: cross the limit and the kernel OOM-kills the container with exit code 137 (128+9, SIGKILL), often before the logs finish flushing. CPU is compressible: crossing the limit only throttles the process, which keeps running but slower, showing up as a degraded P99 rather than a missing process. \"The app did not crash but suddenly got slow\" and \"the app was killed\" therefore point in different directions.\n\nThe `QoS class` is derived, not declared. The kubelet computes it from requests and limits: every container declaring both cpu and memory with requests equal to limits is `Guaranteed`; declaring nothing is `BestEffort`; anything else is `Burstable`. That class decides who is evicted first when a node runs short of memory: BestEffort first, then Burstable pods exceeding their own requests, and Guaranteed last.\n\nThis creates an easy dead end. A container gets OOM-killed, so you remove the limit and it stops being killed. True, but it has also become BestEffort and is now first in line for eviction: one way of dying traded for another. The right move is to measure actual usage and set numbers from that. Production adds the VPA recommender to compute them and a LimitRange to give the namespace sane defaults."
+        }
+      }
+    ]
+  },
+  {
     "id": "message-broker",
     "title": {
       "zh": "高并发消息系统",

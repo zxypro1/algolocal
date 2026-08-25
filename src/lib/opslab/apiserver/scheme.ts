@@ -86,6 +86,16 @@ export class Scheme {
    * 返回**排序稳定**的第一个匹配 —— 多个组里有同名资源时，核心组优先，
    * 其余按组名字典序，免得同一条命令在不同次运行里解析到不同资源。
    */
+  /** 按 group/version/kind 找 —— 从 manifest（有 apiVersion + kind）反查资源时用 */
+  resolveKind(group: string, version: string, kind: string): ResourceDefinition | undefined {
+    for (const definition of this.list()) {
+      if (definition.group === group && definition.version === version && definition.kind === kind) {
+        return definition;
+      }
+    }
+    return undefined;
+  }
+
   resolve(name: string): ResourceDefinition | undefined {
     const lower = name.toLowerCase();
     const [head, ...groupParts] = lower.split('.');
