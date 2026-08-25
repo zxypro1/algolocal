@@ -20,6 +20,7 @@ import { createNetTools } from '../net';
 import { parseChain } from '../crypto';
 import { createOpensslCommand } from './openssl';
 import { materializePki } from './pki';
+import { GitNetwork, createGitCommand, seedRepository } from '../git';
 import { createExecHandler } from './podshell';
 import { CliRuntime, installClusterCli } from '../wasm';
 import type { KubeObject } from '../apiserver';
@@ -36,6 +37,8 @@ export interface OpsWorld {
   machine: Machine;
   images: ImageStore;
   registries: RegistryNetwork;
+  /** 内网 Git 服务 */
+  git: GitNetwork;
   /** 装上的真 CLI 名字，如 ['kubectl','helm'] */
   applets: string[];
   /** 敲一条命令，然后让世界自己往前走到静止 */
@@ -61,6 +64,23 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
   // 先声明，下面 createCluster 要用；仓库对象在它之后才建得出来
   let lookupPushedImage: (image: string) => ReturnType<typeof behaviorOfImage> | undefined = () => undefined;
 
+  /**
+   * 内网服务的名字。
+   *
+   * 私有仓库、Git 服务这些，办公网与集群都该解析得到；不在这张表里的
+   * 名字表现和真的 DNS 失败一样 —— 「写错了域名」和「服务挂了」要分得开。
+   */
+  const externalHosts: Record<string, string[]> = {
+    ...Object.fromEntries((spec.registries ?? []).map((registry, index) => [
+      registry.host, [`10.10.0.${20 + index}`],
+    ])),
+    ...Object.fromEntries((spec.gitRepositories ?? []).flatMap((repository, index) => {
+      const host = GitNetwork.hostOf(repository.url);
+      return host ? [[host, [`10.10.0.${40 + index}`]] as [string, string[]]] : [];
+    })),
+    ...(spec.externalHosts ?? {}),
+  };
+
   const cluster = createCluster({
     seed: spec.seed ?? 1,
     startTime: Date.parse(spec.startTime ?? DEFAULT_START),
@@ -77,13 +97,7 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     ])),
     clusterAgeMs,
     resolveImage: (image) => lookupPushedImage(image),
-    externalHosts: {
-      // 私有仓库这些内网服务，办公网与集群都该解析得到
-      ...Object.fromEntries((spec.registries ?? []).map((registry, index) => [
-        registry.host, [`10.10.0.${20 + index}`],
-      ])),
-      ...(spec.externalHosts ?? {}),
-    },
+    externalHosts,
     addressPools: spec.addressPools,
     /**
      * 跳板机信任哪些根。
@@ -112,6 +126,23 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
   });
 
   const images = new ImageStore();
+
+  // 内网的 Git 服务。关卡声明里那些仓库在世界起来之前就该在了。
+  const git = new GitNetwork();
+  for (const repository of spec.gitRepositories ?? []) {
+    const bare = git.create(repository.url, {
+      head: repository.branch ?? 'main',
+      readOnly: repository.readOnly,
+    });
+    if (repository.files) {
+      seedRepository(bare, repository.files, {
+        message: repository.message ?? 'initial commit',
+        // 仓库是「本来就在」的东西，提交时间按集群年龄之前算
+        timestamp: cluster.wallClock() - DEFAULT_OBJECT_AGE_MS,
+      });
+    }
+  }
+
   const registries = new RegistryNetwork();
   for (const registry of spec.registries ?? []) {
     registries.add(new ImageRegistry({
@@ -138,6 +169,14 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
   }
 
   machine.install('openssl', createOpensslCommand());
+
+  machine.install('git', createGitCommand({
+    network: git,
+    now: () => cluster.wallClock(),
+    identity: spec.machine?.gitIdentity ?? { name: 'ops', email: 'ops@corp.internal' },
+    // 名字解析不到的远端，表现和真的 DNS 失败一样
+    resolves: (host) => Boolean(externalHosts[host]),
+  }));
 
   machine.install('docker', createDockerCommand({
     store: images,
@@ -209,6 +248,7 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     machine,
     images,
     registries,
+    git,
     applets,
     now: () => cluster.wallClock(),
     async run(command: string) {
