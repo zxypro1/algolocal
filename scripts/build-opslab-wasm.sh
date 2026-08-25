@@ -121,4 +121,27 @@ GOOS=js GOARCH=wasm go -C "$ROOT/$WORK" build \
 cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$ROOT/$OUT_DIR/wasm_exec.js" 2>/dev/null \
   || cp "$(go env GOROOT)/misc/wasm/wasm_exec.js" "$ROOT/$OUT_DIR/wasm_exec.js"
 
+# Go 的 time.Now() 在 js/wasm 里读的是宿主的 Date。虚拟世界里这会让
+# `helm list` 的 UPDATED 列、各种时间戳每次都不一样，回放就对不上了。
+# 把两个时钟入口接到宿主提供的虚拟时钟上（不提供时仍然用真时间）。
+python3 - "$ROOT/$OUT_DIR/wasm_exec.js" <<'PYEOF'
+import sys
+path = sys.argv[1]
+source = open(path).read()
+old_wall = '''					const msec = (new Date).getTime();'''
+new_wall = '''					// opslab: 虚拟时钟优先，回放才逐字节一致
+					const msec = (globalThis.__opslabNow ? globalThis.__opslabNow() : (new Date).getTime());'''
+old_nano = '''						setInt64(sp + 8, (timeOrigin + performance.now()) * 1000000);'''
+new_nano = '''						// opslab: 单调时钟同样跟着虚拟时钟走。
+						// 加 1 是必须的：Go 的运行时把 nanotime 返回 0 当成致命错误，
+						// 而虚拟时钟从 0 开始是很正常的事。
+						setInt64(sp + 8, (globalThis.__opslabNow
+							? globalThis.__opslabNow() + 1
+							: (timeOrigin + performance.now())) * 1000000);'''
+if old_wall not in source or old_nano not in source:
+    raise SystemExit('wasm_exec.js 的时钟入口变了，补丁要重写')
+source = source.replace(old_wall, new_wall).replace(old_nano, new_nano)
+open(path, 'w').write(source)
+PYEOF
+
 ls -lh "$ROOT/$OUT_DIR/$OUT_NAME" | awk '{print "'"$OUT_NAME"':", $5}'

@@ -190,10 +190,8 @@ export function applyPatch(target: Json, patch: Json, type: PatchType): Json {
     case 'application/merge-patch+json': return applyMergePatch(target, patch);
     case 'application/strategic-merge-patch+json': return applyStrategicMergePatch(target, patch);
     case 'application/apply-patch+yaml':
-      throw badRequest(
-        'the server responded with the status code 415 but did not return more information: ' +
-        'server-side apply is not supported by opslab; drop --server-side'
-      );
+      // 走的是 Registry.apply（要 fieldManager 与 managedFields），不在这里
+      throw badRequest('apply patches must go through server-side apply');
     default:
       throw badRequest(`Unsupported Media Type: ${String(type)}`);
   }

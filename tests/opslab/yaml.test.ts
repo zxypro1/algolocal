@@ -141,6 +141,7 @@ const WASM_PATH = path.join(__dirname, '../../public/opslab/opslab-cli.wasm');
 const WASM_EXEC = path.join(__dirname, '../../public/opslab/wasm_exec.js');
 const HAS_ARTIFACT = fs.existsSync(WASM_PATH) && fs.existsSync(WASM_EXEC);
 const describeIfBuilt = HAS_ARTIFACT ? describe : describe.skip;
+const NOW = Date.parse('2026-03-02T09:00:00Z');
 
 const MANIFESTS: Array<[string, string]> = [
   ['最普通的 Deployment', [
@@ -235,7 +236,7 @@ describeIfBuilt('和真 kubectl 对答案', () => {
     // 用一个真集群做 discovery —— kubectl 得先能把 kind 映射到资源上
     const cluster = createCluster();
     cluster.start();
-    const vfs = createVfs(() => 0);
+    const vfs = createVfs(() => NOW);
     vfs.writeFile('/root/.kube/config', renderKubeconfig(defaultKubeconfig()));
     vfs.writeFile('/root/m.yaml', manifest);
     const result = await cli().run('kubectl', // 校验要向 apiserver 取 OpenAPI，这里没有真集群；关掉它，
@@ -243,7 +244,7 @@ describeIfBuilt('和真 kubectl 对答案', () => {
       ['apply', '-f', 'm.yaml', '--dry-run=client', '--validate=false', '-o', 'json'], {
       vfs, cwd: '/root',
       fetch: (url, init) => cluster.apiServer.handle(url, init as never),
-      now: () => 0,
+      now: () => NOW,
     });
     expect(result.stderr).toBe('');
 
