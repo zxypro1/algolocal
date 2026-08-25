@@ -81,13 +81,25 @@ export class ArgoCdController extends Controller {
      * 标成 background —— 它「永远有下一次」，算成前台的话世界就再也静不下来了。
      * 想看到轮询生效，把虚拟时钟往前推（advanceBy）就行，和真集群里等三分钟一样。
      */
-    this.kernel.setInterval(() => this.enqueueAll(), POLL_INTERVAL_MS, {
+    this.poll = this.kernel.setInterval(() => this.enqueueAll(), POLL_INTERVAL_MS, {
       background: true,
       label: 'argocd:poll',
     });
   }
 
+  private poll: number;
+  private stopped = false;
+
+  stop(): void {
+    // webhook 的订阅摘不掉（GitNetwork 只管发），所以这里立个旗子；
+    // 轮询的定时器要显式清掉，不然换一个集群起来还有上一个在敲门
+    this.stopped = true;
+    this.kernel.clearTimer(this.poll);
+    super.stop();
+  }
+
   private enqueueAll(): void {
+    if (this.stopped) return;
     for (const application of this.applications.list()) this.enqueue(objectKey(application));
   }
 
@@ -143,7 +155,9 @@ export class ArgoCdController extends Controller {
         // 手动 sync 一定会把现状拉回仓库；自动同步要开了 selfHeal 才会
         selfHeal: Boolean(automated?.selfHeal) || requested,
       });
-      if (automated?.prune || requested) this.prune(application, desired.objects);
+      if (automated?.prune || requested) {
+        this.prune(application, desired.objects, previousKinds(application));
+      }
     }
 
     const resources = desired.objects.map((managed) => this.statusOf(managed));
@@ -269,13 +283,23 @@ export class ArgoCdController extends Controller {
    * 只删自己建的（带 tracking 标签的），不然一个 Application 会把
    * 别人的东西也收走 —— 真 Argo 用同样的方式圈定自己的地盘。
    */
-  private prune(application: KubeObject, objects: Managed[]): void {
+  private prune(application: KubeObject, objects: Managed[], previous: Set<string>): void {
     const wanted = new Set(objects.map((managed) =>
       `${managed.definition.resource}/${managed.namespace ?? ''}/${managed.object.metadata?.name}`));
     const instance = application.metadata.name;
 
+    /**
+     * 只扫这个 Application 碰过的资源类型。
+     *
+     * 「上一轮 status 里出现过的」加上「这一轮仓库里有的」——
+     * 一个 kind 从仓库里整个消失时，它还在上一轮的 status 里，所以扫得到。
+     * 不这么收窄的话每次同步都要把全集群所有类型 list 一遍。
+     */
+    const kinds = new Set([...previous, ...objects.map((managed) => managed.definition.resource)]);
+
     for (const definition of this.context.scheme.list()) {
       if (definition.resource === 'applications') continue;
+      if (!kinds.has(definition.resource)) continue;
       let live: KubeObject[];
       try {
         live = this.registry.list(definition).items;
@@ -362,6 +386,22 @@ function mergeDesired(live: unknown, desired: unknown): unknown {
     out[key] = mergeDesired((live as Record<string, unknown>)[key], value);
   }
   return out;
+}
+
+/** 上一轮同步管过哪些资源类型 —— 从 status.resources 里读回来 */
+function previousKinds(application: KubeObject): Set<string> {
+  const resources = ((application.status ?? {}) as { resources?: Array<{ kind?: string }> }).resources ?? [];
+  // status 里记的是 kind，prune 要按 resource 复数名对；两边都收着，
+  // 命中判断用 resource，多一个 kind 不影响正确性
+  return new Set(resources.map((entry) => pluralOf(entry.kind ?? '')));
+}
+
+/** Kind -> resource 的粗略复数化。只用于收窄扫描范围，判错了顶多多扫一类。 */
+function pluralOf(kind: string): string {
+  const lower = kind.toLowerCase();
+  if (lower.endsWith('s')) return `${lower}es`;
+  if (lower.endsWith('y')) return `${lower.slice(0, -1)}ies`;
+  return `${lower}s`;
 }
 
 function tracked(object: KubeObject, namespace: string | undefined, instance: string): KubeObject {
