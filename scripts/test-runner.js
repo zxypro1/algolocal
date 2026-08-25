@@ -140,9 +140,20 @@ class TestRunner {
         jestArgs.push('--bail');
       }
 
+      /**
+       * 给 jest 更大的堆。
+       *
+       * opslab 那套要把 142MB 的 CLI 产物编成 WebAssembly，每个测试文件各编一次
+       * （jest 的模块注册表是按文件隔离的）。默认堆在机器同时干着别的活时会不够，
+       * 表现成偶发的整套失败 —— 偶发的失败比稳定的失败更费人。
+       */
       const jest = spawn('npx', ['jest', ...jestArgs], {
         stdio: 'inherit',
-        shell: true
+        shell: true,
+        env: {
+          ...process.env,
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --max-old-space-size=8192`.trim(),
+        },
       });
 
       jest.on('close', (code) => {
