@@ -47,13 +47,16 @@ module.exports = {
     'styles/**/*',
     '.next/**/*',
     'public/**/*',
-    // public/opslab 是构建产物的落脚点，不是源码目录。这里改成白名单：
+    // public/{labkit,gpulab,opslab} 是构建产物的落脚点，不是源码目录。这里改成白名单：
     // 通配符会把别人工作区里遗留的旧产物一起打进包 —— 早先那个 120MB 的
     // kubectl.wasm（spike 时期的单 CLI 版本，代码里已经零引用）就是这么混进去的。
+    // 新增资源要同时改 scripts/copy-lab-assets.js 与下面的 asarUnpack。
+    '!public/labkit/*.wasm',
+    '!public/gpulab/*.wasm',
     '!public/opslab/*.wasm',
+    'public/labkit/web-tree-sitter.wasm',
+    'public/labkit/tree-sitter-bash.wasm',
     'public/opslab/opslab-cli.wasm',
-    'public/opslab/web-tree-sitter.wasm',
-    'public/opslab/tree-sitter-bash.wasm',
     'problems/**/*',
     'projects/**/*',
     'locales/**/*',
@@ -126,8 +129,8 @@ module.exports = {
     // 只能整份读进内存再编译，启动慢一倍、峰值内存也翻倍。
     // 同样逐个列名，理由见上面 files 里那段。
     'public/opslab/opslab-cli.wasm',
-    'public/opslab/web-tree-sitter.wasm',
-    'public/opslab/tree-sitter-bash.wasm',
+    'public/labkit/web-tree-sitter.wasm',
+    'public/labkit/tree-sitter-bash.wasm',
     'public/icon.png',
     'public/favicon.ico'
   ],

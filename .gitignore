@@ -10,6 +10,8 @@ dist
 
 # TypeScript incremental build info
 tsconfig.tsbuildinfo
+public/labkit/*.wasm
+public/gpulab/*.wasm
 public/opslab/*.wasm
 public/opslab/wasm_exec.js
 .opslab-build/

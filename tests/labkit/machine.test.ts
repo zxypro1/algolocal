@@ -481,9 +481,9 @@ describe('glob 匹配', () => {
  * 这里把 window / document / fetch 造出来，逼它走浏览器分支。
  */
 describe('浏览器里的语法加载', () => {
-  const PUBLIC_WASM = path.join(__dirname, '../../public/opslab/tree-sitter-bash.wasm');
+  const PUBLIC_WASM = path.join(__dirname, '../../public/labkit/tree-sitter-bash.wasm');
 
-  it('从 /opslab/tree-sitter-bash.wasm 取语法，取到的是能用的', async () => {
+  it('从 /labkit/tree-sitter-bash.wasm 取语法，取到的是能用的', async () => {
     expect(fs.existsSync(PUBLIC_WASM)).toBe(true);
 
     const requested: string[] = [];
@@ -494,7 +494,7 @@ describe('浏览器里的语法加载', () => {
     globals.document = {};
     globals.fetch = async (url: string) => {
       requested.push(url);
-      const file = url === '/opslab/tree-sitter-bash.wasm'
+      const file = url === '/labkit/tree-sitter-bash.wasm'
         ? PUBLIC_WASM
         : path.join(__dirname, '../../node_modules/web-tree-sitter/web-tree-sitter.wasm');
       const bytes = fs.readFileSync(file);
@@ -510,7 +510,7 @@ describe('浏览器里的语法加载', () => {
       // 运行时 wasm 在 Node 下由 emscripten 自己定位，这里只验语法文件那一段
       const parser = await loadShellParser({ runtimeWasmUrl: undefined });
       expect(parser.parse('echo hi | wc -l').rootNode.hasError).toBe(false);
-      expect(requested).toContain('/opslab/tree-sitter-bash.wasm');
+      expect(requested).toContain('/labkit/tree-sitter-bash.wasm');
     } finally {
       globals.window = saved.window;
       globals.document = saved.document;

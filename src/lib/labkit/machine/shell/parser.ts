@@ -174,7 +174,7 @@ export async function loadShellParser(options: ShellParserOptions = {}): Promise
     const Parser = treeSitter.Parser ?? treeSitter.default?.Parser;
     const Language = treeSitter.Language ?? treeSitter.default?.Language;
 
-    const runtimeUrl = options.runtimeWasmUrl ?? (isBrowser() ? '/opslab/web-tree-sitter.wasm' : undefined);
+    const runtimeUrl = options.runtimeWasmUrl ?? (isBrowser() ? '/labkit/web-tree-sitter.wasm' : undefined);
     await Parser.init(runtimeUrl ? { locateFile: () => runtimeUrl } : undefined);
 
     const grammar = options.grammar ?? defaultGrammarPath();
@@ -202,12 +202,12 @@ function isBrowser(): boolean {
 /**
  * 语法文件在哪。
  *
- * 浏览器里由构建脚本拷到 /opslab/tree-sitter-bash.wasm；
+ * 浏览器里由构建脚本拷到 /labkit/tree-sitter-bash.wasm；
  * Node（测试、出题脚本）里直接从 node_modules 取。
  */
 function defaultGrammarPath(): string {
   return isBrowser()
-    ? '/opslab/tree-sitter-bash.wasm'
+    ? '/labkit/tree-sitter-bash.wasm'
     : 'node_modules/tree-sitter-bash/tree-sitter-bash.wasm';
 }
 

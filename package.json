@@ -43,9 +43,9 @@
   ],
   "scripts": {
     "dev": "next dev",
-    "predev": "node scripts/copy-opslab-assets.js",
+    "predev": "node scripts/copy-lab-assets.js",
     "build": "next build",
-    "prebuild": "node scripts/copy-opslab-assets.js",
+    "prebuild": "node scripts/copy-lab-assets.js",
     "start": "next start",
     "deploy-local": "npm run build && npm start",
     "setup": "npm install && npm run build",
