@@ -10,6 +10,7 @@
  *  3. **过程指标** —— `metrics()`，也就是门槛读的那棵树。
  */
 import type { GpuMetrics, StaticMetrics } from '../metrics';
+import type { RooflinePoint, TimingResult } from '../timing';
 import type { SanitizerReport } from '../vm/sanitizer';
 import type { CommandRecord } from '../../labkit/machine';
 import { ulpDistanceOf } from './numeric';
@@ -55,6 +56,13 @@ export interface GpuLabApi {
   metrics(): GpuMetrics;
   /** 寄存器 / 共享内存 / 占用率 */
   staticMetrics(): StaticMetrics | null;
+  /**
+   * 时序估算。**只能用来做同关的相对比较**，不要写成绝对阈值的断言 ——
+   * 这个模型没有真卡可校准，绝对值不可迁移。
+   */
+  timing(): TimingResult;
+  /** roofline 上的那个点 */
+  roofline(): RooflinePoint;
 
   /** 把一个缓冲区读回来 */
   buffer(name: string): Float32Array;
@@ -116,6 +124,8 @@ export function createGpuLabApi(world: GpuWorld): GpuLabApi {
 
     metrics: () => world.gpu.metrics(),
     staticMetrics: () => world.gpu.staticMetrics(),
+    timing: () => world.gpu.timing(),
+    roofline: () => world.gpu.roofline(),
 
     buffer(name) {
       const buffer = world.buffers.get(name);

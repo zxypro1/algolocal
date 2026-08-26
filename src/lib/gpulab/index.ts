@@ -11,6 +11,7 @@ import { lowerTranslationUnit } from './cuda/lower';
 import { parseCuda, type CudaParserOptions } from './cuda/parser';
 import { flattenMetrics, staticMetricsOf, toMetrics, type GpuMetrics, type StaticMetrics } from './metrics';
 import { H100, computeOccupancy, type DeviceSpec } from './device';
+import { estimateTiming, roofline, type RooflinePoint, type TimingResult } from './timing';
 import { LinearMemory } from './vm/memory';
 import { RaceDetector, formatRaceReports, type SanitizerReport } from './vm/sanitizer';
 import { emptyCounters, launchKernel, type Dim3, type GpuCounters, type LaunchConfig, type KernelArg } from './vm/vm';
@@ -21,6 +22,8 @@ export { KernelError, dim3, launchKernel } from './vm/vm';
 export { LinearMemory, MemoryFault, SECTOR_BYTES, WARP_SIZE } from './vm/memory';
 export { flattenMetrics, staticMetricsOf, toMetrics } from './metrics';
 export { H100, B200, DEVICES, computeOccupancy } from './device';
+export { estimateTiming, roofline, timingFor, H100_TIMING, B200_TIMING } from './timing';
+export type { TimingResult, RooflinePoint, TimingSpec, UnitCycles } from './timing';
 export type { DeviceSpec, Occupancy } from './device';
 export type { StaticMetrics } from './metrics';
 export { RaceDetector, formatRaceReports } from './vm/sanitizer';
@@ -160,6 +163,29 @@ export class GpuDevice {
     });
     this.lastSanitizer = detector.result();
     return this.lastSanitizer;
+  }
+
+  /**
+   * 时序估算。
+   *
+   * **只用于展示与同关相对比较，不作门槛** —— 见 timing.ts 开头的说明。
+   */
+  timing(): TimingResult {
+    return estimateTiming({
+      counters: this.counters,
+      device: this.device,
+      occupancy: this.lastStatic?.occupancy.theoretical ?? 0,
+    });
+  }
+
+  /** roofline 上的那个点 */
+  roofline(): RooflinePoint {
+    return roofline({
+      counters: this.counters,
+      device: this.device,
+      occupancy: this.lastStatic?.occupancy.theoretical ?? 0,
+      timing: this.timing(),
+    });
   }
 
   /** 最近一次 launch 的静态指标（寄存器、共享内存、占用率） */

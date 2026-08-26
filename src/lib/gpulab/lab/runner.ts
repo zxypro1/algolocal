@@ -41,6 +41,8 @@ export function gpuMetricTree(world: GpuWorld): Record<string, unknown> {
   const metrics = world.gpu.metrics();
   const stat = world.gpu.staticMetrics();
   const sanitizer = world.gpu.sanitizerReport();
+  const timing = world.gpu.timing();
+  const line = world.gpu.roofline();
 
   return {
     ...metrics,
@@ -57,6 +59,24 @@ export function gpuMetricTree(world: GpuWorld): Record<string, unknown> {
     },
     /** 显存峰值 —— FlashAttention、KV cache 那几关的门槛读它 */
     memoryPeakBytes: world.gpu.usedBytes,
+    /**
+     * 时序估算与 roofline。
+     *
+     * **放进来是给用例读的，不是给门槛读的。** 关卡可以用它做同关的相对
+     * 比较（「比上一版快 3 倍」），但绝不能写成绝对阈值的门槛 ——
+     * 这是 design/gpulab.md 立的硬规矩，理由见 timing.ts 开头。
+     */
+    timing: {
+      cycles: timing.cycles,
+      nanoseconds: timing.nanoseconds,
+      latencyHiding: timing.latencyHiding,
+      units: timing.units,
+    },
+    roofline: {
+      arithmeticIntensity: line.arithmeticIntensity,
+      efficiency: line.efficiency,
+      ridgePoint: line.ridgePoint,
+    },
   };
 }
 
