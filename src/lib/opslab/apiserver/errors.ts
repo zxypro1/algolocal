@@ -21,12 +21,15 @@ export type StatusReason =
   | 'MethodNotAllowed'
   | 'Gone'
   | 'UnsupportedMediaType'
-  | 'InternalError';
+  | 'InternalError'
+  /** 驱逐被 PDB 挡下时用的就是它 —— 429，意思是「现在不行，等会儿再来」 */
+  | 'TooManyRequests';
 
 export interface StatusCause {
   reason: string;
   message: string;
-  field: string;
+  /** 出问题的字段路径。有些原因（比如 PDB 拦下驱逐）没有具体字段。 */
+  field?: string;
 }
 
 export interface StatusDetails {

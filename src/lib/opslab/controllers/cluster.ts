@@ -31,6 +31,7 @@ import {
 } from '../rbac';
 import { ESO_RESOURCES, ExternalSecretsController } from '../secrets';
 import { OBSERVABILITY_RESOURCES, PrometheusController } from '../observability';
+import { DISRUPTION_RESOURCES, PdbController, evictionVerdict } from '../disruption';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
@@ -154,7 +155,7 @@ export class Cluster {
     this.scheme = createScheme([
       ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES, ...ARGOCD_RESOURCES,
       ...MESH_RESOURCES, ...RBAC_RESOURCES, ...KYVERNO_RESOURCES, ...ESO_RESOURCES,
-      ...OBSERVABILITY_RESOURCES,
+      ...OBSERVABILITY_RESOURCES, ...DISRUPTION_RESOURCES,
       ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
@@ -184,6 +185,21 @@ export class Cluster {
             }, user, attributes),
           }
         : {}),
+      /**
+       * 驱逐前问一遍 PDB。
+       *
+       * 这是 `kubectl drain` 会在违反预算时停下来的原因 ——
+       * 而 `kubectl delete pod` 走的是另一条路，谁也拦不住。
+       */
+      evict: (namespace, name) => {
+        const pods = this.scheme.get({ group: '', version: 'v1', resource: 'pods' });
+        const budgets = this.scheme.get({ group: 'policy', version: 'v1', resource: 'poddisruptionbudgets' });
+        if (!pods || !budgets) return { allowed: true };
+        const inNamespace = this.registry.list(pods, { namespace }).items;
+        const pod = inNamespace.find((item) => item.metadata.name === name);
+        if (!pod) return { allowed: true };
+        return evictionVerdict(pod, this.registry.list(budgets).items, inNamespace);
+      },
       exec: (request, stdin) => {
         if (!this.execHandler) throw new Error('exec 没有接上');
         return this.execHandler(request, stdin);
@@ -594,6 +610,8 @@ export class Cluster {
       // 每个节点一份：CNI 的 agent、日志采集都是这个形状
       new DaemonSetController(context),
       new EndpointsController(context),
+      // PDB 的状态。`kubectl get pdb` 里 ALLOWED DISRUPTIONS 那一列就是它写的。
+      new PdbController(context),
       // 入口：控制器自己是集群里的一个工作负载，卸载掉 Gateway 就不再被 program
       new GatewayController(context),
       // 内网 PKI：同样是集群里的一个工作负载，卸载掉就不再签发

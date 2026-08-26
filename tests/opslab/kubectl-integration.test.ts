@@ -459,3 +459,71 @@ describeIfBuilt('真 kubectl 遇上 RBAC', () => {
     expect(result.stderr).toContain('dev@corp.internal');
   });
 });
+
+/**
+ * `kubectl drain` 真的会被 PDB 拦住
+ *
+ * drain 走的是 eviction 子资源，delete 不是 —— 这一组证明的是那个区别
+ * 在真 kubectl 那边也成立：它会重试、会打出 apiserver 那句话、
+ * 最后按 --timeout 放弃。
+ */
+describeIfBuilt('真 kubectl drain 遇上 PDB', () => {
+  jest.setTimeout(120_000);
+
+  const DRAIN_WORLD = (minAvailable: number) => ({
+    namespaces: ['default', 'shop'],
+    images: { 'harbor.corp.internal/team/portal:1.4.0': {} },
+    nodes: [{ name: 'node-1' }, { name: 'node-2' }],
+    objects: [
+      {
+        apiVersion: 'apps/v1', kind: 'Deployment',
+        metadata: { name: 'portal', namespace: 'shop' },
+        spec: {
+          replicas: 2,
+          selector: { matchLabels: { app: 'portal' } },
+          template: {
+            metadata: { labels: { app: 'portal' } },
+            spec: { containers: [{ name: 'web', image: 'harbor.corp.internal/team/portal:1.4.0' }] },
+          },
+        },
+      },
+      {
+        apiVersion: 'policy/v1', kind: 'PodDisruptionBudget',
+        metadata: { name: 'portal', namespace: 'shop' },
+        spec: { minAvailable, selector: { matchLabels: { app: 'portal' } } },
+      },
+    ],
+  });
+
+  it('cordon 之后节点不再接新 Pod', async () => {
+    const world = await createOpsWorld({ world: DRAIN_WORLD(1) as never, runtime: runtime() });
+    const result = await world.run('kubectl cordon node-1');
+    expect(result.stdout).toContain('node/node-1 cordoned');
+
+    const node = world.cluster.registry.get(
+      world.cluster.scheme.mustGet({ group: '', version: 'v1', resource: 'nodes' }), undefined, 'node-1'
+    );
+    expect((node.spec as { unschedulable?: boolean }).unschedulable).toBe(true);
+  });
+
+  it('预算用满时 drain 停下来，报的是 apiserver 那句话', async () => {
+    const world = await createOpsWorld({ world: DRAIN_WORLD(2) as never, runtime: runtime() });
+    const result = await world.run('kubectl drain node-1 --ignore-daemonsets --force --timeout=3s');
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("Cannot evict pod as it would violate the pod's disruption budget");
+    expect(result.stderr).toContain('global timeout reached');
+  });
+
+  it('预算有余量时 drain 走得通', async () => {
+    const world = await createOpsWorld({ world: DRAIN_WORLD(1) as never, runtime: runtime() });
+    const result = await world.run('kubectl drain node-1 --ignore-daemonsets --force --timeout=10s');
+    expect(result.stdout).toContain('drained');
+  });
+
+  it('kubectl get pdb 那几列', async () => {
+    const world = await createOpsWorld({ world: DRAIN_WORLD(1) as never, runtime: runtime() });
+    const result = await world.run('kubectl get pdb -n shop');
+    expect(result.stdout).toContain('NAME     MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE');
+    expect(result.stdout).toContain('portal   1               N/A               1');
+  });
+});

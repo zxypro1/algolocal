@@ -176,6 +176,26 @@ export const TABLE_PRINTERS: Record<string, TablePrinter> = {
       ];
     },
   },
+  poddisruptionbudgets: {
+    columns: [
+      NAME_COLUMN,
+      col('Min Available', 'The minimum number of pods that must be available.'),
+      col('Max Unavailable', 'The maximum number of pods that may be unavailable.'),
+      col('Allowed Disruptions', 'The number of pods that may be evicted right now.'),
+      AGE_COLUMN,
+    ],
+    cells: (object, age) => {
+      const spec = (object.spec ?? {}) as any;
+      const status = (object.status ?? {}) as any;
+      return [
+        object.metadata.name,
+        spec.minAvailable !== undefined ? String(spec.minAvailable) : 'N/A',
+        spec.maxUnavailable !== undefined ? String(spec.maxUnavailable) : 'N/A',
+        String(status.disruptionsAllowed ?? 0),
+        age,
+      ];
+    },
+  },
   namespaces: {
     columns: [NAME_COLUMN, col('Status', 'The status of the namespace.'), AGE_COLUMN],
     cells: (object, age) => [
