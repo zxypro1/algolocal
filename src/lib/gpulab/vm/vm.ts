@@ -20,7 +20,7 @@
  *  3. 收尾**不要用闭包**：闭包一旦捕获可变局部，V8 会把它们挪进堆上的
  *     context 对象，每条指令多出好几次堆访问。
  */
-import { encode, type ExecutableKernel, type Program, ATOM, BIN, FN, OP, SHFL, SLOTS, SPACE, SREG, TY, UN } from '../ir/program';
+import { encode, type ExecutableKernel, type Program, ATOM, BIN, FN, OP, SFU_FNS, SHFL, SLOTS, SPACE, SREG, TY, UN } from '../ir/program';
 import type { CompiledKernel } from '../ir/types';
 import {
   addF32, divF32, expF32, fastDivF32, fastExpF32, fastLogF32, floatToInt, floatToUint,
@@ -55,6 +55,23 @@ export interface GpuCounters {
   laneInsts: number;
   instFma: number;
   instLdSt: number;
+  /**
+   * 走特殊功能单元的指令：exp / log / rsqrt / tanh。
+   *
+   * 单独数是因为 **SFU 的吞吐是 FMA 的 1/8**，softmax 里那个 expf
+   * 能不能成为瓶颈全看这个数。
+   */
+  instSfu: number;
+  /** tensor core 的乘加次数 */
+  instMma: number;
+  /**
+   * 记账指令：立即数与寄存器搬运。
+   *
+   * 我们的 IR **故意不做优化**，这样指令数才反映学员写了什么。
+   * 但 const 与 mov 在任何真编译器里都会被折叠进操作数，硬件上并不存在。
+   * 时序模型必须把它们扣掉，否则瓶颈归因会被这些幽灵指令带偏。
+   */
+  instBookkeeping: number;
   globalLoadRequests: number;
   globalStoreRequests: number;
   globalLoadSectors: number;
@@ -89,7 +106,7 @@ export interface GpuCounters {
 
 export function emptyCounters(): GpuCounters {
   return {
-    warpInsts: 0, laneInsts: 0, instFma: 0, instLdSt: 0,
+    warpInsts: 0, laneInsts: 0, instFma: 0, instLdSt: 0, instSfu: 0, instMma: 0, instBookkeeping: 0,
     globalLoadRequests: 0, globalStoreRequests: 0,
     globalLoadSectors: 0, globalStoreSectors: 0,
     sharedLoadRequests: 0, sharedStoreRequests: 0, sharedBankConflicts: 0,
@@ -316,6 +333,8 @@ class Executor {
     let laneInsts = 0;
     let instFma = 0;
     let instLdSt = 0;
+    let instSfu = 0;
+    let instBookkeeping = 0;
     let divergent = 0;
     let atomics = 0;
     let shuffles = 0;
@@ -329,6 +348,7 @@ class Executor {
           warp.done = true;
           counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
           counters.instFma += instFma; counters.instLdSt += instLdSt;
+          counters.instSfu += instSfu; counters.instBookkeeping += instBookkeeping;
           counters.divergentBranches += divergent;
           counters.atomics += atomics; counters.shuffles += shuffles;
           counters.warpSyncErrors += warpSyncErrors;
@@ -339,6 +359,7 @@ class Executor {
         if (counters.warpInsts + warpInsts > this.maxWarpInsts) {
           counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
           counters.instFma += instFma; counters.instLdSt += instLdSt;
+          counters.instSfu += instSfu; counters.instBookkeeping += instBookkeeping;
           counters.divergentBranches += divergent;
           counters.atomics += atomics; counters.shuffles += shuffles;
           counters.warpSyncErrors += warpSyncErrors;
@@ -363,6 +384,7 @@ class Executor {
             for (let lane = 0; lane < WARP_SIZE; lane += 1) {
               if (active & (1 << lane)) regs[dst + lane] = value;
             }
+            instBookkeeping += lanes;
             pc += 1;
             break;
           }
@@ -373,6 +395,7 @@ class Executor {
             for (let lane = 0; lane < WARP_SIZE; lane += 1) {
               if (active & (1 << lane)) regs[dst + lane] = regs[src + lane];
             }
+            instBookkeeping += lanes;
             pc += 1;
             break;
           }
@@ -626,6 +649,7 @@ class Executor {
             warp.pc = pc + 1;
             counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
             counters.instFma += instFma; counters.instLdSt += instLdSt;
+          counters.instSfu += instSfu; counters.instBookkeeping += instBookkeeping;
             counters.divergentBranches += divergent;
           counters.atomics += atomics; counters.shuffles += shuffles;
           counters.warpSyncErrors += warpSyncErrors;
@@ -669,6 +693,8 @@ class Executor {
               regs[dst + lane] = out;
             }
             if (fn === FN.fmaf) instFma += lanes;
+            // 超越函数走 SFU，吞吐只有 FMA 的 1/8
+            else if (SFU_FNS[fn]) instSfu += lanes;
             pc += 1;
             break;
           }
@@ -831,6 +857,7 @@ class Executor {
             warp.done = true;
             counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
             counters.instFma += instFma; counters.instLdSt += instLdSt;
+          counters.instSfu += instSfu; counters.instBookkeeping += instBookkeeping;
             counters.divergentBranches += divergent;
           counters.atomics += atomics; counters.shuffles += shuffles;
           counters.warpSyncErrors += warpSyncErrors;
@@ -843,6 +870,7 @@ class Executor {
     } catch (error) {
       counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
       counters.instFma += instFma; counters.instLdSt += instLdSt;
+          counters.instSfu += instSfu; counters.instBookkeeping += instBookkeeping;
       counters.divergentBranches += divergent;
           counters.atomics += atomics; counters.shuffles += shuffles;
           counters.warpSyncErrors += warpSyncErrors;

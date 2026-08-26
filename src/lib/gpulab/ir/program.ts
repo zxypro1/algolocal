@@ -79,6 +79,17 @@ export const FN = {
   __popc: 16, __clz: 17, __ffs: 18,
 } as const;
 
+/**
+ * 哪些内建函数走 **SFU**（特殊功能单元）。
+ *
+ * 用查表而不是判断 FN 的区间：区间判断依赖枚举顺序，将来往中间插一个
+ * 函数就会静默算错，而这个数直接决定 softmax 那几关的瓶颈在哪。
+ */
+export const SFU_FNS = new Uint8Array(32);
+for (const fn of ['sqrtf', 'rsqrtf', 'expf', 'logf', 'tanhf', 'powf', '__expf', '__logf', '__fdividef'] as const) {
+  SFU_FNS[FN[fn]] = 1;
+}
+
 export const SREG = {
   'tid.x': 0, 'tid.y': 1, 'tid.z': 2,
   'ctaid.x': 3, 'ctaid.y': 4, 'ctaid.z': 5,

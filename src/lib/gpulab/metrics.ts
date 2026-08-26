@@ -89,6 +89,10 @@ export interface GpuMetrics {
     laneExecuted: number;
     fma: number;
     ldst: number;
+    /** 走 SFU 的指令（exp / log / rsqrt…），吞吐只有 FMA 的 1/8 */
+    sfu: number;
+    /** tensor core 乘加 */
+    mma: number;
   };
   launch: {
     blocks: number;
@@ -136,6 +140,8 @@ export function toMetrics(counters: GpuCounters): GpuMetrics {
       laneExecuted: counters.laneInsts,
       fma: counters.instFma,
       ldst: counters.instLdSt,
+      sfu: counters.instSfu,
+      mma: counters.instMma,
     },
     launch: {
       blocks: counters.blocksLaunched,
