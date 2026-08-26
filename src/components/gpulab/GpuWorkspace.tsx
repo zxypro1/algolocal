@@ -16,7 +16,7 @@ import {
 } from '@mantine/core';
 import {
   IconAlertTriangle, IconChartHistogram, IconCpu, IconFileCode,
-  IconPlayerPlay, IconRefresh, IconTerminal2,
+  IconPlayerPlay, IconRefresh, IconSitemap, IconTerminal2,
 } from '@tabler/icons-react';
 import { useMantineColorScheme } from '@mantine/core';
 import Editor from '@monaco-editor/react';
@@ -36,6 +36,7 @@ const WorkbenchTerminal = dynamic(
 );
 const ProfilePanel = dynamic(() => import('./ProfilePanel'), { ssr: false });
 const MemoryPanel = dynamic(() => import('./MemoryPanel'), { ssr: false });
+const ClusterPanel = dynamic(() => import('./ClusterPanel'), { ssr: false });
 
 export interface GpuWorkspaceProps {
   session: ProjectSession;
@@ -205,7 +206,7 @@ export default function GpuWorkspace({ session, registerClearResults }: GpuWorks
     }
   }, [gpu.world, stage, session]);
 
-  /** 集群关卡在标题上多显示卡数（集群面板在后面的切片里补） */
+  /** 集群关卡才有集群面板；单卡的 21 关不该多出一个空 tab */
   const isCluster = Boolean(gpu.world?.cluster);
 
   if (!project || !stage) return null;
@@ -351,6 +352,11 @@ export default function GpuWorkspace({ session, registerClearResults }: GpuWorks
                   <Tabs.Tab value="memory" fz="xs" leftSection={<IconCpu size={13} />}>
                     访存
                   </Tabs.Tab>
+                  {isCluster && (
+                    <Tabs.Tab value="cluster" fz="xs" leftSection={<IconSitemap size={13} />}>
+                      集群
+                    </Tabs.Tab>
+                  )}
                 </Tabs.List>
 
                 <Tabs.Panel value="terminal" style={{ flex: 1, minHeight: 0 }}>
@@ -425,6 +431,14 @@ export default function GpuWorkspace({ session, registerClearResults }: GpuWorks
                     <MemoryPanel world={gpu.world} revision={gpu.revision} />
                   </ErrorBoundary>
                 </Tabs.Panel>
+
+                {isCluster && (
+                  <Tabs.Panel value="cluster" style={{ flex: 1, minHeight: 0 }}>
+                    <ErrorBoundary fallback={renderPanelError}>
+                      <ClusterPanel world={gpu.world} revision={gpu.revision} />
+                    </ErrorBoundary>
+                  </Tabs.Panel>
+                )}
 
               </Tabs>
             )}
