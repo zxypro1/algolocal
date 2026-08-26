@@ -1666,6 +1666,48 @@ const primers = {
         + '16 elements and MXFP4 per 32, exists so hardware can do this natively.'
       )
     ),
+    'cuda-graph': t(
+      p(
+        '解码的处境很特别：每一步只算一个 token，计算量极小，'
+        + '而要起的 kernel 不少，真实的一层 Transformer 有几十个，80 层就是上千个。'
+        + '真卡上每次提交有几微秒的固定开销，于是提交本身成了瓶颈，'
+        + 'GPU 大部分时间在等下一个 kernel 被交上来。',
+        'CUDA Graph 把一串 launch 录下来，之后一次性提交。'
+        + '省下来的纯粹是提交开销，kernel 该干的活一点没少，'
+        + 'block 数、FMA 数全都不变。'
+        + '这也解释了它为什么对预填充几乎没用：'
+        + '一次算几千个 token 时每个 kernel 本来就跑很久，几微秒可以忽略。'
+        + 'CUDA Graph 是解码专属的优化。',
+        '用起来有一个硬约束：图录下来的是**捕获那一刻的实参值**。'
+        + '指针是稳定的地址，重放没问题；而按值传的标量录下来就定死了。'
+        + '所以真实引擎会把所有随步数变化的量都做成显存里的值，'
+        + '让 kernel 从指针读，序列长度、批里每条序列的状态，全都如此。',
+        '还有一个后果值得留意：图是按形状固定的。'
+        + '批大小变了、序列长度跨过某个桶了，就得换一张图。'
+        + '于是引擎预先为若干个批大小各捕获一张，运行时挑最接近的、'
+        + '把多余的位置填成 padding。'
+        + '你看到连续批处理的批大小往往是几个固定档位而不是任意数，原因就在这里。'
+      ),
+      p(
+        'Decoding is peculiar: each step computes a single token, almost no work, across quite a '
+        + 'few kernels. A real Transformer layer has dozens, and eighty layers means thousands. On '
+        + 'real hardware each submission costs a few microseconds of fixed overhead, so submission '
+        + 'becomes the bottleneck and the GPU spends most of its time waiting for more work.',
+        'CUDA Graphs record a run of launches and submit them in one go. What is saved is purely '
+        + 'the submission overhead: the kernels do the same work, the same blocks, the same FMAs. '
+        + 'That also explains why graphs do almost nothing for prefill, where each kernel already '
+        + 'runs a long time and microseconds are noise. Graphs are a decode-side optimisation.',
+        'There is one hard constraint. A graph records the argument values **at capture time**. '
+        + 'Pointers are stable addresses so replay is fine, but a scalar passed by value is frozen. '
+        + 'Real engines therefore make every step-varying quantity device-resident and have kernels '
+        + 'read it through a pointer: sequence lengths, per-sequence state in the batch, all of it.',
+        'One more consequence is worth noticing: graphs are fixed by shape. Change the batch size, '
+        + 'or cross a sequence-length bucket, and you need a different graph. So engines capture one '
+        + 'per batch size ahead of time and pick the nearest at runtime, padding the unused slots. '
+        + 'That is why continuous batching tends to use a handful of fixed batch sizes rather than '
+        + 'arbitrary ones.'
+      )
+    ),
   },
 
   'intranet-k8s': {

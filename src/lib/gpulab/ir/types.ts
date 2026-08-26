@@ -180,6 +180,10 @@ export type HostFn =
   | 'cudaMalloc' | 'cudaFree' | 'cudaMemcpy' | 'cudaMemset' | 'cudaDeviceSynchronize'
   | 'printf'
   | 'lab_buffer' | 'lab_buffer_len'
+  /** CUDA Graph：把一串 launch 录下来，之后一次重放 */
+  | 'cudaStreamBeginCapture' | 'cudaStreamEndCapture'
+  | 'cudaGraphInstantiate' | 'cudaGraphLaunch'
+  | 'cudaGraphDestroy' | 'cudaGraphExecDestroy'
   | 'vec_new' | 'vec_push' | 'vec_pop' | 'vec_get' | 'vec_set' | 'vec_len' | 'vec_clear'
   | 'map_new' | 'map_set' | 'map_get' | 'map_has' | 'map_del' | 'map_len'
   | 'ring_new' | 'ring_push' | 'ring_pop' | 'ring_peek' | 'ring_len';

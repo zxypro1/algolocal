@@ -98,6 +98,8 @@ export interface GpuMetrics {
     blocks: number;
     warps: number;
     barriers: number;
+    /** 提交次数。CUDA Graph 把 N 次提交合成 1 次，读的就是它 */
+    kernels: number;
   };
 }
 
@@ -144,6 +146,7 @@ export function toMetrics(counters: GpuCounters): GpuMetrics {
       mma: counters.instMma,
     },
     launch: {
+      kernels: counters.kernelLaunches,
       blocks: counters.blocksLaunched,
       warps: counters.warpsLaunched,
       barriers: counters.barriers,
