@@ -1327,6 +1327,23 @@ const primers = {
       )
     ),
 
+    'progressive-delivery': t(
+      p(
+        'Deployment 的滚动更新只回答一个问题：新的 Pod 起来了没有。而「起来了」和「好用」是两回事：一个进程活着、探针全过、日志干净，但大半请求返回 500 的版本，滚动更新会毫不犹豫地把它铺到 100%。`渐进式发布`补的就是这一段：把「什么叫好」写进发布流程本身。',
+        '`Argo Rollouts` 用 `Rollout` 替代 Deployment（是替代不是补充，一个工作负载只能由其中之一管）。它多出来的是 `strategy.canary.steps`：一串按顺序执行的步骤。`setWeight` 调整金丝雀占多少副本，`pause` 停一下（带 `duration` 就是等那么久，不带就是无限期等人来 `promote`），`analysis` 起一次分析。控制器用 `status.currentStepIndex` 记着走到第几步，每步做完才往前挪一格。',
+        '`AnalysisTemplate` 描述判据：一条 PromQL 加一个 `successCondition`（形如 `result < 0.05`）。任何一条不满足，整个发布`中止`。要特别注意中止的含义，它不是「停在原地」，而是**回到稳定版本**：金丝雀缩到 0，稳定版拉回满副本。这也是自动回滚的实现，不需要人介入。另一个必写的字段是 `initialDelay`：金丝雀刚起来的那几秒计数器还是 0、采样点不够两个，这时候算出来的是稳定版的错误率，看着很好，然后就把坏版本放行了。',
+        '判据本身要写成`比例`而不是计数。`sum(rate(errors[5m])) > 0` 会让任何一个 5xx 都毁掉发布，而真实系统永远有零星的 5xx，结果是没有版本发得出去，最后有人把分析这一步删掉。还有一条实践：**金丝雀的判据应该和告警的判据是同一个表达式**，否则会出现「发布时看着没事、上线后告警响」，那说明「什么叫坏」被定义了两遍。',
+        '另一半是节点维护。`PodDisruptionBudget` 管的是`自愿中断`，也就是有人主动发起的那些：节点维护、缩容、驱逐。`kubectl drain` 走的是 Pod 的 `eviction` 子资源，会先问 PDB，违反就收到 429 并重试；而 `kubectl delete pod` 走的是普通删除，谁也拦不住。这是两条命令行为不同的根源。PDB 保证的是「不会被人为打空」，不是「永远有 N 个副本」：节点掉电、OOMKill、被抢占都不在它管辖内。还有一个反效果要避开：`minAvailable` 写成和副本数一样大，任何驱逐都会被拒，节点永远维护不了。'
+      ),
+      p(
+        'A rolling update answers one question: did the new pods start. Starting is not the same as working, and a version whose process is alive, probes pass, and logs are clean while three requests in ten return 500 will be spread to 100% without hesitation. `Progressive delivery` fills that gap by writing "what good looks like" into the release process itself.',
+        '`Argo Rollouts` replaces a Deployment with a `Rollout` (replaces, not supplements: a workload is managed by one or the other). What it adds is `strategy.canary.steps`, an ordered list. `setWeight` sets how many replicas are canary, `pause` stops (with a `duration` it waits that long, without one it waits indefinitely for a `promote`), and `analysis` runs an evaluation. The controller tracks progress in `status.currentStepIndex`, advancing only when a step completes.',
+        'An `AnalysisTemplate` describes the criterion: a PromQL query plus a `successCondition` such as `result < 0.05`. If any metric fails, the rollout `aborts`. Note what aborting means: not stopping in place but **returning to the stable version**, scaling the canary to zero and stable back to full. That is the automatic rollback, with nobody in the loop. The other field you must write is `initialDelay`: in the first seconds a canary counter is still zero with fewer than two samples, so what you compute is the stable version error rate, which looks great and lets the bad version through.',
+        'The criterion must be a `ratio` rather than a count. `sum(rate(errors[5m])) > 0` fails a release on any single 5xx, real systems always have a few, nothing ever ships, and eventually somebody deletes the analysis step. One more practice: **the canary criterion and the alerting criterion should be the same expression**, or you get "looked fine during rollout, paged afterwards", which means "bad" was defined twice.',
+        'The other half is node maintenance. A `PodDisruptionBudget` governs `voluntary` disruptions, the ones somebody initiates: maintenance, scale-down, eviction. `kubectl drain` goes through the Pod `eviction` subresource, which consults the PDB and returns 429 with a retry when it would be violated, while `kubectl delete pod` is an ordinary delete that nothing stops. That is why the two commands behave differently. A PDB guarantees nobody drains you to zero, not that N replicas always exist: power loss, OOMKill, and preemption are all outside its remit. And avoid the counterproductive setting where `minAvailable` equals the replica count, because then every eviction is refused and the node can never be maintained.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',

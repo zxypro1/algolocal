@@ -61,7 +61,10 @@ const LANE_PADDING = 28;
 /** 泳道从上到下：流量怎么进来 → 谁在提供服务 → 实例 → 落在哪台机器 */
 const LANES: Array<{ id: string; title: string; kinds: string[] }> = [
   { id: 'ingress', title: '入口', kinds: ['Gateway', 'HTTPRoute', 'Ingress', 'Service'] },
-  { id: 'workload', title: '工作负载', kinds: ['Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob', 'ReplicaSet'] },
+  {
+    id: 'workload', title: '工作负载',
+    kinds: ['Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob', 'Rollout', 'ReplicaSet'],
+  },
   { id: 'pod', title: '实例', kinds: ['Pod'] },
   { id: 'node', title: '节点', kinds: ['Node'] },
 ];
@@ -165,6 +168,22 @@ function describe(object: KubeObject): { detail: string; status: TopologyStatus 
       return {
         detail: `${ready}/${desired}`,
         status: desired === 0 ? 'pending' : ready === desired ? 'ok' : ready === 0 ? 'error' : 'warn',
+      };
+    }
+    /**
+     * Rollout 比 Deployment 多一样东西：它停在哪一步。
+     * 只打 `可用/期望` 的话，「暂停等人确认」和「分析失败已经退回去」
+     * 在图上长得一模一样，而这两件事要采取的动作完全相反。
+     */
+    case 'Rollout': {
+      const available = Number(status.availableReplicas ?? 0);
+      const desired = Number(spec.replicas ?? 0);
+      const phase = String(status.phase ?? 'Progressing');
+      return {
+        detail: `${available}/${desired} ${phase}`,
+        status: phase === 'Degraded' ? 'error'
+          : phase === 'Healthy' ? 'ok'
+            : phase === 'Paused' ? 'pending' : 'warn',
       };
     }
     case 'ReplicaSet': {

@@ -30,7 +30,10 @@ import {
   CLUSTERROLEBINDINGS, CLUSTERROLES, RBAC_RESOURCES, ROLEBINDINGS, ROLES, authorize,
 } from '../rbac';
 import { ESO_RESOURCES, ExternalSecretsController } from '../secrets';
-import { OBSERVABILITY_RESOURCES, PrometheusController } from '../observability';
+import {
+  OBSERVABILITY_RESOURCES, PrometheusController, evaluate as promqlEvaluate,
+} from '../observability';
+import { ROLLOUT_RESOURCES, RolloutController } from '../rollouts';
 import { DISRUPTION_RESOURCES, PdbController, evictionVerdict } from '../disruption';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
@@ -155,7 +158,7 @@ export class Cluster {
     this.scheme = createScheme([
       ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES, ...ARGOCD_RESOURCES,
       ...MESH_RESOURCES, ...RBAC_RESOURCES, ...KYVERNO_RESOURCES, ...ESO_RESOURCES,
-      ...OBSERVABILITY_RESOURCES, ...DISRUPTION_RESOURCES,
+      ...OBSERVABILITY_RESOURCES, ...DISRUPTION_RESOURCES, ...ROLLOUT_RESOURCES,
       ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
@@ -619,6 +622,26 @@ export class Cluster {
       // 监控：采集是定时拉的，所以采样之间发生的事看不见
       ...(this.options.metrics
         ? [(this.prometheus = new PrometheusController(context, this.options.metrics))]
+        : []),
+      /**
+       * 渐进式发布。
+       *
+       * 分析用的是同一套 PromQL 求值器 —— 金丝雀的判据和告警的判据本来
+       * 就该是同一个东西，不然「发布时看着没事、上线后告警响」。
+       */
+      ...(this.options.metrics
+        ? [new RolloutController(context, {
+            evaluate: (query) => {
+              const prometheus = this.prometheus;
+              if (!prometheus) return undefined;
+              try {
+                const results = promqlEvaluate(prometheus.tsdb, query, this.wallClock());
+                return results[0]?.value;
+              } catch {
+                return undefined;
+              }
+            },
+          })]
         : []),
       // 密钥：真值住在集群外面，这里只维护一份投影
       ...(this.options.fetchSecret

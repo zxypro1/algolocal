@@ -176,6 +176,30 @@ export const TABLE_PRINTERS: Record<string, TablePrinter> = {
       ];
     },
   },
+  rollouts: {
+    columns: [
+      NAME_COLUMN,
+      col('Desired', 'The desired number of replicas.'),
+      col('Current', 'The current number of replicas.'),
+      col('Up-to-date', 'The number of replicas on the latest revision.'),
+      col('Available', 'The number of available replicas.'),
+      AGE_COLUMN,
+    ],
+    // 和 Argo Rollouts 的 CRD 一样：这五列里没有状态。
+    // 想知道走到哪一步、为什么停了，得 describe，或者看 AnalysisRun。
+    cells: (object, age) => {
+      const spec = (object.spec ?? {}) as any;
+      const status = (object.status ?? {}) as any;
+      return [
+        object.metadata.name,
+        String(spec.replicas ?? 1),
+        String(status.replicas ?? 0),
+        String(status.updatedReplicas ?? 0),
+        String(status.availableReplicas ?? 0),
+        age,
+      ];
+    },
+  },
   poddisruptionbudgets: {
     columns: [
       NAME_COLUMN,
