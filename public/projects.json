@@ -17246,6 +17246,355 @@
           "zh": "一个 Transformer 层的尾巴上挂着一串逐元素操作：加偏置、过激活函数、加残差。每一步写成一个独立的 kernel 最省事，但每一步都要把整个张量读进来、写回去。三步就是六趟访存，而真正的计算只有每个元素几次乘加。\n\n`算子融合`把它们合成一个 kernel：读一次、在寄存器里连着做完三步、写一次。访存从六趟降到三趟，而这类算子的时间几乎全在访存上，所以收益差不多就是两倍。\n\n融合之所以是推理引擎里收益最直接的优化，正因为逐元素算子**全部**是带宽受限的。给它们更多算力毫无意义，唯一能做的就是少搬几次数据。\n\n`torch.compile` 的主要工作之一就是自动做这件事，把一串逐元素操作编成一个 Triton 内核。手写的库里，Liger-Kernel 把 LLM 常见的融合模式都实现了一遍。再往上一层是把 GEMM 和它后面的逐元素操作也融进去，那叫 epilogue fusion。",
           "en": "The tail of a Transformer layer is a chain of element-wise operations: add a bias, apply an activation, add the residual. Writing each as its own kernel is easiest, but every step reads the whole tensor and writes it back. Three steps means six trips through memory for what is only a handful of arithmetic operations per element.\n\n`Operator fusion` merges them into one kernel: read once, carry the value through all three steps in registers, write once. Memory traffic drops from six trips to three, and since these operators spend essentially all their time in memory, the speedup is close to two times.\n\nFusion is the most directly profitable optimisation in an inference engine precisely because element-wise operators are **all** bandwidth-bound. Giving them more compute changes nothing; the only lever is moving data fewer times.\n\nOne of the main jobs of `torch.compile` is doing this automatically, compiling a chain of element-wise operations into a single Triton kernel. Among hand-written libraries, Liger-Kernel implements the common LLM fusion patterns. One level up, fusing a GEMM with the element-wise work that follows it is called epilogue fusion."
         }
+      },
+      {
+        "id": "naive-attention",
+        "title": {
+          "zh": "朴素注意力 —— 亲手把显存打爆",
+          "en": "Naive attention — blow up memory on purpose"
+        },
+        "goal": {
+          "zh": "注意力是 Transformer 的核心：`O = softmax(Q Kᵀ / √d) V`。\n\n按定义直接写就是三步：\n\n1. 算分数矩阵 `S = Q Kᵀ / √d`，形状是 **seq × seq**\n2. 对 S 的每一行做 softmax\n3. 用归一化后的权重加权 V\n\n`attention.cu` 里的 kernel 是空的，参数已经给好了 —— 注意有一个 `S` 参数，\n那就是第 1 步要写进去的分数矩阵。每个 block 一个 warp，负责一行 query。\n\n**这一关不设性能门槛**，把它写对就行。但跑完之后请看一眼 `ncu`：\n\n```bash\nnvcc -o bench attention.cu && ncu ./bench\n```\n\n这里 seq = 128，S 是 128×128 = 64 KB，看起来无所谓。\n**但 S 的大小是 seq 的平方。** 换成真实场景：\n\n| seq | S 的大小（单头 fp32） |\n| --- | --- |\n| 128 | 64 KB |\n| 2048 | 16 MB |\n| 8192 | 256 MB |\n| 32768 | 4 GB |\n\n再乘上头数（32）与批大小，长上下文的 S 根本放不进显存。\n这就是 FlashAttention 要解决的问题，也是下一关的内容。\n\n**通关标准**\n\n- 结果和 fp64 参考对得上\n- softmax 要减最大值，不能出 inf / nan\n- 分数矩阵确实被物化了（下一关就是来拆掉它的）",
+          "en": "Attention is the heart of a Transformer: `O = softmax(Q Kᵀ / √d) V`.\n\nWritten straight from the definition it is three steps:\n\n1. compute the score matrix `S = Q Kᵀ / √d`, shape **seq × seq**\n2. softmax each row of S\n3. weight V by the normalised scores\n\nThe kernel in `attention.cu` is empty and the parameters are already there. Note the `S`\nparameter: that is the score matrix step 1 writes. One warp per block, one query row each.\n\n**No performance gate here**, just get it right. But look at `ncu` afterwards:\n\n```bash\nnvcc -o bench attention.cu && ncu ./bench\n```\n\nHere seq = 128 and S is 128×128 = 64 KB, which seems harmless.\n**But S grows with the square of seq.** In realistic settings:\n\n| seq | size of S (one head, fp32) |\n| --- | --- |\n| 128 | 64 KB |\n| 2048 | 16 MB |\n| 8192 | 256 MB |\n| 32768 | 4 GB |\n\nMultiply by the head count (32) and the batch size and S simply does not fit for long contexts.\nThat is the problem FlashAttention solves, and the next stage.\n\n**To pass**\n\n- results match an fp64 reference\n- softmax subtracts the maximum, no inf/nan\n- the score matrix really is materialised (the next stage takes it apart)"
+        },
+        "checklist": [
+          {
+            "zh": "算出 S = Q Kᵀ / √d 并写进 S 参数",
+            "en": "Compute `S = Q Kᵀ / √d` and write it into the S parameter"
+          },
+          {
+            "zh": "对 S 的每一行做数值稳定的 softmax",
+            "en": "Apply a numerically stable softmax to each row of S"
+          },
+          {
+            "zh": "用权重加权 V 得到输出",
+            "en": "Weight V by those scores to produce the output"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "一个 warp 负责一行 query。算 S 那一步让 32 个 lane 分头算不同的 j。",
+            "en": "One warp per query row. In the S step, let the 32 lanes handle different j values."
+          },
+          {
+            "zh": "softmax 的 max 与 sum 都要跨整个 warp 归并，用 `__shfl_xor_sync`。写完 S 之后读它之前，加一句 `__syncwarp(0xffffffff)`。",
+            "en": "Both the max and the sum must be reduced across the warp with `__shfl_xor_sync`. Put a `__syncwarp(0xffffffff)` between writing S and reading it back."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**忘了除以 √d。** 点积的量级随维度增长，不缩放的话 softmax 会退化成 one-hot，数值上还容易溢出。",
+            "en": "**Forgetting the 1/√d scaling.** Dot products grow with dimension; without it softmax collapses toward one-hot and overflows more easily."
+          },
+          {
+            "zh": "**softmax 不减最大值。** 分数里有正有负，`exp` 直接算容易出 inf，除下来就是 nan。第 12 关讲过这一点。",
+            "en": "**Skipping the max subtraction in softmax.** Scores span positive and negative values; raw `exp` overflows to inf and the division yields nan. Stage 12 covered this."
+          }
+        ],
+        "extension": {
+          "zh": "注意力的计算量是 O(seq² · d)，显存是 O(seq²)。这两个平方是长上下文的根本困难，也是过去几年一大堆研究的出发点：稀疏注意力砍掉大部分分数、线性注意力换一种结合律、而 FlashAttention 选择了第三条路 —— 计算量一点不减，但**不把 S 存下来**，于是显存从 O(seq²) 降到 O(seq)。下一关就做这件事。",
+          "en": "Attention costs O(seq² · d) in compute and O(seq²) in memory. Those two squares are the fundamental difficulty of long context and the starting point for years of research: sparse attention drops most scores, linear attention reassociates the products, and FlashAttention takes a third route, keeping the full computation but **never storing S**, which brings memory down from O(seq²) to O(seq). That is the next stage."
+        },
+        "gpu": {
+          "files": {
+            "/root/attention.cu": "// O = softmax(Q K^T / sqrt(d)) V\n//\n// 一个 block 一个 warp，负责一行 query。\n// S 是 seq×seq 的分数矩阵，第一步写进去、后面两步读回来。\n__global__ void attention(const float* Q, const float* K, const float* V,\n                          float* S, float* O, int seq, int dim) {\n  int row = blockIdx.x;\n  int lane = threadIdx.x;\n\n  // TODO: 三步走\n  //   1. S[row][j] = dot(Q[row], K[j]) / sqrt(dim)\n  //   2. 对 S[row][*] 做数值稳定的 softmax\n  //   3. O[row][d] = sum_j P[j] * V[j][d]\n}\n"
+          },
+          "bench": {
+            "sources": [
+              "/root/attention.cu"
+            ],
+            "buffers": [
+              {
+                "name": "Q",
+                "length": 8192,
+                "fill": {
+                  "kind": "random",
+                  "seed": 81,
+                  "min": -1,
+                  "max": 1
+                }
+              },
+              {
+                "name": "K",
+                "length": 8192,
+                "fill": {
+                  "kind": "random",
+                  "seed": 83,
+                  "min": -1,
+                  "max": 1
+                }
+              },
+              {
+                "name": "V",
+                "length": 8192,
+                "fill": {
+                  "kind": "random",
+                  "seed": 89,
+                  "min": -1,
+                  "max": 1
+                }
+              },
+              {
+                "name": "S",
+                "length": 16384,
+                "fill": {
+                  "kind": "zeros"
+                }
+              },
+              {
+                "name": "O",
+                "length": 8192,
+                "fill": {
+                  "kind": "zeros"
+                }
+              }
+            ],
+            "launches": [
+              {
+                "kernel": "attention",
+                "grid": [
+                  128
+                ],
+                "block": [
+                  32
+                ],
+                "args": [
+                  "Q",
+                  "K",
+                  "V",
+                  "S",
+                  "O",
+                  128,
+                  64
+                ]
+              }
+            ]
+          },
+          "referenceFiles": {
+            "/root/attention.cu": "__global__ void attention(const float* Q, const float* K, const float* V,\n                          float* S, float* O, int seq, int dim) {\n  int row = blockIdx.x;\n  int lane = threadIdx.x;\n  float scale = rsqrtf((float)dim);\n\n  // 1. 分数矩阵，写进显存\n  for (int j = lane; j < seq; j += 32) {\n    float acc = 0.0f;\n    for (int d = 0; d < dim; ++d) acc = fmaf(Q[row * dim + d], K[j * dim + d], acc);\n    S[row * seq + j] = acc * scale;\n  }\n  __syncwarp(0xffffffff);\n\n  // 2. 行内 softmax，减最大值保证不溢出\n  float m = -3.4e38f;\n  for (int j = lane; j < seq; j += 32) m = fmaxf(m, S[row * seq + j]);\n  for (int d = 16; d > 0; d >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffff, m, d));\n\n  float sum = 0.0f;\n  for (int j = lane; j < seq; j += 32) sum += expf(S[row * seq + j] - m);\n  for (int d = 16; d > 0; d >>= 1) sum += __shfl_xor_sync(0xffffffff, sum, d);\n\n  // 3. 加权 V\n  for (int d = lane; d < dim; d += 32) {\n    float acc = 0.0f;\n    for (int j = 0; j < seq; ++j) {\n      acc = fmaf(expf(S[row * seq + j] - m) / sum, V[j * dim + d], acc);\n    }\n    O[row * dim + d] = acc;\n  }\n}\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "attention.spec.ts",
+            "content": "      const lab = require('@gpu/lab');\n      const SEQ = 128;\n      const DIM = 64;\n\n      describe('朴素注意力', () => {\n      it('结果和 fp64 参考对得上', async () => {\n  await lab.buildAndRun();\n  const Q = lab.buffer('Q');\n  const K = lab.buffer('K');\n  const V = lab.buffer('V');\n  const O = lab.buffer('O');\n  const scale = 1 / Math.sqrt(DIM);\n\n  for (let row = 0; row < SEQ; row += 17) {\n    const scores = new Float64Array(SEQ);\n    for (let j = 0; j < SEQ; j += 1) {\n      let dot = 0;\n      for (let d = 0; d < DIM; d += 1) dot += Q[row * DIM + d] * K[j * DIM + d];\n      scores[j] = dot * scale;\n    }\n    let max = -Infinity;\n    for (let j = 0; j < SEQ; j += 1) max = Math.max(max, scores[j]);\n    let sum = 0;\n    for (let j = 0; j < SEQ; j += 1) sum += Math.exp(scores[j] - max);\n\n    for (let d = 0; d < DIM; d += 11) {\n      let expected = 0;\n      for (let j = 0; j < SEQ; j += 1) {\n        expected += (Math.exp(scores[j] - max) / sum) * V[j * DIM + d];\n      }\n      const actual = O[row * DIM + d];\n      expect(Number.isFinite(actual)).toBe(true);\n      expect(Math.abs(actual - expected)).toBeLessThanOrEqual(1e-4);\n    }\n  }\n});\n\n        it('softmax 减了最大值 —— 没有 inf 也没有 nan', async () => {\n          await lab.buildAndRun();\n          expect(lab.buffer('O').every((value) => Number.isFinite(value))).toBe(true);\n          // 分数矩阵里也不能有溢出：直接 expf 一个大分数就会在这里暴露\n          expect(lab.buffer('S').every((value) => Number.isFinite(value))).toBe(true);\n        });\n\n        it('确实把 seq×seq 的分数矩阵物化了 —— 这正是下一关要去掉的', async () => {\n          await lab.buildAndRun();\n          const S = lab.buffer('S');\n          expect(S.some((value) => value !== 0)).toBe(true);\n        });\n      });\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "gpu.sanitizer.races",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "数据竞态",
+              "en": "data races"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.sanitizer.warpSyncErrors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "warp 同步用错",
+              "en": "warp sync errors"
+            },
+            "dimension": "correctness"
+          }
+        ],
+        "focus": [
+          "correctness"
+        ],
+        "primer": {
+          "zh": "注意力回答的是「这个位置该关注序列里的哪些位置」。公式是 `O = softmax(Q K^T / sqrt(d)) V`：Q 与 K 的点积给出每对位置之间的相关分数，softmax 把一行分数变成权重，再拿权重去加权 V。\n\n除以 `sqrt(d)` 不是可有可无的。点积是 d 项求和，量级随 d 增长；不缩放的话进 softmax 的数就太大，指数一拉开就退化成 one-hot，梯度也几乎消失。\n\n按定义直接实现要先把分数矩阵 `S` 算出来。S 的形状是 seq × seq，也就是说**它的大小随序列长度平方增长**。seq=128 时只有 64KB，seq=8192 时单个头就是 256MB，再乘上头数与批大小就完全放不下了。\n\n这是长上下文的根本困难。研究界给出的路线大致三条：稀疏注意力只算一部分分数、线性注意力换一种结合顺序绕开 seq×seq、而 FlashAttention 选择了保留全部计算但**不把 S 存下来**。",
+          "en": "Attention answers the question of which positions in a sequence a given position should attend to. The formula is `O = softmax(Q K^T / sqrt(d)) V`: the dot product of Q and K gives a relevance score for each pair of positions, softmax turns a row of scores into weights, and those weights combine the rows of V.\n\nThe `sqrt(d)` divisor is not optional. A dot product sums d terms and grows with d; without the scaling the numbers entering softmax are too large, the exponentials spread out into a nearly one-hot distribution, and gradients all but vanish.\n\nA literal implementation must build the score matrix `S` first. S has shape seq × seq, meaning **its size grows with the square of the sequence length**. At seq=128 that is 64KB; at seq=8192 a single head is 256MB, and multiplying by head count and batch size makes it impossible to hold.\n\nThis is the fundamental difficulty of long context. Research has taken roughly three routes: sparse attention computes only some scores, linear attention reassociates the products to avoid the seq×seq matrix entirely, and FlashAttention keeps the full computation but **never stores S**."
+        }
+      },
+      {
+        "id": "flash-attention",
+        "title": {
+          "zh": "FlashAttention —— 不把分数矩阵存下来",
+          "en": "FlashAttention — never materialise the score matrix"
+        },
+        "goal": {
+          "zh": "上一关的 S 是 seq×seq。要让它不占显存，办法只有一个：**不存它**。\n\nFlashAttention 的思路是把三步合成一遍：一边算分数、一边做 softmax、一边加权 V。\n关键是第 12 关那个**在线 softmax** —— 它让你在还没看完整行的情况下，\n就能维护一个「到目前为止正确」的归一化结果，看到更大的值时把已有的部分修正一下。\n\n对输出也用同样的修正：\n\n```cuda\nfloat mNew = fmaxf(m, p);          // p 是新算出来的分数\nfloat corr = expf(m - mNew);        // 已有部分要缩放多少\nfloat w    = expf(p - mNew);\nl   = l   * corr + w;               // 归一化分母\nacc = acc * corr + w * V[j][d];     // 输出累加器\nm   = mNew;\n```\n\n走完整行之后 `acc / l` 就是答案，**而 S 从头到尾没有被写过一个字节**。\n显存从 O(seq²) 降到 O(seq)。\n\n```bash\nnvcc -o bench attention.cu && ncu ./bench\n```\n\n**通关标准**\n\n- 结果和上一关一样（fp64 参考，容差 1e-4）\n- `S` 缓冲区一个字节都没被写过\n- DRAM 写量 ≤ 40 KB（朴素版是 96 KB）",
+          "en": "The S from the previous stage is seq×seq. There is only one way to stop it occupying memory:\n**do not store it**.\n\nFlashAttention fuses all three steps into one pass: score, softmax and V-weighting together.\nThe key is the **online softmax** from stage 12, which maintains a result that is correct\n\"so far\" without having seen the whole row, rescaling what it has when a larger value appears.\n\nThe same correction applies to the output accumulator:\n\n```cuda\nfloat mNew = fmaxf(m, p);          // p is the newly computed score\nfloat corr = expf(m - mNew);        // how much to rescale what we have\nfloat w    = expf(p - mNew);\nl   = l   * corr + w;               // normalising denominator\nacc = acc * corr + w * V[j][d];     // output accumulator\nm   = mNew;\n```\n\nAfter the row, `acc / l` is the answer, **and S was never written at all**. Memory drops from\nO(seq²) to O(seq).\n\n```bash\nnvcc -o bench attention.cu && ncu ./bench\n```\n\n**To pass**\n\n- same results as before (fp64 reference, tolerance 1e-4)\n- not a single byte written to `S`\n- DRAM writes at most 40 KB (96 KB naive)"
+        },
+        "checklist": [
+          {
+            "zh": "把三步合成一个循环",
+            "en": "Fuse the three steps into one loop"
+          },
+          {
+            "zh": "同时维护 m、l 与输出累加器，每一步都按 corr 修正",
+            "en": "Maintain m, l and the output accumulators together, rescaling each by corr"
+          },
+          {
+            "zh": "确认 S 一个字节都没写",
+            "en": "Confirm nothing was written to S"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "每个 lane 负责 `dim / 32 = 2` 个输出分量，所以要两个累加器。",
+            "en": "Each lane owns `dim / 32 = 2` output components, so keep two accumulators."
+          },
+          {
+            "zh": "算 `dot(Q[row], K[j])` 时让整个 warp 分头算再归并，这样每一步只需要一个 j。",
+            "en": "Compute `dot(Q[row], K[j])` by splitting across the warp and reducing, so each step handles one j."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**只修正了 l 忘了修正 acc。** 输出累加器和分母是在同一个 max 下算的，两个都要按 corr 缩放，少一个结果就偏了。",
+            "en": "**Rescaling l but not acc.** The output accumulator and the denominator share the same running maximum; both need the corr factor or the result drifts."
+          },
+          {
+            "zh": "**最后忘了除以 l。** 累加器里是未归一化的加权和，结果会大一个数量级 —— 而且量级正好是权重和，很容易看成「算法错了」。",
+            "en": "**Forgetting the final division by l.** The accumulator holds an unnormalised weighted sum, so the result is off by exactly the weight total, which is easy to misread as an algorithmic bug."
+          }
+        ],
+        "extension": {
+          "zh": "这一关做的是 FlashAttention 的核心思想，真实现还要在此之上分块：K 与 V 按块搬进共享内存，Q 的一块留在寄存器里，于是访存也从 O(seq²) 降下来 —— 我们这一版只解决了显存，访存量还是 O(seq²·d)。\n\nFlashAttention-4 在 2026 年 3 月发布，针对 Blackwell 重写：因为 tensor core 变快了而 SFU 没跟上，softmax 里那个 `exp()` 变得和矩阵乘一样贵，于是要在两个 tile 之间 ping-pong，让一块的矩阵乘和另一块的指数运算重叠。第 12 关那个「省下访存却多花 SFU」的取舍，在这里被放大成了整个 kernel 的结构。\n\n它也是从 Triton 退回 CuTe DSL 写的 —— Blackwell 的 TMA 与 TMEM 需要 tile 级控制，Triton 的抽象暴露不出来。",
+          "en": "This stage implements the core idea; a real implementation also tiles on top of it, staging blocks of K and V into shared memory with a block of Q in registers, which brings memory *traffic* down too. Our version only fixes the footprint; traffic is still O(seq²·d).\n\nFlashAttention-4 shipped in March 2026, rewritten for Blackwell: because tensor cores got faster while the SFU did not, the `exp()` in softmax became as expensive as the matmuls, so the kernel ping-pongs between two tiles to overlap one tile's matmuls with the other's exponentials. The trade from stage 12, saving memory traffic at the cost of SFU work, is magnified here into the structure of the whole kernel.\n\nIt is also written in CuTe DSL rather than Triton: Blackwell's TMA and TMEM need tile-level control that Triton's abstractions do not expose."
+        },
+        "gpu": {
+          "files": {
+            "/root/attention.cu": "// 上一关的朴素版：正确，但把 seq×seq 的分数矩阵写进了显存。\n//\n// 用在线 softmax 把三步合成一遍，让 S 一个字节都不用写。\n__global__ void attention(const float* Q, const float* K, const float* V,\n                          float* S, float* O, int seq, int dim) {\n  int row = blockIdx.x;\n  int lane = threadIdx.x;\n  float scale = rsqrtf((float)dim);\n\n  for (int j = lane; j < seq; j += 32) {\n    float acc = 0.0f;\n    for (int d = 0; d < dim; ++d) acc = fmaf(Q[row * dim + d], K[j * dim + d], acc);\n    S[row * seq + j] = acc * scale;\n  }\n  __syncwarp(0xffffffff);\n\n  float m = -3.4e38f;\n  for (int j = lane; j < seq; j += 32) m = fmaxf(m, S[row * seq + j]);\n  for (int d = 16; d > 0; d >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffff, m, d));\n\n  float sum = 0.0f;\n  for (int j = lane; j < seq; j += 32) sum += expf(S[row * seq + j] - m);\n  for (int d = 16; d > 0; d >>= 1) sum += __shfl_xor_sync(0xffffffff, sum, d);\n\n  for (int d = lane; d < dim; d += 32) {\n    float acc = 0.0f;\n    for (int j = 0; j < seq; ++j) {\n      acc = fmaf(expf(S[row * seq + j] - m) / sum, V[j * dim + d], acc);\n    }\n    O[row * dim + d] = acc;\n  }\n}\n"
+          },
+          "bench": {
+            "sources": [
+              "/root/attention.cu"
+            ],
+            "buffers": [
+              {
+                "name": "Q",
+                "length": 8192,
+                "fill": {
+                  "kind": "random",
+                  "seed": 81,
+                  "min": -1,
+                  "max": 1
+                }
+              },
+              {
+                "name": "K",
+                "length": 8192,
+                "fill": {
+                  "kind": "random",
+                  "seed": 83,
+                  "min": -1,
+                  "max": 1
+                }
+              },
+              {
+                "name": "V",
+                "length": 8192,
+                "fill": {
+                  "kind": "random",
+                  "seed": 89,
+                  "min": -1,
+                  "max": 1
+                }
+              },
+              {
+                "name": "S",
+                "length": 16384,
+                "fill": {
+                  "kind": "zeros"
+                }
+              },
+              {
+                "name": "O",
+                "length": 8192,
+                "fill": {
+                  "kind": "zeros"
+                }
+              }
+            ],
+            "launches": [
+              {
+                "kernel": "attention",
+                "grid": [
+                  128
+                ],
+                "block": [
+                  32
+                ],
+                "args": [
+                  "Q",
+                  "K",
+                  "V",
+                  "S",
+                  "O",
+                  128,
+                  64
+                ]
+              }
+            ]
+          },
+          "referenceFiles": {
+            "/root/attention.cu": "__global__ void attention(const float* Q, const float* K, const float* V,\n                          float* S, float* O, int seq, int dim) {\n  int row = blockIdx.x;\n  int lane = threadIdx.x;\n  float scale = rsqrtf((float)dim);\n\n  // 走一遍就够：分数、softmax、加权 V 同时进行\n  float m = -3.4e38f;   // 到目前为止见过的最大分数\n  float l = 0.0f;       // 到目前为止的归一化分母\n  float acc0 = 0.0f;    // 每个 lane 负责 dim/32 = 2 个输出分量\n  float acc1 = 0.0f;\n\n  for (int j = 0; j < seq; ++j) {\n    // 整个 warp 协作算一个点积\n    float p = 0.0f;\n    for (int d = lane; d < dim; d += 32) p = fmaf(Q[row * dim + d], K[j * dim + d], p);\n    for (int dd = 16; dd > 0; dd >>= 1) p += __shfl_xor_sync(0xffffffff, p, dd);\n    p = p * scale;\n\n    // 在线修正：见到更大的分数就把已有的部分缩放一下\n    float mNew = fmaxf(m, p);\n    float corr = expf(m - mNew);\n    float w = expf(p - mNew);\n\n    l = l * corr + w;\n    acc0 = acc0 * corr + w * V[j * dim + lane];\n    acc1 = acc1 * corr + w * V[j * dim + lane + 32];\n    m = mNew;\n  }\n\n  O[row * dim + lane] = acc0 / l;\n  O[row * dim + lane + 32] = acc1 / l;\n}\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "attention.spec.ts",
+            "content": "      const lab = require('@gpu/lab');\n      const SEQ = 128;\n      const DIM = 64;\n\n      describe('FlashAttention', () => {\n      it('结果和 fp64 参考对得上', async () => {\n  await lab.buildAndRun();\n  const Q = lab.buffer('Q');\n  const K = lab.buffer('K');\n  const V = lab.buffer('V');\n  const O = lab.buffer('O');\n  const scale = 1 / Math.sqrt(DIM);\n\n  for (let row = 0; row < SEQ; row += 17) {\n    const scores = new Float64Array(SEQ);\n    for (let j = 0; j < SEQ; j += 1) {\n      let dot = 0;\n      for (let d = 0; d < DIM; d += 1) dot += Q[row * DIM + d] * K[j * DIM + d];\n      scores[j] = dot * scale;\n    }\n    let max = -Infinity;\n    for (let j = 0; j < SEQ; j += 1) max = Math.max(max, scores[j]);\n    let sum = 0;\n    for (let j = 0; j < SEQ; j += 1) sum += Math.exp(scores[j] - max);\n\n    for (let d = 0; d < DIM; d += 11) {\n      let expected = 0;\n      for (let j = 0; j < SEQ; j += 1) {\n        expected += (Math.exp(scores[j] - max) / sum) * V[j * DIM + d];\n      }\n      const actual = O[row * DIM + d];\n      expect(Number.isFinite(actual)).toBe(true);\n      expect(Math.abs(actual - expected)).toBeLessThanOrEqual(1e-4);\n    }\n  }\n});\n\n        it('**分数矩阵一个字节都没被写过**', async () => {\n          await lab.buildAndRun();\n          const S = lab.buffer('S');\n          expect(S.every((value) => value === 0)).toBe(true);\n        });\n\n        it('DRAM 写量降到只剩输出', async () => {\n          await lab.buildAndRun();\n          expect(lab.metrics().memory.writeBytes).toBeLessThanOrEqual(40 * 1024);\n        });\n\n        it('没有 inf / nan —— 在线修正必须数值稳定', async () => {\n          await lab.buildAndRun();\n          expect(lab.buffer('O').every((value) => Number.isFinite(value))).toBe(true);\n        });\n      });\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "gpu.sanitizer.races",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "数据竞态",
+              "en": "data races"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.sanitizer.warpSyncErrors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "warp 同步用错",
+              "en": "warp sync errors"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.memory.writeBytes",
+            "op": "lte",
+            "value": 40960,
+            "label": {
+              "zh": "DRAM 写字节数（朴素版是 96KB，含 seq×seq 的分数矩阵）",
+              "en": "DRAM bytes written (96KB naive, including the seq×seq scores)"
+            },
+            "unit": "byte",
+            "dimension": "latency"
+          },
+          {
+            "metric": "gpu.memory.readBytes",
+            "op": "lte",
+            "value": 20971520,
+            "label": {
+              "zh": "DRAM 读字节数（朴素版约 40MB）",
+              "en": "DRAM bytes read (about 40MB naive)"
+            },
+            "unit": "byte",
+            "dimension": "latency"
+          }
+        ],
+        "focus": [
+          "latency",
+          "correctness"
+        ],
+        "primer": {
+          "zh": "FlashAttention 的出发点是一句朴素的观察：**S 只是中间结果，没人需要它。**既然最终要的是 `O`，那就一边算分数、一边做 softmax、一边加权 V，算完就扔。\n\n难点在 softmax 需要整行的最大值与和，而这两个量要走完整行才知道。在线 softmax 解决了它：维护当前的 (m, l)，见到更大的分数就把已经攒的部分按 `exp(m_old - m_new)` 缩放一下。**输出累加器也要按同一个因子缩放** --它和分母是在同一个 max 下算出来的，只修正一个就会算错。\n\n于是显存从 O(seq²) 降到 O(seq)：只需要几个标量寄存器，不需要任何 seq×seq 的缓冲区。真实现还会在这之上分块：K 与 V 按块搬进共享内存，于是访存量也降下来。\n\nFlashAttention-4 在 2026 年 3 月发布，针对 Blackwell 重写。有意思的地方在于**瓶颈换了**：tensor core 变快了而 SFU 没跟上，softmax 里那个指数运算变得和矩阵乘一样贵，于是要在两个 tile 之间 ping-pong，让一块的矩阵乘和另一块的指数重叠。它也因此从 Triton 退回了 CuTe DSL --Blackwell 的 TMA 与 TMEM 需要 tile 级控制，Triton 的抽象暴露不出来。",
+          "en": "FlashAttention starts from a plain observation: **S is only an intermediate and nobody needs it**. Since the goal is `O`, compute scores, apply softmax and weight V in a single pass, discarding each score as soon as it has been used.\n\nThe obstacle is that softmax needs the maximum and sum of the whole row, and neither is known until the row is finished. Online softmax solves it: keep a running (m, l) and rescale what has been accumulated by `exp(m_old - m_new)` whenever a larger score appears. **The output accumulator must be rescaled by the same factor**, since it was built under the same running maximum; correcting only one of them gives a wrong answer.\n\nMemory then drops from O(seq²) to O(seq): a handful of scalar registers and no seq×seq buffer at all. Real implementations tile on top of this, staging blocks of K and V through shared memory so that memory *traffic* falls as well.\n\nFlashAttention-4 shipped in March 2026, rewritten for Blackwell. The interesting part is that **the bottleneck moved**: tensor cores got faster while the SFU did not, so the exponentials in softmax became as expensive as the matmuls. The kernel now ping-pongs between two tiles to overlap one tile's matmuls with the other's exponentials. It also moved back from Triton to CuTe DSL, because Blackwell's TMA and TMEM need tile-level control that Triton does not expose."
+        }
       }
     ]
   },
