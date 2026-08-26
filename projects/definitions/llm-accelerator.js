@@ -6332,6 +6332,392 @@ const STAGE_24 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 25 关：序列并行                                                    */
+/* ------------------------------------------------------------------ */
+
+const SP_WAYS = 8;
+const SP_TOKENS = 64;
+const SP_HIDDEN = 64;
+const SP_LAYERS = 8;
+
+const SP_KERNELS = code`
+  __global__ void fill(float* a, float v, int n) {
+    int i = threadIdx.x;
+    if (i < n) a[i] = v;
+  }
+  // LayerNorm / dropout 这类逐元素算子的替身
+  __global__ void elementwise(float* a, float k, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) a[i] = a[i] * k;
+  }
+`;
+
+const spBench = {
+  sources: ['/root/sequenceparallel.cu'],
+  buffers: [
+    { name: 'check', length: SP_WAYS, fill: { kind: 'zeros' } },
+  ],
+  launches: [],
+};
+
+const STAGE_25 = {
+  id: 'sequence-parallel',
+  title: t('序列并行 —— 通信量不变，激活显存降 n 倍',
+    'Sequence parallelism — same communication, n times less activation memory'),
+  goal: t(
+    [
+      '上一关的张量并行只切了矩阵乘。**矩阵乘之间的那些算子没切** ——',
+      'LayerNorm、dropout、残差加，这些逐元素的操作在每张卡上都是',
+      '**在完整的激活上重复做一遍**。',
+      '',
+      '重复计算还是小事。真正贵的是**激活要留着给反向用** ——',
+      '8 层的模型，每张卡就得存 8 份完整的激活。',
+      '',
+      '序列并行的做法：既然这些算子是逐元素的，那就**按序列维度切开**，',
+      '每张卡只做 1/n、只存 1/n。',
+      '',
+      '关键在通信怎么接。张量并行末尾的 all-reduce 之后，每张卡都有完整的结果；',
+      '而序列并行只想要 1/n。这两件事合起来正好是 **reduce-scatter**：',
+      '',
+      '```',
+      '张量并行:  部分和 --[all-reduce]--> 完整激活 --> 逐元素(完整)',
+      '序列并行:  部分和 --[reduce-scatter]--> 1/n 激活 --> 逐元素(1/n)',
+      '                                                        |',
+      '                        下一个矩阵乘要完整输入 <--[all-gather]',
+      '```',
+      '',
+      '**而 `reduce-scatter + all-gather` 的通信量和一次 `all-reduce` 完全相同。**',
+      '回忆第 22 关：ring all-reduce 本来就是这两个阶段拼起来的，',
+      '各占 `(n-1)/n`，加起来正好 `2(n-1)/n`。',
+      '',
+      '所以序列并行是**白拿的**：通信一个字节不多，激活显存降到 1/n，',
+      '逐元素的计算也降到 1/n。',
+      '',
+      '```bash',
+      'nvcc -o bench sequenceparallel.cu && ncu ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 每张卡的显存峰值 ≤ 60 KB（只做张量并行是 144 KB）',
+      '- 逐元素的指令数 ≤ 20 万（只做张量并行是 121 万）',
+      '- **通信总量一个字节都不能少** —— 省的不是通信',
+    ].join('\n'),
+    [
+      'The tensor parallelism of the previous stage split only the matmuls. **The operators between',
+      'them were not split**: LayerNorm, dropout, the residual add. Every GPU repeats those',
+      'elementwise operations **on the full activation**.',
+      '',
+      'The repeated compute is the smaller problem. The expensive part is that **activations must be',
+      'kept for the backward pass**, so an 8-layer model stores 8 full activations per GPU.',
+      '',
+      'Sequence parallelism\'s answer: since those operators are elementwise, **split them along the',
+      'sequence dimension** so each GPU does 1/n of the work and stores 1/n of the result.',
+      '',
+      'The interesting part is how the communication connects. After tensor parallelism\'s final',
+      'all-reduce every GPU has the complete result; sequence parallelism only wants 1/n. Those two',
+      'together are exactly a **reduce-scatter**:',
+      '',
+      '```',
+      'TP:  partials --[all-reduce]--> full activation --> elementwise (full)',
+      'SP:  partials --[reduce-scatter]--> 1/n activation --> elementwise (1/n)',
+      '                                                            |',
+      '                        next matmul needs full <--[all-gather]',
+      '```',
+      '',
+      '**And `reduce-scatter + all-gather` costs exactly as much as one `all-reduce`.** Recall stage',
+      '22: ring all-reduce *is* those two phases stitched together, each costing `(n-1)/n`, together',
+      'exactly `2(n-1)/n`.',
+      '',
+      'So sequence parallelism is **free**: not one extra byte of communication, activation memory',
+      'down to 1/n, elementwise compute down to 1/n.',
+      '',
+      '```bash',
+      'nvcc -o bench sequenceparallel.cu && ncu ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- peak memory per GPU at most 60 KB (144 KB with tensor parallelism alone)',
+      '- at most 200k elementwise instructions (1.21M with TP alone)',
+      '- **not one byte less communication**: that is not what is being saved',
+    ].join('\n')
+  ),
+  checklist: [
+    t('把 all-reduce 换成 reduce-scatter', 'Replace the all-reduce with a reduce-scatter'),
+    t('每层的激活只分配 1/n', 'Allocate only 1/n of each layer\'s activation'),
+    t('逐元素算子只在自己那一段上做', 'Run the elementwise operator on your own slice only'),
+    t('下一个矩阵乘之前用 all-gather 凑回完整的',
+      'Use an all-gather to reassemble the full tensor before the next matmul'),
+  ],
+  hints: [
+    t('`ncclReduceScatter` 的第三个参数是**收到多少个**（`recvcount`），'
+      + '不是发出去多少个 —— 发的是 `recvcount × n`。',
+      'The third argument to `ncclReduceScatter` is how many elements you **receive** '
+      + '(`recvcount`), not how many you send: you send `recvcount x n`.'),
+    t('all-gather 凑回来的那块可以各层复用 —— 它是过渡用的，不需要留给反向。'
+      + '要留的是 reduce-scatter 之后那 1/n。',
+      'The buffer the all-gather fills can be reused across layers; it is transient and not needed '
+      + 'for backward. What must be kept is the 1/n from the reduce-scatter.'),
+  ],
+  pitfalls: [
+    t('**all-gather 之后的那块也留着不放。** 那就白做了 —— '
+      + '省显存的关键是"完整的那份只在过渡时存在"。',
+      '**Keeping the all-gathered buffer around too.** That defeats the point: the saving depends on '
+      + 'the full copy existing only transiently.'),
+    t('**以为 reduce-scatter 比 all-reduce 便宜一半就够了。** '
+      + '它确实只有一半，但你还要加上 all-gather 的另一半 —— 加起来一样。'
+      + '序列并行省的是显存与逐元素计算，**不是通信**。',
+      '**Assuming reduce-scatter alone is the win because it costs half.** It does cost half, but '
+      + 'you still pay the all-gather\'s other half, and the total is identical. Sequence '
+      + 'parallelism saves memory and elementwise compute, **not communication**.'),
+  ],
+  extension: t(
+    '序列并行出自 Megatron 的后续论文（Reducing Activation Recomputation in Large '
+    + 'Transformer Models，2022），和选择性激活重算是同一篇里的两个手段。'
+    + '论文里报的是激活显存降到约 1/5，而**通信量完全不变**。'
+    + '\n\n'
+    + '值得体会的是这一关和前两关的对照。三关都在动通信，但动的维度完全不同：'
+    + '\n\n'
+    + '| 关 | 总字节 | 消息数 | 分布 | 换来了什么 |'
+    + '\n| --- | --- | --- | --- | --- |'
+    + '\n| 22 ring | 不变 | 涨 n 倍 | **摊开** | 瓶颈降 n/2 |'
+    + '\n| 23 分桶 | 不变 | **降** | 不变 | 每消息开销 |'
+    + '\n| 25 序列并行 | **不变** | 不变 | 不变 | 显存与计算降 n 倍 |'
+    + '\n\n'
+    + '三次优化，通信总量一次都没降。这不是巧合 ——'
+    + '集合通信的总量由算法的语义定死了（人人都要拿到那个和），'
+    + '能动的只有分布、粒度、以及"用哪个集合操作把它接到别的优化上"。'
+    + '\n\n'
+    + '再往前一步就是上下文并行（Ring Attention）：'
+    + '序列并行切的是逐元素算子，注意力本身还是每张卡算完整的；'
+    + '上下文并行把注意力也按序列切开，代价是注意力内部要转一圈 KV。'
+    + '那是长上下文训练（百万 token）的必需品。',
+    'Sequence parallelism comes from Megatron\'s follow-up paper (Reducing Activation Recomputation '
+    + 'in Large Transformer Models, 2022), alongside selective activation recomputation. The paper '
+    + 'reports activation memory falling to roughly a fifth with **communication volume unchanged**.'
+    + '\n\nThe contrast with the previous stages is worth sitting with. All three touch '
+    + 'communication, along completely different axes:\n\n'
+    + '| stage | total bytes | messages | distribution | what it buys |\n'
+    + '| --- | --- | --- | --- | --- |\n'
+    + '| 22 ring | same | n times more | **spread out** | bottleneck down n/2 |\n'
+    + '| 23 bucketing | same | **fewer** | same | per-message overhead |\n'
+    + '| 25 sequence parallel | **same** | same | same | memory and compute down n |\n\n'
+    + 'Three optimisations and the total never dropped once. That is not a coincidence: the volume '
+    + 'of a collective is fixed by its semantics (everyone needs that sum). What you can change is '
+    + 'the distribution, the granularity, and which collective you use to connect it to another '
+    + 'optimisation.\n\n'
+    + 'One step further is context parallelism (Ring Attention). Sequence parallelism splits the '
+    + 'elementwise operators while attention itself still runs whole on every GPU; context '
+    + 'parallelism splits attention along the sequence too, at the cost of passing KV around a ring '
+    + 'inside attention. That is what million-token training requires.'
+  ),
+  gpu: {
+    world: CLUSTER_WORLD,
+    files: {
+      '/root/sequenceparallel.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "nccl.h"
+
+        ${SP_KERNELS}
+
+        int main(void) {
+          const int TP = ${SP_WAYS};
+          const int FULL = ${SP_TOKENS * SP_HIDDEN};
+          const int SHARD = FULL / TP;
+          const int LAYERS = ${SP_LAYERS};
+
+          int devs[8];
+          for (int i = 0; i < TP; ++i) devs[i] = i;
+          int comms[8];
+          ncclCommInitAll(comms, TP, devs);
+
+          int part[8];
+          for (int i = 0; i < TP; ++i) {
+            cudaSetDevice(devs[i]);
+            float* p;
+            cudaMalloc((void**)&p, FULL * 4);
+            fill<<<1, 64>>>(p, 0.1f, 64);
+            part[i] = p;
+          }
+
+          // TODO: 每层 all-reduce 出一份**完整的**激活，逐元素算子在完整的
+          //       激活上做，而且每层都要留给反向。
+          //       改成 reduce-scatter + 1/n 的逐元素 + all-gather。
+          for (int layer = 0; layer < LAYERS; ++layer) {
+            int act[8];
+            for (int i = 0; i < TP; ++i) {
+              cudaSetDevice(devs[i]);
+              float* a;
+              cudaMalloc((void**)&a, FULL * 4);
+              act[i] = a;
+            }
+            ncclGroupStart();
+            for (int i = 0; i < TP; ++i) {
+              ncclAllReduce(part[i], act[i], FULL, ncclFloat, ncclSum, comms[i], 0);
+            }
+            ncclGroupEnd();
+            for (int i = 0; i < TP; ++i) {
+              cudaSetDevice(devs[i]);
+              elementwise<<<FULL / 64, 64>>>(act[i], 1.0009765625f, FULL);
+            }
+          }
+
+          float* check = lab_buffer(0);
+          float host[8];
+          for (int i = 0; i < TP; ++i) {
+            cudaSetDevice(devs[i]);
+            float one[1];
+            cudaMemcpy(one, part[i], 4, cudaMemcpyDeviceToHost);
+            host[i] = one[0];
+          }
+          cudaSetDevice(0);
+          cudaMemcpy(check, host, TP * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+    bench: spBench,
+    referenceFiles: {
+      '/root/sequenceparallel.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "nccl.h"
+
+        ${SP_KERNELS}
+
+        int main(void) {
+          const int TP = ${SP_WAYS};
+          const int FULL = ${SP_TOKENS * SP_HIDDEN};
+          const int SHARD = FULL / TP;
+          const int LAYERS = ${SP_LAYERS};
+
+          int devs[8];
+          for (int i = 0; i < TP; ++i) devs[i] = i;
+          int comms[8];
+          ncclCommInitAll(comms, TP, devs);
+
+          int part[8]; int gathered[8];
+          for (int i = 0; i < TP; ++i) {
+            cudaSetDevice(devs[i]);
+            float* p; float* g;
+            cudaMalloc((void**)&p, FULL * 4);
+            // 完整的那份**只在过渡时存在**，各层复用，不留给反向
+            cudaMalloc((void**)&g, FULL * 4);
+            fill<<<1, 64>>>(p, 0.1f, 64);
+            part[i] = p; gathered[i] = g;
+          }
+
+          for (int layer = 0; layer < LAYERS; ++layer) {
+            int act[8];
+            for (int i = 0; i < TP; ++i) {
+              cudaSetDevice(devs[i]);
+              float* a;
+              // 每层要留给反向的只有 1/n
+              cudaMalloc((void**)&a, SHARD * 4);
+              act[i] = a;
+            }
+
+            // all-reduce 换成 reduce-scatter：归约完每张卡只拿自己那一段。
+            // 注意第三个参数是**收到多少个**，发出去的是它的 n 倍
+            ncclGroupStart();
+            for (int i = 0; i < TP; ++i) {
+              ncclReduceScatter(part[i], act[i], SHARD, ncclFloat, ncclSum, comms[i], 0);
+            }
+            ncclGroupEnd();
+
+            // 逐元素算子只在自己那 1/n 上做
+            for (int i = 0; i < TP; ++i) {
+              cudaSetDevice(devs[i]);
+              elementwise<<<SHARD / 64, 64>>>(act[i], 1.0009765625f, SHARD);
+            }
+
+            // 下一个矩阵乘要完整的输入 —— all-gather 凑回来。
+            // reduce-scatter 的 (n-1)/n 加上这里的 (n-1)/n，
+            // 正好是一次 all-reduce 的 2(n-1)/n：**通信一个字节都没多**
+            ncclGroupStart();
+            for (int i = 0; i < TP; ++i) {
+              ncclAllGather(act[i], gathered[i], SHARD, ncclFloat, comms[i], 0);
+            }
+            ncclGroupEnd();
+          }
+
+          float* check = lab_buffer(0);
+          float host[8];
+          for (int i = 0; i < TP; ++i) {
+            cudaSetDevice(devs[i]);
+            float one[1];
+            cudaMemcpy(one, part[i], 4, cudaMemcpyDeviceToHost);
+            host[i] = one[0];
+          }
+          cudaSetDevice(0);
+          cudaMemcpy(check, host, TP * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('sequenceparallel.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const TP = ${SP_WAYS};
+
+      describe('序列并行', () => {
+        it('结果有限且一致', async () => {
+          await lab.buildAndRun();
+          const check = lab.buffer('check');
+          for (let i = 0; i < TP; i += 1) expect(Number.isFinite(check[i])).toBe(true);
+        });
+
+        it('**每张卡的激活显存降下来了**', async () => {
+          await lab.buildAndRun();
+          expect(lab.peakBytes()).toBeLessThanOrEqual(60 * 1024);
+        });
+
+        it('逐元素的计算也降到 1/n', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().inst.laneExecuted).toBeLessThanOrEqual(200000);
+        });
+
+        it('**通信总量一个字节都没少** —— 省的不是通信', async () => {
+          await lab.buildAndRun();
+          // reduce-scatter 的 (n-1)/n + all-gather 的 (n-1)/n = all-reduce 的 2(n-1)/n
+          expect(lab.comm().bytes).toBe(1835008);
+        });
+
+        it('消息数也一样', async () => {
+          await lab.buildAndRun();
+          expect(lab.comm().messages).toBe(896);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.memoryPeakBytes', op: 'lte', value: 60 * 1024,
+      zh: '每张卡的显存峰值（只做张量并行是 144KB）',
+      en: 'peak memory per GPU (144KB with tensor parallelism alone)',
+      unit: 'byte', dimension: 'throughput',
+    }),
+    gate({
+      metric: 'gpu.inst.laneExecuted', op: 'lte', value: 200000,
+      zh: '逐元素的指令数（只做张量并行是 121 万）',
+      en: 'elementwise instructions (1.21M with TP alone)',
+      unit: 'inst', dimension: 'throughput',
+    }),
+    gate({
+      metric: 'gpu.comm.bytes', op: 'gte', value: 1835008,
+      zh: '通信总量 —— 序列并行省的不是通信，少了就是算错了',
+      en: 'total communication: sequence parallelism does not save this, so a drop means a bug',
+      unit: 'byte', dimension: 'correctness',
+    }),
+  ],
+  focus: ['throughput', 'correctness'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -6398,5 +6784,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22, STAGE_23, STAGE_24],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22, STAGE_23, STAGE_24, STAGE_25],
 };

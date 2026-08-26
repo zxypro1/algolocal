@@ -1885,6 +1885,51 @@ const primers = {
         + 'communicates.'
       )
     ),
+    'sequence-parallel': t(
+      p(
+        '张量并行只切了矩阵乘，矩阵乘之间的那些算子没切 --'
+        + 'LayerNorm、dropout、残差加，这些逐元素的操作在每张卡上都是'
+        + '在完整的激活上重复做一遍。重复计算还是小事，'
+        + '真正贵的是激活要留着给反向用：几十层的模型，'
+        + '每张卡都得存几十份完整的激活。',
+        '序列并行的做法很直接：既然这些算子是逐元素的，'
+        + '那就按序列维度切开，每张卡只做 1/n、只存 1/n。'
+        + '有意思的是通信怎么接。张量并行末尾的 all-reduce 之后每张卡都有完整的结果，'
+        + '而序列并行只想要 1/n，这两件事合起来正好是一次 reduce-scatter；'
+        + '等到下一个矩阵乘需要完整输入时，再用 all-gather 凑回来。',
+        '关键在于 reduce-scatter 加 all-gather 的通信量和一次 all-reduce 完全相同。'
+        + 'ring all-reduce 本来就是这两个阶段拼起来的，各占 (n-1)/n，'
+        + '加起来正好 2(n-1)/n。所以序列并行是白拿的：'
+        + '通信一个字节不多，激活显存降到 1/n，逐元素的计算也降到 1/n。',
+        '值得体会的是这一关和前几关的对照。手写 ring 是把通信量摊开、'
+        + '梯度分桶是把消息数降下来、序列并行是通信完全不动而换来显存与计算 --'
+        + '三次优化，通信总量一次都没降。这不是巧合：'
+        + '集合通信的总量由算法的语义定死了，能动的只有分布、粒度、'
+        + '以及用哪个集合操作把它接到别的优化上。'
+      ),
+      p(
+        'Tensor parallelism splits only the matmuls; the operators between them are not split. '
+        + 'LayerNorm, dropout and the residual add are repeated on the full activation by every GPU. '
+        + 'The repeated compute is the smaller problem. The expensive part is that activations are '
+        + 'kept for the backward pass, so a model with dozens of layers stores dozens of full '
+        + 'activations per GPU.',
+        'Sequence parallelism is direct about it: since those operators are elementwise, split them '
+        + 'along the sequence so each GPU does and stores 1/n. The interesting part is how the '
+        + 'communication connects. After tensor parallelism\'s all-reduce every GPU has the whole '
+        + 'result while sequence parallelism wants only 1/n, and those two together are exactly a '
+        + 'reduce-scatter. When the next matmul needs the full tensor, an all-gather reassembles it.',
+        'The key is that reduce-scatter plus all-gather costs exactly as much as one all-reduce. A '
+        + 'ring all-reduce is those two phases stitched together, each costing (n-1)/n, together '
+        + '2(n-1)/n. So sequence parallelism is free: not one extra byte of communication, '
+        + 'activation memory down to 1/n, elementwise compute down to 1/n.',
+        'The contrast with earlier stages is worth sitting with. Hand-written ring spreads the '
+        + 'communication out, gradient bucketing reduces the message count, and sequence parallelism '
+        + 'leaves communication untouched while buying memory and compute. Three optimisations and '
+        + 'the total volume never dropped once. That is not a coincidence: the volume of a '
+        + 'collective is fixed by its semantics. What you can change is the distribution, the '
+        + 'granularity, and which collective connects it to another optimisation.'
+      )
+    ),
   },
 
   'intranet-k8s': {

@@ -26983,6 +26983,158 @@
           "zh": "模型大到一张卡放不下时，就得把单个权重矩阵切开放到多张卡上。切法有讲究：一个前馈层是两次矩阵乘，第一次按列切（每张卡算出中间结果的一竖条，各算各的、不需要通信），第二次按行切（每张卡拿自己那一竖条乘对应的横条，得到一个部分和）。所有部分和加起来才是答案，这需要一次 all-reduce。\n\n关键在于列并行的输出形状正好是行并行想要的输入形状。于是一整层只需要末尾一次通信。换成先行后列，中间就得凑一次，一层要两次 all-reduce --Megatron-LM 那篇论文最核心的设计就是这个顺序。注意力层是同一个套路：QKV 投影按头切等价于列并行，输出投影按行切。\n\n张量并行的通信频率极高。数据并行一步只 all-reduce 一次，而张量并行一个 Transformer 层就要两次（注意力一次、前馈一次），反向再两次，80 层的模型每步就是 320 次集合操作。这个频率决定了它对延迟极其敏感，也决定了它不能跨机。\n\n机内的 NVLink 和跨机的 InfiniBand 带宽差将近一个数量级，延迟差三倍。所以现实中的并行策略是分层的：张量并行只在机内，流水线并行跨机（每级之间只传一次激活），数据并行在最外层（每步一次 all-reduce，频率最低）。这几个维度的排布顺序，几乎完全由「这一维通信多频繁」决定。",
           "en": "When a model no longer fits on one GPU, individual weight matrices get split across GPUs, and how you split them matters. A feed-forward layer is two matmuls: split the first by columns (each GPU computes a vertical strip of the intermediate, independently, with no communication) and the second by rows (each GPU multiplies its strip by the matching horizontal strip and gets a partial sum). Summing the partials needs one all-reduce.\n\nThe key is that column-parallel output has exactly the shape row-parallel wants as input, so a whole layer needs one collective at the end. Row-then-column would need one in the middle as well, two per layer. That ordering is the core design of the Megatron-LM paper. Attention follows the same pattern: splitting QKV by head is equivalent to column parallel, and the output projection splits by row.\n\nTensor parallelism communicates extremely often. Data parallelism all-reduces once per step; tensor parallelism does it twice per Transformer layer (attention, feed-forward) plus twice more in backward, so an 80-layer model issues 320 collectives per step. That frequency makes it acutely latency-sensitive, and it is why it cannot span nodes.\n\nIn-node NVLink and cross-node InfiniBand differ by nearly an order of magnitude in bandwidth and threefold in latency. Real parallel strategies are therefore layered: tensor parallelism stays in-node, pipeline parallelism goes across nodes (one activation transfer per stage boundary), and data parallelism sits outermost with one all-reduce per step. The ordering of these dimensions is decided almost entirely by how often each one communicates."
         }
+      },
+      {
+        "id": "sequence-parallel",
+        "title": {
+          "zh": "序列并行 —— 通信量不变，激活显存降 n 倍",
+          "en": "Sequence parallelism — same communication, n times less activation memory"
+        },
+        "goal": {
+          "zh": "上一关的张量并行只切了矩阵乘。**矩阵乘之间的那些算子没切** ——\nLayerNorm、dropout、残差加，这些逐元素的操作在每张卡上都是\n**在完整的激活上重复做一遍**。\n\n重复计算还是小事。真正贵的是**激活要留着给反向用** ——\n8 层的模型，每张卡就得存 8 份完整的激活。\n\n序列并行的做法：既然这些算子是逐元素的，那就**按序列维度切开**，\n每张卡只做 1/n、只存 1/n。\n\n关键在通信怎么接。张量并行末尾的 all-reduce 之后，每张卡都有完整的结果；\n而序列并行只想要 1/n。这两件事合起来正好是 **reduce-scatter**：\n\n```\n张量并行:  部分和 --[all-reduce]--> 完整激活 --> 逐元素(完整)\n序列并行:  部分和 --[reduce-scatter]--> 1/n 激活 --> 逐元素(1/n)\n                                                        |\n                        下一个矩阵乘要完整输入 <--[all-gather]\n```\n\n**而 `reduce-scatter + all-gather` 的通信量和一次 `all-reduce` 完全相同。**\n回忆第 22 关：ring all-reduce 本来就是这两个阶段拼起来的，\n各占 `(n-1)/n`，加起来正好 `2(n-1)/n`。\n\n所以序列并行是**白拿的**：通信一个字节不多，激活显存降到 1/n，\n逐元素的计算也降到 1/n。\n\n```bash\nnvcc -o bench sequenceparallel.cu && ncu ./bench\n```\n\n**通关标准**\n\n- 每张卡的显存峰值 ≤ 60 KB（只做张量并行是 144 KB）\n- 逐元素的指令数 ≤ 20 万（只做张量并行是 121 万）\n- **通信总量一个字节都不能少** —— 省的不是通信",
+          "en": "The tensor parallelism of the previous stage split only the matmuls. **The operators between\nthem were not split**: LayerNorm, dropout, the residual add. Every GPU repeats those\nelementwise operations **on the full activation**.\n\nThe repeated compute is the smaller problem. The expensive part is that **activations must be\nkept for the backward pass**, so an 8-layer model stores 8 full activations per GPU.\n\nSequence parallelism's answer: since those operators are elementwise, **split them along the\nsequence dimension** so each GPU does 1/n of the work and stores 1/n of the result.\n\nThe interesting part is how the communication connects. After tensor parallelism's final\nall-reduce every GPU has the complete result; sequence parallelism only wants 1/n. Those two\ntogether are exactly a **reduce-scatter**:\n\n```\nTP:  partials --[all-reduce]--> full activation --> elementwise (full)\nSP:  partials --[reduce-scatter]--> 1/n activation --> elementwise (1/n)\n                                                            |\n                        next matmul needs full <--[all-gather]\n```\n\n**And `reduce-scatter + all-gather` costs exactly as much as one `all-reduce`.** Recall stage\n22: ring all-reduce *is* those two phases stitched together, each costing `(n-1)/n`, together\nexactly `2(n-1)/n`.\n\nSo sequence parallelism is **free**: not one extra byte of communication, activation memory\ndown to 1/n, elementwise compute down to 1/n.\n\n```bash\nnvcc -o bench sequenceparallel.cu && ncu ./bench\n```\n\n**To pass**\n\n- peak memory per GPU at most 60 KB (144 KB with tensor parallelism alone)\n- at most 200k elementwise instructions (1.21M with TP alone)\n- **not one byte less communication**: that is not what is being saved"
+        },
+        "checklist": [
+          {
+            "zh": "把 all-reduce 换成 reduce-scatter",
+            "en": "Replace the all-reduce with a reduce-scatter"
+          },
+          {
+            "zh": "每层的激活只分配 1/n",
+            "en": "Allocate only 1/n of each layer's activation"
+          },
+          {
+            "zh": "逐元素算子只在自己那一段上做",
+            "en": "Run the elementwise operator on your own slice only"
+          },
+          {
+            "zh": "下一个矩阵乘之前用 all-gather 凑回完整的",
+            "en": "Use an all-gather to reassemble the full tensor before the next matmul"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "`ncclReduceScatter` 的第三个参数是**收到多少个**（`recvcount`），不是发出去多少个 —— 发的是 `recvcount × n`。",
+            "en": "The third argument to `ncclReduceScatter` is how many elements you **receive** (`recvcount`), not how many you send: you send `recvcount x n`."
+          },
+          {
+            "zh": "all-gather 凑回来的那块可以各层复用 —— 它是过渡用的，不需要留给反向。要留的是 reduce-scatter 之后那 1/n。",
+            "en": "The buffer the all-gather fills can be reused across layers; it is transient and not needed for backward. What must be kept is the 1/n from the reduce-scatter."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**all-gather 之后的那块也留着不放。** 那就白做了 —— 省显存的关键是\"完整的那份只在过渡时存在\"。",
+            "en": "**Keeping the all-gathered buffer around too.** That defeats the point: the saving depends on the full copy existing only transiently."
+          },
+          {
+            "zh": "**以为 reduce-scatter 比 all-reduce 便宜一半就够了。** 它确实只有一半，但你还要加上 all-gather 的另一半 —— 加起来一样。序列并行省的是显存与逐元素计算，**不是通信**。",
+            "en": "**Assuming reduce-scatter alone is the win because it costs half.** It does cost half, but you still pay the all-gather's other half, and the total is identical. Sequence parallelism saves memory and elementwise compute, **not communication**."
+          }
+        ],
+        "extension": {
+          "zh": "序列并行出自 Megatron 的后续论文（Reducing Activation Recomputation in Large Transformer Models，2022），和选择性激活重算是同一篇里的两个手段。论文里报的是激活显存降到约 1/5，而**通信量完全不变**。\n\n值得体会的是这一关和前两关的对照。三关都在动通信，但动的维度完全不同：\n\n| 关 | 总字节 | 消息数 | 分布 | 换来了什么 |\n| --- | --- | --- | --- | --- |\n| 22 ring | 不变 | 涨 n 倍 | **摊开** | 瓶颈降 n/2 |\n| 23 分桶 | 不变 | **降** | 不变 | 每消息开销 |\n| 25 序列并行 | **不变** | 不变 | 不变 | 显存与计算降 n 倍 |\n\n三次优化，通信总量一次都没降。这不是巧合 ——集合通信的总量由算法的语义定死了（人人都要拿到那个和），能动的只有分布、粒度、以及\"用哪个集合操作把它接到别的优化上\"。\n\n再往前一步就是上下文并行（Ring Attention）：序列并行切的是逐元素算子，注意力本身还是每张卡算完整的；上下文并行把注意力也按序列切开，代价是注意力内部要转一圈 KV。那是长上下文训练（百万 token）的必需品。",
+          "en": "Sequence parallelism comes from Megatron's follow-up paper (Reducing Activation Recomputation in Large Transformer Models, 2022), alongside selective activation recomputation. The paper reports activation memory falling to roughly a fifth with **communication volume unchanged**.\n\nThe contrast with the previous stages is worth sitting with. All three touch communication, along completely different axes:\n\n| stage | total bytes | messages | distribution | what it buys |\n| --- | --- | --- | --- | --- |\n| 22 ring | same | n times more | **spread out** | bottleneck down n/2 |\n| 23 bucketing | same | **fewer** | same | per-message overhead |\n| 25 sequence parallel | **same** | same | same | memory and compute down n |\n\nThree optimisations and the total never dropped once. That is not a coincidence: the volume of a collective is fixed by its semantics (everyone needs that sum). What you can change is the distribution, the granularity, and which collective you use to connect it to another optimisation.\n\nOne step further is context parallelism (Ring Attention). Sequence parallelism splits the elementwise operators while attention itself still runs whole on every GPU; context parallelism splits attention along the sequence too, at the cost of passing KV around a ring inside attention. That is what million-token training requires."
+        },
+        "gpu": {
+          "world": {
+            "globalBytes": 4194304,
+            "cluster": {
+              "devices": 8,
+              "devicesPerNode": 8
+            }
+          },
+          "files": {
+            "/root/sequenceparallel.cu": "        #include \"engine.h\"\n        #include \"cluster.h\"\n        #include \"nccl.h\"\n\n        __global__ void fill(float* a, float v, int n) {\n  int i = threadIdx.x;\n  if (i < n) a[i] = v;\n}\n// LayerNorm / dropout 这类逐元素算子的替身\n__global__ void elementwise(float* a, float k, int n) {\n  int i = blockIdx.x * blockDim.x + threadIdx.x;\n  if (i < n) a[i] = a[i] * k;\n}\n\n\n        int main(void) {\n          const int TP = 8;\n          const int FULL = 4096;\n          const int SHARD = FULL / TP;\n          const int LAYERS = 8;\n\n          int devs[8];\n          for (int i = 0; i < TP; ++i) devs[i] = i;\n          int comms[8];\n          ncclCommInitAll(comms, TP, devs);\n\n          int part[8];\n          for (int i = 0; i < TP; ++i) {\n            cudaSetDevice(devs[i]);\n            float* p;\n            cudaMalloc((void**)&p, FULL * 4);\n            fill<<<1, 64>>>(p, 0.1f, 64);\n            part[i] = p;\n          }\n\n          // TODO: 每层 all-reduce 出一份**完整的**激活，逐元素算子在完整的\n          //       激活上做，而且每层都要留给反向。\n          //       改成 reduce-scatter + 1/n 的逐元素 + all-gather。\n          for (int layer = 0; layer < LAYERS; ++layer) {\n            int act[8];\n            for (int i = 0; i < TP; ++i) {\n              cudaSetDevice(devs[i]);\n              float* a;\n              cudaMalloc((void**)&a, FULL * 4);\n              act[i] = a;\n            }\n            ncclGroupStart();\n            for (int i = 0; i < TP; ++i) {\n              ncclAllReduce(part[i], act[i], FULL, ncclFloat, ncclSum, comms[i], 0);\n            }\n            ncclGroupEnd();\n            for (int i = 0; i < TP; ++i) {\n              cudaSetDevice(devs[i]);\n              elementwise<<<FULL / 64, 64>>>(act[i], 1.0009765625f, FULL);\n            }\n          }\n\n          float* check = lab_buffer(0);\n          float host[8];\n          for (int i = 0; i < TP; ++i) {\n            cudaSetDevice(devs[i]);\n            float one[1];\n            cudaMemcpy(one, part[i], 4, cudaMemcpyDeviceToHost);\n            host[i] = one[0];\n          }\n          cudaSetDevice(0);\n          cudaMemcpy(check, host, TP * 4, cudaMemcpyHostToDevice);\n          return 0;\n        }\n"
+          },
+          "bench": {
+            "sources": [
+              "/root/sequenceparallel.cu"
+            ],
+            "buffers": [
+              {
+                "name": "check",
+                "length": 8,
+                "fill": {
+                  "kind": "zeros"
+                }
+              }
+            ],
+            "launches": []
+          },
+          "referenceFiles": {
+            "/root/sequenceparallel.cu": "        #include \"engine.h\"\n        #include \"cluster.h\"\n        #include \"nccl.h\"\n\n        __global__ void fill(float* a, float v, int n) {\n  int i = threadIdx.x;\n  if (i < n) a[i] = v;\n}\n// LayerNorm / dropout 这类逐元素算子的替身\n__global__ void elementwise(float* a, float k, int n) {\n  int i = blockIdx.x * blockDim.x + threadIdx.x;\n  if (i < n) a[i] = a[i] * k;\n}\n\n\n        int main(void) {\n          const int TP = 8;\n          const int FULL = 4096;\n          const int SHARD = FULL / TP;\n          const int LAYERS = 8;\n\n          int devs[8];\n          for (int i = 0; i < TP; ++i) devs[i] = i;\n          int comms[8];\n          ncclCommInitAll(comms, TP, devs);\n\n          int part[8]; int gathered[8];\n          for (int i = 0; i < TP; ++i) {\n            cudaSetDevice(devs[i]);\n            float* p; float* g;\n            cudaMalloc((void**)&p, FULL * 4);\n            // 完整的那份**只在过渡时存在**，各层复用，不留给反向\n            cudaMalloc((void**)&g, FULL * 4);\n            fill<<<1, 64>>>(p, 0.1f, 64);\n            part[i] = p; gathered[i] = g;\n          }\n\n          for (int layer = 0; layer < LAYERS; ++layer) {\n            int act[8];\n            for (int i = 0; i < TP; ++i) {\n              cudaSetDevice(devs[i]);\n              float* a;\n              // 每层要留给反向的只有 1/n\n              cudaMalloc((void**)&a, SHARD * 4);\n              act[i] = a;\n            }\n\n            // all-reduce 换成 reduce-scatter：归约完每张卡只拿自己那一段。\n            // 注意第三个参数是**收到多少个**，发出去的是它的 n 倍\n            ncclGroupStart();\n            for (int i = 0; i < TP; ++i) {\n              ncclReduceScatter(part[i], act[i], SHARD, ncclFloat, ncclSum, comms[i], 0);\n            }\n            ncclGroupEnd();\n\n            // 逐元素算子只在自己那 1/n 上做\n            for (int i = 0; i < TP; ++i) {\n              cudaSetDevice(devs[i]);\n              elementwise<<<SHARD / 64, 64>>>(act[i], 1.0009765625f, SHARD);\n            }\n\n            // 下一个矩阵乘要完整的输入 —— all-gather 凑回来。\n            // reduce-scatter 的 (n-1)/n 加上这里的 (n-1)/n，\n            // 正好是一次 all-reduce 的 2(n-1)/n：**通信一个字节都没多**\n            ncclGroupStart();\n            for (int i = 0; i < TP; ++i) {\n              ncclAllGather(act[i], gathered[i], SHARD, ncclFloat, comms[i], 0);\n            }\n            ncclGroupEnd();\n          }\n\n          float* check = lab_buffer(0);\n          float host[8];\n          for (int i = 0; i < TP; ++i) {\n            cudaSetDevice(devs[i]);\n            float one[1];\n            cudaMemcpy(one, part[i], 4, cudaMemcpyDeviceToHost);\n            host[i] = one[0];\n          }\n          cudaSetDevice(0);\n          cudaMemcpy(check, host, TP * 4, cudaMemcpyHostToDevice);\n          return 0;\n        }\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "sequenceparallel.spec.ts",
+            "content": "const lab = require('@gpu/lab');\nconst TP = 8;\n\ndescribe('序列并行', () => {\n  it('结果有限且一致', async () => {\n    await lab.buildAndRun();\n    const check = lab.buffer('check');\n    for (let i = 0; i < TP; i += 1) expect(Number.isFinite(check[i])).toBe(true);\n  });\n\n  it('**每张卡的激活显存降下来了**', async () => {\n    await lab.buildAndRun();\n    expect(lab.peakBytes()).toBeLessThanOrEqual(60 * 1024);\n  });\n\n  it('逐元素的计算也降到 1/n', async () => {\n    await lab.buildAndRun();\n    expect(lab.metrics().inst.laneExecuted).toBeLessThanOrEqual(200000);\n  });\n\n  it('**通信总量一个字节都没少** —— 省的不是通信', async () => {\n    await lab.buildAndRun();\n    // reduce-scatter 的 (n-1)/n + all-gather 的 (n-1)/n = all-reduce 的 2(n-1)/n\n    expect(lab.comm().bytes).toBe(1835008);\n  });\n\n  it('消息数也一样', async () => {\n    await lab.buildAndRun();\n    expect(lab.comm().messages).toBe(896);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "gpu.sanitizer.races",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "数据竞态",
+              "en": "data races"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.sanitizer.warpSyncErrors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "warp 同步用错",
+              "en": "warp sync errors"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.memoryPeakBytes",
+            "op": "lte",
+            "value": 61440,
+            "label": {
+              "zh": "每张卡的显存峰值（只做张量并行是 144KB）",
+              "en": "peak memory per GPU (144KB with tensor parallelism alone)"
+            },
+            "unit": "byte",
+            "dimension": "throughput"
+          },
+          {
+            "metric": "gpu.inst.laneExecuted",
+            "op": "lte",
+            "value": 200000,
+            "label": {
+              "zh": "逐元素的指令数（只做张量并行是 121 万）",
+              "en": "elementwise instructions (1.21M with TP alone)"
+            },
+            "unit": "inst",
+            "dimension": "throughput"
+          },
+          {
+            "metric": "gpu.comm.bytes",
+            "op": "gte",
+            "value": 1835008,
+            "label": {
+              "zh": "通信总量 —— 序列并行省的不是通信，少了就是算错了",
+              "en": "total communication: sequence parallelism does not save this, so a drop means a bug"
+            },
+            "unit": "byte",
+            "dimension": "correctness"
+          }
+        ],
+        "focus": [
+          "throughput",
+          "correctness"
+        ],
+        "primer": {
+          "zh": "张量并行只切了矩阵乘，矩阵乘之间的那些算子没切 --LayerNorm、dropout、残差加，这些逐元素的操作在每张卡上都是在完整的激活上重复做一遍。重复计算还是小事，真正贵的是激活要留着给反向用：几十层的模型，每张卡都得存几十份完整的激活。\n\n序列并行的做法很直接：既然这些算子是逐元素的，那就按序列维度切开，每张卡只做 1/n、只存 1/n。有意思的是通信怎么接。张量并行末尾的 all-reduce 之后每张卡都有完整的结果，而序列并行只想要 1/n，这两件事合起来正好是一次 reduce-scatter；等到下一个矩阵乘需要完整输入时，再用 all-gather 凑回来。\n\n关键在于 reduce-scatter 加 all-gather 的通信量和一次 all-reduce 完全相同。ring all-reduce 本来就是这两个阶段拼起来的，各占 (n-1)/n，加起来正好 2(n-1)/n。所以序列并行是白拿的：通信一个字节不多，激活显存降到 1/n，逐元素的计算也降到 1/n。\n\n值得体会的是这一关和前几关的对照。手写 ring 是把通信量摊开、梯度分桶是把消息数降下来、序列并行是通信完全不动而换来显存与计算 --三次优化，通信总量一次都没降。这不是巧合：集合通信的总量由算法的语义定死了，能动的只有分布、粒度、以及用哪个集合操作把它接到别的优化上。",
+          "en": "Tensor parallelism splits only the matmuls; the operators between them are not split. LayerNorm, dropout and the residual add are repeated on the full activation by every GPU. The repeated compute is the smaller problem. The expensive part is that activations are kept for the backward pass, so a model with dozens of layers stores dozens of full activations per GPU.\n\nSequence parallelism is direct about it: since those operators are elementwise, split them along the sequence so each GPU does and stores 1/n. The interesting part is how the communication connects. After tensor parallelism's all-reduce every GPU has the whole result while sequence parallelism wants only 1/n, and those two together are exactly a reduce-scatter. When the next matmul needs the full tensor, an all-gather reassembles it.\n\nThe key is that reduce-scatter plus all-gather costs exactly as much as one all-reduce. A ring all-reduce is those two phases stitched together, each costing (n-1)/n, together 2(n-1)/n. So sequence parallelism is free: not one extra byte of communication, activation memory down to 1/n, elementwise compute down to 1/n.\n\nThe contrast with earlier stages is worth sitting with. Hand-written ring spreads the communication out, gradient bucketing reduces the message count, and sequence parallelism leaves communication untouched while buying memory and compute. Three optimisations and the total volume never dropped once. That is not a coincidence: the volume of a collective is fixed by its semantics. What you can change is the distribution, the granularity, and which collective connects it to another optimisation."
+        }
       }
     ]
   },
