@@ -440,15 +440,21 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                 </div>
               </Tabs.Panel>
 
+              {/**
+                * 拓扑这一页切走就卸载，和别的页不一样。
+                *
+                * 它是世界的纯投影，没有自己的状态，卸载不丢任何东西；而留着的话
+                * 代价很实在：隐藏期间 ReactFlow 把每个节点量成 0×0，切回来时
+                * fitView 按错的包围盒算，缩放停在最小值 0.5，看着就是一张空白画布
+                * （要再切一次才正常）。重新挂载则是它最顺的那条路 —— 容器一开始
+                * 就有尺寸，`fitView` 属性自己就对了。
+                */}
               <Tabs.Panel value="topology" style={{ flex: 1, minHeight: 0 }}>
-                <ErrorBoundary fallback={renderPanelError}>
-                  <TopologyView
-                    graph={ops.topology}
-                    onInspect={handleInspect}
-                    highlight={highlight}
-                    active={rightTab === 'topology'}
-                  />
-                </ErrorBoundary>
+                {rightTab === 'topology' && (
+                  <ErrorBoundary fallback={renderPanelError}>
+                    <TopologyView graph={ops.topology} onInspect={handleInspect} highlight={highlight} />
+                  </ErrorBoundary>
+                )}
               </Tabs.Panel>
 
               <Tabs.Panel value="changes" style={{ flex: 1, minHeight: 0 }}>
