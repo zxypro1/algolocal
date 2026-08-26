@@ -1484,6 +1484,73 @@ const primers = {
         + 'element-wise work that follows it is called epilogue fusion.'
       )
     ),
+    'naive-attention': t(
+      p(
+        '注意力回答的是「这个位置该关注序列里的哪些位置」。'
+        + '公式是 `O = softmax(Q K^T / sqrt(d)) V`：Q 与 K 的点积给出每对位置之间的相关分数，'
+        + 'softmax 把一行分数变成权重，再拿权重去加权 V。',
+        '除以 `sqrt(d)` 不是可有可无的。点积是 d 项求和，量级随 d 增长；'
+        + '不缩放的话进 softmax 的数就太大，指数一拉开就退化成 one-hot，梯度也几乎消失。',
+        '按定义直接实现要先把分数矩阵 `S` 算出来。'
+        + 'S 的形状是 seq × seq，也就是说**它的大小随序列长度平方增长**。'
+        + 'seq=128 时只有 64KB，seq=8192 时单个头就是 256MB，再乘上头数与批大小就完全放不下了。',
+        '这是长上下文的根本困难。研究界给出的路线大致三条：'
+        + '稀疏注意力只算一部分分数、线性注意力换一种结合顺序绕开 seq×seq、'
+        + '而 FlashAttention 选择了保留全部计算但**不把 S 存下来**。'
+      ),
+      p(
+        'Attention answers the question of which positions in a sequence a given position should attend '
+        + 'to. The formula is `O = softmax(Q K^T / sqrt(d)) V`: the dot product of Q and K gives a '
+        + 'relevance score for each pair of positions, softmax turns a row of scores into weights, and '
+        + 'those weights combine the rows of V.',
+        'The `sqrt(d)` divisor is not optional. A dot product sums d terms and grows with d; without the '
+        + 'scaling the numbers entering softmax are too large, the exponentials spread out into a nearly '
+        + 'one-hot distribution, and gradients all but vanish.',
+        'A literal implementation must build the score matrix `S` first. S has shape seq × seq, meaning '
+        + '**its size grows with the square of the sequence length**. At seq=128 that is 64KB; at '
+        + 'seq=8192 a single head is 256MB, and multiplying by head count and batch size makes it '
+        + 'impossible to hold.',
+        'This is the fundamental difficulty of long context. Research has taken roughly three routes: '
+        + 'sparse attention computes only some scores, linear attention reassociates the products to '
+        + 'avoid the seq×seq matrix entirely, and FlashAttention keeps the full computation but '
+        + '**never stores S**.'
+      )
+    ),
+    'flash-attention': t(
+      p(
+        'FlashAttention 的出发点是一句朴素的观察：**S 只是中间结果，没人需要它。**'
+        + '既然最终要的是 `O`，那就一边算分数、一边做 softmax、一边加权 V，算完就扔。',
+        '难点在 softmax 需要整行的最大值与和，而这两个量要走完整行才知道。'
+        + '在线 softmax 解决了它：维护当前的 (m, l)，见到更大的分数就把已经攒的部分'
+        + '按 `exp(m_old - m_new)` 缩放一下。**输出累加器也要按同一个因子缩放** --'
+        + '它和分母是在同一个 max 下算出来的，只修正一个就会算错。',
+        '于是显存从 O(seq²) 降到 O(seq)：只需要几个标量寄存器，不需要任何 seq×seq 的缓冲区。'
+        + '真实现还会在这之上分块：K 与 V 按块搬进共享内存，于是访存量也降下来。',
+        'FlashAttention-4 在 2026 年 3 月发布，针对 Blackwell 重写。'
+        + '有意思的地方在于**瓶颈换了**：tensor core 变快了而 SFU 没跟上，'
+        + 'softmax 里那个指数运算变得和矩阵乘一样贵，于是要在两个 tile 之间 ping-pong，'
+        + '让一块的矩阵乘和另一块的指数重叠。它也因此从 Triton 退回了 CuTe DSL --'
+        + 'Blackwell 的 TMA 与 TMEM 需要 tile 级控制，Triton 的抽象暴露不出来。'
+      ),
+      p(
+        'FlashAttention starts from a plain observation: **S is only an intermediate and nobody needs '
+        + 'it**. Since the goal is `O`, compute scores, apply softmax and weight V in a single pass, '
+        + 'discarding each score as soon as it has been used.',
+        'The obstacle is that softmax needs the maximum and sum of the whole row, and neither is known '
+        + 'until the row is finished. Online softmax solves it: keep a running (m, l) and rescale what '
+        + 'has been accumulated by `exp(m_old - m_new)` whenever a larger score appears. **The output '
+        + 'accumulator must be rescaled by the same factor**, since it was built under the same running '
+        + 'maximum; correcting only one of them gives a wrong answer.',
+        'Memory then drops from O(seq²) to O(seq): a handful of scalar registers and no seq×seq buffer '
+        + 'at all. Real implementations tile on top of this, staging blocks of K and V through shared '
+        + 'memory so that memory *traffic* falls as well.',
+        'FlashAttention-4 shipped in March 2026, rewritten for Blackwell. The interesting part is that '
+        + '**the bottleneck moved**: tensor cores got faster while the SFU did not, so the exponentials '
+        + 'in softmax became as expensive as the matmuls. The kernel now ping-pongs between two tiles to '
+        + 'overlap one tile\'s matmuls with the other\'s exponentials. It also moved back from Triton to '
+        + 'CuTe DSL, because Blackwell\'s TMA and TMEM need tile-level control that Triton does not expose.'
+      )
+    ),
   },
 
   'intranet-k8s': {
