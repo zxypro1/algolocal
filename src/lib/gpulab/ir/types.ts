@@ -40,7 +40,15 @@ export type BuiltinFn =
   | '__expf' | '__logf' | '__fdividef'
   | 'min' | 'max' | 'abs'
   /** 位操作 —— 和 __ballot_sync 配套用，数掩码里有几位、最低位在哪 */
-  | '__popc' | '__clz' | '__ffs';
+  | '__popc' | '__clz' | '__ffs'
+  /**
+   * fp8 转换，名字与参数照抄 `cuda_fp8.h`。
+   *
+   * **一处刻意的偏差**：真 CUDA 的 `__nv_cvt_fp8_to_halfraw` 返回
+   * `__half_raw`（一个结构体），这个子集没有 struct，所以直接返回 half。
+   * 语义没有区别，写法上少一次 `.x`。这条偏差写在 `cuda_fp8.h` 的注释里。
+   */
+  | '__nv_cvt_float_to_fp8' | '__nv_cvt_fp8_to_halfraw';
 
 /**
  * warp 内的数据交换方式。

@@ -290,3 +290,150 @@ export function floatToUint(value: number): number {
   if (Number.isNaN(value) || value < 0) return 0;
   return Math.trunc(value) >>> 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* fp8                                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * fp8 的两种格式。
+ *
+ * 这两个名字与位宽分配来自 OCP 的 FP8 规范，也是 CUDA `cuda_fp8.h` 里
+ * `__nv_fp8_interpretation_t` 的两个取值：
+ *
+ *   E4M3：4 位指数 3 位尾数，最大 448，最小正规数 2^-6。**没有 inf**，
+ *         0x7F / 0xFF 是 NaN。推理里权重与激活用它 —— 尾数多一位，
+ *         而推理的动态范围本来就该靠 scale 压住。
+ *   E5M2：5 位指数 2 位尾数，最大 57344，有 inf 也有 NaN，
+ *         和 IEEE 的规矩一致。动态范围大但精度差，训练里的梯度用它。
+ *
+ * **注意 E4M3 的动态范围有多窄**：从 2^-9（最小次正规数）到 448，
+ * 也就是不到 19 个二进制数量级。fp32 是 277 个。
+ * 所有量化工程的难处都从这一行开始。
+ */
+export interface Fp8Format {
+  /** 尾数位数 */
+  mantissaBits: number;
+  /** 最小正规数的指数 */
+  minNormalExp: number;
+  /** 能表示的最大有限值 */
+  maxFinite: number;
+  /** 有没有 inf（E4M3 没有） */
+  hasInfinity: boolean;
+}
+
+export const FP8_E4M3: Fp8Format = {
+  mantissaBits: 3, minNormalExp: -6, maxFinite: 448, hasInfinity: false,
+};
+
+export const FP8_E5M2: Fp8Format = {
+  mantissaBits: 2, minNormalExp: -14, maxFinite: 57344, hasInfinity: true,
+};
+
+/**
+ * 舍到某个 fp8 格式能表示的最近的值。
+ *
+ * 舍入规则和 fp16 那条一样是就近取偶 —— 理由也一样：
+ * 我们对外承诺重放逐位一致。
+ */
+/**
+ * 舍到某个 fp8 格式能表示的最近的值。
+ *
+ * `saturate` 对应真 API 的 `__nv_saturation_t`：
+ *
+ *   SATFINITE（推理里的默认）：超出范围的夹到最大有限值。
+ *     **这是有意的** —— 一个溢出的激活值变成 inf，会顺着 softmax
+ *     传染成一整行 NaN，而夹住只是这一个数不准。
+ *   NOSAT：按 IEEE 的规矩来，E5M2 溢出成 inf，E4M3 没有 inf 所以是 NaN。
+ *
+ * 舍入规则和 fp16 那条一样是就近取偶 —— 理由也一样：
+ * 我们对外承诺重放逐位一致。
+ */
+export function toFp8(value: number, format: Fp8Format, saturate = true): number {
+  if (Number.isNaN(value)) return NaN;
+  if (value === 0) return value;
+
+  const sign = value < 0 ? -1 : 1;
+
+  // 非有限的输入要先处理掉：往下走的话 `Math.log2(Infinity)` 会让
+  // step 也变成 Infinity，`Infinity / Infinity` 就是 NaN，
+  // 于是一个 inf 悄悄变成 NaN
+  if (!Number.isFinite(value)) {
+    if (!saturate) return format.hasInfinity ? sign * Infinity : NaN;
+    return sign * format.maxFinite;
+  }
+
+  const abs = Math.abs(value);
+
+  // 次正规数的步长固定在 2^(minNormalExp - mantissaBits)
+  const subnormalStep = Math.pow(2, format.minNormalExp - format.mantissaBits);
+  if (abs < subnormalStep / 2) return sign * 0;
+
+  const minNormal = Math.pow(2, format.minNormalExp);
+  const step = abs < minNormal
+    ? subnormalStep
+    : Math.pow(2, Math.floor(Math.log2(abs)) - format.mantissaBits);
+
+  const rounded = f32(sign * roundHalfToEven(abs / step) * step);
+  if (Math.abs(rounded) > format.maxFinite) {
+    if (saturate) return sign * format.maxFinite;
+    return format.hasInfinity ? sign * Infinity : NaN;
+  }
+  return rounded;
+}
+
+/**
+ * 编码成 8 位存储（0..255），和 CUDA 的 `__nv_fp8_storage_t` 一个意思。
+ *
+ * 真实的 kernel 就是这么用的：一次拿一个 32 位字，里面装 4 个 fp8
+ * （`__nv_fp8x4_e4m3` 就是这么定义的）。这个工作台的显存按 4 字节寻址，
+ * 所以「4 个打包进一个 int」不是变通，是照着真实做法来的 ——
+ * 也只有这样，量化省下来的显存才真的量得出来。
+ */
+export function fp8ToStorage(value: number, format: Fp8Format, saturate = true): number {
+  const quantized = toFp8(value, format, saturate);
+  if (Number.isNaN(quantized)) return format === FP8_E4M3 ? 0x7f : 0x7e;
+
+  const sign = quantized < 0 || Object.is(quantized, -0) ? 1 : 0;
+  const abs = Math.abs(quantized);
+  const bias = format === FP8_E4M3 ? 7 : 15;
+  const expBits = format === FP8_E4M3 ? 4 : 5;
+  const mantBits = format.mantissaBits;
+
+  if (abs === 0) return sign << 7;
+
+  const minNormal = Math.pow(2, format.minNormalExp);
+  if (abs < minNormal) {
+    const step = Math.pow(2, format.minNormalExp - mantBits);
+    return (sign << 7) | Math.round(abs / step);
+  }
+  if (!Number.isFinite(abs)) return (sign << 7) | (((1 << expBits) - 1) << mantBits);
+
+  const exponent = Math.floor(Math.log2(abs));
+  const mantissa = Math.round((abs / Math.pow(2, exponent) - 1) * Math.pow(2, mantBits));
+  return (sign << 7) | ((exponent + bias) << mantBits) | mantissa;
+}
+
+/** 从 8 位存储解回来 */
+export function storageToFp8(storage: number, format: Fp8Format): number {
+  const bits = storage & 0xff;
+  const sign = bits & 0x80 ? -1 : 1;
+  const expBits = format === FP8_E4M3 ? 4 : 5;
+  const mantBits = format.mantissaBits;
+  const bias = format === FP8_E4M3 ? 7 : 15;
+  const expField = (bits >> mantBits) & ((1 << expBits) - 1);
+  const mantissa = bits & ((1 << mantBits) - 1);
+
+  if (expField === (1 << expBits) - 1) {
+    if (format === FP8_E4M3) {
+      // E4M3 没有 inf：全 1 指数配全 1 尾数是 NaN，别的还是正常的数
+      if (mantissa === (1 << mantBits) - 1) return NaN;
+      return f32(sign * Math.pow(2, expField - bias) * (1 + mantissa / Math.pow(2, mantBits)));
+    }
+    return mantissa === 0 ? sign * Infinity : NaN;
+  }
+  if (expField === 0) {
+    return f32(sign * mantissa * Math.pow(2, format.minNormalExp - mantBits));
+  }
+  return f32(sign * Math.pow(2, expField - bias) * (1 + mantissa / Math.pow(2, mantBits)));
+}

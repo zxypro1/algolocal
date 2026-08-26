@@ -56,6 +56,10 @@ const BUILTIN_FNS: Record<string, { fn: BuiltinFn; arity: number; ty: IrType }> 
   min: { fn: 'min', arity: 2, ty: 'i32' },
   max: { fn: 'max', arity: 2, ty: 'i32' },
   abs: { fn: 'abs', arity: 1, ty: 'i32' },
+  // fp8 转换。第一个是「float 转 fp8 的 8 位存储」，返回 0..255；
+  // 第二个转回来。参数与真 cuda_fp8.h 一致：(值, 饱和模式, 格式)。
+  __nv_cvt_float_to_fp8: { fn: '__nv_cvt_float_to_fp8', arity: 3, ty: 'i32' },
+  __nv_cvt_fp8_to_halfraw: { fn: '__nv_cvt_fp8_to_halfraw', arity: 2, ty: 'f32' },
   __popc: { fn: '__popc', arity: 1, ty: 'i32' },
   __clz: { fn: '__clz', arity: 1, ty: 'i32' },
   __ffs: { fn: '__ffs', arity: 1, ty: 'i32' },
@@ -227,6 +231,18 @@ const HOST_FNS: Record<string, { fn: HostFn; arity: number; scalar: 'int' | 'voi
   ring_len: { fn: 'ring_len', arity: 1, scalar: 'int' },
 };
 
+/**
+ * 设备侧也认的常量，kernel 与宿主代码都能用。
+ *
+ * 取值与 `cuda_fp8.h` 里那两个枚举一致。
+ */
+const DEVICE_CONSTANTS: Record<string, number> = {
+  __NV_NOSAT: 0,
+  __NV_SATFINITE: 1,
+  __NV_E4M3: 0,
+  __NV_E5M2: 1,
+};
+
 /** `cudaMemcpyKind` 的四个取值，和真头文件里的顺序一致 */
 const HOST_CONSTANTS: Record<string, number> = {
   cudaMemcpyHostToHost: 0,
@@ -310,6 +326,11 @@ class Compiler {
         elementBytes: pointer ? sizeOf((param.type as { to: CudaType }).to) : 4,
       });
     });
+
+    for (const [name, value] of Object.entries(DEVICE_CONSTANTS)) {
+      const reg = this.constant(value, 'i32', this.kernel.span.line);
+      this.bind(name, { where: 'reg', reg, type: { kind: 'scalar', scalar: 'int' } });
+    }
 
     if (this.ctx.host) {
       for (const [name, value] of Object.entries(HOST_CONSTANTS)) {
@@ -1051,7 +1072,18 @@ class Compiler {
     const target: CudaType = spec.ty === 'f32'
       ? { kind: 'scalar', scalar: 'float' }
       : { kind: 'scalar', scalar: 'int' };
-    const args = node.args.map((arg) => this.convert(this.expr(arg), target, node.span.line).reg);
+    // fp8 那两个的参数类型不齐：第一个按各自的类型，后面两个是枚举（int）。
+    // 一律按返回类型转的话，`__nv_cvt_fp8_to_halfraw(storage, __NV_E4M3)`
+    // 会把存储字节转成 float 再传，解码就全错了。
+    const isFp8 = spec.fn === '__nv_cvt_float_to_fp8' || spec.fn === '__nv_cvt_fp8_to_halfraw';
+    const args = node.args.map((arg, index) => {
+      const argTarget: CudaType = isFp8
+        ? (index === 0 && spec.fn === '__nv_cvt_float_to_fp8'
+            ? { kind: 'scalar', scalar: 'float' }
+            : { kind: 'scalar', scalar: 'int' })
+        : target;
+      return this.convert(this.expr(arg), argTarget, node.span.line).reg;
+    });
     const dst = this.alloc();
     this.emit({ op: 'call', dst, fn: spec.fn, args, ty: spec.ty }, node.span.line);
     return { reg: dst, type: target };

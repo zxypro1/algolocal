@@ -7,7 +7,7 @@
  * （不支持的东西必须报错，不能悄悄跑错）。
  */
 import {
-  CONTAINERS_H, CUDA_RUNTIME_H, ENGINE_H,
+  CONTAINERS_H, CUDA_FP8_H, CUDA_RUNTIME_H, ENGINE_H,
 } from '../../src/lib/gpulab/host/headers';
 import { GpuDevice, compileProgram, formatPrintf } from '../../src/lib/gpulab';
 
@@ -471,8 +471,8 @@ describe('头文件与编译器的签名是对得上的', () => {
    * 头文件是学员唯一的参考。它写了什么函数，编译器就必须认什么函数 ——
    * 两边分家的话，学员照着头文件写会撞上「暂不支持」，而那是平台的错。
    */
-  const declared = [...`${CONTAINERS_H}\n${ENGINE_H}\n${CUDA_RUNTIME_H}`.matchAll(
-    /^\s*(?:int|void|float\*)\s+(\w+)\s*\(/gm
+  const declared = [...`${CONTAINERS_H}\n${ENGINE_H}\n${CUDA_RUNTIME_H}\n${CUDA_FP8_H}`.matchAll(
+    /^\s*(?:int|void|float\*|half)\s+(\w+)\s*\(/gm
   )].map((match) => match[1]);
 
   it.each(declared)('头文件里的 %s 编译器认得', async (name) => {
