@@ -52,6 +52,8 @@ const CAPI_IMAGE = 'registry.k8s.io/cluster-api/cluster-api-controller:v1.9.4';
 const AUTOSCALER_IMAGE = 'registry.k8s.io/autoscaling/cluster-autoscaler:v1.32.0';
 // 月末结算：一批算得很重的活，跑完就散
 const SETTLEMENT_IMAGE = 'harbor.corp.internal/team/settlement:2.1';
+// 平台组自己写的 Operator。镜像里装的就是学员写的那段 reconcile。
+const SITE_OPERATOR_IMAGE = 'harbor.corp.internal/platform/site-operator:0.1';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -158,7 +160,7 @@ const WORLD = {
   namespaces: [
     'default', 'kube-system', 'payments', 'analytics',
     'envoy-gateway-system', 'ingress-nginx', 'cert-manager', 'argocd', 'istio-system',
-    'kyverno', 'external-secrets', 'monitoring', 'velero', 'capi-system',
+    'kyverno', 'external-secrets', 'monitoring', 'velero', 'capi-system', 'platform-system',
   ],
   images: {
     [PORTAL_IMAGE]: {
@@ -211,6 +213,7 @@ const WORLD = {
     [CAPI_IMAGE]: { pullMs: 400, startupMs: 600, readyAfterMs: 300 },
     [AUTOSCALER_IMAGE]: { pullMs: 400, startupMs: 600, readyAfterMs: 300 },
     [SETTLEMENT_IMAGE]: { pullMs: 300, startupMs: 500, readyAfterMs: 200, memoryUsage: '256Mi' },
+    [SITE_OPERATOR_IMAGE]: { pullMs: 300, startupMs: 400, readyAfterMs: 200, memoryUsage: '128Mi' },
     [LEDGERDB_IMAGE]: {
       pullMs: 800, startupMs: 1200, readyAfterMs: 600,
       listens: [5432], memoryUsage: '512Mi', handlesSigterm: true,
@@ -7407,6 +7410,478 @@ const stage22 = {
   ),
 };
 
+/* ------------------------------------------------------------------ */
+/* 第 23 关：写一个 Operator                                           */
+/* ------------------------------------------------------------------ */
+
+/** 平台组的自助入口网关：hostname 是通配的，任何一个 Site 都能挂上来 */
+const SELF_SERVICE_GATEWAY = {
+  apiVersion: 'gateway.networking.k8s.io/v1', kind: 'Gateway',
+  metadata: { name: 'self-service', namespace: 'payments' },
+  spec: {
+    gatewayClassName: 'envoy-internal',
+    listeners: [
+      { name: 'http', port: 80, protocol: 'HTTP', hostname: '*.corp.internal' },
+    ],
+  },
+};
+
+/**
+ * Operator 自己。
+ *
+ * 它和别的平台组件没有任何区别：一个 Deployment。把它缩到 0，
+ * Site 还在、`kubectl get sites` 照样查得到，只是没有人再让它们成真 ——
+ * 「CRD 是数据结构，Operator 才是行为」在这里是能动手验证的。
+ */
+const SITE_OPERATOR = {
+  apiVersion: 'apps/v1', kind: 'Deployment',
+  metadata: {
+    name: 'site-operator', namespace: 'platform-system',
+    labels: { 'app.kubernetes.io/name': 'site-operator' },
+  },
+  spec: {
+    replicas: 1,
+    selector: { matchLabels: { 'app.kubernetes.io/name': 'site-operator' } },
+    template: {
+      metadata: { labels: { 'app.kubernetes.io/name': 'site-operator' } },
+      spec: { containers: [{ name: 'manager', image: SITE_OPERATOR_IMAGE }] },
+    },
+  },
+};
+
+const SITE_CRD_STARTER = code`
+  # 待补：Site 这个类型还不存在。
+  #
+  # 需要一个 CustomResourceDefinition，让 apiserver 认识 platform.corp.internal/v1
+  # 下面的 Site。业务方提交的东西长这样（见 /root/sites/shop.yaml）：
+  #
+  #   spec:
+  #     host: shop.corp.internal
+  #     service:
+  #       name: portal
+  #       port: 80
+  #
+  # 两件容易漏的：Operator 要往 status 里写东西，以及
+  # \`kubectl get sites\` 应该一眼看得出 host —— 这两样都在 CRD 上声明。
+`;
+
+const SITE_CRD_REFERENCE = code`
+  apiVersion: apiextensions.k8s.io/v1
+  kind: CustomResourceDefinition
+  metadata:
+    name: sites.platform.corp.internal
+  spec:
+    group: platform.corp.internal
+    scope: Namespaced
+    names:
+      plural: sites
+      singular: site
+      kind: Site
+      shortNames:
+      - st
+    versions:
+    - name: v1
+      served: true
+      storage: true
+      # 不声明的话 status 就不是子资源，写 status 会连带改到 spec
+      subresources:
+        status: {}
+      # kubectl get sites 打出来的列。平台的自助入口，好不好用就看这几列。
+      additionalPrinterColumns:
+      - name: Host
+        type: string
+        jsonPath: .spec.host
+      - name: Ready
+        type: string
+        jsonPath: .status.ready
+`;
+
+const OPERATOR_STARTER = code`
+  /**
+   * Site Operator —— 待补
+   *
+   * 这个文件就是控制器本身。世界会 watch 你在 \`exports.watches\` 里声明的类型，
+   * 每次变化调一次 \`reconcile\`。CommonJS 写法，改完立刻生效
+   * （真集群里这一步是重新构建镜像再发布）。
+   *
+   * ctx 上有这些：
+   *
+   *   ctx.object                       触发这次 reconcile 的 Site
+   *   ctx.name / ctx.namespace
+   *   ctx.owner()                      属主引用，挂在你造出来的东西上
+   *   ctx.get(kind, name, namespace)   读不到返回 undefined
+   *   ctx.list(kind, namespace)
+   *   ctx.apply(object)                有就改，没有就建
+   *   ctx.delete(kind, name, namespace)
+   *   ctx.setStatus(patch)             只在真的变了的时候才写回
+   *   ctx.event(reason, message)       记一条事件
+   *   ctx.log(...)
+   *
+   * 要造的是一条 HTTPRoute：挂在 payments 命名空间里那个叫 self-service 的
+   * Gateway 上，hostname 用 Site 的 host，后端指向 Site 里写的 service。
+   */
+  exports.watches = ['Site'];
+
+  exports.reconcile = (ctx) => {
+    // TODO
+  };
+`;
+
+const OPERATOR_REFERENCE = code`
+  /**
+   * Site Operator
+   *
+   * 一个 Site 进来，保证有一条对应的 HTTPRoute 出去。
+   *
+   * 三件事是这段代码真正在做的：
+   *   1. 照着**现在**的 spec 收敛，而不是「创建时做一次」
+   *   2. 属主引用挂上，Site 没了路由跟着没
+   *   3. watch 自己造出来的类型，别人改坏了下一轮能改回去
+   */
+  exports.watches = ['Site', 'HTTPRoute'];
+
+  exports.reconcile = (ctx) => {
+    const site = ctx.object;
+    const backend = (site.spec || {}).service || {};
+
+    if (!site.spec || !site.spec.host || !backend.name) {
+      ctx.setStatus({ ready: false, reason: 'spec.host 和 spec.service.name 都是必填' });
+      ctx.event('InvalidSpec', 'host 或者 service 没写全', 'Warning');
+      return;
+    }
+
+    ctx.apply({
+      apiVersion: 'gateway.networking.k8s.io/v1',
+      kind: 'HTTPRoute',
+      metadata: {
+        name: site.metadata.name,
+        namespace: site.metadata.namespace,
+        // 不挂这个的话，Site 删了路由还在，变成没人管的孤儿
+        ownerReferences: [ctx.owner()],
+      },
+      spec: {
+        parentRefs: [{ name: 'self-service' }],
+        hostnames: [site.spec.host],
+        rules: [{
+          matches: [{ path: { type: 'PathPrefix', value: '/' } }],
+          backendRefs: [{ name: backend.name, port: backend.port || 80 }],
+        }],
+      },
+    });
+
+    // 只写观察到的事实，不写期望 —— 期望在 spec 里
+    ctx.setStatus({
+      ready: true,
+      url: 'http://' + site.spec.host,
+      observedGeneration: site.metadata.generation,
+    });
+  };
+`;
+
+const SHOP_SITE = code`
+  apiVersion: platform.corp.internal/v1
+  kind: Site
+  metadata:
+    name: shop
+    namespace: payments
+  spec:
+    host: shop.corp.internal
+    service:
+      name: portal
+      port: 80
+`;
+
+const SHOP_SITE_MOVED = code`
+  apiVersion: platform.corp.internal/v1
+  kind: Site
+  metadata:
+    name: shop
+    namespace: payments
+  spec:
+    host: shop2.corp.internal
+    service:
+      name: portal
+      port: 80
+`;
+
+const stage23 = {
+  id: 'write-an-operator',
+  title: t('写一个 Operator', 'Write an Operator'),
+  goal: t(
+    code`
+      业务方要一个对外入口，现在的流程是提工单：平台组手写一条 HTTPRoute，
+      改一次 host 再提一次工单。一周三四次，而且每次都有人写错后端端口。
+
+      这一关把这件事变成自助的：业务方提交一个 \`Site\`，平台负责让它成真。
+
+      两半：一半是 \`CustomResourceDefinition\`，让 apiserver 认识 Site 这个类型；
+      另一半是 \`/root/operator/site.js\` 里那个 \`reconcile\` —— 它就是控制器本身，
+      世界会 watch 你声明的类型，每次变化调它一次。
+
+      Site 长这样（\`/root/sites/shop.yaml\`）：
+
+      \`\`\`yaml
+      spec:
+        host: shop.corp.internal
+        service:
+          name: portal
+          port: 80
+      \`\`\`
+
+      要造出来的是一条挂在 \`self-service\` 这个 Gateway 上的 HTTPRoute。
+
+      ## 通关标准
+
+      1. \`kubectl get sites\` 查得到，而且一眼看得出 host；
+      2. 提交一个 Site，路由自动出现，而且**真的通** —— 从跳板机上 curl 得到 200；
+      3. 改了 Site 的 host，路由跟着改（声明式，不是「创建时做一次」）；
+      4. 有人手工把路由改坏，下一轮要改回去；
+      5. 删掉 Site，路由跟着没；
+      6. Site 的 status 里写得出它现在好不好。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl apply -f /root/operator/site-crd.yaml
+      kubectl apply -f /root/sites/shop.yaml
+      kubectl get sites -n payments
+      kubectl describe site shop -n payments
+      kubectl get httproute -n payments
+      \`\`\`
+    `,
+    code`
+      Teams that want a public entry point file a ticket, someone on the platform team
+      hand-writes an HTTPRoute, and changing a hostname means another ticket. Three or
+      four a week, and somebody always gets the backend port wrong.
+
+      This stage turns that into self-service: a team submits a \`Site\`, and the
+      platform makes it real.
+
+      Two halves. One is a \`CustomResourceDefinition\` that teaches the apiserver about
+      Site. The other is the \`reconcile\` function in \`/root/operator/site.js\`, which
+      *is* the controller: the world watches the kinds you declare and calls it on
+      every change.
+
+      A Site looks like this (\`/root/sites/shop.yaml\`):
+
+      \`\`\`yaml
+      spec:
+        host: shop.corp.internal
+        service:
+          name: portal
+          port: 80
+      \`\`\`
+
+      What it should produce is an HTTPRoute attached to the \`self-service\` Gateway.
+
+      ## Done when
+
+      1. \`kubectl get sites\` works and shows the host at a glance;
+      2. submitting a Site produces a route that **actually serves**: curl from the jump
+         host returns 200;
+      3. changing the host changes the route (declarative, not create-once);
+      4. if somebody edits the route by hand, the next reconcile puts it back;
+      5. deleting the Site removes the route;
+      6. the Site's status says whether it is working.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl apply -f /root/operator/site-crd.yaml
+      kubectl apply -f /root/sites/shop.yaml
+      kubectl get sites -n payments
+      kubectl describe site shop -n payments
+      kubectl get httproute -n payments
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('新类型注册得上', 'The new kind is registered'),
+    t('路由自动出现而且通', 'The route appears and serves'),
+    t('改坏了能自己修回去', 'Drift is repaired'),
+  ],
+  hints: [
+    t(
+      'reconcile 不是「事件处理器」。它收到的只有「这个对象该看一眼了」，不告诉你变的是什么 —— 所以正确的写法永远是「照着**现在**的 spec，把世界收敛过去」，而不是「根据这次的变化做个增量」。这也是它必须可以被重复调用而不出错的原因。',
+      'Reconcile is not an event handler. All it gets is "look at this object again", never what changed, so the correct shape is always "converge the world to the spec as it is now", not "apply a delta for this change". That is also why it must be safe to call repeatedly.'
+    ),
+    t(
+      '想修偏差，就得 watch 自己造出来的那个类型。只 watch 主类型的话，别人手工改坏了路由，你要等到下一次有人动 Site 才会发现 —— 那不叫「持续收敛」，那叫「碰巧修好」。',
+      'To repair drift you must watch the kind you create. Watching only the primary kind means a hand-edited route stays broken until somebody happens to touch the Site again, which is not continuous convergence, it is coincidence.'
+    ),
+    t(
+      '删除不用你写代码。属主引用挂对了，Site 一删，垃圾回收会把路由一起带走。真正需要写删除逻辑的是「外部状态」—— 比如你在集群外面开了一个 DNS 记录，那才要 finalizer。',
+      'You do not write deletion logic. With the owner reference attached, garbage collection takes the route away with the Site. What actually needs a finalizer is **external** state, like a DNS record you created outside the cluster.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      'status 里每次都写一个新时间戳。写 status 会触发一次新的 watch 事件，事件又触发 reconcile，reconcile 又写 status —— 控制器把自己吵醒，CPU 跑满而且什么都没做。只在**真的变了**的时候才写。',
+      'Writing a fresh timestamp into status every pass. Writing status produces a watch event, the event triggers reconcile, reconcile writes status: the controller wakes itself up forever, burning CPU and achieving nothing. Write only when something actually changed.'
+    ),
+    t(
+      '把期望状态放进 status。status 是**观察到的事实**，随时可以被重新算出来；spec 是期望，只有人能改。放反了的后果是：备份恢复之后、或者 status 被清掉之后，控制器不知道该收敛到哪儿去。',
+      'Putting desired state into status. Status is observed fact and must be recomputable at any moment; spec is desire and only humans change it. Get it backwards and the controller no longer knows what to converge to after a restore, or after status is cleared.'
+    ),
+    t(
+      '整体替换自己造出来的对象。apiserver 会往对象上补字段（resourceVersion、集群分配的那些），整体覆盖会把它们抹掉，于是每一轮 reconcile 都「发现不一样」再写一次，无限重写。只改你负责的那部分。',
+      'Replacing the object you create wholesale. The apiserver adds fields of its own (resourceVersion, cluster-assigned values); overwriting them means every reconcile "finds a difference" and writes again, forever. Touch only the parts you own.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      CNI_CILIUM,
+      ...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...TLS_PLATFORM,
+      ...ROLLOUTS_PLATFORM, ...MONITORING_CARRIED,
+      ...PORTAL_ROLLOUT, PORTAL_ROUTE,
+      SELF_SERVICE_GATEWAY, SITE_OPERATOR,
+    ],
+    operator: { path: '/root/operator/site.js', kind: 'Site', name: 'site-operator' },
+    files: {
+      '/root/operator/site-crd.yaml': SITE_CRD_STARTER,
+      '/root/operator/site.js': OPERATOR_STARTER,
+      '/root/sites/shop.yaml': SHOP_SITE,
+      '/root/sites/shop-moved.yaml': SHOP_SITE_MOVED,
+    },
+    referenceFiles: {
+      '/root/operator/site-crd.yaml': SITE_CRD_REFERENCE,
+      '/root/operator/site.js': OPERATOR_REFERENCE,
+    },
+    referenceCommands: [
+      'kubectl apply -f /root/operator/site-crd.yaml',
+    ],
+  },
+  specs: [
+    spec('write-an-operator.spec.ts', code`
+      import { advance, get, list, sh } from '@ops/lab';
+
+      const SITE = () => get('Site', 'shop', 'payments');
+      const ROUTE = () => list('HTTPRoute', { namespace: 'payments' })
+        .filter((route) => route.metadata.name === 'shop')[0];
+
+      const gatewayAddress = () => {
+        const gateway = get('Gateway', 'self-service', 'payments');
+        return ((gateway.status || {}).addresses || [])[0].value;
+      };
+
+      describe('写一个 Operator', () => {
+        it('新类型注册得上，而且一眼看得出 host', async () => {
+          const crds = list('CustomResourceDefinition')
+            .filter((crd) => crd.spec.names.kind === 'Site');
+          expect(crds.length).toBe(1);
+          const established = (crds[0].status.conditions || [])
+            .filter((condition) => condition.type === 'Established');
+          expect(established[0].status).toBe('True');
+
+          await sh('kubectl apply -f /root/sites/shop.yaml');
+          await advance(30000);
+
+          const listed = await sh('kubectl get sites -n payments');
+          expect(listed.code).toBe(0);
+          expect(listed.stdout).toContain('shop.corp.internal');
+        });
+
+        it('路由自动出现，而且指向对的后端', () => {
+          const route = ROUTE();
+          expect(route).toBeTruthy();
+          expect(route.spec.hostnames).toEqual(['shop.corp.internal']);
+          const backend = route.spec.rules[0].backendRefs[0];
+          expect(backend.name).toBe('portal');
+          expect(backend.port).toBe(80);
+          // 属主引用要挂上，不然删了 Site 会留下孤儿
+          const owners = route.metadata.ownerReferences || [];
+          expect(owners.some((owner) => owner.kind === 'Site' && owner.name === 'shop')).toBe(true);
+        });
+
+        it('真的通：从跳板机上 curl 得到 200', async () => {
+          const result = await sh(
+            "curl -s -o /dev/null -w '%{http_code}' -H 'Host: shop.corp.internal' http://"
+            + gatewayAddress()
+          );
+          expect(result.stdout).toBe('200');
+        });
+
+        it('status 写得出它现在好不好', () => {
+          const status = SITE().status || {};
+          expect(status.ready).toBe(true);
+          expect(status.observedGeneration).toBe(SITE().metadata.generation);
+        });
+
+        it('改了 Site，路由跟着改', async () => {
+          await sh('kubectl apply -f /root/sites/shop-moved.yaml');
+          await advance(30000);
+          expect(ROUTE().spec.hostnames).toEqual(['shop2.corp.internal']);
+
+          const result = await sh(
+            "curl -s -o /dev/null -w '%{http_code}' -H 'Host: shop2.corp.internal' http://"
+            + gatewayAddress()
+          );
+          expect(result.stdout).toBe('200');
+        });
+
+        it('有人手工改坏了路由，下一轮改回去', async () => {
+          await sh(
+            'kubectl patch httproute shop -n payments --type=json -p '
+            + '\\'[{"op":"replace","path":"/spec/hostnames","value":["oops.corp.internal"]}]\\''
+          );
+          await advance(30000);
+          expect(ROUTE().spec.hostnames).toEqual(['shop2.corp.internal']);
+        });
+
+        it('删掉 Site，路由跟着没', async () => {
+          await sh('kubectl delete site shop -n payments');
+          await advance(30000);
+          expect(ROUTE()).toBeUndefined();
+        });
+      });
+    `),
+  ],
+  focus: ['architecture', 'operations'],
+  extension: t(
+    code`
+      写完这一关，值得回头看一眼整个项目：从第 1 关那条 \`kubectl get nodes\`
+      到这里，你一路见到的所有东西 —— Deployment、Gateway、Certificate、
+      Rollout、Backup、MachineDeployment —— 都是同一个形状：一个描述期望的对象，
+      加一个把期望变成现实的控制器。你刚才写的那三十行，和它们没有本质区别。
+
+      这就是 Kubernetes 真正的产品：不是容器编排，是一个**通用的声明式 API
+      服务器**加一套控制器模式。容器编排只是这套东西的第一个应用。
+      所以「用 CRD 管数据库」「用 CRD 管 DNS 记录」「用 CRD 管办公室门禁」
+      听起来离谱，但在架构上完全成立 —— 存储、鉴权、watch、审计、
+      kubectl 全套白送，你只要写那个 reconcile。
+
+      有两条边界值得记住。一是**不是所有东西都该做成 CRD**：一个只在部署时
+      跑一次的动作，写成 Job 或者 CI 的一步更合适 —— 控制器的成本是它要
+      永远活着、永远正确。二是**reconcile 一定要幂等且可重入**：它会在你
+      意料之外的时刻被调用（重启之后的全量 resync、别人改坏了、
+      你自己写 status 触发的那一次），任何「只能执行一次」的逻辑迟早会出事。
+    `,
+    code`
+      Now that this one is done, look back across the whole project. Everything you met
+      from that first \`kubectl get nodes\` onwards — Deployment, Gateway, Certificate,
+      Rollout, Backup, MachineDeployment — has the same shape: an object describing
+      desired state, plus a controller that makes it real. The thirty lines you just
+      wrote are not different in kind from any of them.
+
+      That is what Kubernetes actually is: not container orchestration, but a **general
+      declarative API server** plus a controller pattern. Container orchestration was
+      simply its first application. Which is why "manage databases with a CRD", "manage
+      DNS records with a CRD", or "manage office door badges with a CRD" sound absurd
+      and are architecturally sound: storage, authorization, watch, audit, and kubectl
+      all come for free, and you only write the reconcile.
+
+      Two boundaries are worth keeping. First, **not everything should be a CRD**: an
+      action that runs once at deploy time is better as a Job or a CI step, because a
+      controller costs you something that must stay alive and stay correct forever.
+      Second, **reconcile must be idempotent and re-entrant**: it will be called at
+      moments you did not plan for, including the full resync after a restart, after
+      somebody edits your output, and on the pass your own status write triggered.
+      Any logic that can only run once will eventually run twice.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -7453,6 +7928,6 @@ module.exports = {
     stage1, stage2, stage3, stage4, stage5, stage6,
     stage7, stage8, stage9, stage10, stage11, stage12,
     stage13, stage14, stage15, stage16, stage17, stage18, stage19, stage20,
-    stage21, stage22,
+    stage21, stage22, stage23,
   ],
 };

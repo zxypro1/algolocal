@@ -1382,6 +1382,25 @@ const primers = {
       )
     ),
 
+    'write-an-operator': t(
+      p(
+        '到这一关为止，你见过的每一个东西都是同一个形状：一个描述期望的对象，加一个把期望变成现实的控制器。Deployment 是这样，Gateway、Certificate、Rollout、Backup、MachineDeployment 全是这样。这一关要做的就是自己写一个，从而看清这个形状本身。',
+        '`CustomResourceDefinition` 负责前半段：让 apiserver 多认识一种类型。认识之后，REST 端点、watch、RBAC 里的资源名、`kubectl get`、YAML apply，全套白送，所以写 Operator 的重点从来不在 CRD 上。CRD 上真正要想清楚的只有几件：`scope` 是命名空间级还是集群级、要不要 `subresources.status`（不声明的话 status 不是子资源，写 status 会连带改到 spec）、以及 `additionalPrinterColumns`，因为 `kubectl get` 打出来什么样，决定了这个自助入口好不好用。',
+        '后半段是 `reconcile`。它最容易被误解成事件处理器，其实它收到的只有一句「这个对象该看一眼了」，不告诉你变的是什么。所以正确的写法永远是`照着现在的 spec 把世界收敛过去`，而不是「根据这次变化做个增量」。这条决定了它必须**幂等且可重入**：全量 resync、别人改坏了、你自己写 status 触发的那一次，都会让它被重复调用。',
+        '要想修偏差，就得 watch 自己造出来的那个类型。只 watch 主类型的话，别人手工改坏了你造的东西，你要等到下一次有人动主对象才会发现，那不叫持续收敛。而顺着`属主引用`找回主对象，正是「附属对象变了该 reconcile 谁」的答案，所以属主引用不只是为了删除。',
+        '删除通常不用写代码：属主引用挂对了，垃圾回收会把附属对象一起带走。真正需要 `finalizer` 的是**集群外面的状态**：你在别处开了一个 DNS 记录、一个云上的桶，这些东西 apiserver 不知道，只能靠 finalizer 拦住删除、清理完再放行。代价是 finalizer 摘不掉的对象会永远卡在 Terminating。',
+        '最后是 `status` 的两条纪律。一是 status 只放**观察到的事实**，随时可以重新算出来；期望放在 spec 里，只有人能改。放反了的话，status 一被清掉控制器就不知道该收敛到哪儿。二是只在**真的变了**的时候才写 status：写 status 会产生一个 watch 事件，事件触发 reconcile，reconcile 又写 status，每次都写一个新时间戳的控制器会把自己吵醒，CPU 跑满而且什么都没做。'
+      ),
+      p(
+        'Everything you have met up to this point has the same shape: an object describing desired state, plus a controller that makes it real. Deployment is that shape, and so are Gateway, Certificate, Rollout, Backup, and MachineDeployment. This stage is about writing one yourself, so the shape itself becomes visible.',
+        'A `CustomResourceDefinition` covers the first half: it teaches the apiserver one more type. After that, REST endpoints, watch, the resource name in RBAC, `kubectl get`, and YAML apply all come free, which is why writing an operator is never really about the CRD. The few things worth thinking about on it: `scope` (namespaced or cluster), whether to declare `subresources.status` (without it status is not a subresource and writing status also rewrites spec), and `additionalPrinterColumns`, because what `kubectl get` prints decides whether the self-service entry point is pleasant to use.',
+        'The second half is `reconcile`. It is easily mistaken for an event handler, but all it receives is "take another look at this object", never what changed. The correct shape is therefore always `converge the world to the spec as it is now`, not "apply a delta for this change". That is what makes it necessarily **idempotent and re-entrant**: a full resync, somebody editing your output, and the pass your own status write triggered will all call it again.',
+        'Repairing drift requires watching the kind you create. Watch only the primary kind and a hand-edited child stays broken until somebody happens to touch the primary object again, which is not continuous convergence. And following the `owner reference` back to the primary object is exactly how "a child changed, whom do I reconcile" is answered, so owner references are not only about deletion.',
+        'Deletion usually needs no code: with owner references attached, garbage collection takes the children with the parent. What genuinely needs a `finalizer` is state **outside** the cluster, a DNS record or a bucket you created elsewhere that the apiserver knows nothing about; a finalizer holds the deletion until you have cleaned it up. The price is that an object whose finalizer never clears sits in Terminating forever.',
+        'Finally, two rules about `status`. It holds **observed fact** only, recomputable at any time; desire lives in spec where only humans change it. Reverse them and the controller no longer knows what to converge to once status is cleared. And write status only when something actually changed: writing status produces a watch event, the event triggers reconcile, and reconcile writes status again, so a controller that stamps a fresh timestamp every pass wakes itself up forever, burning CPU and achieving nothing.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',

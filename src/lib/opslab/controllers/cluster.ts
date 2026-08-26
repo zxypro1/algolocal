@@ -524,6 +524,19 @@ export class Cluster {
     return (this.options.startTime ?? Date.parse('2026-01-01T00:00:00Z')) + this.kernel.now();
   }
 
+  /**
+   * 世界建好之后再挂一个控制器上去。
+   *
+   * 学员自己写的 Operator 就是这么接进来的 —— 它的代码在机器的磁盘上，
+   * 而机器是在集群之后才有的，所以没法在 start() 里一起建。
+   */
+  attach(create: (context: ControllerContext) => Controller): Controller {
+    const controller = create(this.context);
+    this.controllers.push(controller);
+    if (this.started) controller.start();
+    return controller;
+  }
+
   private get context(): ControllerContext {
     return {
       kernel: this.kernel,
@@ -647,7 +660,8 @@ export class Cluster {
     this.started = true;
 
     const context = this.context;
-    this.controllers = [
+    // 用 push 而不是赋值：start() 之前 attach 进来的（学员的 Operator）不能被冲掉
+    this.controllers.push(
       new SchedulerController(context),
       new ReplicaSetController(context),
       new DeploymentController(context),
@@ -723,8 +737,8 @@ export class Cluster {
           })]
         : []),
       new LoadBalancerController(context, this.options.addressPools ?? DEFAULT_POOLS),
-      ...this.nodeSpecs.flatMap((node) => this.kubeletFor(context, node.name)),
-    ];
+      ...this.nodeSpecs.flatMap((node) => this.kubeletFor(context, node.name))
+    );
     for (const controller of this.controllers) controller.start();
 
     /**
