@@ -60,6 +60,14 @@ export function gpuMetricTree(world: GpuWorld): Record<string, unknown> {
     /** 显存峰值 —— FlashAttention、KV cache 那几关的门槛读它 */
     memoryPeakBytes: world.gpu.usedBytes,
     /**
+     * 算术强度：每从 DRAM 搬一个字节做了多少次浮点运算。
+     *
+     * **这是结构性计量，可以作门槛** —— 分子是 FMA 与 MMA 的条数、
+     * 分母是扇区数 × 32，两边都是精确计数，和模拟耗时不是一回事。
+     * 分块、融合、寄存器分块这些优化的直接证据就是它涨了。
+     */
+    arithmeticIntensity: line.arithmeticIntensity,
+    /**
      * 时序估算与 roofline。
      *
      * **放进来是给用例读的，不是给门槛读的。** 关卡可以用它做同关的相对

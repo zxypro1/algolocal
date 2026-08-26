@@ -1190,6 +1190,632 @@ const STAGE_6 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 7 关：朴素 GEMM                                                   */
+/* ------------------------------------------------------------------ */
+
+const N7 = 128;
+
+/** 三关共用的 GEMM 场景：128×128，A 与 B 用固定种子填 */
+const gemmBench = (kernel) => ({
+  sources: ['/root/sgemm.cu'],
+  buffers: [
+    { name: 'A', length: N7 * N7, fill: { kind: 'random', seed: 31, min: -1, max: 1 } },
+    { name: 'B', length: N7 * N7, fill: { kind: 'random', seed: 37, min: -1, max: 1 } },
+    { name: 'C', length: N7 * N7, fill: { kind: 'zeros' } },
+  ],
+  launches: [kernel],
+});
+
+/** 结果对不对：拿 fp64 算一遍参考，按 sqrt(K)*eps 给界 */
+const GEMM_CORRECTNESS = code`
+  it('结果和 fp64 参考对得上', async () => {
+    await lab.buildAndRun();
+    const A = lab.buffer('A');
+    const B = lab.buffer('B');
+    const C = lab.buffer('C');
+    // 抽样比较：全比一遍要 128^3 次乘加，没必要
+    let worst = 0;
+    for (let row = 0; row < N; row += 7) {
+      for (let col = 0; col < N; col += 7) {
+        let expected = 0;
+        for (let k = 0; k < N; k += 1) expected += A[row * N + k] * B[k * N + col];
+        const actual = C[row * N + col];
+        expect(Number.isFinite(actual)).toBe(true);
+        worst = Math.max(worst, Math.abs(actual - expected) / Math.max(1, Math.abs(expected)));
+      }
+    }
+    // fp32 累加 128 项：8 * sqrt(128) * 2^-23 约等于 1.1e-5
+    expect(worst).toBeLessThanOrEqual(2e-5);
+  });
+`;
+
+const STAGE_7 = {
+  id: 'naive-gemm',
+  title: t('朴素 GEMM —— 先跑通，看它落在 roofline 的哪儿',
+    'Naive GEMM — get it working, then find it on the roofline'),
+  goal: t(
+    [
+      '矩阵乘法是 LLM 里绝大部分算力的去处。先用最直白的写法做出来：',
+      '每个线程负责输出矩阵的一个元素，沿 k 维做一遍点积。',
+      '',
+      '规模是 128×128×128，启动配置 8×8 个 block、每块 16×16 个线程。',
+      '',
+      '```bash',
+      'nvcc -o bench sgemm.cu && ncu ./bench',
+      '```',
+      '',
+      '**这一关不设性能门槛。** 它的作用是立一根标杆：跑完之后记下',
+      '`Arithmetic Intensity` 那一行（每从显存搬一个字节做了多少次浮点运算）',
+      '和 DRAM 读字节数。第 8、9 关会把这两个数分别改善 8 倍与 25 倍。',
+      '',
+      '朴素写法的问题在于：A 的每一行被读了 128 遍，B 的每一列也是。',
+      '算术强度只有 0.5，也就是搬两个字节才做一次乘加 —— 这种 kernel 卡在带宽上，',
+      'GPU 那几十 TFLOPS 的算力一点用不上。',
+      '',
+      '**通关标准**',
+      '',
+      '- 结果和 fp64 参考对得上（相对误差 ≤ 2e-5）',
+      '- 每个线程只算一个输出元素',
+      '- 访存是合并的',
+    ].join('\n'),
+    [
+      'Matrix multiplication is where nearly all the FLOPs in an LLM go. Start with the direct',
+      'version: one thread per output element, one dot product along k.',
+      '',
+      'The size is 128×128×128, launched as 8×8 blocks of 16×16 threads.',
+      '',
+      '```bash',
+      'nvcc -o bench sgemm.cu && ncu ./bench',
+      '```',
+      '',
+      '**No performance gate here.** This stage plants a marker: note the `Arithmetic Intensity`',
+      'line (floating-point operations per byte fetched from memory) and the DRAM read bytes.',
+      'Stages 8 and 9 improve those by 8× and 25×.',
+      '',
+      'The problem with the direct version is that every row of A is read 128 times and so is every',
+      'column of B. Arithmetic intensity is 0.5, meaning two bytes moved per multiply-add. A kernel',
+      'like that is bandwidth-bound and the tens of TFLOPs of compute sit idle.',
+      '',
+      '**To pass**',
+      '',
+      '- results match an fp64 reference (relative error ≤ 2e-5)',
+      '- one output element per thread',
+      '- coalesced memory access',
+    ].join('\n')
+  ),
+  checklist: [
+    t('算出这个线程负责哪一行、哪一列', 'Work out which row and column this thread owns'),
+    t('沿 k 维累加 A[row][k] * B[k][col]', 'Accumulate A[row][k] * B[k][col] along k'),
+    t('用 ncu 记下算术强度与 DRAM 读字节数', 'Note arithmetic intensity and DRAM bytes with ncu'),
+  ],
+  hints: [
+    t('`row` 用 blockIdx.y / threadIdx.y，`col` 用 blockIdx.x / threadIdx.x。',
+      'Use blockIdx.y / threadIdx.y for `row` and blockIdx.x / threadIdx.x for `col`.'),
+    t('用 `fmaf(a, b, acc)` 而不是 `acc += a * b`，一次舍入而不是两次。',
+      'Prefer `fmaf(a, b, acc)` over `acc += a * b`: one rounding instead of two.'),
+  ],
+  pitfalls: [
+    t('**把 row 和 col 接反。** `col` 必须跟着 threadIdx.x 走，'
+      + '这样同一个 warp 里相邻的线程才访问 B 的相邻列，访存才合并。接反了扇区数会翻 8 倍。',
+      '**Swapping row and col.** `col` must follow threadIdx.x so neighbouring lanes read neighbouring '
+      + 'columns of B and the access coalesces. Swapped, the sector count goes up 8×.'),
+    t('**累加器用 double。** 这个工作台只做 fp32；真卡上 fp64 的吞吐是 fp32 的 1/64，'
+      + '拿它当累加器会让 kernel 慢两个数量级。',
+      '**Accumulating in double.** This workbench is fp32 only, and on real hardware fp64 throughput '
+      + 'is 1/64 of fp32, so using it as an accumulator costs two orders of magnitude.'),
+  ],
+  extension: t(
+    'roofline 图上有两段：一段斜坡（受带宽限制）和一段平台（受算力限制），交界处叫**拐点**。'
+    + 'H100 的拐点在几十 FLOP/byte，而朴素 GEMM 的算术强度是 0.5，'
+    + '离拐点差两个数量级 —— 它稳稳落在斜坡的最左边。'
+    + '接下来两关做的事情，本质上就是把这个点沿横轴往右推。',
+    'A roofline chart has two segments: a bandwidth-limited slope and a compute-limited plateau, '
+    + 'meeting at the **ridge point**. On an H100 that ridge sits in the tens of FLOP/byte, while naive '
+    + 'GEMM has an arithmetic intensity of 0.5, two orders of magnitude to the left of it, firmly on the '
+    + 'slope. The next two stages are, in essence, about pushing that point to the right.'
+  ),
+  gpu: {
+    files: {
+      '/root/sgemm.cu': code`
+        // C = A * B，都是 128×128 的方阵。
+        //
+        // 每个线程算 C 的一个元素。启动配置是 8×8 个 block、每块 16×16 线程。
+        __global__ void sgemm(const float* A, const float* B, float* C, int n) {
+          // TODO: 算出 row 与 col，沿 k 维做点积
+        }
+      `,
+    },
+    bench: gemmBench({
+      kernel: 'sgemm', grid: [N7 / 16, N7 / 16], block: [16, 16],
+      args: ['A', 'B', 'C', N7],
+    }),
+    referenceFiles: {
+      '/root/sgemm.cu': code`
+        __global__ void sgemm(const float* A, const float* B, float* C, int n) {
+          int row = blockIdx.y * blockDim.y + threadIdx.y;
+          int col = blockIdx.x * blockDim.x + threadIdx.x;
+          if (row < n && col < n) {
+            float acc = 0.0f;
+            for (int k = 0; k < n; ++k) {
+              acc = fmaf(A[row * n + k], B[k * n + col], acc);
+            }
+            C[row * n + col] = acc;
+          }
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('gemm.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const N = ${N7};
+
+      describe('朴素 GEMM', () => {
+      ${GEMM_CORRECTNESS}
+        it('访存是合并的', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().global.sectorsPerRequest).toBeLessThanOrEqual(4.5);
+        });
+
+        it('每个线程只算一个输出 —— 乘加总数就是 n^3', async () => {
+          await lab.buildAndRun();
+          const fma = lab.metrics().inst.fma;
+          expect(fma).toBeGreaterThanOrEqual(N * N * N);
+          expect(fma).toBeLessThan(N * N * N * 1.2);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.global.sectorsPerRequest', op: 'lte', value: 4.5,
+      zh: '每次访存打到的 32B 扇区数', en: 'sectors per request',
+      unit: 'sector/req', dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.inst.fma', op: 'gte', value: N7 * N7 * N7,
+      zh: '乘加总数（确认真的在算矩阵乘）', en: 'FMA count (confirms the work is done)',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness'],
+};
+
+/* ------------------------------------------------------------------ */
+/* 第 8 关：共享内存分块 GEMM                                            */
+/* ------------------------------------------------------------------ */
+
+const STAGE_8 = {
+  id: 'tiled-gemm',
+  title: t('分块 GEMM —— 把 DRAM 读量砍掉 8 倍', 'Tiled GEMM — 8× less DRAM traffic'),
+  goal: t(
+    [
+      '上一关的朴素 GEMM 从 DRAM 读了 **8 MB**，而 A 和 B 加起来才 128 KB。',
+      '同一份数据被反复读了几十遍。',
+      '',
+      '**分块**解决这件事：把 A 和 B 各切成 16×16 的小块，一次搬一对到共享内存，',
+      '让 block 里的 256 个线程都从共享内存取数。每个元素从 DRAM 读一次，',
+      '在共享内存里被用 16 次。',
+      '',
+      '流程是：搬一块 → `__syncthreads()` → 用这一块累加 → `__syncthreads()` → 搬下一块。',
+      '**两个屏障都不能少**：第一个保证「大家都搬完了才开始算」，',
+      '第二个保证「大家都算完了才开始覆盖」。',
+      '',
+      '```bash',
+      'nvcc -o bench sgemm.cu && ncu ./bench',
+      'compute-sanitizer --tool racecheck ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 结果和上一关一样',
+      '- DRAM 读量 ≤ 2 MB（朴素版是 8 MB）',
+      '- bank 冲突为 0',
+      '- 没有竞态',
+    ].join('\n'),
+    [
+      'The naive GEMM read **8 MB** from DRAM while A and B together are only 128 KB.',
+      'The same data was fetched dozens of times.',
+      '',
+      '**Tiling** fixes that: cut A and B into 16×16 tiles, stage one pair at a time in shared memory,',
+      'and let all 256 threads of the block read from there. Each element is fetched from DRAM once',
+      'and used 16 times out of shared memory.',
+      '',
+      'The loop is: stage a tile, `__syncthreads()`, accumulate, `__syncthreads()`, stage the next.',
+      '**Neither barrier is optional**: the first guarantees everyone finished writing before anyone',
+      'reads, the second guarantees everyone finished reading before anyone overwrites.',
+      '',
+      '```bash',
+      'nvcc -o bench sgemm.cu && ncu ./bench',
+      'compute-sanitizer --tool racecheck ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- same results as before',
+      '- DRAM reads at most 2 MB (8 MB before)',
+      '- zero bank conflicts',
+      '- no races',
+    ].join('\n')
+  ),
+  checklist: [
+    t('声明两块 16×16 的共享内存暂存 A 与 B 的分块',
+      'Declare two 16×16 shared tiles for the A and B blocks'),
+    t('外层沿 k 维按分块推进，内层在共享内存里做 16 次乘加',
+      'Step tiles along k in the outer loop, 16 multiply-adds in shared memory in the inner one'),
+    t('两个 __syncthreads() 都不能少', 'Both `__syncthreads()` calls are required'),
+  ],
+  hints: [
+    t('每个线程搬一个 A 元素和一个 B 元素进共享内存，正好 16×16 = 256 个线程搬一整块。',
+      'Each thread stages one A element and one B element; 16×16 = 256 threads cover a whole tile.'),
+    t('搬 A 时用 `A[row * n + t * 16 + tx]`，搬 B 时用 `B[(t * 16 + ty) * n + col]` —— 两边都是合并的。',
+      'Stage A with `A[row * n + t * 16 + tx]` and B with `B[(t * 16 + ty) * n + col]`; both coalesce.'),
+  ],
+  pitfalls: [
+    t('**只放一个屏障。** 少了第二个，跑得快的线程会在别人还没读完时就覆盖共享内存。'
+      + 'racecheck 会指出来，而结果不一定错 —— 这正是第 3 关讲过的。',
+      '**Using only one barrier.** Without the second, a fast thread overwrites the tile while others '
+      + 'are still reading it. racecheck reports it even when the answer happens to be right, exactly as in stage 3.'),
+    t('**分块循环写成 `k < n` 而不是 `t < n / 16`。** 外层走的是分块数不是元素数。',
+      '**Writing the tile loop as `k < n` instead of `t < n / 16`.** The outer loop counts tiles, not elements.'),
+  ],
+  extension: t(
+    '这一关把算术强度从 0.5 推到 3.8，但离 H100 拐点的几十 FLOP/byte 还差得远。'
+    + '瓶颈已经从 DRAM 换成了共享内存的带宽：每做一次乘加就要从共享内存读两个数。'
+    + '下一关用寄存器分块把这个比例再改善一个量级。'
+    + 'CUTLASS 把这套层次叫做 threadblock tile / warp tile / thread tile，是同一个思路的三层展开。',
+    'This stage lifts arithmetic intensity from 0.5 to 3.8, still far from the H100 ridge in the tens of '
+    + 'FLOP/byte. The bottleneck has merely moved from DRAM to shared-memory bandwidth: every multiply-add '
+    + 'still reads two values out of shared memory. The next stage improves that ratio by another order of '
+    + 'magnitude with register tiling. CUTLASS calls this hierarchy threadblock tile / warp tile / thread '
+    + 'tile, which is the same idea unrolled three levels deep.'
+  ),
+  gpu: {
+    files: {
+      '/root/sgemm.cu': code`
+        // 上一关的朴素版：结果对，但从 DRAM 读了 8MB。
+        //
+        // 改成分块：把 A 和 B 各切成 16×16 的块搬进共享内存。
+        __global__ void sgemm(const float* A, const float* B, float* C, int n) {
+          int row = blockIdx.y * blockDim.y + threadIdx.y;
+          int col = blockIdx.x * blockDim.x + threadIdx.x;
+          if (row < n && col < n) {
+            float acc = 0.0f;
+            for (int k = 0; k < n; ++k) {
+              acc = fmaf(A[row * n + k], B[k * n + col], acc);
+            }
+            C[row * n + col] = acc;
+          }
+        }
+      `,
+    },
+    bench: gemmBench({
+      kernel: 'sgemm', grid: [N7 / 16, N7 / 16], block: [16, 16],
+      args: ['A', 'B', 'C', N7],
+    }),
+    referenceFiles: {
+      '/root/sgemm.cu': code`
+        __global__ void sgemm(const float* A, const float* B, float* C, int n) {
+          __shared__ float As[16][16];
+          __shared__ float Bs[16][16];
+
+          int tx = threadIdx.x;
+          int ty = threadIdx.y;
+          int row = blockIdx.y * 16 + ty;
+          int col = blockIdx.x * 16 + tx;
+
+          float acc = 0.0f;
+          for (int t = 0; t < n / 16; ++t) {
+            // 每个线程搬一个 A 元素、一个 B 元素，两边都是合并访问
+            As[ty][tx] = A[row * n + t * 16 + tx];
+            Bs[ty][tx] = B[(t * 16 + ty) * n + col];
+            __syncthreads();
+
+            for (int k = 0; k < 16; ++k) {
+              acc = fmaf(As[ty][k], Bs[k][tx], acc);
+            }
+            // 大家都读完了才能覆盖 —— 少了这一句就是竞态
+            __syncthreads();
+          }
+
+          C[row * n + col] = acc;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('gemm.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const N = ${N7};
+
+      describe('分块 GEMM', () => {
+      ${GEMM_CORRECTNESS}
+        it('DRAM 读量砍掉了', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().memory.readBytes).toBeLessThanOrEqual(2 * 1024 * 1024);
+        });
+
+        it('确实经过了共享内存，而且没有 bank 冲突', async () => {
+          await lab.buildAndRun();
+          const metrics = lab.metrics();
+          expect(metrics.shared.loadRequests).toBeGreaterThan(0);
+          expect(metrics.shared.bankConflicts).toBe(0);
+          expect(metrics.launch.barriers).toBeGreaterThan(0);
+        });
+
+        it('没有竞态', async () => {
+          const report = await lab.racecheck();
+          expect(report.races.length).toBe(0);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.memory.readBytes', op: 'lte', value: 2 * 1024 * 1024,
+      zh: 'DRAM 读字节数（朴素版是 8MB）', en: 'DRAM bytes read (8MB naive)',
+      unit: 'byte', dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.shared.bankConflicts', op: 'eq', value: 0,
+      zh: '共享内存 bank 冲突', en: 'shared bank conflicts',
+      dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.launch.barriers', op: 'gte', value: 1,
+      zh: '屏障次数（确认真的用了共享内存分块）', en: 'barriers (confirms real tiling)',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['latency'],
+};
+
+/* ------------------------------------------------------------------ */
+/* 第 9 关：寄存器分块                                                   */
+/* ------------------------------------------------------------------ */
+
+const STAGE_9 = {
+  id: 'register-tiling',
+  title: t('寄存器分块 —— 每个线程算 4×4，算术强度再涨三倍',
+    'Register tiling — 4×4 per thread, 3× the arithmetic intensity'),
+  goal: t(
+    [
+      '分块之后算术强度是 3.8，DRAM 不再是瓶颈了 —— 但共享内存成了新瓶颈：',
+      '每做一次乘加就要从共享内存读两个数。',
+      '',
+      '**寄存器分块**把这个比例改过来：让每个线程算 **4×4 = 16 个输出**。',
+      '从共享内存读 4 个 A 的值和 4 个 B 的值（8 次读），就能做 16 次乘加 ——',
+      '读写比从 2:1 变成 1:2，好了四倍。而那 16 个累加器全部待在寄存器里。',
+      '',
+      'block 还是 16×16 个线程，但现在它负责 **64×64** 的输出块。',
+      '',
+      '```bash',
+      'nvcc -o bench sgemm.cu && ncu ./bench',
+      '```',
+      '',
+      '**注意第 6 关的规则**：那 16 个累加器只有在下标全是编译期常量时才待得住寄存器。',
+      '写成 `float acc[4][4]` 再用循环变量去索引，整个数组就落到 local memory 了。',
+      '',
+      '**通关标准**',
+      '',
+      '- 结果不变',
+      '- 算术强度 ≥ 8（分块版是 3.8）',
+      '- `local.bytes = 0`',
+      '- bank 冲突为 0',
+    ].join('\n'),
+    [
+      'After tiling, arithmetic intensity is 3.8 and DRAM is no longer the bottleneck. Shared memory is:',
+      'every multiply-add still reads two values out of it.',
+      '',
+      '**Register tiling** changes that ratio: let each thread compute **4×4 = 16 outputs**.',
+      'Reading 4 values of A and 4 of B (8 reads) then feeds 16 multiply-adds, turning a 2:1 read/compute',
+      'ratio into 1:2, four times better. All 16 accumulators live in registers.',
+      '',
+      'The block is still 16×16 threads but now owns a **64×64** output tile.',
+      '',
+      '```bash',
+      'nvcc -o bench sgemm.cu && ncu ./bench',
+      '```',
+      '',
+      '**Remember stage 6**: those 16 accumulators stay in registers only while every subscript is a',
+      'compile-time constant. Writing `float acc[4][4]` and indexing it with a loop variable sends the',
+      'whole array to local memory.',
+      '',
+      '**To pass**',
+      '',
+      '- unchanged results',
+      '- arithmetic intensity at least 8 (3.8 when tiled)',
+      '- `local.bytes = 0`',
+      '- zero bank conflicts',
+    ].join('\n')
+  ),
+  checklist: [
+    t('每个线程用 16 个标量累加器，不要用带动态下标的数组',
+      'Use 16 scalar accumulators, not an array with dynamic subscripts'),
+    t('内层循环读 4 个 A 值与 4 个 B 值，做 16 次乘加',
+      'The inner loop reads 4 A values and 4 B values, then does 16 multiply-adds'),
+    t('给两块共享内存各挑一个不会撞 bank 的行宽',
+      'Pick a row width for each shared tile that avoids bank collisions'),
+  ],
+  hints: [
+    t('把 4 个输出按 16 跨步分布（`ty`、`ty+16`、`ty+32`、`ty+48`），而不是连续的 4 行 —— '
+      + '这样每个 warp 读共享内存时落在连续的 bank 上。',
+      'Spread the four outputs with a stride of 16 (`ty`, `ty+16`, `ty+32`, `ty+48`) rather than four '
+      + 'consecutive rows, so each warp reads consecutive banks.'),
+    t('一个 warp 跨了两个 ty（blockDim 是 16×16），所以两块共享内存的行宽要**分别**错开：'
+      + '被 ty 索引的那块行宽取 %32 == 2，被 tx 索引的那块取 %32 == 16。',
+      'A warp spans two ty values (blockDim is 16×16), so the two tiles need *different* paddings: the '
+      + 'tile indexed by ty wants a row width ≡ 2 (mod 32), the one indexed by tx wants ≡ 16.'),
+  ],
+  pitfalls: [
+    t('**用 `float acc[4][4]` 加循环初始化。** `acc[i][j] = 0.0f` 里的 `i` 是循环变量，'
+      + '整个数组会落到 local memory，`local.bytes` 门槛立刻挂 —— 这就是第 6 关那个坑。',
+      '**Using `float acc[4][4]` with a loop to initialise it.** The `i` in `acc[i][j] = 0.0f` is a loop '
+      + 'variable, so the array lands in local memory and the `local.bytes` gate fails. Exactly the stage-6 trap.'),
+    t('**两块共享内存用同一个 padding。** 一个被 ty 索引、一个被 tx 索引，'
+      + '同一个 padding 只能救一块，另一块照样撞。',
+      '**Padding both shared tiles the same way.** One is indexed by ty and the other by tx; a single '
+      + 'padding fixes only one of them.'),
+  ],
+  extension: t(
+    '到这里算术强度是 12.8，比朴素版高 25 倍，DRAM 读量从 8MB 降到 256KB。'
+    + '再往上就要用 tensor core 了 —— 那是第 11 关。'
+    + '真正的高性能 GEMM（CUTLASS、cuBLAS）在这一层之上还有两件事：'
+    + '用 `float4` 做向量化访存把每条指令搬 16 字节，以及用 swizzle 代替 padding'
+    + '（padding 在 tile 尺寸受 MMA 形状约束时用不了）。',
+    'Arithmetic intensity is now 12.8, twenty-five times the naive version, and DRAM reads fell from 8MB '
+    + 'to 256KB. Going further means tensor cores, which is stage 11. Production GEMMs (CUTLASS, cuBLAS) '
+    + 'add two more things on top of this layer: vectorised `float4` accesses moving 16 bytes per '
+    + 'instruction, and swizzling instead of padding, since padding is unavailable once MMA shapes '
+    + 'constrain the tile size.'
+  ),
+  gpu: {
+    files: {
+      '/root/sgemm.cu': code`
+        // 第 8 关的分块版：算术强度 3.8，瓶颈从 DRAM 挪到了共享内存。
+        //
+        // 改成每个线程算 4×4 个输出，block 覆盖 64×64。
+        __global__ void sgemm(const float* A, const float* B, float* C, int n) {
+          __shared__ float As[16][16];
+          __shared__ float Bs[16][16];
+
+          int tx = threadIdx.x;
+          int ty = threadIdx.y;
+          int row = blockIdx.y * 16 + ty;
+          int col = blockIdx.x * 16 + tx;
+
+          float acc = 0.0f;
+          for (int t = 0; t < n / 16; ++t) {
+            As[ty][tx] = A[row * n + t * 16 + tx];
+            Bs[ty][tx] = B[(t * 16 + ty) * n + col];
+            __syncthreads();
+            for (int k = 0; k < 16; ++k) acc = fmaf(As[ty][k], Bs[k][tx], acc);
+            __syncthreads();
+          }
+          C[row * n + col] = acc;
+        }
+      `,
+    },
+    bench: gemmBench({
+      kernel: 'sgemm', grid: [N7 / 64, N7 / 64], block: [16, 16],
+      args: ['A', 'B', 'C', N7],
+    }),
+    referenceFiles: {
+      '/root/sgemm.cu': code`
+        __global__ void sgemm(const float* A, const float* B, float* C, int n) {
+          // 一个 warp 跨两个 ty，所以两块的行宽要分别错开：
+          //   As 被 ty 索引 -> 66 % 32 == 2
+          //   Bs 被 tx 索引 -> 80 % 32 == 16
+          __shared__ float As[16][66];
+          __shared__ float Bs[16][80];
+
+          int tx = threadIdx.x;
+          int ty = threadIdx.y;
+
+          // 16 个标量累加器，全部待在寄存器里
+          float a00 = 0.0f, a01 = 0.0f, a02 = 0.0f, a03 = 0.0f;
+          float a10 = 0.0f, a11 = 0.0f, a12 = 0.0f, a13 = 0.0f;
+          float a20 = 0.0f, a21 = 0.0f, a22 = 0.0f, a23 = 0.0f;
+          float a30 = 0.0f, a31 = 0.0f, a32 = 0.0f, a33 = 0.0f;
+
+          for (int t = 0; t < n / 16; ++t) {
+            As[tx][ty +  0] = A[(blockIdx.y * 64 + ty +  0) * n + t * 16 + tx];
+            As[tx][ty + 16] = A[(blockIdx.y * 64 + ty + 16) * n + t * 16 + tx];
+            As[tx][ty + 32] = A[(blockIdx.y * 64 + ty + 32) * n + t * 16 + tx];
+            As[tx][ty + 48] = A[(blockIdx.y * 64 + ty + 48) * n + t * 16 + tx];
+            Bs[ty][tx +  0] = B[(t * 16 + ty) * n + blockIdx.x * 64 + tx +  0];
+            Bs[ty][tx + 16] = B[(t * 16 + ty) * n + blockIdx.x * 64 + tx + 16];
+            Bs[ty][tx + 32] = B[(t * 16 + ty) * n + blockIdx.x * 64 + tx + 32];
+            Bs[ty][tx + 48] = B[(t * 16 + ty) * n + blockIdx.x * 64 + tx + 48];
+            __syncthreads();
+
+            for (int k = 0; k < 16; ++k) {
+              float x0 = As[k][ty + 0], x1 = As[k][ty + 16];
+              float x2 = As[k][ty + 32], x3 = As[k][ty + 48];
+              float y0 = Bs[k][tx + 0], y1 = Bs[k][tx + 16];
+              float y2 = Bs[k][tx + 32], y3 = Bs[k][tx + 48];
+              // 8 次共享内存读换 16 次乘加
+              a00 = fmaf(x0, y0, a00); a01 = fmaf(x0, y1, a01);
+              a02 = fmaf(x0, y2, a02); a03 = fmaf(x0, y3, a03);
+              a10 = fmaf(x1, y0, a10); a11 = fmaf(x1, y1, a11);
+              a12 = fmaf(x1, y2, a12); a13 = fmaf(x1, y3, a13);
+              a20 = fmaf(x2, y0, a20); a21 = fmaf(x2, y1, a21);
+              a22 = fmaf(x2, y2, a22); a23 = fmaf(x2, y3, a23);
+              a30 = fmaf(x3, y0, a30); a31 = fmaf(x3, y1, a31);
+              a32 = fmaf(x3, y2, a32); a33 = fmaf(x3, y3, a33);
+            }
+            __syncthreads();
+          }
+
+          int cb = blockIdx.x * 64 + tx;
+          int r0 = (blockIdx.y * 64 + ty +  0) * n;
+          C[r0 + cb] = a00; C[r0 + cb + 16] = a01; C[r0 + cb + 32] = a02; C[r0 + cb + 48] = a03;
+          int r1 = (blockIdx.y * 64 + ty + 16) * n;
+          C[r1 + cb] = a10; C[r1 + cb + 16] = a11; C[r1 + cb + 32] = a12; C[r1 + cb + 48] = a13;
+          int r2 = (blockIdx.y * 64 + ty + 32) * n;
+          C[r2 + cb] = a20; C[r2 + cb + 16] = a21; C[r2 + cb + 32] = a22; C[r2 + cb + 48] = a23;
+          int r3 = (blockIdx.y * 64 + ty + 48) * n;
+          C[r3 + cb] = a30; C[r3 + cb + 16] = a31; C[r3 + cb + 32] = a32; C[r3 + cb + 48] = a33;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('gemm.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const N = ${N7};
+
+      describe('寄存器分块 GEMM', () => {
+      ${GEMM_CORRECTNESS}
+        it('算术强度上去了', async () => {
+          await lab.buildAndRun();
+          expect(lab.roofline().arithmeticIntensity).toBeGreaterThanOrEqual(8);
+        });
+
+        it('累加器待在寄存器里，一个字节 local memory 都不用', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().local.bytes).toBe(0);
+        });
+
+        it('共享内存没有 bank 冲突', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().shared.bankConflicts).toBe(0);
+        });
+
+        it('每个线程真的算了 16 个输出 —— 线程总数只有上一关的十六分之一', async () => {
+          await lab.buildAndRun();
+          const metrics = lab.metrics();
+          // 64×64 的输出块 / 256 个线程 = 每线程 16 个
+          expect(metrics.launch.warps).toBeLessThanOrEqual((N / 64) * (N / 64) * 8);
+          expect(metrics.inst.fma).toBeGreaterThanOrEqual(N * N * N);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.arithmeticIntensity', op: 'gte', value: 8,
+      zh: '算术强度（朴素 0.5，分块 3.8）', en: 'arithmetic intensity (0.5 naive, 3.8 tiled)',
+      unit: 'flop/byte', dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.local.bytes', op: 'eq', value: 0,
+      zh: 'local memory 流量', en: 'local memory traffic',
+      unit: 'byte', dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.shared.bankConflicts', op: 'eq', value: 0,
+      zh: '共享内存 bank 冲突', en: 'shared bank conflicts',
+      dimension: 'latency',
+    }),
+  ],
+  focus: ['latency'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -1256,5 +1882,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9],
 };
