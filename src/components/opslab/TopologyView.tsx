@@ -7,10 +7,10 @@
  * 交互只有两种：看，和点一下把对应的只读命令插进终端。拖拽改状态是不做的 ——
  * 真集群里没有「把 Pod 拖到另一台机器上」这个动作，做了就是在教错的东西。
  */
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   Background, Controls, Handle, MiniMap, Position, ReactFlow, useEdgesState, useNodesState,
-  type Edge, type Node, type NodeProps,
+  type Edge, type Node, type NodeProps, type ReactFlowInstance,
 } from '@xyflow/react';
 import { Group, Stack, Text } from '@mantine/core';
 import type { TopologyGraph, TopologyStatus } from '../../lib/opslab/lab';
@@ -86,9 +86,17 @@ export interface TopologyViewProps {
   onInspect?: (command: string) => void;
   /** 包路径停在哪个节点上，圈出来 */
   highlight?: string;
+  /**
+   * 这块面板现在是不是被选中的那一页。
+   *
+   * 它和终端、IDE 同属一组 tab，切走时整块是 display:none。ReactFlow 只在
+   * 初始化时 fitView 一次，而它初始化的那一刻容器是 0×0 —— 不管的话切回来
+   * 是一张几乎空白的画布，只有角落里露出半个节点。
+   */
+  active?: boolean;
 }
 
-export default function TopologyView({ graph, onInspect, highlight }: TopologyViewProps) {
+export default function TopologyView({ graph, onInspect, highlight, active = true }: TopologyViewProps) {
   const initialNodes = useMemo<Node[]>(
     () => graph.nodes.map((node) => ({
       id: node.id,
@@ -123,6 +131,27 @@ export default function TopologyView({ graph, onInspect, highlight }: TopologyVi
   useEffect(() => { setNodes(initialNodes); }, [initialNodes, setNodes]);
   useEffect(() => { setEdges(initialEdges); }, [initialEdges, setEdges]);
 
+  /**
+   * 被选中的时候补一次 fitView。
+   *
+   * 早先这里挂的是 ResizeObserver，靠「宽度从 0 变正」判断自己露出来了。
+   * 不可靠：ReactFlow 内部也在用 ResizeObserver 量尺寸，两个观察者的回调
+   * 顺序不保证，先跑我们这个的话它内部还是 0×0，fitView 算出来没有意义。
+   * 由 tab 状态驱动就确定多了 —— effect 跑在提交之后，那时布局已经定了；
+   * 再推一帧，等 ReactFlow 也量完。
+   */
+  const containerRef = useRef<HTMLDivElement>(null);
+  const flowRef = useRef<ReactFlowInstance | null>(null);
+  const onInit = useCallback((instance: ReactFlowInstance) => { flowRef.current = instance; }, []);
+
+  useEffect(() => {
+    if (!active) return undefined;
+    const frame = requestAnimationFrame(() => {
+      try { flowRef.current?.fitView(); } catch { /* 实例还没好，下次选中还会再来 */ }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [active]);
+
   if (graph.nodes.length === 0) {
     return (
       <Stack align="center" justify="center" h="100%" gap={4}>
@@ -133,12 +162,13 @@ export default function TopologyView({ graph, onInspect, highlight }: TopologyVi
   }
 
   return (
-    <div style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div ref={containerRef} style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
       <div style={{ flex: 1, minHeight: 0 }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
+        onInit={onInit}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={(_, node) => {
