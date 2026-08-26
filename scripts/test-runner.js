@@ -52,6 +52,11 @@ class TestRunner {
         description: 'apiserver semantics, controllers, the real kubectl/helm WASM runtime, and byte-identical replay of dozens of concurrent entities'
       },
       {
+        name: 'Gpulab CUDA VM',
+        file: 'tests/gpulab',
+        description: 'The CUDA frontend, the warp-lockstep VM, coalescing and bank-conflict measurement, and byte-identical replay'
+      },
+      {
         name: 'Desktop Menus',
         file: 'tests/desktop',
         description: 'Application and context menus, including the edit roles that ⌘V depends on'

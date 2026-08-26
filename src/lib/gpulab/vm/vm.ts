@@ -1,0 +1,701 @@
+/**
+ * warp 锁步执行器
+ *
+ * 核心：**一条指令派发一次，内部对 32 个 lane 循环**。指令派发的开销因此
+ * 被摊薄 32 倍，这是整个执行模型跑得动的原因。
+ *
+ * 三件事在这里是「真的」而不是估的：
+ *  - 发散：活跃掩码 + 结构化重汇聚栈，和真硬件对结构化控制流的处理一致；
+ *  - 屏障：`__syncthreads()` 真的把 warp 挂起，等同 block 的其它 warp 到齐；
+ *  - 访存计量：每条访存指令算 32 个地址，做扇区归并 / bank 冲突分析。
+ *
+ * 执行顺序完全确定（block 按 id、warp 按编号轮转），所以同一份代码跑两遍
+ * 逐位相同 —— 这是判定门槛之一。**代价是竞态不会自己暴露**，得靠单独的
+ * racecheck 主动检测。
+ *
+ * 性能纪律（生产环境实测约 1350 万条 warp 指令/秒，见 ir/program.ts 的说明）：
+ *  1. 指令流是 `Int32Array`，不是对象数组；
+ *  2. **热路径上不分配内存** —— `countSectors` / `countBankConflicts` 都用
+ *     复用的暂存数组，计数器在循环里用局部变量攒着，退出时再写回；
+ *  3. 收尾**不要用闭包**：闭包一旦捕获可变局部，V8 会把它们挪进堆上的
+ *     context 对象，每条指令多出好几次堆访问。
+ */
+import { encode, type ExecutableKernel, type Program, BIN, FN, OP, SLOTS, SPACE, SREG, TY, UN } from '../ir/program';
+import type { CompiledKernel } from '../ir/types';
+import {
+  addF32, divF32, expF32, fastDivF32, fastExpF32, fastLogF32, floatToInt, floatToUint,
+  fmaF32, logF32, maxF32, minF32, mulF32, powF32, rsqrtF32, sqrtF32, subF32, tanhF32,
+} from './float';
+import {
+  LinearMemory, MemoryFault, SECTOR_BYTES, WARP_SIZE,
+  countBankConflicts, countSectors,
+} from './memory';
+
+export interface Dim3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+export function dim3(x: number, y = 1, z = 1): Dim3 {
+  return { x, y, z };
+}
+
+export interface LaunchConfig {
+  grid: Dim3;
+  block: Dim3;
+}
+
+/** kernel 实参：指针是地址（number），标量按声明的类型 */
+export type KernelArg = number;
+
+export interface GpuCounters {
+  warpInsts: number;
+  laneInsts: number;
+  instFma: number;
+  instLdSt: number;
+  globalLoadRequests: number;
+  globalStoreRequests: number;
+  globalLoadSectors: number;
+  globalStoreSectors: number;
+  sharedLoadRequests: number;
+  sharedStoreRequests: number;
+  sharedBankConflicts: number;
+  divergentBranches: number;
+  activeLanes: number;
+  barriers: number;
+  blocksLaunched: number;
+  warpsLaunched: number;
+}
+
+export function emptyCounters(): GpuCounters {
+  return {
+    warpInsts: 0, laneInsts: 0, instFma: 0, instLdSt: 0,
+    globalLoadRequests: 0, globalStoreRequests: 0,
+    globalLoadSectors: 0, globalStoreSectors: 0,
+    sharedLoadRequests: 0, sharedStoreRequests: 0, sharedBankConflicts: 0,
+    divergentBranches: 0, activeLanes: 0,
+    barriers: 0, blocksLaunched: 0, warpsLaunched: 0,
+  };
+}
+
+export class KernelError extends Error {
+  line: number;
+  constructor(message: string, line: number) {
+    super(line > 0 ? `第 ${line} 行：${message}` : message);
+    this.name = 'KernelError';
+    this.line = line;
+  }
+}
+
+/** 重汇聚栈的一项 */
+interface MaskFrame {
+  origin: number;
+  otherwise: number;
+}
+
+class Warp {
+  pc = 0;
+  active: number;
+  readonly present: number;
+  stack: MaskFrame[] = [];
+  atBarrier = false;
+  done = false;
+  readonly regs: Float64Array;
+
+  constructor(readonly index: number, present: number, numRegs: number) {
+    this.present = present;
+    this.active = present;
+    this.regs = new Float64Array(Math.max(1, numRegs) * WARP_SIZE);
+  }
+}
+
+export interface RunResult {
+  counters: GpuCounters;
+}
+
+export interface RunOptions {
+  memory: LinearMemory;
+  sharedCapacity?: number;
+  maxWarpInsts?: number;
+}
+
+const DEFAULT_MAX_WARP_INSTS = 200_000_000;
+
+export function launchKernel(
+  kernel: CompiledKernel | ExecutableKernel,
+  config: LaunchConfig,
+  args: KernelArg[],
+  options: RunOptions
+): RunResult {
+  const executable = 'program' in kernel ? kernel : encode(kernel);
+  const counters = emptyCounters();
+  new Executor(executable, config, args, options, counters).run();
+  return { counters };
+}
+
+class Executor {
+  private readonly shared: LinearMemory;
+  private readonly addresses = new Int32Array(WARP_SIZE);
+  private readonly maxWarpInsts: number;
+  private readonly blockThreads: number;
+  private readonly warpsPerBlock: number;
+  private readonly program: Program;
+  /** 参数值按类型规整过，避免每次 param 指令都判一遍 */
+  private readonly argValues: Float64Array;
+
+  constructor(
+    private readonly kernel: ExecutableKernel,
+    private readonly config: LaunchConfig,
+    args: KernelArg[],
+    private readonly options: RunOptions,
+    private readonly counters: GpuCounters
+  ) {
+    this.program = kernel.program;
+    const capacity = options.sharedCapacity ?? 48 * 1024;
+    if (kernel.sharedBytes > capacity) {
+      throw new KernelError(
+        `这个 kernel 要 ${kernel.sharedBytes} 字节共享内存，超过了每个 block 的上限 ${capacity} 字节`,
+        0
+      );
+    }
+    this.shared = new LinearMemory(Math.max(4, kernel.sharedBytes), 'shared');
+    this.maxWarpInsts = options.maxWarpInsts ?? DEFAULT_MAX_WARP_INSTS;
+    this.blockThreads = config.block.x * config.block.y * config.block.z;
+    if (this.blockThreads === 0) throw new KernelError('blockDim 不能是 0', 0);
+    if (this.blockThreads > 1024) {
+      throw new KernelError(`一个 block 最多 1024 个线程，这里是 ${this.blockThreads}`, 0);
+    }
+    this.warpsPerBlock = Math.ceil(this.blockThreads / WARP_SIZE);
+    if (args.length !== kernel.params.length) {
+      throw new KernelError(
+        `${kernel.name} 需要 ${kernel.params.length} 个参数，给了 ${args.length} 个`, 0
+      );
+    }
+    this.argValues = new Float64Array(args.length);
+    for (let i = 0; i < args.length; i += 1) {
+      const ty = kernel.paramTypes[i];
+      this.argValues[i] =
+        ty === TY.F32 ? Math.fround(args[i]) : ty === TY.U32 ? args[i] >>> 0 : args[i] | 0;
+    }
+  }
+
+  run(): void {
+    const { grid } = this.config;
+    for (let bz = 0; bz < grid.z; bz += 1) {
+      for (let by = 0; by < grid.y; by += 1) {
+        for (let bx = 0; bx < grid.x; bx += 1) {
+          this.runBlock(bx, by, bz);
+        }
+      }
+    }
+  }
+
+  private runBlock(bx: number, by: number, bz: number): void {
+    this.counters.blocksLaunched += 1;
+    // 共享内存在 block 之间不保留内容。真卡上它是脏的；我们清零是为了确定性，
+    // 这是一处已知分叉 —— 靠未初始化共享内存出错的程序在这里不会暴露。
+    this.shared.reset();
+
+    const warps: Warp[] = [];
+    for (let w = 0; w < this.warpsPerBlock; w += 1) {
+      const first = w * WARP_SIZE;
+      const count = Math.min(WARP_SIZE, this.blockThreads - first);
+      const present = count === WARP_SIZE ? -1 : (1 << count) - 1;
+      warps.push(new Warp(w, present, this.kernel.numRegs));
+      this.counters.warpsLaunched += 1;
+    }
+
+    let cursor = 0;
+    while (true) {
+      let live = 0;
+      let waiting = 0;
+      for (const warp of warps) {
+        if (warp.done) continue;
+        live += 1;
+        if (warp.atBarrier) waiting += 1;
+      }
+      if (live === 0) break;
+
+      if (waiting === live) {
+        // 全到齐了，一起放行
+        this.counters.barriers += 1;
+        for (const warp of warps) warp.atBarrier = false;
+      } else if (waiting > 0) {
+        // 有 warp 在等，还有 warp 活着 —— 先让活着的跑。但如果活着的
+        // 全都跑完退出了，等的那些就永远等不到人了。
+        let runnable = false;
+        for (const warp of warps) if (!warp.done && !warp.atBarrier) { runnable = true; break; }
+        if (!runnable) {
+          throw new KernelError(
+            '__syncthreads() 卡住了：block 里有 warp 已经退出，剩下的还在等它。' +
+            '屏障必须让整个 block 都到达',
+            0
+          );
+        }
+      }
+
+      const warp = warps[cursor % warps.length];
+      cursor += 1;
+      if (warp.done || warp.atBarrier) continue;
+      this.runWarp(warp, bx, by, bz);
+    }
+  }
+
+  /**
+   * 跑一个 warp，直到它到达屏障或者结束。
+   *
+   * 计数器在这里用局部变量攒 —— 每条指令碰一次 `this.counters.x` 的话，
+   * 光属性访问就能吃掉三成吞吐。
+   */
+  private runWarp(warp: Warp, bx: number, by: number, bz: number): void {
+    const code = this.program.code;
+    const pool = this.program.pool;
+    const lines = this.program.lines;
+    const regs = warp.regs;
+    const addresses = this.addresses;
+    const globalMemory = this.options.memory;
+    const sharedMemory = this.shared;
+    const block = this.config.block;
+    const grid = this.config.grid;
+    const argValues = this.argValues;
+    const counters = this.counters;
+    const warpBase = warp.index * WARP_SIZE;
+
+    // 计数器用局部变量攒着，出口再写回（理由见文件头第 3 条）
+    let warpInsts = 0;
+    let laneInsts = 0;
+    let instFma = 0;
+    let instLdSt = 0;
+    let divergent = 0;
+
+    let pc = warp.pc;
+
+    try {
+      while (true) {
+        if (pc < 0 || pc >= this.program.count) {
+          warp.done = true;
+          counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
+          counters.instFma += instFma; counters.instLdSt += instLdSt;
+          counters.divergentBranches += divergent;
+          return;
+        }
+
+        warpInsts += 1;
+        if (counters.warpInsts + warpInsts > this.maxWarpInsts) {
+          counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
+          counters.instFma += instFma; counters.instLdSt += instLdSt;
+          counters.divergentBranches += divergent;
+          throw new KernelError(
+            `执行预算用光了（${this.maxWarpInsts} 条 warp 指令）—— 多半是循环没退出`,
+            lines[pc]
+          );
+        }
+
+        const at = pc * SLOTS;
+        const op = code[at];
+        const active = warp.active;
+        const lanes = popcount(active);
+        laneInsts += lanes;
+
+        switch (op) {
+          case OP.CONST: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const ty = code[at + 3];
+            const raw = pool[code[at + 2]];
+            const value = ty === TY.F32 ? Math.fround(raw) : ty === TY.U32 ? raw >>> 0 : raw | 0;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if (active & (1 << lane)) regs[dst + lane] = value;
+            }
+            pc += 1;
+            break;
+          }
+
+          case OP.MOV: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const src = code[at + 2] * WARP_SIZE;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if (active & (1 << lane)) regs[dst + lane] = regs[src + lane];
+            }
+            pc += 1;
+            break;
+          }
+
+          case OP.BIN: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const a = code[at + 2] * WARP_SIZE;
+            const b = code[at + 3] * WARP_SIZE;
+            const kind = code[at + 4];
+            const ty = code[at + 5];
+            if (ty === TY.F32) this.binF32(regs, dst, a, b, kind, active, lines[pc]);
+            else this.binInt(regs, dst, a, b, kind, ty === TY.U32, active, lines[pc]);
+            pc += 1;
+            break;
+          }
+
+          case OP.UN: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const a = code[at + 2] * WARP_SIZE;
+            const kind = code[at + 3];
+            const ty = code[at + 4];
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if ((active & (1 << lane)) === 0) continue;
+              const value = regs[a + lane];
+              regs[dst + lane] =
+                kind === UN.neg ? (ty === TY.F32 ? Math.fround(-value) : normalize(-value, ty))
+                : kind === UN.not ? (value === 0 ? 1 : 0)
+                : normalize(~value, ty);
+            }
+            pc += 1;
+            break;
+          }
+
+          case OP.CVT: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const a = code[at + 2] * WARP_SIZE;
+            const from = code[at + 3];
+            const to = code[at + 4];
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if ((active & (1 << lane)) === 0) continue;
+              regs[dst + lane] = convert(regs[a + lane], from, to);
+            }
+            pc += 1;
+            break;
+          }
+
+          case OP.SREG: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const which = code[at + 2];
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if ((active & (1 << lane)) === 0) continue;
+              const tid = warpBase + lane;
+              let value: number;
+              switch (which) {
+                case SREG['tid.x']: value = tid % block.x; break;
+                case SREG['tid.y']: value = ((tid / block.x) | 0) % block.y; break;
+                case SREG['tid.z']: value = (tid / (block.x * block.y)) | 0; break;
+                case SREG['ctaid.x']: value = bx; break;
+                case SREG['ctaid.y']: value = by; break;
+                case SREG['ctaid.z']: value = bz; break;
+                case SREG['ntid.x']: value = block.x; break;
+                case SREG['ntid.y']: value = block.y; break;
+                case SREG['ntid.z']: value = block.z; break;
+                case SREG['nctaid.x']: value = grid.x; break;
+                case SREG['nctaid.y']: value = grid.y; break;
+                case SREG['nctaid.z']: value = grid.z; break;
+                default: value = WARP_SIZE; break;
+              }
+              regs[dst + lane] = value;
+            }
+            pc += 1;
+            break;
+          }
+
+          case OP.PARAM: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const value = argValues[code[at + 2]];
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if (active & (1 << lane)) regs[dst + lane] = value;
+            }
+            pc += 1;
+            break;
+          }
+
+          case OP.SHAREDBASE: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const offset = code[at + 2];
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if (active & (1 << lane)) regs[dst + lane] = offset;
+            }
+            pc += 1;
+            break;
+          }
+
+          case OP.LOAD: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const addr = code[at + 2] * WARP_SIZE;
+            const isGlobal = code[at + 3] === SPACE.GLOBAL;
+            const ty = code[at + 4];
+            const memory = isGlobal ? globalMemory : sharedMemory;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if ((active & (1 << lane)) === 0) continue;
+              const address = regs[addr + lane] | 0;
+              addresses[lane] = address;
+              regs[dst + lane] =
+                ty === TY.F32 ? memory.readF32(address)
+                : ty === TY.U32 ? memory.readU32(address)
+                : memory.readI32(address);
+            }
+            if (isGlobal) {
+              counters.globalLoadRequests += 1;
+              counters.globalLoadSectors += countSectors(addresses, active);
+            } else {
+              counters.sharedLoadRequests += 1;
+              counters.sharedBankConflicts += countBankConflicts(addresses, active);
+            }
+            instLdSt += lanes;
+            pc += 1;
+            break;
+          }
+
+          case OP.STORE: {
+            const addr = code[at + 1] * WARP_SIZE;
+            const src = code[at + 2] * WARP_SIZE;
+            const isGlobal = code[at + 3] === SPACE.GLOBAL;
+            const ty = code[at + 4];
+            const memory = isGlobal ? globalMemory : sharedMemory;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if ((active & (1 << lane)) === 0) continue;
+              const address = regs[addr + lane] | 0;
+              addresses[lane] = address;
+              const value = regs[src + lane];
+              if (ty === TY.F32) memory.writeF32(address, value);
+              else if (ty === TY.U32) memory.writeU32(address, value);
+              else memory.writeI32(address, value);
+            }
+            if (isGlobal) {
+              counters.globalStoreRequests += 1;
+              counters.globalStoreSectors += countSectors(addresses, active);
+            } else {
+              counters.sharedStoreRequests += 1;
+              counters.sharedBankConflicts += countBankConflicts(addresses, active);
+            }
+            instLdSt += lanes;
+            pc += 1;
+            break;
+          }
+
+          case OP.JMP:
+            pc = code[at + 1];
+            break;
+
+          case OP.PUSH: {
+            const cond = code[at + 1] * WARP_SIZE;
+            let taken = 0;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if ((active & (1 << lane)) === 0) continue;
+              if (regs[cond + lane] !== 0) taken |= 1 << lane;
+            }
+            const otherwise = active & ~taken;
+            if (taken !== 0 && otherwise !== 0) divergent += 1;
+            warp.stack.push({ origin: active, otherwise });
+            warp.active = taken;
+            pc = taken === 0 ? code[at + 2] : pc + 1;
+            break;
+          }
+
+          case OP.SWAP: {
+            const frame = warp.stack[warp.stack.length - 1];
+            if (!frame) throw new KernelError('内部错误：swap 时重汇聚栈是空的', lines[pc]);
+            warp.active = frame.otherwise;
+            frame.otherwise = 0;
+            pc = warp.active === 0 ? code[at + 1] : pc + 1;
+            break;
+          }
+
+          case OP.POP: {
+            const frame = warp.stack.pop();
+            if (!frame) throw new KernelError('内部错误：pop 时重汇聚栈是空的', lines[pc]);
+            warp.active = frame.origin;
+            pc += 1;
+            break;
+          }
+
+          case OP.LOOP:
+            warp.stack.push({ origin: active, otherwise: 0 });
+            pc += 1;
+            break;
+
+          case OP.LCOND: {
+            const cond = code[at + 1] * WARP_SIZE;
+            let taken = 0;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if ((active & (1 << lane)) === 0) continue;
+              if (regs[cond + lane] !== 0) taken |= 1 << lane;
+            }
+            if (taken !== 0 && taken !== active) divergent += 1;
+            warp.active = taken;
+            pc = taken === 0 ? code[at + 2] : pc + 1;
+            break;
+          }
+
+          case OP.BAR: {
+            // 屏障必须由整个 block 到达。一个 warp 在分歧区里到达屏障，
+            // 真卡上是未定义行为（多半挂死）—— 明确报错，不放过去。
+            if (warp.active !== warp.present) {
+              throw new KernelError(
+                '__syncthreads() 出现在发散的分支里：这个 warp 只有一部分 lane 到达了屏障。' +
+                '真卡上这是未定义行为，通常直接挂死。把屏障挪到所有线程都会执行到的地方',
+                lines[pc]
+              );
+            }
+            warp.atBarrier = true;
+            warp.pc = pc + 1;
+            counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
+            counters.instFma += instFma; counters.instLdSt += instLdSt;
+            counters.divergentBranches += divergent;
+            return;
+          }
+
+          case OP.CALL: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const fn = code[at + 2];
+            const a0 = code[at + 4] * WARP_SIZE;
+            const a1 = code[at + 5] * WARP_SIZE;
+            const a2 = code[at + 6] * WARP_SIZE;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if ((active & (1 << lane)) === 0) continue;
+              const x = regs[a0 + lane];
+              const y = regs[a1 + lane];
+              const z = regs[a2 + lane];
+              let out: number;
+              switch (fn) {
+                case FN.fmaf: out = fmaF32(x, y, z); break;
+                case FN.fabsf: out = Math.fround(Math.abs(x)); break;
+                case FN.fminf: out = minF32(x, y); break;
+                case FN.fmaxf: out = maxF32(x, y); break;
+                case FN.sqrtf: out = sqrtF32(x); break;
+                case FN.rsqrtf: out = rsqrtF32(x); break;
+                case FN.expf: out = expF32(x); break;
+                case FN.logf: out = logF32(x); break;
+                case FN.tanhf: out = tanhF32(x); break;
+                case FN.powf: out = powF32(x, y); break;
+                case FN.__expf: out = fastExpF32(x); break;
+                case FN.__logf: out = fastLogF32(x); break;
+                case FN.__fdividef: out = fastDivF32(x, y); break;
+                case FN.min: out = Math.min(x | 0, y | 0) | 0; break;
+                case FN.max: out = Math.max(x | 0, y | 0) | 0; break;
+                default: out = Math.abs(x | 0) | 0; break;
+              }
+              regs[dst + lane] = out;
+            }
+            if (fn === FN.fmaf) instFma += lanes;
+            pc += 1;
+            break;
+          }
+
+          case OP.RET:
+            warp.done = true;
+            counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
+            counters.instFma += instFma; counters.instLdSt += instLdSt;
+            counters.divergentBranches += divergent;
+            return;
+
+          default:
+            throw new KernelError(`内部错误：不认识的操作码 ${op}`, lines[pc]);
+        }
+      }
+    } catch (error) {
+      counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
+      counters.instFma += instFma; counters.instLdSt += instLdSt;
+      counters.divergentBranches += divergent;
+      if (error instanceof MemoryFault) throw new KernelError(error.message, lines[Math.min(pc, this.program.count - 1)]);
+      if (error instanceof KernelError) throw error;
+      throw new KernelError(String((error as Error)?.message ?? error), lines[Math.min(pc, this.program.count - 1)]);
+    }
+  }
+
+  private binF32(
+    regs: Float64Array, dst: number, a: number, b: number,
+    kind: number, active: number, line: number
+  ): void {
+    switch (kind) {
+      case BIN.add:
+        for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+          if (active & (1 << lane)) regs[dst + lane] = addF32(regs[a + lane], regs[b + lane]);
+        }
+        return;
+      case BIN.sub:
+        for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+          if (active & (1 << lane)) regs[dst + lane] = subF32(regs[a + lane], regs[b + lane]);
+        }
+        return;
+      case BIN.mul:
+        for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+          if (active & (1 << lane)) regs[dst + lane] = mulF32(regs[a + lane], regs[b + lane]);
+        }
+        return;
+      case BIN.div:
+        for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+          if (active & (1 << lane)) regs[dst + lane] = divF32(regs[a + lane], regs[b + lane]);
+        }
+        return;
+      default:
+        break;
+    }
+    for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+      if ((active & (1 << lane)) === 0) continue;
+      const x = regs[a + lane];
+      const y = regs[b + lane];
+      let out: number;
+      switch (kind) {
+        case BIN.lt: out = x < y ? 1 : 0; break;
+        case BIN.le: out = x <= y ? 1 : 0; break;
+        case BIN.gt: out = x > y ? 1 : 0; break;
+        case BIN.ge: out = x >= y ? 1 : 0; break;
+        case BIN.eq: out = x === y ? 1 : 0; break;
+        case BIN.ne: out = x !== y ? 1 : 0; break;
+        default: throw new KernelError('这个运算符不能用在 float 上', line);
+      }
+      regs[dst + lane] = out;
+    }
+  }
+
+  private binInt(
+    regs: Float64Array, dst: number, a: number, b: number,
+    kind: number, unsigned: boolean, active: number, line: number
+  ): void {
+    for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+      if ((active & (1 << lane)) === 0) continue;
+      const xi = unsigned ? regs[a + lane] >>> 0 : regs[a + lane] | 0;
+      const yi = unsigned ? regs[b + lane] >>> 0 : regs[b + lane] | 0;
+      let out: number;
+      switch (kind) {
+        case BIN.add: out = unsigned ? (xi + yi) >>> 0 : (xi + yi) | 0; break;
+        case BIN.sub: out = unsigned ? (xi - yi) >>> 0 : (xi - yi) | 0; break;
+        case BIN.mul: out = unsigned ? Math.imul(xi, yi) >>> 0 : Math.imul(xi, yi); break;
+        case BIN.div:
+          if (yi === 0) throw new KernelError('整数除以 0', line);
+          out = unsigned ? Math.trunc(xi / yi) >>> 0 : Math.trunc(xi / yi) | 0;
+          break;
+        case BIN.rem:
+          if (yi === 0) throw new KernelError('整数取模 0', line);
+          out = unsigned ? (xi % yi) >>> 0 : (xi % yi) | 0;
+          break;
+        case BIN.shl: out = unsigned ? (xi << (yi & 31)) >>> 0 : xi << (yi & 31); break;
+        case BIN.shr: out = unsigned ? xi >>> (yi & 31) : xi >> (yi & 31); break;
+        case BIN.and: out = unsigned ? (xi & yi) >>> 0 : xi & yi; break;
+        case BIN.or: out = unsigned ? (xi | yi) >>> 0 : xi | yi; break;
+        case BIN.xor: out = unsigned ? (xi ^ yi) >>> 0 : xi ^ yi; break;
+        case BIN.lt: out = xi < yi ? 1 : 0; break;
+        case BIN.le: out = xi <= yi ? 1 : 0; break;
+        case BIN.gt: out = xi > yi ? 1 : 0; break;
+        case BIN.ge: out = xi >= yi ? 1 : 0; break;
+        case BIN.eq: out = xi === yi ? 1 : 0; break;
+        default: out = xi !== yi ? 1 : 0; break;
+      }
+      regs[dst + lane] = out;
+    }
+  }
+}
+
+function normalize(value: number, ty: number): number {
+  return ty === TY.F32 ? Math.fround(value) : ty === TY.U32 ? value >>> 0 : value | 0;
+}
+
+function convert(value: number, from: number, to: number): number {
+  if (from === to) return value;
+  if (to === TY.F32) return Math.fround(from === TY.U32 ? value >>> 0 : value | 0);
+  if (from === TY.F32) return to === TY.U32 ? floatToUint(value) : floatToInt(value);
+  return to === TY.U32 ? value >>> 0 : value | 0;
+}
+
+function popcount(mask: number): number {
+  let n = mask - ((mask >> 1) & 0x55555555);
+  n = (n & 0x33333333) + ((n >> 2) & 0x33333333);
+  n = (n + (n >> 4)) & 0x0f0f0f0f;
+  return (n * 0x01010101) >> 24;
+}
+
+export { SECTOR_BYTES, WARP_SIZE, LinearMemory, encode };
+export type { ExecutableKernel };

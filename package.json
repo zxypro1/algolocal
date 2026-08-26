@@ -113,6 +113,7 @@
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
     "tree-sitter-bash": "^0.25.1",
+    "tree-sitter-cuda": "^0.21.1",
     "typescript": "5.1.6",
     "web-tree-sitter": "^0.26.13"
   },
