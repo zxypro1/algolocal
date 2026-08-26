@@ -1147,6 +1147,92 @@ const primers = {
         + 'last writer and barrier epoch, and reports the conflicts.'
       )
     ),
+    'bank-conflicts': t(
+      p(
+        '共享内存不是一整块，它被切成 **32 个 bank**。哪个地址属于哪个 bank 只看一条规则：'
+        + '`bank = (字节地址 / 4) % 32`。也就是说连续的 float 依次落在 bank 0、1、2……31，然后绕回 0。',
+        '一个 warp 的 32 个 lane 同时访问共享内存时，落在**不同 bank** 上的可以一次做完；'
+        + '落在**同一个 bank 的不同地址**上的必须排队，n 个不同地址就是 n 路串行。'
+        + '所以最坏情况（32 个 lane 全挤在一个 bank）比最好情况慢 32 倍。',
+        '有一个例外常被忽略：**同一个 bank 上访问同一个地址不算冲突**，那是广播，一点都不慢。'
+        + '`s[0]` 被所有线程读、或者 `s[threadIdx.x / 2]` 这种一半 lane 读同一格，都是免费的。',
+        '按列访问二维数组是最典型的冲突源。行宽 32 个 float 时，`tile[0][c]`、`tile[1][c]`、`tile[2][c]` '
+        + '的地址依次差 128 字节，算出来的 bank 号完全一样。把行宽改成 33，每一行就整体错开一个 bank，冲突消失。'
+        + '代价是每 32 行多占 32 个 float，换来 32 倍的吞吐。'
+      ),
+      p(
+        'Shared memory is not one flat block; it is divided into **32 banks**, and which bank an address '
+        + 'belongs to follows one rule: `bank = (byte address / 4) % 32`. Consecutive floats therefore land '
+        + 'in banks 0, 1, 2 and so on up to 31, then wrap.',
+        'When the 32 lanes of a warp access shared memory, lanes hitting **different banks** are serviced '
+        + 'together. Lanes hitting **different addresses within one bank** are serialised, n distinct '
+        + 'addresses costing n ways. The worst case, all 32 lanes in one bank, is 32 times slower than the best.',
+        'One exception is often missed: **the same address in the same bank is a broadcast**, not a conflict, '
+        + 'and costs nothing. Every thread reading `s[0]`, or half the lanes reading `s[threadIdx.x / 2]`, is free.',
+        'Column-wise access of a 2D array is the classic conflict. With a row of 32 floats, `tile[0][c]`, '
+        + '`tile[1][c]` and `tile[2][c]` are 128 bytes apart and map to identical banks. Widening the row to 33 '
+        + 'shifts every row by one bank and the conflict disappears, at a cost of 32 extra floats per 32 rows '
+        + 'in exchange for 32 times the throughput.'
+      )
+    ),
+    'warp-reduce': t(
+      p(
+        'GPU 调度的最小单位是 `warp`，也就是 32 个线程。它们**共用一个程序计数器**：'
+        + '一条指令下去，32 个 lane 一起执行。遇到 `if` 时如果 lane 之间的判断结果不一致，'
+        + '硬件只能先把满足条件的那批跑一遍、再把另一批跑一遍，两边的时间都要花。这叫 `warp 发散`。',
+        '发散不是「有分支就慢」，而是「**同一个 warp 内部**判断结果不一致才慢」。'
+        + '`if (blockIdx.x % 2)` 整个 warp 走同一边，不发散；`if (threadIdx.x % 2)` 就把 warp 劈成两半。',
+        '既然 warp 内的线程本来就在一起走，它们之间交换数据其实不必经过内存。'
+        + '`__shfl_xor_sync(mask, v, delta)` 让每个 lane 直接读到 `lane ^ delta` 那个 lane 的寄存器。'
+        + '做 5 次（delta 取 16、8、4、2、1），32 个值就两两归并成了一个，'
+        + '**一次内存访问都没有，也不需要 `__syncthreads()`**。',
+        '第一个参数 `mask` 说明哪些 lane 参与。全员参与时写 `0xffffffff`。'
+        + '读一个没在掩码里的 lane，拿到的是未定义值，这是真卡上很难查的一类 bug。'
+      ),
+      p(
+        'The GPU schedules in units of a `warp`, 32 threads that **share one program counter**: one '
+        + 'instruction issues and all 32 lanes execute it. At an `if` whose condition differs between lanes, '
+        + 'the hardware runs the taken lanes first and the others afterwards, paying for both. That is '
+        + '`warp divergence`.',
+        'Divergence is not "branches are slow" but "branches that disagree **inside one warp** are slow". '
+        + '`if (blockIdx.x % 2)` sends a whole warp one way and costs nothing; `if (threadIdx.x % 2)` splits it in half.',
+        'Since the threads of a warp already move together, exchanging data between them need not go through '
+        + 'memory. `__shfl_xor_sync(mask, v, delta)` hands each lane the register held by lane `lane ^ delta`. '
+        + 'Five rounds with delta 16, 8, 4, 2 and 1 pairwise collapse 32 values into one, '
+        + '**with no memory traffic and no `__syncthreads()`**.',
+        'The first argument, `mask`, states which lanes take part; `0xffffffff` means all of them. Reading a '
+        + 'lane outside the mask yields an undefined value, a bug that is notoriously hard to track down on real hardware.'
+      )
+    ),
+    occupancy: t(
+      p(
+        '`占用率`是一个 SM 上同时驻留了多少 warp，除以它能装下的最大 warp 数。'
+        + '它重要是因为 GPU 隐藏延迟的方式就是切换 warp：一个 warp 在等显存，'
+        + '调度器就去跑另一个。能同时驻留的 warp 越多，等待越容易被盖住。',
+        '限制驻留数的资源有四个，每个 SM 上都是固定的：寄存器堆、共享内存、'
+        + '最大 block 数、最大 warp 数。四条各算出能驻留几个 block，取最小的那个。'
+        + '`ncu` 的 `Occupancy` 分节会直接告诉你是哪一条卡住了，这比数字本身有用得多。',
+        '寄存器是最常见的瓶颈，而它有一个反直觉的地方：**线程私有的数组只有在下标全是编译期常量时'
+        + '才能待在寄存器里**。出现一次动态下标，整个数组就会落到 `local memory`。'
+        + '那块内存名字叫 local，实际住在显存里，每次访问都是一趟真正的访存。',
+        '更麻烦的是，数组搬走之后寄存器数反而**变少**了，光看寄存器数会以为优化成功。'
+        + '真正的证据是 local memory 的流量：它不为 0，就说明有东西掉出了寄存器。'
+      ),
+      p(
+        '`Occupancy` is how many warps are resident on an SM divided by the maximum it can hold. It matters '
+        + 'because switching warps is exactly how a GPU hides latency: while one warp waits on memory the '
+        + 'scheduler runs another. More resident warps means more waiting gets covered.',
+        'Four fixed per-SM resources limit residency: the register file, shared memory, the maximum block '
+        + 'count and the maximum warp count. Each implies a number of resident blocks and the smallest wins. '
+        + 'The `Occupancy` section of `ncu` names the limiter, which is far more useful than the number itself.',
+        'Registers are the usual bottleneck, and they have a counter-intuitive property: **a thread-private '
+        + 'array stays in registers only while every subscript is a compile-time constant**. One dynamic index '
+        + 'and the whole array moves to `local memory`, which despite its name lives in device memory, making '
+        + 'every access a real memory round trip.',
+        'Worse, once the array moves out the register count *drops*, so that metric alone looks like a win. '
+        + 'The real evidence is local-memory traffic: anything above zero means something fell out of registers.'
+      )
+    ),
   },
 
   'intranet-k8s': {
