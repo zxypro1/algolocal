@@ -37,6 +37,9 @@ const KYVERNO_IMAGE = 'ghcr.io/kyverno/kyverno:v1.16.0';
 // 一个从公网直接拿来的镜像，没人签过
 const UNSIGNED_IMAGE = 'docker.io/library/redis:7.4';
 const ESO_IMAGE = 'ghcr.io/external-secrets/external-secrets:v0.21.0';
+const PROMETHEUS_IMAGE = 'quay.io/prometheus/prometheus:v3.9.1';
+// 报表服务的一个坏版本：五分之一的请求 500
+const REPORTS_IMAGE_BAD = 'harbor.corp.internal/team/reports:2.3.0';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -143,7 +146,7 @@ const WORLD = {
   namespaces: [
     'default', 'kube-system', 'payments', 'analytics',
     'envoy-gateway-system', 'ingress-nginx', 'cert-manager', 'argocd', 'istio-system',
-    'kyverno', 'external-secrets',
+    'kyverno', 'external-secrets', 'monitoring',
   ],
   images: {
     [PORTAL_IMAGE]: {
@@ -154,6 +157,7 @@ const WORLD = {
       memoryUsage: '180Mi',
       handlesSigterm: true,
       runAsUser: 10001,
+      requestsPerSecond: 40,
     },
     // 平台组装的入口控制器与 PKI
     [ENVOY_IMAGE]: { pullMs: 300, startupMs: 400, readyAfterMs: 200, listens: [18000] },
@@ -187,6 +191,14 @@ const WORLD = {
     [ZTUNNEL_IMAGE]: { pullMs: 400, startupMs: 500, readyAfterMs: 200, listens: [15008] },
     [KYVERNO_IMAGE]: { pullMs: 500, startupMs: 700, readyAfterMs: 300, listens: [9443] },
     [ESO_IMAGE]: { pullMs: 400, startupMs: 600, readyAfterMs: 300, listens: [8080] },
+    [PROMETHEUS_IMAGE]: { pullMs: 600, startupMs: 900, readyAfterMs: 400, listens: [9090] },
+    [REPORTS_IMAGE_BAD]: {
+      pullMs: 500, startupMs: 800, readyAfterMs: 200,
+      listens: [9090], routes: { '/healthz': 200, '/metrics': 200 },
+      memoryUsage: '300Mi',
+      // 坏就坏在这里：五分之一的请求返回 5xx，但进程活着、探针照过
+      requestsPerSecond: 25, errorRatio: 0.2,
+    },
     [UNSIGNED_IMAGE]: { pullMs: 300, startupMs: 400, readyAfterMs: 200, listens: [6379] },
     // 会话存储
     [SESSIONS_IMAGE]: {
@@ -202,8 +214,9 @@ const WORLD = {
     [REPORTS_IMAGE]: {
       pullMs: 500, startupMs: 800, readyAfterMs: 200,
       listens: [9090],
-      routes: { '/healthz': 200 },
+      routes: { '/healthz': 200, '/metrics': 200 },
       memoryUsage: '900Mi',
+      requestsPerSecond: 25,
     },
   },
   // 本地已经有的基础镜像，写 Dockerfile 时 FROM 得着
@@ -563,7 +576,9 @@ const PORTAL_WORKLOAD = [
   },
   {
     apiVersion: 'v1', kind: 'Service',
-    metadata: { name: 'portal', namespace: 'payments' },
+    // Service 自己也带上 app 标签：ServiceMonitor 是按 Service 的标签选的，
+    // 只在 spec.selector 里写 app 是选不中它的
+    metadata: { name: 'portal', namespace: 'payments', labels: { app: 'portal' } },
     spec: { clusterIP: '10.96.1.10', selector: { app: 'portal' }, ports: [{ port: 80, targetPort: 8080 }] },
   },
 ];
@@ -5859,6 +5874,345 @@ const stage18 = {
   ),
 };
 
+
+/* ------------------------------------------------------------------ */
+/* 第 19 关                                                            */
+/* ------------------------------------------------------------------ */
+
+const MONITORING_PLATFORM = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: {
+      name: 'prometheus', namespace: 'monitoring',
+      labels: { 'app.kubernetes.io/name': 'prometheus' },
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'prometheus' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'prometheus' } },
+        spec: { containers: [{ name: 'prometheus', image: PROMETHEUS_IMAGE, ports: [{ containerPort: 9090 }] }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'monitoring.coreos.com/v1', kind: 'Prometheus',
+    metadata: { name: 'main', namespace: 'monitoring' },
+    spec: {
+      // 平台组的约定：只采带这个标签的 ServiceMonitor
+      serviceMonitorSelector: { matchLabels: { release: 'kube-prom' } },
+      replicas: 1,
+    },
+  },
+];
+
+/** 报表服务上了一个坏版本：进程活着、探针照过，但五分之一的请求 500 */
+const REPORTS_DEGRADED = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: 'reports', namespace: 'payments' },
+    spec: {
+      replicas: 2,
+      selector: { matchLabels: { app: 'reports' } },
+      template: {
+        metadata: { labels: { app: 'reports' } },
+        spec: {
+          containers: [{
+            name: 'app', image: REPORTS_IMAGE_BAD,
+            ports: [{ containerPort: 9090 }],
+            resources: { requests: { memory: '256Mi' }, limits: { memory: '1Gi' } },
+          }],
+        },
+      },
+    },
+  },
+  {
+    apiVersion: 'v1', kind: 'Service',
+    metadata: { name: 'reports', namespace: 'payments', labels: { app: 'reports' } },
+    spec: { selector: { app: 'reports' }, ports: [{ port: 80, targetPort: 9090 }] },
+  },
+];
+
+const MONITORING_STARTER = code`
+  # 采集与告警都还没配。
+  #
+  # 提示：Prometheus 实例上写着 serviceMonitorSelector，
+  #      去看看它要求 ServiceMonitor 带什么标签。
+`;
+
+const MONITORING_REFERENCE = code`
+  apiVersion: monitoring.coreos.com/v1
+  kind: ServiceMonitor
+  metadata:
+    name: reports
+    namespace: payments
+    labels:
+      release: kube-prom
+  spec:
+    selector:
+      matchLabels:
+        app: reports
+    endpoints:
+    - port: http
+  ---
+  apiVersion: monitoring.coreos.com/v1
+  kind: ServiceMonitor
+  metadata:
+    name: portal
+    namespace: payments
+    labels:
+      release: kube-prom
+  spec:
+    selector:
+      matchLabels:
+        app: portal
+    endpoints:
+    - port: http
+  ---
+  apiVersion: monitoring.coreos.com/v1
+  kind: PrometheusRule
+  metadata:
+    name: payments
+    namespace: payments
+    labels:
+      release: kube-prom
+  spec:
+    groups:
+    - name: payments.rules
+      rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} 的 {{ $labels.pod }} 采不到了"
+      - alert: HighErrorRate
+        expr: sum(rate(http_requests_total{code=~"5.."}[5m])) by (job)
+          / sum(rate(http_requests_total[5m])) by (job) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} 的 5xx 比例是 {{ $value }}"
+`;
+
+const stage19 = {
+  id: 'metrics-and-alerts',
+  title: t('让集群自己说出哪儿不对', 'Let the Cluster Say What Is Wrong'),
+  goal: t(
+    code`
+      财务报了一个说不清的问题：「报表有时候打不开，刷新几次又好了」。
+      \`kubectl get pods\` 全是 Running，探针全过，日志里也没有异常堆栈 ——
+      因为进程确实活着，只是**一部分请求返回了 5xx**。
+
+      这类问题不看指标是查不出来的。Prometheus 装好了，但集群里一个
+      \`ServiceMonitor\` 都没有，一条告警规则也没有。
+
+      ## 通关标准
+
+      1. 门户与报表的指标都采得到（\`up\` 有它们的序列）；
+      2. 有一条按 **PromQL 求值**的错误率告警，能真的触发；
+      3. 有一条目标掉线的告警；
+      4. 两条都带 \`for\`，抖动不会立刻变成告警；
+      5. 规则文件过 \`promtool check rules\`。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl get prometheus -n monitoring -o yaml
+      kubectl apply -f /root/infra/monitoring.yaml
+      promtool check rules /root/infra/monitoring.yaml
+      promtool query instant http://localhost:9090 'up'
+      promtool query instant http://localhost:9090 'sum(rate(http_requests_total{code=~"5.."}[5m])) by (job)'
+      \`\`\`
+    `,
+    code`
+      Finance reports something vague: "the reports page sometimes fails, refreshing a
+      few times fixes it". \`kubectl get pods\` shows everything Running, probes pass,
+      and the logs hold no stack traces, because the process really is alive and only
+      **some requests return 5xx**.
+
+      Problems like this are invisible without metrics. Prometheus is installed, but
+      the cluster has no \`ServiceMonitor\` and no alerting rules at all.
+
+      ## Done when
+
+      1. metrics from the portal and reports are being collected (\`up\` has series for
+         both);
+      2. an error-rate alert exists, evaluated as real **PromQL**, and it fires;
+      3. a target-down alert exists;
+      4. both carry \`for\`, so a blip does not become a page;
+      5. the rule file passes \`promtool check rules\`.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl get prometheus -n monitoring -o yaml
+      kubectl apply -f /root/infra/monitoring.yaml
+      promtool check rules /root/infra/monitoring.yaml
+      promtool query instant http://localhost:9090 'up'
+      promtool query instant http://localhost:9090 'sum(rate(http_requests_total{code=~"5.."}[5m])) by (job)'
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('指标采得到', 'Metrics are being collected'),
+    t('告警按 PromQL 求值并真的触发', 'Alerts evaluate as PromQL and fire'),
+    t('带 for，抖动不会变成告警', 'They carry for, so blips do not page'),
+  ],
+  hints: [
+    t(
+      '采集要过**两层**选择器：Prometheus 实例的 \`serviceMonitorSelector\` 先选中 ServiceMonitor，ServiceMonitor 的 \`selector\` 再选中 Service。少配哪一层都是一条指标都采不到，而两边看起来都很正常。',
+      'Collection passes **two** selectors: the Prometheus instance `serviceMonitorSelector` picks ServiceMonitors, and the ServiceMonitor `selector` picks Services. Miss either and nothing is collected, while both objects look perfectly fine.'
+    ),
+    t(
+      '错误率是**两个 rate 相除**，不是一个计数。分子分母都要先 \`sum ... by (job)\` 聚合到同一组标签上，否则两边配不上，表达式返回空 —— 而返回空的告警永远不会触发，也不会报错。',
+      'An error rate is **one rate divided by another**, not a count. Aggregate both sides with `sum ... by (job)` onto the same label set, or they will not match and the expression returns nothing. An alert whose expression returns nothing never fires and never complains.'
+    ),
+    t(
+      '写完先 \`promtool check rules\` 跑一遍，再 \`promtool query instant\` 把表达式单独查一次。apiserver 收 PrometheusRule 的时候**不校验表达式**，写错了照样收下。',
+      'Run `promtool check rules` first, then query the expression alone with `promtool query instant`. The apiserver does **not validate expressions** when accepting a PrometheusRule; a broken one is stored happily.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '用 \`http_requests_total{code=~"5.."} > 0\` 当告警。counter 只会涨，这条从第一个 5xx 起就永远成立 —— 而且它衡量的是「历史上出过多少错」，不是「现在错得多不多」。错误率永远要用 \`rate\` 加除法。',
+      'Alerting on `http_requests_total{code=~"5.."} > 0`. A counter only grows, so this is true forever after the first 5xx, and it measures how many errors ever happened rather than how bad things are now. Error rates always need `rate` and a division.'
+    ),
+    t(
+      '不写 \`for\`。一次采集抖动就会发一条告警，收告警的人很快就不看了 —— 而这比没有告警更糟，因为大家会以为「有人在盯着」。',
+      'Omitting `for`. A single scrape blip pages someone, and people stop reading alerts, which is worse than having none because everyone assumes somebody is watching.'
+    ),
+    t(
+      '以为指标里能看到一切。采集是**定时拉**的（默认 15 秒一次），只活了十秒的 Pod 很可能一个点都没采到。指标回答的是「持续的、按比例的」问题；一次性的、短暂的事件要看 Event 与日志。',
+      'Expecting metrics to show everything. Scraping is **periodic pull** (15s by default), so a pod that lived ten seconds may contribute no samples at all. Metrics answer sustained, proportional questions; one-off short events live in Events and logs.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      CNI_CILIUM,
+      ...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...TLS_PLATFORM, ...MONITORING_PLATFORM,
+      ...PORTAL_WORKLOAD, PORTAL_ROUTE, ...REPORTS_DEGRADED,
+    ],
+    files: { '/root/infra/monitoring.yaml': MONITORING_STARTER },
+    referenceFiles: { '/root/infra/monitoring.yaml': MONITORING_REFERENCE },
+    referenceCommands: [
+      'kubectl apply -f /root/infra/monitoring.yaml',
+    ],
+  },
+  specs: [
+    spec('metrics-and-alerts.spec.ts', code`
+      import { advance, list, sh } from '@ops/lab';
+
+      const PROM = 'http://localhost:9090';
+
+      describe('指标与告警', () => {
+        it('门户与报表的指标都采得到', async () => {
+          await advance(300000);
+          const result = await sh("promtool query instant " + PROM + " 'up'");
+          expect(result.code).toBe(0);
+          expect(result.stdout).toContain('payments/reports');
+          expect(result.stdout).toContain('payments/portal');
+        });
+
+        it('规则文件是干净的', async () => {
+          const result = await sh('promtool check rules /root/infra/monitoring.yaml');
+          expect(result.code).toBe(0);
+          expect(result.stdout).toContain('SUCCESS');
+        });
+
+        it('错误率告警真的触发了', async () => {
+          await advance(1200000);
+          const rules = list('PrometheusRule', { namespace: 'payments' });
+          expect(rules.length).toBeGreaterThan(0);
+
+          const firing = list('Pod', { namespace: 'monitoring' });
+          expect(firing.length).toBeGreaterThan(0);
+
+          const result = await sh(
+            "promtool query instant " + PROM
+            + " 'sum(rate(http_requests_total{code=~\\"5..\\"}[5m])) by (job)"
+            + " / sum(rate(http_requests_total[5m])) by (job) > 0.05'"
+          );
+          expect(result.stdout).toContain('payments/reports');
+          // 门户没坏，不该出现在结果里
+          expect(result.stdout).not.toContain('payments/portal');
+        });
+
+        it('告警是按 PromQL 写的，而且带 for', () => {
+          const rules = list('PrometheusRule', { namespace: 'payments' })
+            .flatMap((rule) => (rule.spec.groups || []).flatMap((group) => group.rules || []))
+            .filter((rule) => rule.alert);
+          expect(rules.length).toBeGreaterThanOrEqual(2);
+          for (const rule of rules) {
+            expect(rule.for).toBeTruthy();
+          }
+          // 错误率那条必须是比率，不能是裸计数
+          const rate = rules.find((rule) => /rate\\(/.test(rule.expr) && rule.expr.includes('/'));
+          expect(rate).toBeTruthy();
+        });
+
+        it('有一条目标掉线的告警', () => {
+          const rules = list('PrometheusRule', { namespace: 'payments' })
+            .flatMap((rule) => (rule.spec.groups || []).flatMap((group) => group.rules || []));
+          expect(rules.some((rule) => /\\bup\\b/.test(rule.expr || ''))).toBe(true);
+        });
+
+        it('ServiceMonitor 带上了 Prometheus 要求的标签', () => {
+          const monitors = list('ServiceMonitor', { namespace: 'payments' });
+          expect(monitors.length).toBeGreaterThanOrEqual(2);
+          for (const monitor of monitors) {
+            expect(monitor.metadata.labels.release).toBe('kube-prom');
+          }
+        });
+      });
+    `),
+  ],
+  focus: ['observability', 'correctness'],
+  extension: t(
+    code`
+      这一关的场景之所以值得单独练，是因为它落在**监控的盲区之间**：
+      进程活着（探针过）、日志没异常（5xx 是正常返回不是崩溃）、
+      Pod 没重启（\`kubectl get\` 一片绿）。三个最常用的信号全说「没事」，
+      只有比例型指标看得出来。
+
+      三类信号各管一段，混着用才完整：**指标**回答「持续的、按比例的」问题
+      （错误率、延迟分位数、饱和度），代价是采样间隔之间的事看不见；
+      **日志**回答「这一次具体发生了什么」，代价是量大且没有聚合；
+      **链路追踪**回答「这一次请求在哪一跳慢了」，代价是采样率与埋点成本。
+      拿指标去查单次请求、拿日志去算错误率，都是用错了工具。
+
+      告警上有一条经验值得记：**告的应该是症状，不是原因**。
+      「错误率超过 5%」是症状，用户感受得到；「某个 Pod 内存高」是原因，
+      而且高内存不一定有影响。按原因告警的系统会在半夜叫醒一个人，
+      让他去看一个用户根本没感觉的指标 —— 几次之后就没人看告警了。
+    `,
+    code`
+      This scenario is worth practising because it falls **between the blind spots**:
+      the process is alive (probes pass), the logs are clean (a 5xx is a normal
+      response, not a crash), and no pod restarted (\`kubectl get\` is all green). The
+      three signals people reach for first all say "fine", and only a proportional
+      metric shows the problem.
+
+      Three signal types cover different ground and only work together. **Metrics**
+      answer sustained, proportional questions (error rate, latency quantiles,
+      saturation) at the cost of blindness between scrapes. **Logs** answer what
+      happened in one specific case, at the cost of volume and no aggregation.
+      **Traces** answer which hop was slow for one request, at the cost of sampling and
+      instrumentation. Using metrics to investigate a single request, or logs to
+      compute an error rate, is using the wrong tool.
+
+      One rule of thumb about alerting: **alert on symptoms, not causes**. "Error rate
+      above 5%" is a symptom users feel; "this pod uses a lot of memory" is a cause,
+      and high memory may have no effect at all. Alerting on causes wakes someone at
+      3am to look at a number no user noticed, and after a few of those nobody reads
+      the alerts any more.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -5904,6 +6258,6 @@ module.exports = {
   stages: [
     stage1, stage2, stage3, stage4, stage5, stage6,
     stage7, stage8, stage9, stage10, stage11, stage12,
-    stage13, stage14, stage15, stage16, stage17, stage18,
+    stage13, stage14, stage15, stage16, stage17, stage18, stage19,
   ],
 };

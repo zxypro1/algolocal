@@ -24,6 +24,21 @@ import { GitNetwork, createGitCommand, parseCommit, readTree, seedRepository } f
 import { createIstioctlCommand } from '../mesh';
 import { SignatureStore, createCosignCommand } from '../admission';
 import { OpenBao, createBaoCommand } from '../secrets';
+import { createPromtoolCommand } from '../observability';
+import { parseQuantity } from '../controllers';
+
+/**
+ * promtool 认哪些地址。
+ *
+ * 端口转发过来的、集群内的 Service 名，都指向同一个 Prometheus ——
+ * 学员用哪种写法都该能查到。
+ */
+const PROMETHEUS_ADDRESSES = [
+  'http://localhost:9090',
+  'http://127.0.0.1:9090',
+  'http://prometheus.monitoring.svc:9090',
+  'http://prometheus.monitoring.svc.cluster.local:9090',
+];
 import { currentNamespaceOf } from './view';
 import { DEFAULT_KUBECONFIG_PATH } from '../wasm';
 import { createExecHandler } from './podshell';
@@ -132,6 +147,52 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     addressPools: spec.addressPools,
     users: spec.users,
     signatures,
+    /**
+     * 指标从集群状态里长出来。
+     *
+     * 这几个是排查真正用得上的：`up`（由 Prometheus 合成，见控制器）、
+     * HTTP 请求计数与错误计数、容器内存。数值由镜像声明的行为决定，
+     * 于是「注入一个故障」就是改镜像行为或改副本数，而不是伪造指标。
+     */
+    metrics: {
+      sample: (target, at) => {
+        void at;
+        const pods = cluster.scheme.get({ group: '', version: 'v1', resource: 'pods' });
+        const pod = pods && cluster.registry.list(pods, { namespace: target.namespace }).items
+          .find((item) => item.metadata.name === target.pod);
+        if (!pod) return [];
+        const containers = ((pod.spec ?? {}) as any).containers ?? [];
+        const behavior = cluster.imageBehaviorOf(containers[0]?.image);
+        const out: Array<{ name: string; labels: Record<string, string>; value: number }> = [];
+
+        /**
+         * 请求计数是 counter，单调递增。
+         *
+         * 每一轮按「这个 Pod 已经跑了多久」算，于是它随时间线性增长，
+         * `rate()` 出来是一个稳定的值 —— Pod 重启之后从头开始，
+         * 正好让学员看到 counter 归零这件事。
+         */
+        const started = Date.parse(((pod.status ?? {}) as any).startTime ?? '') || cluster.wallClock();
+        const seconds = Math.max(0, (cluster.wallClock() - started) / 1000);
+        const rps = behavior?.requestsPerSecond ?? 10;
+        out.push({ name: 'http_requests_total', labels: { code: '200' }, value: Math.floor(seconds * rps) });
+        const errorRate = behavior?.errorRatio ?? 0;
+        out.push({
+          name: 'http_requests_total', labels: { code: '500' },
+          value: Math.floor(seconds * rps * errorRate),
+        });
+
+        const memory = behavior?.memoryUsage ? parseQuantity(behavior.memoryUsage) : undefined;
+        if (memory !== undefined) {
+          out.push({ name: 'container_memory_working_set_bytes', labels: {}, value: memory });
+        }
+        const limit = containers[0]?.resources?.limits?.memory;
+        if (limit) {
+          out.push({ name: 'container_spec_memory_limit_bytes', labels: {}, value: parseQuantity(limit) });
+        }
+        return out;
+      },
+    },
     /**
      * ESO 去密钥库取值。
      *
@@ -269,6 +330,13 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
       server: (address) => (address.replace(/\/+$/, '') === bao.address ? bao : undefined),
     }));
   }
+
+  machine.install('promtool', createPromtoolCommand({
+    tsdb: (address) => (PROMETHEUS_ADDRESSES.includes(address.replace(/\/+$/, ''))
+      ? cluster.prometheus?.tsdb
+      : undefined),
+    now: () => cluster.wallClock(),
+  }));
 
   machine.install('cosign', createCosignCommand({
     signatures,

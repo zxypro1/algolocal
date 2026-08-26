@@ -1312,6 +1312,21 @@ const primers = {
       )
     ),
 
+    'metrics-and-alerts': t(
+      p(
+        '`Prometheus` 是**拉**模型：它按配置找到一批目标，每隔一段时间（默认 15 秒）去每个目标的 `/metrics` 上采一次。数据模型很小：一条`序列`由指标名加一组标签唯一确定，值按时间点存。这个模型带来两个直接后果：两次采样之间发生的事看不见（只活十秒的 Pod 可能一个点都没有），以及目标挂掉之后它此前的指标还会在图上停留一个回看窗口（默认五分钟）才消失。',
+        '在 Kubernetes 里，采集配置写成 `ServiceMonitor`：按标签选中一批 Service，去它们后面的 Pod 上拉。这里有个**两层选择器**的坑：Prometheus 实例自己有一个 `serviceMonitorSelector`，先由它选中 ServiceMonitor，再由 ServiceMonitor 的 `selector` 选中 Service。少配任何一层的结果都是一条指标都采不到，而两个对象看起来都完全正常。`up` 这个指标是 Prometheus 自己合成的，不来自目标，它是判断「采不采得到」的第一手依据。',
+        '`PromQL` 里最要紧的区分是 `counter` 与 `gauge`。counter 只增不减（请求总数、错误总数），直接看它的值没有意义，要用 `rate(x[5m])` 求每秒增量；gauge 可以上下浮动（内存、队列长度），直接看瞬时值。错误率是**两个 rate 相除**：`sum(rate(errors[5m])) by (job) / sum(rate(total[5m])) by (job)`。两侧必须聚合到同一组标签上，否则配不上，表达式返回空，而返回空的告警永远不会触发，也不会报错。另外比较运算符是`过滤`不是求布尔值：`up == 0` 返回的是那些确实为 0 的序列。',
+        '告警规则写在 `PrometheusRule` 里，`expr` 加 `for`。`for` 的意思是「条件持续成立这么久才真的告警」，中间处于 `pending`；条件一旦不成立就整条清掉，所以抖动不会累积。两条实践值得记：一是 apiserver 收 PrometheusRule 时**不校验表达式**，写错了照样收下，所以上线前要 `promtool check rules` 加 `promtool query instant` 各跑一遍；二是`告症状不告原因`：「错误率超过 5%」用户感受得到，「某个 Pod 内存高」不一定有影响，按原因告警的系统很快就没人看了。'
+      ),
+      p(
+        '`Prometheus` is a **pull** model: it discovers a set of targets and scrapes `/metrics` on each at a fixed interval, 15 seconds by default. The data model is tiny: a `series` is identified by a metric name plus a set of labels, with values stored per timestamp. Two consequences follow directly. Anything happening between scrapes is invisible, so a pod that lived ten seconds may contribute no samples at all. And after a target dies, its earlier metrics linger for one lookback window (five minutes by default) before disappearing.',
+        'In Kubernetes the scrape config is a `ServiceMonitor`: select Services by label, scrape the pods behind them. There is a **two-selector** trap here: the Prometheus instance has its own `serviceMonitorSelector` which picks ServiceMonitors, and each ServiceMonitor has a `selector` which picks Services. Missing either layer collects nothing, while both objects look perfectly healthy. The `up` metric is synthesised by Prometheus rather than coming from the target, which makes it the first thing to check when nothing appears.',
+        'The distinction that matters most in `PromQL` is `counter` versus `gauge`. A counter only increases (requests served, errors returned) and its raw value means little; use `rate(x[5m])` for per-second increase. A gauge moves both ways (memory, queue depth) and is read directly. An error rate is **one rate divided by another**: `sum(rate(errors[5m])) by (job) / sum(rate(total[5m])) by (job)`. Both sides must be aggregated to the same label set or they will not match and the expression returns nothing, and an alert whose expression returns nothing never fires and never complains. Note also that comparison operators `filter` rather than produce booleans: `up == 0` returns the series that really are zero.',
+        'Alerting rules live in a `PrometheusRule` as an `expr` plus a `for`. The `for` means the condition must hold that long before the alert really fires, staying `pending` meanwhile, and the whole thing clears the moment the condition stops holding, so blips do not accumulate. Two practices worth keeping: the apiserver does **not validate expressions** when accepting a PrometheusRule, so run `promtool check rules` and `promtool query instant` before shipping; and `alert on symptoms, not causes`, because users feel "error rate above 5%" while "this pod uses a lot of memory" may mean nothing, and cause-based alerting quickly stops being read.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',
