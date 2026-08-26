@@ -15,7 +15,7 @@ import {
   ScrollArea, Select, Stack, Tabs, Text, Tooltip,
 } from '@mantine/core';
 import {
-  IconAlertTriangle, IconChartHistogram, IconFileCode,
+  IconAlertTriangle, IconChartHistogram, IconCpu, IconFileCode,
   IconPlayerPlay, IconRefresh, IconTerminal2,
 } from '@tabler/icons-react';
 import { useMantineColorScheme } from '@mantine/core';
@@ -35,6 +35,7 @@ const WorkbenchTerminal = dynamic(
   () => import('../workbench/WorkbenchTerminal'), { ssr: false }
 );
 const ProfilePanel = dynamic(() => import('./ProfilePanel'), { ssr: false });
+const MemoryPanel = dynamic(() => import('./MemoryPanel'), { ssr: false });
 
 export interface GpuWorkspaceProps {
   session: ProjectSession;
@@ -347,6 +348,9 @@ export default function GpuWorkspace({ session, registerClearResults }: GpuWorks
                   <Tabs.Tab value="profile" fz="xs" leftSection={<IconChartHistogram size={13} />}>
                     剖析
                   </Tabs.Tab>
+                  <Tabs.Tab value="memory" fz="xs" leftSection={<IconCpu size={13} />}>
+                    访存
+                  </Tabs.Tab>
                 </Tabs.List>
 
                 <Tabs.Panel value="terminal" style={{ flex: 1, minHeight: 0 }}>
@@ -413,6 +417,12 @@ export default function GpuWorkspace({ session, registerClearResults }: GpuWorks
                 <Tabs.Panel value="profile" style={{ flex: 1, minHeight: 0 }}>
                   <ErrorBoundary fallback={renderPanelError}>
                     <ProfilePanel world={gpu.world} revision={gpu.revision} onInsert={insertCommand} />
+                  </ErrorBoundary>
+                </Tabs.Panel>
+
+                <Tabs.Panel value="memory" style={{ flex: 1, minHeight: 0 }}>
+                  <ErrorBoundary fallback={renderPanelError}>
+                    <MemoryPanel world={gpu.world} revision={gpu.revision} />
                   </ErrorBoundary>
                 </Tabs.Panel>
 

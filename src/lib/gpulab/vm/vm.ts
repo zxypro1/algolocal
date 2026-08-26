@@ -32,6 +32,7 @@ import {
   countBankConflicts, countSectors,
 } from './memory';
 import type { RaceDetector } from './sanitizer';
+import type { AccessSpace, AccessTrace } from './trace';
 
 export interface Dim3 {
   x: number;
@@ -191,6 +192,14 @@ export interface RunOptions {
    */
   raceDetector?: RaceDetector;
   /**
+   * 访存轨迹。
+   *
+   * **按需开启**，和 racecheck 一个路子：不给就一行额外代码都不跑。
+   * 每条访存要拷 32 个地址，常开的话内存与吞吐都受不了 ——
+   * 工作台上是一个「采样一次」按钮，单独跑一遍。
+   */
+  trace?: AccessTrace;
+  /**
    * 宿主服务：CUDA runtime、printf、容器、起 kernel。
    *
    * **只有跑宿主程序时才给。** 设备侧的 kernel 里根本编不出 hostcall
@@ -224,6 +233,12 @@ export interface HostServices {
 }
 
 const DEFAULT_MAX_WARP_INSTS = 200_000_000;
+
+/** SPACE 的数值码 → 名字。轨迹里要存名字，查表比每次判分支便宜 */
+const SPACE_NAMES: AccessSpace[] = [];
+SPACE_NAMES[SPACE.GLOBAL] = 'global';
+SPACE_NAMES[SPACE.SHARED] = 'shared';
+SPACE_NAMES[SPACE.LOCAL] = 'local';
 
 export function launchKernel(
   kernel: CompiledKernel | ExecutableKernel,
@@ -398,7 +413,10 @@ class Executor {
     const hostArgs = this.hostArgs;
     const counters = this.counters;
     const detector = this.options.raceDetector;
+    const trace = this.options.trace;
     const warpBase = warp.index * WARP_SIZE;
+    // 轨迹里要标出是哪个 block 的 —— 三维网格摊成一个序号
+    const blockOrdinal = trace ? (bz * grid.y + by) * grid.x + bx : 0;
 
     // 计数器用局部变量攒着，出口再写回（理由见文件头第 3 条）
     let warpInsts = 0;
@@ -590,14 +608,24 @@ class Executor {
                 : ty === TY.U32 ? memory.readU32(address)
                 : memory.readI32(address);
             }
+            let loadSectors = 0;
+            let loadConflicts = 0;
             if (space === SPACE.GLOBAL) {
+              loadSectors = countSectors(addresses, active);
               counters.globalLoadRequests += 1;
-              counters.globalLoadSectors += countSectors(addresses, active);
+              counters.globalLoadSectors += loadSectors;
             } else if (space === SPACE.SHARED) {
+              loadConflicts = countBankConflicts(addresses, active);
               counters.sharedLoadRequests += 1;
-              counters.sharedBankConflicts += countBankConflicts(addresses, active);
+              counters.sharedBankConflicts += loadConflicts;
             } else {
               counters.localReadBytes += lanes * 4;
+            }
+            if (trace) {
+              trace.record(
+                lines[pc], 'load', SPACE_NAMES[space], addresses, active,
+                loadSectors, loadConflicts, blockOrdinal, warp.index
+              );
             }
             // local memory 是线程私有的，不可能有竞态，不用喂给检测器
             if (detector && space !== SPACE.LOCAL) {
@@ -630,14 +658,24 @@ class Executor {
               else if (ty === TY.U32) memory.writeU32(address, value);
               else memory.writeI32(address, value);
             }
+            let storeSectors = 0;
+            let storeConflicts = 0;
             if (space === SPACE.GLOBAL) {
+              storeSectors = countSectors(addresses, active);
               counters.globalStoreRequests += 1;
-              counters.globalStoreSectors += countSectors(addresses, active);
+              counters.globalStoreSectors += storeSectors;
             } else if (space === SPACE.SHARED) {
+              storeConflicts = countBankConflicts(addresses, active);
               counters.sharedStoreRequests += 1;
-              counters.sharedBankConflicts += countBankConflicts(addresses, active);
+              counters.sharedBankConflicts += storeConflicts;
             } else {
               counters.localWriteBytes += lanes * 4;
+            }
+            if (trace) {
+              trace.record(
+                lines[pc], 'store', SPACE_NAMES[space], addresses, active,
+                storeSectors, storeConflicts, blockOrdinal, warp.index
+              );
             }
             if (detector && space !== SPACE.LOCAL) {
               const name = space === SPACE.GLOBAL ? 'global' : 'shared';

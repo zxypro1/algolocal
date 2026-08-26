@@ -14,6 +14,7 @@
  */
 import type { CommandHandler, CommandResult } from '../../labkit/machine';
 import { compileProgram } from '../index';
+import type { AccessTrace } from '../vm/trace';
 import { runClusterHost } from '../cluster/run';
 import { CudaCompileError } from '../cuda/lower';
 import { CudaSyntaxError } from '../cuda/parser';
@@ -163,6 +164,13 @@ function diagnose(error: unknown, source: string, fileName: string): string {
 export interface RunOptions {
   /** 开着 racecheck 跑 */
   racecheck?: boolean;
+  /**
+   * 开着访存轨迹跑。
+   *
+   * 和 racecheck 一样是额外的一遍：真实那一遍的指标要原样留着，
+   * 否则「采样一次访存」会把学员刚跑出来的数字冲掉。
+   */
+  trace?: AccessTrace;
 }
 
 export class BenchError extends Error {
@@ -194,7 +202,9 @@ export async function runBench(
 
   // racecheck 是**额外**跑的一遍，不能把真实那一遍的指标冲掉 ——
   // 门槛读的是真实那一遍。先存住，跑完再放回去。
-  const preserved = options.racecheck ? world.gpu.snapshotCounters() : null;
+  const preserved = (options.racecheck || options.trace)
+    ? world.gpu.snapshotCounters()
+    : null;
 
   // 重新建一台干净的设备：显存内容、分配游标、指标全部归零
   if (world.cluster) world.cluster.reset();
@@ -262,7 +272,11 @@ export async function runBench(
     });
 
     try {
-      if (options.racecheck) {
+      if (options.trace) {
+        world.gpu.launchWithTrace(kernel, {
+          grid: toDim3(launch.grid), block: toDim3(launch.block),
+        }, args, options.trace);
+      } else if (options.racecheck) {
         world.gpu.launchWithRacecheck(kernel, {
           grid: toDim3(launch.grid), block: toDim3(launch.block),
         }, args);
