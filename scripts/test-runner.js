@@ -54,7 +54,7 @@ class TestRunner {
       {
         name: 'Gpulab CUDA VM',
         file: 'tests/gpulab',
-        description: 'The CUDA frontend, the warp-lockstep VM, coalescing and bank-conflict measurement, and byte-identical replay'
+        description: 'The CUDA frontend, the warp-lockstep VM, coalescing/bank-conflict measurement, racecheck, and the nvcc/ncu toolchain'
       },
       {
         name: 'Desktop Menus',

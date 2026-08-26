@@ -199,6 +199,19 @@ export class GpuDevice {
   resetMetrics(): void {
     this.counters = emptyCounters();
   }
+
+  /**
+   * 把设备恢复到刚开机的样子：显存清零、分配游标归零、指标清空。
+   *
+   * `./bench` 每次跑都要先做这个 —— 跑两遍必须得到同样的结果，
+   * 否则「重放一致」这条门槛就不成立了。
+   */
+  reset(): void {
+    this.memory.reset();
+    this.counters = emptyCounters();
+    this.lastSanitizer = { races: [], truncated: 0 };
+    this.lastStatic = null;
+  }
 }
 
 /** 每次 launch 的计数器累加到设备上 —— 一关可能 launch 很多次 */
