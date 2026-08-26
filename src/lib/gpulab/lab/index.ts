@@ -9,6 +9,11 @@ export type {
 } from './world';
 export { installToolchain, runBench } from './cli';
 export { formatProfile, formatNvidiaSmi, arithmeticIntensity } from './report';
+export { createGpuLabApi, createGpuLabModules, GpuLabError } from './modules';
+export type { GpuLabApi, Deviation } from './modules';
+export { ulpDistanceOf, accumulationTolerance } from './numeric';
+export { runGpuStage, gpuMetricTree } from './runner';
+export type { RunGpuStageOptions } from './runner';
 
 import { createGpuWorld, type GpuWorld, type GpuWorldSpec } from './world';
 import { installToolchain } from './cli';

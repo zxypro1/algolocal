@@ -141,6 +141,10 @@ export class GpuDevice {
     config: LaunchConfig,
     args: KernelArg[]
   ): SanitizerReport {
+    // 静态指标和普通 launch 是同一份（同一个 kernel、同一个配置），
+    // 也要填上 —— 否则 racecheck 跑完之后占用率与寄存器数会变成空的
+    const threadsPerBlock = config.block.x * config.block.y * config.block.z;
+    this.lastStatic = staticMetricsOf(this.device, kernel, threadsPerBlock);
     const detector = new RaceDetector({
       // 只盯已经分配出去的那部分显存，影子内存跟着题目规模走
       globalBytes: this.memory.used,
@@ -201,6 +205,20 @@ export class GpuDevice {
   }
 
   /**
+   * 存 / 取一份计数器快照。
+   *
+   * 给 racecheck 那一遍用：它要在干净的设备上重跑一次，但**不能把
+   * 真实那一遍的指标冲掉** —— 门槛读的是真实那一遍。
+   */
+  snapshotCounters(): GpuCounters {
+    return { ...this.counters };
+  }
+
+  restoreCounters(snapshot: GpuCounters): void {
+    this.counters = { ...snapshot };
+  }
+
+  /**
    * 把设备恢复到刚开机的样子：显存清零、分配游标归零、指标清空。
    *
    * `./bench` 每次跑都要先做这个 —— 跑两遍必须得到同样的结果，
@@ -209,7 +227,6 @@ export class GpuDevice {
   reset(): void {
     this.memory.reset();
     this.counters = emptyCounters();
-    this.lastSanitizer = { races: [], truncated: 0 };
     this.lastStatic = null;
   }
 }

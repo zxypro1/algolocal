@@ -134,6 +134,8 @@ export interface ProjectStage {
   lab?: LabNetworkConfig;
   /** ops 形态的关卡增量（workspace.kind === 'ops' 时才有意义） */
   ops?: OpsStageSpec;
+  /** gpu 形态的关卡增量（workspace.kind === 'gpu' 时才有意义） */
+  gpu?: GpuStageSpec;
   /** 本关重点考察的维度，用于 AI 评审聚焦 */
   focus?: DimensionKey[];
   /**
@@ -159,7 +161,7 @@ export interface ProjectStage {
  * 这里声明的是**形态**而不是布局坐标：面板怎么摆是代码的事，
  * 题目只回答「这是哪一类实验台」。
  */
-export type WorkspaceKind = 'code' | 'ops';
+export type WorkspaceKind = 'code' | 'ops' | 'gpu';
 
 /** 现有形态：多文件工作区 + 隐藏用例 + 指标门槛 */
 export interface CodeWorkspaceSpec {
@@ -431,7 +433,43 @@ export interface OpsStageSpec {
   };
 }
 
-export type WorkspaceSpec = CodeWorkspaceSpec | OpsWorkspaceSpec;
+/**
+ * GPU 形态：任务 + 终端 + IDE + 剖析 + 访存（+ 后半程的集群）。
+ *
+ * 世界（这是一台什么卡、磁盘上有什么、`./bench` 跑什么）放在项目上，
+ * 每一关只写自己的增量 —— 和 ops 形态一个路子。
+ */
+export interface GpuWorkspaceSpec {
+  kind: 'gpu';
+  world?: import('../gpulab/lab').GpuWorldSpec;
+}
+
+/**
+ * 一关在 GPU 世界上加的增量。
+ *
+ * 判定仍然走隐藏用例（`stage.specs`），只是那些 TS 里 import 的是
+ * `@gpu/lab`。
+ */
+export interface GpuStageSpec {
+  /** 进入本关时往机器磁盘上放的文件（一般就是那个 .cu） */
+  files?: Record<string, string>;
+  /** 这一关的 `./bench` 跑什么。不写就沿用世界里的。 */
+  bench?: import('../gpulab/lab').BenchSpec;
+  /** 每 block 共享内存上限的覆盖（比如需要 96KB 的关卡） */
+  sharedBytesPerBlock?: number;
+  /** 进入本关时先替学员跑一遍的命令 */
+  setupCommands?: string[];
+  /**
+   * 参考解：把这一关做对的那份 kernel 源码。
+   *
+   * 反向验证靠它 —— 用参考解跑，用例与门槛必须全绿；用起始代码跑，必须挂。
+   */
+  referenceFiles?: Record<string, string>;
+  /** 参考解顺带要敲的命令 */
+  referenceCommands?: string[];
+}
+
+export type WorkspaceSpec = CodeWorkspaceSpec | OpsWorkspaceSpec | GpuWorkspaceSpec;
 
 export interface EngineeringProject {
   id: string;
@@ -541,6 +579,14 @@ export interface LabMetrics {
   samples: RequestSample[];
   /** 用户通过 @lab/metrics 打的自定义计数 */
   counters: Record<string, number>;
+  /**
+   * GPU 关卡的指标树。
+   *
+   * 门槛直接写路径，比如
+   * `{ metric: 'gpu.global.sectorsPerRequest', op: 'lte', value: 4.5 }` ——
+   * `getMetricValue` 本来就会一层层走下去，不用改解析。
+   */
+  gpu?: Record<string, unknown>;
 }
 
 export interface GateResult {

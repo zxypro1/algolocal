@@ -187,6 +187,10 @@ export async function runBench(
     return { stdout: '', stderr: '这一关没有声明 bench，无法运行\n', code: 1 };
   }
 
+  // racecheck 是**额外**跑的一遍，不能把真实那一遍的指标冲掉 ——
+  // 门槛读的是真实那一遍。先存住，跑完再放回去。
+  const preserved = options.racecheck ? world.gpu.snapshotCounters() : null;
+
   // 重新建一台干净的设备：显存内容、分配游标、指标全部归零
   world.gpu.reset();
   world.buffers.clear();
@@ -239,6 +243,7 @@ export async function runBench(
     }
   }
 
+  if (preserved) world.gpu.restoreCounters(preserved);
   world.lastRun = { artifact, launches: bench.launches, wallClockMs: Date.now() - startedAt };
   out.push(`launched ${bench.launches.length} kernel(s) on ${world.device.name}`);
   return { stdout: `${out.join('\n')}\n`, stderr: '', code: 0 };
