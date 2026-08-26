@@ -16,6 +16,7 @@ import {
   objectKey,
   splitKey,
 } from './framework';
+import { PERSISTENTVOLUMECLAIMS } from '../storage/resources';
 import {
   CONFIGMAPS,
   DEPLOYMENTS,
@@ -91,18 +92,23 @@ export function updateStatusIfChanged(
 export class SchedulerController extends Controller {
   private pods: Informer;
   private nodes: Informer;
+  private claims: Informer;
 
   constructor(context: ControllerContext) {
     super(context, 'scheduler');
     this.pods = new Informer(this.registry, PODS);
     this.nodes = this.track(new Informer(this.registry, NODES));
     this.watch(this.pods);
-    // 节点变了，所有待调度的 Pod 都值得再看一眼
-    this.nodes.onChange(() => {
-      for (const pod of this.pods.list()) {
-        if (!(pod.spec as any)?.nodeName) this.queue.add(objectKey(pod));
-      }
-    });
+    this.claims = this.track(new Informer(this.registry, PERSISTENTVOLUMECLAIMS));
+    // 节点变了，所有待调度的 Pod 都值得再看一眼。
+    // PVC 也一样：一块盘绑上，等着它的 Pod 才有得调度。
+    for (const informer of [this.nodes, this.claims]) {
+      informer.onChange(() => {
+        for (const pod of this.pods.list()) {
+          if (!(pod.spec as any)?.nodeName) this.queue.add(objectKey(pod));
+        }
+      });
+    }
   }
 
   protected async reconcile(key: string): Promise<void> {
@@ -119,8 +125,22 @@ export class SchedulerController extends Controller {
     if (spec.nodeName) return;                       // 已经调度过了
     if (pod.metadata.deletionTimestamp) return;
 
-    const candidates = this.nodes.list().filter((node) => this.fits(node, pod));
+    /**
+     * 卷没绑上就别调度。
+     *
+     * 真调度器把「PVC 绑好了没有」当成一个 predicate：盘还没有，Pod 落到
+     * 哪台机器上都没意义。学员看到的现象是 Pod 一直 Pending 而节点明明有富余，
+     * describe 里那一行 `pod has unbound immediate PersistentVolumeClaims`
+     * 才是真正的原因。
+     */
+    const unbound = this.unboundClaims(pod);
+    const candidates = unbound.length > 0
+      ? []
+      : this.nodes.list().filter((node) => this.fits(node, pod));
     if (candidates.length === 0) {
+      const reason = unbound.length > 0
+        ? `0/${this.nodes.list().length} nodes are available: pod has unbound immediate PersistentVolumeClaims.`
+        : `0/${this.nodes.list().length} nodes are available: insufficient resources or no matching node.`;
       let changed = false;
       await ignoreConflict(() => {
         const before = JSON.stringify(this.registry.get(PODS, namespace, name).status ?? null);
@@ -128,8 +148,7 @@ export class SchedulerController extends Controller {
           ...(pod.status as any),
           phase: 'Pending',
           conditions: [{
-            type: 'PodScheduled', status: 'False', reason: 'Unschedulable',
-            message: '0/' + this.nodes.list().length + ' nodes are available: insufficient resources or no matching node.',
+            type: 'PodScheduled', status: 'False', reason: 'Unschedulable', message: reason,
           }],
         });
         changed = before !== JSON.stringify(this.registry.get(PODS, namespace, name).status ?? null);
@@ -137,8 +156,7 @@ export class SchedulerController extends Controller {
       // 状态没变就别再刷一条一样的事件出来
       if (!changed) return;
       this.context.recordEvent({
-        object: pod, type: 'Warning', reason: 'FailedScheduling',
-        message: `0/${this.nodes.list().length} nodes are available.`,
+        object: pod, type: 'Warning', reason: 'FailedScheduling', message: reason,
       });
       return;
     }
@@ -155,6 +173,26 @@ export class SchedulerController extends Controller {
       object: pod, type: 'Normal', reason: 'Scheduled',
       message: `Successfully assigned ${namespace}/${name} to ${chosen.metadata.name}`,
     });
+  }
+
+  /** Pod 引用了但还没 Bound 的 PVC */
+  private unboundClaims(pod: KubeObject): string[] {
+    const volumes = ((pod.spec as any)?.volumes ?? []) as any[];
+    const out: string[] = [];
+    for (const volume of volumes) {
+      const claimName = volume.persistentVolumeClaim?.claimName;
+      if (!claimName) continue;
+      try {
+        const claim = this.registry.get(
+          PERSISTENTVOLUMECLAIMS, pod.metadata.namespace, claimName
+        );
+        if (((claim.status ?? {}) as any).phase !== 'Bound') out.push(claimName);
+      } catch {
+        // PVC 还不存在也算没绑上 —— Pod 和 PVC 同时 apply 时会短暂经过这个状态
+        out.push(claimName);
+      }
+    }
+    return out;
   }
 
   private fits(node: KubeObject, pod: KubeObject): boolean {

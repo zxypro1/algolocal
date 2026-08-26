@@ -77,6 +77,19 @@ export function createExecHandler(cluster: Cluster) {
     vfs.populate(rootfsFor(pod, cluster));
     for (const directory of ['/bin', '/usr/bin', '/tmp', '/app']) vfs.mkdirp(directory);
 
+    /**
+     * 把卷挂进来。
+     *
+     * 容器的根文件系统每次 exec 都是新的（真容器里写在 rootfs 上的东西
+     * 一重建也就没了），**挂载点下面**的内容却来自卷 —— 这正是持久化的含义。
+     * emptyDir 故意不接：它和 Pod 同生共死，写进去的东西下一次 exec 就不在了。
+     */
+    const mounts = mountsOf(pod, container.name, cluster);
+    for (const mount of mounts) {
+      vfs.mkdirp(mount.path);
+      vfs.populate(prefixed(cluster.volumes.read(mount.volume), mount.path));
+    }
+
     const source = {
       zone: 'cluster' as const,
       namespace: request.namespace,
@@ -109,8 +122,74 @@ export function createExecHandler(cluster: Cluster) {
     // `kubectl exec pod -- sh -c '...'` 与 `kubectl exec pod -- curl x` 都要能跑
     const command = normalizeCommand(request.command);
     const result = await shell.run(command, stdin);
+
+    // 写回。挂载点下面的都是卷上的字节，其余的随容器一起消失。
+    for (const mount of mounts) {
+      cluster.volumes.write(mount.volume, stripped(vfs.toFileMap(mount.path), mount.path));
+    }
     return { stdout: result.stdout, stderr: result.stderr, code: result.code };
   };
+}
+
+/**
+ * 这个容器挂了哪些卷。
+ *
+ * 一条挂载要经过两跳：容器的 volumeMounts 指到 Pod 的 volumes 上，
+ * volumes 里那一项再指到 PVC，PVC 再指到 PV。任何一跳断了都是「挂上去了，
+ * 但里面是空的」—— 而这三跳分别由三个人写（开发、平台、存储），
+ * 所以现实里断得很频繁。
+ */
+function mountsOf(
+  pod: KubeObject,
+  containerName: string,
+  cluster: Cluster
+): Array<{ path: string; volume: string }> {
+  const spec = (pod.spec ?? {}) as any;
+  const container = (spec.containers ?? []).find((item: any) => item.name === containerName);
+  const volumes: any[] = spec.volumes ?? [];
+  const out: Array<{ path: string; volume: string }> = [];
+
+  for (const mount of container?.volumeMounts ?? []) {
+    const volume = volumes.find((item) => item.name === mount.name);
+    const claimName = volume?.persistentVolumeClaim?.claimName;
+    if (!claimName) continue;
+    const claims = cluster.scheme.get({ group: '', version: 'v1', resource: 'persistentvolumeclaims' });
+    if (!claims) continue;
+    try {
+      const claim = cluster.registry.get(claims, pod.metadata.namespace, claimName);
+      const volumeName = ((claim.spec ?? {}) as any).volumeName;
+      if (volumeName) out.push({ path: normalizeMountPath(mount.mountPath), volume: volumeName });
+    } catch {
+      // PVC 不在了：挂载点还在，只是下面什么都没有
+    }
+  }
+  return out;
+}
+
+/** `/data/` → `/data`，根目录保持 `/` */
+function normalizeMountPath(path: string): string {
+  const trimmed = (path ?? '/').replace(/\/+$/, '');
+  return trimmed === '' ? '/' : trimmed;
+}
+
+/** 卷上的相对路径 → 容器里的绝对路径 */
+function prefixed(content: Record<string, string>, mountPath: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [path, value] of Object.entries(content)) {
+    out[`${mountPath === '/' ? '' : mountPath}/${path.replace(/^\/+/, '')}`] = value;
+  }
+  return out;
+}
+
+/** 容器里的绝对路径 → 卷上的相对路径 */
+function stripped(files: Record<string, string>, mountPath: string): Record<string, string> {
+  const prefix = mountPath === '/' ? '/' : `${mountPath}/`;
+  const out: Record<string, string> = {};
+  for (const [path, value] of Object.entries(files)) {
+    if (!path.startsWith(prefix)) continue;
+    out[path.slice(prefix.length)] = value;
+  }
+  return out;
 }
 
 /**

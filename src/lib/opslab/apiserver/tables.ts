@@ -200,6 +200,91 @@ export const TABLE_PRINTERS: Record<string, TablePrinter> = {
       ];
     },
   },
+  /**
+   * 访问模式在表里是缩写。
+   *
+   * `ReadWriteOnce` 打成 `RWO` —— 这不是省字，是 kubectl 的既定输出，
+   * 学员在真集群里看到的就是这三个字母。
+   */
+  persistentvolumeclaims: {
+    columns: [
+      NAME_COLUMN,
+      col('Status', 'The status of the claim.'),
+      col('Volume', 'The bound volume.'),
+      col('Capacity', 'The capacity of the bound volume.'),
+      col('Access Modes', 'The access modes of the bound volume.'),
+      col('Storageclass', 'The StorageClass of the claim.'),
+      col('VolumeAttributesClass', 'The VolumeAttributesClass of the claim.'),
+      AGE_COLUMN,
+    ],
+    cells: (object, age) => {
+      const spec = (object.spec ?? {}) as any;
+      const status = (object.status ?? {}) as any;
+      return [
+        object.metadata.name,
+        status.phase ?? 'Pending',
+        spec.volumeName ?? '',
+        status.capacity?.storage ?? '',
+        shortAccessModes(status.accessModes ?? spec.accessModes),
+        spec.storageClassName ?? '',
+        '<unset>',
+        age,
+      ];
+    },
+  },
+  persistentvolumes: {
+    columns: [
+      NAME_COLUMN,
+      col('Capacity', 'The capacity of the volume.'),
+      col('Access Modes', 'The access modes of the volume.'),
+      col('Reclaim Policy', 'What happens to the volume when its claim goes away.'),
+      col('Status', 'The status of the volume.'),
+      col('Claim', 'The claim bound to this volume.'),
+      col('Storageclass', 'The StorageClass of the volume.'),
+      col('VolumeAttributesClass', 'The VolumeAttributesClass of the volume.'),
+      col('Reason', 'The reason for the current status.'),
+      AGE_COLUMN,
+    ],
+    cells: (object, age) => {
+      const spec = (object.spec ?? {}) as any;
+      const status = (object.status ?? {}) as any;
+      const ref = spec.claimRef;
+      return [
+        object.metadata.name,
+        spec.capacity?.storage ?? '',
+        shortAccessModes(spec.accessModes),
+        spec.persistentVolumeReclaimPolicy ?? 'Retain',
+        status.phase ?? 'Pending',
+        ref ? `${ref.namespace}/${ref.name}` : '',
+        spec.storageClassName ?? '',
+        '<unset>',
+        status.reason ?? '',
+        age,
+      ];
+    },
+  },
+  storageclasses: {
+    columns: [
+      NAME_COLUMN,
+      col('Provisioner', 'The provisioner that creates volumes for this class.'),
+      col('Reclaimpolicy', 'What happens to volumes of this class when released.'),
+      col('Volumebindingmode', 'When volumes of this class are bound.'),
+      col('Allowvolumeexpansion', 'Whether volumes of this class can be expanded.'),
+      AGE_COLUMN,
+    ],
+    cells: (object, age) => {
+      const item = object as any;
+      const isDefault = object.metadata.annotations?.['storageclass.kubernetes.io/is-default-class'] === 'true';
+      return [
+        `${object.metadata.name}${isDefault ? ' (default)' : ''}`,
+        item.provisioner ?? '',
+        item.reclaimPolicy ?? 'Delete',
+        item.volumeBindingMode ?? 'Immediate',
+        String(item.allowVolumeExpansion ?? false),
+        age,
+      ];
+    },
+  },
   poddisruptionbudgets: {
     columns: [
       NAME_COLUMN,
@@ -362,6 +447,14 @@ export const TABLE_PRINTERS: Record<string, TablePrinter> = {
  * 规则有点特别：大于 10 个单位就只显示一个单位（`13d` 而不是 `13d4h`），
  * 小于 10 才显示两个（`4h12m`）。照抄是因为学员对着真集群的输出会对不上。
  */
+/** ReadWriteOnce -> RWO，ReadWriteOncePod -> RWOP */
+function shortAccessModes(modes: string[] | undefined): string {
+  const short: Record<string, string> = {
+    ReadWriteOnce: 'RWO', ReadOnlyMany: 'ROX', ReadWriteMany: 'RWX', ReadWriteOncePod: 'RWOP',
+  };
+  return [...new Set((modes ?? []).map((mode) => short[mode] ?? mode))].join(',');
+}
+
 export function humanDuration(fromEpochMs: number, nowEpochMs: number): string {
   const ms = nowEpochMs - fromEpochMs;
   if (!Number.isFinite(ms)) return '<unknown>';
