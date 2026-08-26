@@ -2021,6 +2021,55 @@ const primers = {
         + 'is below one.'
       )
     ),
+    'expert-parallel': t(
+      p(
+        'MoE 把前馈层换成一组专家，每个 token 只走其中一两个。'
+        + '参数量涨几十倍而每个 token 的计算量几乎没变 --'
+        + '这是 2026 年大模型几乎清一色用 MoE 的原因。'
+        + '专家并行把这些专家摊到多张卡上，token 按路由结果被发到对应的卡上算、'
+        + '算完再收回来，这一去一回就是两次 all-to-all。',
+        '命门在路由。路由器学出来的分布从来不均匀，'
+        + '几个热门专家吃掉大半 token，冷门的只收到零星几个。'
+        + '而一步的时间由最慢的那张卡决定 --'
+        + '于是冷门专家所在的卡大部分时间在等，整机算力用不出来。',
+        '推理侧的标准解法是容量因子加重路由：给每个专家设一个上限，'
+        + '超出的 token 改投当前最闲的。'
+        + '容量因子设多大是个真实的取舍，太小则重路由太多、token 走错专家、质量下降，'
+        + '太大则不均度压不下来。'
+        + '早期的做法是直接丢掉超出的 token，现在主流是 drop-less，把它们重路由出去。',
+        '训练侧则是加一个辅助的负载均衡损失，逼路由器分匀一些 --'
+        + '代价是它和主损失打架，分得太匀路由就失去了专家各有所长的意义。'
+        + 'DeepSeek 后来改用无辅助损失的做法，给每个专家一个按历史负载动态调整的偏置、不进梯度。'
+        + '还有一条是专家放置：既然路由分布长期稳定，'
+        + '那就把热门专家复制到多张卡、冷门专家几个挤一张卡。'
+        + '通信这一侧同样棘手，MoE 的 all-to-all 是稀疏且不规则的，'
+        + '每张卡发给别的卡的量都不一样而且每步都在变。'
+      ),
+      p(
+        'MoE replaces the feed-forward layer with a set of experts, each token visiting only one or '
+        + 'two. Parameters grow by tens of times while per-token compute barely moves, which is why '
+        + 'nearly every large model in 2026 is an MoE. Expert parallelism spreads the experts across '
+        + 'GPUs, dispatching tokens to whichever GPU holds their expert and combining the results '
+        + 'back, a round trip of two all-to-alls.',
+        'The weak point is the routing. A learned router is never uniform: a few popular experts take '
+        + 'most of the tokens while others get a handful. Since a step takes as long as the slowest '
+        + 'GPU, the ones holding cold experts spend most of their time waiting and the machine '
+        + 'delivers a fraction of its compute.',
+        'At inference the standard fix is a capacity factor plus rerouting: cap each expert and send '
+        + 'overflow to whichever is least loaded. Choosing the factor is a real trade, since too '
+        + 'small reroutes too many tokens to the wrong expert and hurts quality, while too large '
+        + 'leaves the imbalance in place. Early systems simply dropped the overflow; the mainstream '
+        + 'now is drop-less rerouting.',
+        'In training the usual answer is an auxiliary load-balancing loss pushing the router toward '
+        + 'uniformity, which fights the main loss, because perfect balance destroys the '
+        + 'specialisation that made experts worth having. DeepSeek later moved to an '
+        + 'auxiliary-loss-free scheme with a per-expert bias adjusted from observed load and kept out '
+        + 'of the gradient. Another angle is expert placement: since the distribution is stable over '
+        + 'time, replicate hot experts and pack cold ones together. The communication side is equally '
+        + 'awkward, since MoE all-to-all is sparse and irregular, with every GPU sending a different '
+        + 'amount to every other and the pattern changing each step.'
+      )
+    ),
   },
 
   'intranet-k8s': {

@@ -334,6 +334,22 @@ export class Cluster {
     this.comm.busbw = this.comm.algbw * factor;
   }
 
+  /**
+   * 负载不均：最忙那张卡的 block 数 / 平均值。
+   *
+   * **用平台观测到的 block 数算，不是学员报的数。** 专家并行里
+   * 每个 token 一个 block，所以这个比值就是"最挤的专家收了多少倍于平均的 token"。
+   * 想把它做好看只有一条路 —— 真的把 token 摊匀；少发 block 会被
+   * 正确性用例抓住，因为那些 token 就没算。
+   */
+  imbalance(): { maxOverMean: number; blocksByDevice: number[] } {
+    const blocks = this.devices.map((device) => device.metrics().launch.blocks);
+    const total = blocks.reduce((sum, n) => sum + n, 0);
+    const mean = blocks.length ? total / blocks.length : 0;
+    const max = blocks.length ? Math.max(...blocks) : 0;
+    return { maxOverMean: mean > 0 ? max / mean : 0, blocksByDevice: blocks };
+  }
+
   nodeOf(device: number): number {
     return nodeOf(device, this.spec);
   }

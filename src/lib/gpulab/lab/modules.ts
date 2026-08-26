@@ -59,6 +59,8 @@ export interface GpuLabApi {
   comm(): CommMetrics | null;
   /** 流水线调度的计量。没调用过 pipe_step 时步数是 0 */
   pipeline(): PipelineMetrics | null;
+  /** 各卡的负载不均 —— 专家并行那一关读它 */
+  imbalance(): { maxOverMean: number; blocksByDevice: number[] } | null;
   /** 集群里第 index 张卡的指标 */
   deviceMetrics(index: number): GpuMetrics;
   /** 寄存器 / 共享内存 / 占用率 */
@@ -140,6 +142,7 @@ export function createGpuLabApi(world: GpuWorld): GpuLabApi {
     metrics: () => world.gpu.metrics(),
     comm: () => world.cluster?.comm ?? null,
     pipeline: () => world.cluster?.pipeline ?? null,
+    imbalance: () => world.cluster?.imbalance() ?? null,
     deviceMetrics: (index) => {
       if (!world.cluster) {
         if (index !== 0) throw new GpuLabError('这一关只有一张卡');
