@@ -256,11 +256,11 @@ L0 内核、shell、容器进程运行时、镜像与 registry、apiserver 与�
 
 | 层 | 位置 | 状态 |
 | --- | --- | --- |
-| 确定性内核 | `src/lib/opslab/kernel/` | 虚拟时钟、优先级、settle/死锁检测、快照 |
+| 确定性内核 | `src/lib/labkit/kernel/` | 虚拟时钟、优先级、settle/死锁检测、快照。**已上移到 labkit**，与 gpulab 共用 |
 | etcd 语义存储 | `src/lib/opslab/store/` | MVCC、revision、watch、compaction |
 | apiserver | `src/lib/opslab/apiserver/` | REST 语义、服务端表格、discovery、**OpenAPI v3**、**PATCH 四种**、scale 子资源 |
 | 控制器 | `src/lib/opslab/controllers/` | 调度器、ReplicaSet、Deployment、Endpoints、kubelet、节点压力驱逐 |
-| 机器层 | `src/lib/opslab/machine/` | VFS、tree-sitter shell、30 个 coreutils、OCI 构建与仓库 |
+| 机器层 | `src/lib/labkit/machine/` + `src/lib/opslab/oci/` | VFS、tree-sitter shell、30 个 coreutils **已上移到 labkit**；OCI 构建与仓库是 k8s 专用，留在 `opslab/oci/` |
 | 多合一 CLI | `src/lib/opslab/wasm/` | kubectl v1.36 + helm v4，按 argv[0] 分发 |
 | 关卡运行时 | `src/lib/opslab/lab/` | 世界装配、`@ops/lab`、拓扑与变更流投影 |
 | 工作台 | `src/components/opslab/` | 任务 / 终端 / IDE / 拓扑四块面板 |
