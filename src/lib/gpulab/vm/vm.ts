@@ -30,6 +30,7 @@ import {
   LinearMemory, MemoryFault, SECTOR_BYTES, WARP_SIZE,
   countBankConflicts, countSectors,
 } from './memory';
+import type { RaceDetector } from './sanitizer';
 
 export interface Dim3 {
   x: number;
@@ -118,6 +119,14 @@ export interface RunOptions {
   memory: LinearMemory;
   sharedCapacity?: number;
   maxWarpInsts?: number;
+  /**
+   * 竞态检测器。
+   *
+   * **按需开启**：不给就一行额外代码都不跑。带上它每次访存要多四次影子读写，
+   * 整体慢两三倍 —— 和现实里 compute-sanitizer 的代价是一个量级，
+   * 也和现实里的用法一致（平时不挂，要查的时候单独跑一遍）。
+   */
+  raceDetector?: RaceDetector;
 }
 
 const DEFAULT_MAX_WARP_INSTS = 200_000_000;
@@ -193,6 +202,11 @@ class Executor {
 
   private runBlock(bx: number, by: number, bz: number): void {
     this.counters.blocksLaunched += 1;
+    const detector = this.options.raceDetector;
+    if (detector) {
+      const grid = this.config.grid;
+      detector.beginBlock((bz * grid.y + by) * grid.x + bx, { x: bx, y: by, z: bz });
+    }
     // 共享内存在 block 之间不保留内容。真卡上它是脏的；我们清零是为了确定性，
     // 这是一处已知分叉 —— 靠未初始化共享内存出错的程序在这里不会暴露。
     this.shared.reset();
@@ -220,6 +234,8 @@ class Executor {
       if (waiting === live) {
         // 全到齐了，一起放行
         this.counters.barriers += 1;
+        // 屏障把 block 的执行切成一个个纪元 —— 竞态判据的核心
+        if (detector) detector.passBarrier();
         for (const warp of warps) warp.atBarrier = false;
       } else if (waiting > 0) {
         // 有 warp 在等，还有 warp 活着 —— 先让活着的跑。但如果活着的
@@ -260,6 +276,7 @@ class Executor {
     const grid = this.config.grid;
     const argValues = this.argValues;
     const counters = this.counters;
+    const detector = this.options.raceDetector;
     const warpBase = warp.index * WARP_SIZE;
 
     // 计数器用局部变量攒着，出口再写回（理由见文件头第 3 条）
@@ -433,6 +450,15 @@ class Executor {
               counters.sharedLoadRequests += 1;
               counters.sharedBankConflicts += countBankConflicts(addresses, active);
             }
+            if (detector) {
+              const space = isGlobal ? 'global' : 'shared';
+              const line = lines[pc];
+              for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+                if (active & (1 << lane)) {
+                  detector.record(space, addresses[lane], warpBase + lane, 'read', line);
+                }
+              }
+            }
             instLdSt += lanes;
             pc += 1;
             break;
@@ -459,6 +485,15 @@ class Executor {
             } else {
               counters.sharedStoreRequests += 1;
               counters.sharedBankConflicts += countBankConflicts(addresses, active);
+            }
+            if (detector) {
+              const space = isGlobal ? 'global' : 'shared';
+              const line = lines[pc];
+              for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+                if (active & (1 << lane)) {
+                  detector.record(space, addresses[lane], warpBase + lane, 'write', line);
+                }
+              }
             }
             instLdSt += lanes;
             pc += 1;
