@@ -127,6 +127,13 @@ async function main() {
      * 放在 tests/opslab/stages.test.ts 里做（按产物在不在决定跑不跑）。
      * 这里明说一句，免得「跳过」被读成「验过了」。
      */
+    if (rawProject.workspace?.kind === 'gpu') {
+      console.log(
+        `  gpu 形态，共 ${rawProject.stages.length} 关；反向验证见 `
+          + 'tests/gpulab/stages.test.ts（npx jest tests/gpulab/stages）'
+      );
+      continue;
+    }
     if (rawProject.workspace?.kind === 'ops') {
       console.log(
         `  ops 形态，共 ${rawProject.stages.length} 关；反向验证见 `
