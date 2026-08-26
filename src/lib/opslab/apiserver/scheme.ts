@@ -58,6 +58,16 @@ export class Scheme {
     this.byKey.set(this.key(complete), complete);
   }
 
+  /**
+   * 注销一个类型。CRD 被删掉时用。
+   *
+   * 真集群里删 CRD 会连带删掉这个类型的**所有对象**，而且这一步不可逆 ——
+   * 删错一个 CRD 和删错一个命名空间是同一个量级的事故。
+   */
+  unregister(definition: { group: string; version: string; resource: string }): boolean {
+    return this.byKey.delete(this.key(definition as ResourceDefinition));
+  }
+
   registerAll(definitions: ResourceDefinition[]): void {
     for (const definition of definitions) this.register(definition);
   }

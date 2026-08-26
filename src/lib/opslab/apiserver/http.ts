@@ -12,7 +12,7 @@
 import { Registry } from './registry';
 import { Scheme, ResourceDefinition } from './scheme';
 import { ApiError, badRequest, forbidden, invalid, notFound, toStatus } from './errors';
-import { renderTable, wantsTable } from './tables';
+import { renderTable, wantsTable, type TablePrinter } from './tables';
 import type { KubeObject, PropagationPolicy, WatchEventOut } from './types';
 
 export interface ApiServerDeps {
@@ -45,6 +45,13 @@ export interface ApiServerDeps {
   authenticate?(token: string | undefined): UserInfo | undefined;
   /** 鉴权。不给就是不鉴权。 */
   authorize?(user: UserInfo, attributes: ResourceAttributes): { allowed: boolean; reason: string };
+  /**
+   * CRD 自带的表格列。
+   *
+   * 内置类型的列写死在 tables.ts 里，CRD 的列由学员在 CRD 上声明 ——
+   * `kubectl get sites` 打出来的东西是他们自己定的。
+   */
+  tablePrinter?(resource: string): TablePrinter | undefined;
 }
 import { openApiDocument, openApiRoot } from './openapi';
 import type { PatchType } from './patch';
@@ -190,6 +197,7 @@ export class ApiServer {
   private readonly authenticate?: ApiServerDeps['authenticate'];
   private readonly authorizeFn?: ApiServerDeps['authorize'];
   private readonly evict?: ApiServerDeps['evict'];
+  private readonly tablePrinter?: ApiServerDeps['tablePrinter'];
   /** 收到的请求，调试与测试用 */
   readonly requestLog: string[] = [];
 
@@ -202,6 +210,7 @@ export class ApiServer {
     this.authenticate = deps.authenticate;
     this.authorizeFn = deps.authorize;
     this.evict = deps.evict;
+    this.tablePrinter = deps.tablePrinter;
   }
 
   /**
@@ -542,7 +551,10 @@ export class ApiServer {
       return statusResponse(badRequest(`the server could not find the requested resource`));
     }
     if (wantsTable(accept)) {
-      return json(renderTable(definition.resource, [object], object.metadata.resourceVersion!, this.now()));
+      return json(renderTable(
+        definition.resource, [object], object.metadata.resourceVersion!, this.now(),
+        this.tablePrinter?.(definition.resource)
+      ));
     }
     return json(object);
   }
@@ -563,7 +575,10 @@ export class ApiServer {
     });
 
     if (wantsTable(accept)) {
-      return json(renderTable(definition.resource, list.items, list.metadata.resourceVersion, this.now()));
+      return json(renderTable(
+        definition.resource, list.items, list.metadata.resourceVersion, this.now(),
+        this.tablePrinter?.(definition.resource)
+      ));
     }
     return json(list);
   }
