@@ -5564,6 +5564,364 @@ const STAGE_22 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 23 关：NCCL 与数据并行                                             */
+/* ------------------------------------------------------------------ */
+
+/** 32 个"层"的梯度，大小差别很大 —— 真模型就是这样 */
+const DP_SIZES = [64, 8, 8, 128, 4, 4, 64, 8, 8, 256, 4, 4, 64, 8, 8, 128, 4, 4, 64, 8, 8, 256, 4, 4, 64, 8, 8, 128, 4, 4, 64, 8];
+const DP_TOTAL = 1408;
+const DP_DEVICES = 8;
+
+const DP_KERNELS = code`
+  __global__ void fill(float* a, float v, int n) {
+    int i = threadIdx.x;
+    if (i < n) a[i] = v;
+  }
+`;
+
+const DP_DECL = DP_SIZES.map((n) => `vec_push(sizes, ${n});`).join('\n            ');
+
+const dpBench = {
+  sources: ['/root/dataparallel.cu'],
+  buffers: [
+    { name: 'check', length: DP_DEVICES, fill: { kind: 'zeros' } },
+  ],
+  launches: [],
+};
+
+const STAGE_23 = {
+  id: 'nccl-data-parallel',
+  title: t('NCCL 与数据并行 —— 梯度分桶', 'NCCL and data parallelism — gradient bucketing'),
+  goal: t(
+    [
+      '上一关你手写了 ring all-reduce。真实工程里当然不这么干 —— 用 NCCL。',
+      '',
+      '```cuda',
+      'int comms[8];',
+      'ncclCommInitAll(comms, 8);',
+      '',
+      'ncclGroupStart();',
+      'for (int d = 0; d < 8; ++d) {',
+      '  ncclAllReduce(send[d], recv[d], n, ncclFloat, ncclSum, comms[d], 0);',
+      '}',
+      'ncclGroupEnd();',
+      '```',
+      '',
+      '**`ncclGroupStart` / `ncclGroupEnd` 不是可选的。** 单线程管多张卡时，',
+      '每个 NCCL 调用都可能阻塞在等对端上，不成组就会死锁 ——',
+      '这是 NVIDIA 文档里明写的。这个工作台不成组会直接报错，',
+      '而不是让你跑出一个看似正常的结果。',
+      '',
+      '现在的问题在别处。数据并行的反向传播算完之后，要把 32 层的梯度都 all-reduce 一遍。',
+      '`dataparallel.cu` 现在是**每层各发一次** —— 32 次集合操作。',
+      '而这些层的梯度大小差别极大：有 256 个元素的，也有只有 4 个的。',
+      '',
+      '为 4 个 float 发一次 all-reduce，等于为了 16 字节的数据付一整套',
+      'ring 的固定开销（8 张卡 × 14 步 = 112 条消息）。',
+      '',
+      '解法是**分桶**：攒够一定大小再发一次。',
+      '把连续的层攒到 ≥ 128 个元素再 all-reduce，32 次就变成 6 次。',
+      '',
+      '```bash',
+      'nvcc -o bench dataparallel.cu && ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 8 张卡都拿到正确的和',
+      '- 消息数 ≤ 800（逐层发是 3584）',
+      '- 搬运总量不变 —— 分桶省的是每消息开销，不是字节',
+    ].join('\n'),
+    [
+      'Last stage you wrote ring all-reduce by hand. Real engineering does not do that; it uses NCCL.',
+      '',
+      '```cuda',
+      'int comms[8];',
+      'ncclCommInitAll(comms, 8);',
+      '',
+      'ncclGroupStart();',
+      'for (int d = 0; d < 8; ++d) {',
+      '  ncclAllReduce(send[d], recv[d], n, ncclFloat, ncclSum, comms[d], 0);',
+      '}',
+      'ncclGroupEnd();',
+      '```',
+      '',
+      '**`ncclGroupStart` / `ncclGroupEnd` are not optional.** With one thread driving several GPUs,',
+      'every NCCL call can block waiting on a peer, and without grouping you deadlock. NVIDIA\'s docs',
+      'say so explicitly. This workbench errors out rather than producing a plausible-looking result.',
+      '',
+      'The problem here is elsewhere. After a data-parallel backward pass, all 32 layers of gradients',
+      'need all-reducing. `dataparallel.cu` currently sends **one per layer**, 32 collectives. Those',
+      'layers vary enormously: some have 256 elements, some only 4.',
+      '',
+      'Issuing an all-reduce for 4 floats means paying a full ring\'s fixed overhead (8 GPUs x 14',
+      'steps = 112 messages) to move 16 bytes.',
+      '',
+      'The fix is **bucketing**: accumulate until you have enough, then send once. Batching',
+      'consecutive layers up to at least 128 elements turns 32 collectives into 6.',
+      '',
+      '```bash',
+      'nvcc -o bench dataparallel.cu && ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- all 8 GPUs hold the correct sum',
+      '- at most 800 messages (3584 per-layer)',
+      '- the same total bytes: bucketing saves per-message overhead, not bytes',
+    ].join('\n')
+  ),
+  checklist: [
+    t('攒够 128 个元素再发一次 all-reduce',
+      'Accumulate at least 128 elements before issuing an all-reduce'),
+    t('最后一桶不管攒够没有都要发出去',
+      'Flush the last bucket whether or not it reached the threshold'),
+    t('集合操作放在 ncclGroupStart / ncclGroupEnd 之间',
+      'Keep the collectives between ncclGroupStart and ncclGroupEnd'),
+  ],
+  hints: [
+    t('梯度在显存里是连着放的，所以一桶就是一段连续区间 —— '
+      + '记住这一桶的起点和已攒的长度，发一次 all-reduce 就够。',
+      'Gradients are contiguous in memory, so a bucket is one contiguous range: track the bucket '
+      + 'start and the accumulated length, and one all-reduce covers it.'),
+    t('别忘了循环结束后还有没发出去的一桶。',
+      'Do not forget the partial bucket left over after the loop.'),
+  ],
+  pitfalls: [
+    t('**漏发最后一桶。** 前 31 层都对，最后几层的梯度没同步 —— '
+      + '训练会照常收敛，只是慢一点、而且各卡的模型悄悄分叉了。'
+      + '这类错误在真实训练里能藏好几天。',
+      '**Dropping the last bucket.** The first 31 layers are fine and the last few never sync. '
+      + 'Training still converges, just slightly worse, while the replicas silently diverge. This '
+      + 'kind of bug hides for days in real training runs.'),
+    t('**每桶都开一次 group。** 那是对的但没必要；真正的错是**在 group 里只发一张卡的**，'
+      + '那样别的卡永远等不到人。',
+      '**Opening a group per bucket.** That is fine but unnecessary. The actual mistake is issuing '
+      + 'the collective for only one GPU inside a group, leaving the others waiting forever.'),
+  ],
+  extension: t(
+    '分桶在 PyTorch 的 DDP 里是默认行为，桶大小的默认值是 **25 MiB**（`bucket_cap_mb`）。'
+    + '这个数字不是拍脑袋 —— 它要同时满足两头：'
+    + '大到让每消息开销可以忽略，又小到不至于让第一桶等太久才凑齐。'
+    + '\n\n'
+    + '还有一个更妙的细节：**DDP 是按参数的反向顺序分桶的。**'
+    + '因为反向传播是从最后一层往前算的，最后一层的梯度最先就绪。'
+    + '按正向顺序分桶的话，第一个桶要等到反向传播快结束才凑齐；'
+    + '按反向顺序，第一个桶在反向刚开始不久就能发出去 ——'
+    + '于是通信和剩下的反向计算重叠起来了。这是第 27 关的内容。'
+    + '\n\n'
+    + '再看一眼这一关的数字：分桶前后**搬运总量一个字节不差**，'
+    + '差的全是消息数（3584 → 672）。这和第 22 关的观察正好互补：'
+    + '上一关是"总量不变、分布变了"，这一关是"总量不变、消息数变了"。'
+    + '通信优化几乎从来不是"少搬点数据"。',
+    'Bucketing is the default in PyTorch DDP, where the bucket size defaults to **25 MiB** '
+    + '(`bucket_cap_mb`). That number is not arbitrary: it has to be large enough that per-message '
+    + 'overhead vanishes and small enough that the first bucket does not wait too long to fill.\n\n'
+    + 'There is a neater detail: **DDP buckets in reverse parameter order.** Backpropagation runs '
+    + 'from the last layer backwards, so the last layer\'s gradients are ready first. Bucketing in '
+    + 'forward order would leave the first bucket waiting until backward is nearly done; in reverse '
+    + 'order it can be sent shortly after backward starts, overlapping communication with the rest '
+    + 'of the backward pass. That is stage 27.\n\n'
+    + 'Look again at the numbers here: total bytes moved are **identical** before and after, and only '
+    + 'the message count changes (3584 to 672). This complements stage 22 exactly. There it was '
+    + '"same total, different distribution"; here it is "same total, fewer messages". Communication '
+    + 'optimisation is almost never about moving less data.'
+  ),
+  gpu: {
+    world: CLUSTER_WORLD,
+    files: {
+      '/root/dataparallel.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "containers.h"
+        #include "nccl.h"
+
+        ${DP_KERNELS}
+
+        int main(void) {
+          const int N = ${DP_DEVICES};
+          const int LAYERS = ${DP_SIZES.length};
+          const int TOTAL = ${DP_TOTAL};
+
+          // 每一"层"的梯度有多少个元素
+          int sizes = vec_new();
+          ${DP_DECL}
+
+          int comms[8];
+          ncclCommInitAll(comms, N);
+
+          int grad[8]; int out[8];
+          for (int d = 0; d < N; ++d) {
+            cudaSetDevice(d);
+            float* g; float* o;
+            cudaMalloc((void**)&g, TOTAL * 4);
+            cudaMalloc((void**)&o, TOTAL * 4);
+            fill<<<1, 64>>>(g, (float)(d + 1), 64);
+            grad[d] = g; out[d] = o;
+          }
+
+          // TODO: 每层各发一次 —— 32 次集合操作。
+          //       为 4 个 float 发一次 all-reduce，等于为 16 字节付一整套
+          //       ring 的固定开销。改成攒够 128 个元素再发。
+          int offset = 0;
+          for (int layer = 0; layer < LAYERS; ++layer) {
+            int n = vec_get(sizes, layer);
+            ncclGroupStart();
+            for (int d = 0; d < N; ++d) {
+              ncclAllReduce(grad[d] + offset, out[d] + offset, n,
+                            ncclFloat, ncclSum, comms[d], 0);
+            }
+            ncclGroupEnd();
+            offset += n;
+          }
+
+          // 每张卡的第 0 个结果写回平台的缓冲区
+          float* check = lab_buffer(0);
+          float host[8];
+          for (int d = 0; d < N; ++d) {
+            cudaSetDevice(d);
+            float one[1];
+            cudaMemcpy(one, out[d], 4, cudaMemcpyDeviceToHost);
+            host[d] = one[0];
+          }
+          cudaSetDevice(0);
+          cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+    bench: dpBench,
+    referenceFiles: {
+      '/root/dataparallel.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "containers.h"
+        #include "nccl.h"
+
+        ${DP_KERNELS}
+
+        int main(void) {
+          const int N = ${DP_DEVICES};
+          const int LAYERS = ${DP_SIZES.length};
+          const int TOTAL = ${DP_TOTAL};
+          const int BUCKET = 128;
+
+          int sizes = vec_new();
+          ${DP_DECL}
+
+          int comms[8];
+          ncclCommInitAll(comms, N);
+
+          int grad[8]; int out[8];
+          for (int d = 0; d < N; ++d) {
+            cudaSetDevice(d);
+            float* g; float* o;
+            cudaMalloc((void**)&g, TOTAL * 4);
+            cudaMalloc((void**)&o, TOTAL * 4);
+            fill<<<1, 64>>>(g, (float)(d + 1), 64);
+            grad[d] = g; out[d] = o;
+          }
+
+          // 梯度在显存里是连着放的，所以一桶就是一段连续区间：
+          // 记住起点与已攒长度，攒够了发一次
+          int start = 0;
+          int pending = 0;
+          for (int layer = 0; layer < LAYERS; ++layer) {
+            pending += vec_get(sizes, layer);
+            // 最后一桶不管攒够没有都要发 —— 漏了它，最后几层的梯度
+            // 永远不同步，而训练照常收敛，只是各卡悄悄分叉
+            int last = layer == LAYERS - 1 ? 1 : 0;
+            if (pending >= BUCKET || last == 1) {
+              ncclGroupStart();
+              for (int d = 0; d < N; ++d) {
+                ncclAllReduce(grad[d] + start, out[d] + start, pending,
+                              ncclFloat, ncclSum, comms[d], 0);
+              }
+              ncclGroupEnd();
+              start += pending;
+              pending = 0;
+            }
+          }
+
+          float* check = lab_buffer(0);
+          float host[8];
+          for (int d = 0; d < N; ++d) {
+            cudaSetDevice(d);
+            float one[1];
+            cudaMemcpy(one, out[d], 4, cudaMemcpyDeviceToHost);
+            host[d] = one[0];
+          }
+          cudaSetDevice(0);
+          cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('dataparallel.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const N = ${DP_DEVICES};
+      const TOTAL = ${DP_TOTAL};
+
+      describe('数据并行的梯度同步', () => {
+        it('8 张卡都拿到正确的和', async () => {
+          await lab.buildAndRun();
+          const check = lab.buffer('check');
+          // 第 d 张卡的梯度是 d + 1，加起来 1+2+...+8 = 36
+          for (let d = 0; d < N; d += 1) {
+            expect(Math.abs(check[d] - 36)).toBeLessThanOrEqual(1e-5);
+          }
+        });
+
+        it('**消息数降下来了**', async () => {
+          await lab.buildAndRun();
+          expect(lab.comm().messages).toBeLessThanOrEqual(800);
+        });
+
+        it('搬运总量一个字节没变 —— 分桶省的是每消息开销', async () => {
+          await lab.buildAndRun();
+          // 每个元素在 ring 上要过 2(n-1)/n × n = 2(n-1) 次，每次 4 字节
+          expect(lab.comm().bytes).toBe(2 * (N - 1) * TOTAL * 4);
+        });
+
+        it('**每一层的梯度都同步了** —— 漏发最后一桶会被抓住', async () => {
+          await lab.buildAndRun();
+          // 全部 TOTAL 个元素都要参与，一个不能少
+          expect(lab.comm().bytes).toBe(2 * (N - 1) * TOTAL * 4);
+        });
+
+        it('全在机内，不该走 IB', async () => {
+          await lab.buildAndRun();
+          expect(lab.comm().bytesByLink.ib).toBe(0);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.comm.messages', op: 'lte', value: 800,
+      zh: '消息条数（逐层发是 3584）', en: 'messages sent (3584 per-layer)',
+      unit: 'message', dimension: 'throughput',
+    }),
+    gate({
+      metric: 'gpu.comm.bytes', op: 'gte', value: 2 * 7 * 1408 * 4,
+      zh: '搬运总量 —— 分桶省的是消息数不是字节，少了就是漏了层',
+      en: 'total bytes: bucketing saves messages, not bytes, so a drop means layers were skipped',
+      unit: 'byte', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'gpu.comm.bytesByLink.ib', op: 'lte', value: 0,
+      zh: '走 IB 的字节数 —— 8 张卡在同一台机器里',
+      en: 'bytes over InfiniBand: all 8 GPUs are in one node',
+      unit: 'byte', dimension: 'correctness',
+    }),
+  ],
+  focus: ['throughput', 'correctness'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -5630,5 +5988,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22, STAGE_23],
 };
