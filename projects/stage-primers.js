@@ -1797,6 +1797,49 @@ const primers = {
         + 'is the user view, bus bandwidth is what the hardware actually moved.'
       )
     ),
+    'nccl-data-parallel': t(
+      p(
+        '数据并行是最简单的并行策略：每张卡放一份完整的模型、喂不同的数据，'
+        + '反向传播之后把梯度加起来，人人都拿到同一个和，再各自更新。'
+        + '加梯度这一步就是 all-reduce，真实工程里用 NCCL 做。',
+        'NCCL 的调用是流序异步的，不是同步返回的函数。'
+        + '单线程管多张卡时必须用 group 语义：把所有卡的调用夹在 '
+        + 'ncclGroupStart 与 ncclGroupEnd 之间一起发。'
+        + '因为每个 NCCL 调用都可能阻塞在等对端上，不成组就会死锁 --'
+        + '这一条 NVIDIA 的文档里明写着。',
+        '真正的性能问题在别处。一个模型有几十上百层，'
+        + '每层的梯度大小差别极大：有的几百万个参数，有的只有几个偏置。'
+        + '为几个 float 发一次 all-reduce，等于为几十字节的数据付一整套 ring '
+        + '的固定开销。解法是分桶：把连续的层攒到一定大小再发一次。',
+        'PyTorch 的 DDP 默认就这么做，桶大小默认 25 MiB。'
+        + '还有一个更妙的细节：DDP 是按参数的反向顺序分桶的。'
+        + '因为反向传播从最后一层往前算，最后一层的梯度最先就绪；'
+        + '按反向顺序分桶，第一个桶在反向刚开始不久就能发出去，'
+        + '于是通信和剩下的反向计算重叠了起来。'
+        + '值得注意的是分桶前后搬运的总字节数一个不差，'
+        + '省的全是每消息的固定开销，通信优化几乎从来不是少搬点数据。'
+      ),
+      p(
+        'Data parallelism is the simplest strategy: every GPU holds a full copy of the model, is fed '
+        + 'different data, and after backpropagation the gradients are summed so everyone has the '
+        + 'same total before updating. Summing them is an all-reduce, done with NCCL in practice.',
+        'NCCL calls are stream-ordered and asynchronous, not synchronous functions. With one thread '
+        + 'driving several GPUs, group semantics are mandatory: put every GPU call between '
+        + 'ncclGroupStart and ncclGroupEnd. Each NCCL call can block waiting on a peer, so without '
+        + 'grouping you deadlock, and NVIDIA documents this explicitly.',
+        'The real performance problem is elsewhere. A model has dozens or hundreds of layers whose '
+        + 'gradients vary enormously: millions of parameters in some, a handful of biases in others. '
+        + 'Issuing an all-reduce for a few floats means paying a full ring of fixed overhead to move '
+        + 'a few dozen bytes. The fix is bucketing: batch consecutive layers up to a size and send '
+        + 'once.',
+        'PyTorch DDP does this by default with a 25 MiB bucket. There is a neater detail too: DDP '
+        + 'buckets in reverse parameter order, because backpropagation runs from the last layer '
+        + 'backwards and the last layer is ready first. In reverse order the first bucket can go out '
+        + 'shortly after backward starts, overlapping communication with the rest of the backward '
+        + 'pass. Note that bucketing moves exactly the same total bytes; all it saves is per-message '
+        + 'overhead. Communication optimisation is almost never about moving less data.'
+      )
+    ),
   },
 
   'intranet-k8s': {
