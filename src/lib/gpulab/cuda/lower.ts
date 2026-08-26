@@ -330,7 +330,7 @@ function lowerExpr(node: TsNode): Expr {
     case 'pointer_expression': {
       const children = namedChildren(node);
       const op = operatorOf(node);
-      if (op === '&') fail(node, '暂不支持取地址运算符 `&`');
+      if (op === '&') return { kind: 'addressOf', target: lowerExpr(children[0]), span };
       return { kind: 'deref', pointer: lowerExpr(children[0]), span };
     }
 

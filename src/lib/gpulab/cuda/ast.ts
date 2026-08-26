@@ -27,6 +27,14 @@ export interface ScalarType {
 export interface PointerType {
   kind: 'pointer';
   to: CudaType;
+  /**
+   * 指向哪个地址空间。
+   *
+   * 不带这一条的话 `float* p = &s[0]`（s 是 __shared__）会悄悄按全局内存
+   * 去读 —— 地址对不上，算出来的东西全是错的，而且不报任何错。
+   * 缺省是 global，只有从 `__shared__` 变量取地址时才是 shared。
+   */
+  space?: 'global' | 'shared';
 }
 
 /** 定长数组。共享内存的 `__shared__ float t[32][33]` 就是它。 */
@@ -114,6 +122,8 @@ export type Expr =
   | { kind: 'ternary'; cond: Expr; then: Expr; otherwise: Expr; span: SourceSpan }
   | { kind: 'subscript'; array: Expr; index: Expr; span: SourceSpan }
   | { kind: 'deref'; pointer: Expr; span: SourceSpan }
+  /** `&lvalue` —— 取地址。`atomicAdd(&hist[i], 1)` 这类写法要用。 */
+  | { kind: 'addressOf'; target: Expr; span: SourceSpan }
   | { kind: 'cast'; to: CudaType; operand: Expr; span: SourceSpan }
   | { kind: 'call'; callee: string; args: Expr[]; span: SourceSpan }
   | { kind: 'assign'; target: Expr; op: BinaryOp | null; value: Expr; span: SourceSpan }

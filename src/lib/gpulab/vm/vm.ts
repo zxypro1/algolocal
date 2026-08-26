@@ -20,7 +20,7 @@
  *  3. 收尾**不要用闭包**：闭包一旦捕获可变局部，V8 会把它们挪进堆上的
  *     context 对象，每条指令多出好几次堆访问。
  */
-import { encode, type ExecutableKernel, type Program, BIN, FN, OP, SLOTS, SPACE, SREG, TY, UN } from '../ir/program';
+import { encode, type ExecutableKernel, type Program, ATOM, BIN, FN, OP, SHFL, SLOTS, SPACE, SREG, TY, UN } from '../ir/program';
 import type { CompiledKernel } from '../ir/types';
 import {
   addF32, divF32, expF32, fastDivF32, fastExpF32, fastLogF32, floatToInt, floatToUint,
@@ -64,6 +64,15 @@ export interface GpuCounters {
   sharedBankConflicts: number;
   divergentBranches: number;
   activeLanes: number;
+  /** 原子操作次数（按 lane 算）—— 第 5 关的门槛读它 */
+  atomics: number;
+  /** warp 级交换指令条数 */
+  shuffles: number;
+  /**
+   * warp 同步原语用错的次数：shuffle 读了一个不参与的 lane、
+   * 或者 __syncwarp 的掩码里有 lane 没到。真卡上这些是未定义行为。
+   */
+  warpSyncErrors: number;
   barriers: number;
   blocksLaunched: number;
   warpsLaunched: number;
@@ -76,6 +85,7 @@ export function emptyCounters(): GpuCounters {
     globalLoadSectors: 0, globalStoreSectors: 0,
     sharedLoadRequests: 0, sharedStoreRequests: 0, sharedBankConflicts: 0,
     divergentBranches: 0, activeLanes: 0,
+    atomics: 0, shuffles: 0, warpSyncErrors: 0,
     barriers: 0, blocksLaunched: 0, warpsLaunched: 0,
   };
 }
@@ -146,6 +156,8 @@ export function launchKernel(
 class Executor {
   private readonly shared: LinearMemory;
   private readonly addresses = new Int32Array(WARP_SIZE);
+  /** shuffle 要先把源值快照下来 —— dst 和 src 可能是同一个寄存器 */
+  private readonly shflScratch = new Float64Array(WARP_SIZE);
   private readonly maxWarpInsts: number;
   private readonly blockThreads: number;
   private readonly warpsPerBlock: number;
@@ -285,6 +297,9 @@ class Executor {
     let instFma = 0;
     let instLdSt = 0;
     let divergent = 0;
+    let atomics = 0;
+    let shuffles = 0;
+    let warpSyncErrors = 0;
 
     let pc = warp.pc;
 
@@ -295,6 +310,8 @@ class Executor {
           counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
           counters.instFma += instFma; counters.instLdSt += instLdSt;
           counters.divergentBranches += divergent;
+          counters.atomics += atomics; counters.shuffles += shuffles;
+          counters.warpSyncErrors += warpSyncErrors;
           return;
         }
 
@@ -303,6 +320,8 @@ class Executor {
           counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
           counters.instFma += instFma; counters.instLdSt += instLdSt;
           counters.divergentBranches += divergent;
+          counters.atomics += atomics; counters.shuffles += shuffles;
+          counters.warpSyncErrors += warpSyncErrors;
           throw new KernelError(
             `执行预算用光了（${this.maxWarpInsts} 条 warp 指令）—— 多半是循环没退出`,
             lines[pc]
@@ -569,6 +588,8 @@ class Executor {
             counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
             counters.instFma += instFma; counters.instLdSt += instLdSt;
             counters.divergentBranches += divergent;
+          counters.atomics += atomics; counters.shuffles += shuffles;
+          counters.warpSyncErrors += warpSyncErrors;
             return;
           }
 
@@ -600,11 +621,168 @@ class Executor {
                 case FN.__fdividef: out = fastDivF32(x, y); break;
                 case FN.min: out = Math.min(x | 0, y | 0) | 0; break;
                 case FN.max: out = Math.max(x | 0, y | 0) | 0; break;
-                default: out = Math.abs(x | 0) | 0; break;
+                case FN.abs: out = Math.abs(x | 0) | 0; break;
+                case FN.__popc: out = popcount(x | 0); break;
+                case FN.__clz: out = (x | 0) === 0 ? 32 : Math.clz32(x >>> 0); break;
+                // __ffs 是 1 起算的最低置位位号，0 表示没有置位
+                default: out = (x | 0) === 0 ? 0 : 32 - Math.clz32(((x | 0) & -(x | 0)) >>> 0); break;
               }
               regs[dst + lane] = out;
             }
             if (fn === FN.fmaf) instFma += lanes;
+            pc += 1;
+            break;
+          }
+
+          case OP.SHFL: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const src = code[at + 2] * WARP_SIZE;
+            const laneArg = code[at + 3] * WARP_SIZE;
+            const maskReg = code[at + 4] * WARP_SIZE;
+            const mode = code[at + 5];
+            const width = code[at + 6];
+            const scratch = this.shflScratch;
+
+            // 先快照：dst 有可能就是 src
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) scratch[lane] = regs[src + lane];
+
+            // 参与者 = 调用方给的掩码 ∩ 当前活跃的 lane
+            let participants = active;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if (active & (1 << lane)) { participants = active & (regs[maskReg + lane] | 0); break; }
+            }
+
+            const segMask = width - 1;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if ((active & (1 << lane)) === 0) continue;
+              const delta = regs[laneArg + lane] | 0;
+              const inSeg = lane & segMask;
+              let target: number;
+              switch (mode) {
+                case SHFL.idx: target = delta & segMask; break;
+                case SHFL.up: target = inSeg - delta; break;
+                case SHFL.down: target = inSeg + delta; break;
+                default: target = inSeg ^ delta; break;
+              }
+              // 越出本段就是「原地不动」，和真硬件一致
+              if (target < 0 || target >= width) target = inSeg;
+              const srcLane = (lane & ~segMask) | target;
+              if ((participants & (1 << srcLane)) === 0) {
+                // 真卡上这里是未定义值。给 0 并记一笔，好让 sanitizer 说得出话。
+                warpSyncErrors += 1;
+                regs[dst + lane] = 0;
+              } else {
+                regs[dst + lane] = scratch[srcLane];
+              }
+            }
+            shuffles += 1;
+            pc += 1;
+            break;
+          }
+
+          case OP.BALLOT: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const pred = code[at + 2] * WARP_SIZE;
+            const maskReg = code[at + 3] * WARP_SIZE;
+            let participants = active;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if (active & (1 << lane)) { participants = active & (regs[maskReg + lane] | 0); break; }
+            }
+            let voted = 0;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if ((participants & (1 << lane)) === 0) continue;
+              if (regs[pred + lane] !== 0) voted |= 1 << lane;
+            }
+            const result = voted >>> 0;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if (active & (1 << lane)) regs[dst + lane] = result;
+            }
+            pc += 1;
+            break;
+          }
+
+          case OP.ACTIVEMASK: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const value = active >>> 0;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if (active & (1 << lane)) regs[dst + lane] = value;
+            }
+            pc += 1;
+            break;
+          }
+
+          case OP.SYNCWARP: {
+            // 我们的 lane 本来就是锁步的，所以这条指令语义上是空操作。
+            // 但它是一个**检查点**：掩码里点了名却没到的 lane，
+            // 在真卡上会让这条指令行为未定义。
+            const maskReg = code[at + 1] * WARP_SIZE;
+            let requested = active;
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if (active & (1 << lane)) { requested = regs[maskReg + lane] | 0; break; }
+            }
+            if ((requested & warp.present & ~active) !== 0) warpSyncErrors += 1;
+            pc += 1;
+            break;
+          }
+
+          case OP.ATOM: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const addr = code[at + 2] * WARP_SIZE;
+            const value = code[at + 3] * WARP_SIZE;
+            const kind = code[at + 4];
+            const isGlobal = code[at + 5] === SPACE.GLOBAL;
+            const ty = code[at + 6];
+            const compare = code[at + 7] * WARP_SIZE;
+            const memory = isGlobal ? globalMemory : sharedMemory;
+
+            // **按 lane 号从小到大依次执行。**
+            // 真卡上原子操作的完成顺序是不定的，这正是「同样的种子、同样的
+            // 数据，loss 曲线对不上」的常见来源。我们必须给一个确定的顺序
+            // （否则重放门槛不成立），所以这里是一处**已知分叉**，
+            // primer 里要专门讲。
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if ((active & (1 << lane)) === 0) continue;
+              const address = regs[addr + lane] | 0;
+              const operand = regs[value + lane];
+              const old = ty === TY.F32 ? memory.readF32(address)
+                : ty === TY.U32 ? memory.readU32(address) : memory.readI32(address);
+              let next: number;
+              if (ty === TY.F32) {
+                switch (kind) {
+                  case ATOM.add: next = Math.fround(old + operand); break;
+                  case ATOM.sub: next = Math.fround(old - operand); break;
+                  case ATOM.exch: next = operand; break;
+                  case ATOM.min: next = old < operand ? old : operand; break;
+                  case ATOM.max: next = old > operand ? old : operand; break;
+                  case ATOM.cas: next = old === regs[compare + lane] ? operand : old; break;
+                  default:
+                    throw new KernelError('位运算的原子操作不能用在 float 上', lines[pc]);
+                }
+                memory.writeF32(address, next);
+              } else {
+                const o = ty === TY.U32 ? old >>> 0 : old | 0;
+                const v = ty === TY.U32 ? operand >>> 0 : operand | 0;
+                switch (kind) {
+                  case ATOM.add: next = o + v; break;
+                  case ATOM.sub: next = o - v; break;
+                  case ATOM.exch: next = v; break;
+                  case ATOM.min: next = o < v ? o : v; break;
+                  case ATOM.max: next = o > v ? o : v; break;
+                  case ATOM.and: next = o & v; break;
+                  case ATOM.or: next = o | v; break;
+                  case ATOM.xor: next = o ^ v; break;
+                  default: next = o === (regs[compare + lane] | 0) ? v : o; break;
+                }
+                next = ty === TY.U32 ? next >>> 0 : next | 0;
+                if (ty === TY.U32) memory.writeU32(address, next);
+                else memory.writeI32(address, next);
+              }
+              regs[dst + lane] = old;
+              atomics += 1;
+            }
+            // 原子操作是并发更新的**正确**做法，不该被 racecheck 报成竞态 ——
+            // 真的 racecheck 也不报它们。所以这里不喂给检测器。
+            instLdSt += lanes;
             pc += 1;
             break;
           }
@@ -614,6 +792,8 @@ class Executor {
             counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
             counters.instFma += instFma; counters.instLdSt += instLdSt;
             counters.divergentBranches += divergent;
+          counters.atomics += atomics; counters.shuffles += shuffles;
+          counters.warpSyncErrors += warpSyncErrors;
             return;
 
           default:
@@ -624,6 +804,8 @@ class Executor {
       counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
       counters.instFma += instFma; counters.instLdSt += instLdSt;
       counters.divergentBranches += divergent;
+          counters.atomics += atomics; counters.shuffles += shuffles;
+          counters.warpSyncErrors += warpSyncErrors;
       if (error instanceof MemoryFault) throw new KernelError(error.message, lines[Math.min(pc, this.program.count - 1)]);
       if (error instanceof KernelError) throw error;
       throw new KernelError(String((error as Error)?.message ?? error), lines[Math.min(pc, this.program.count - 1)]);

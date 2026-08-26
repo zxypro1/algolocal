@@ -31,7 +31,21 @@ export type BuiltinFn =
   | 'fmaf' | 'fabsf' | 'fminf' | 'fmaxf' | 'sqrtf' | 'rsqrtf'
   | 'expf' | 'logf' | 'tanhf' | 'powf'
   | '__expf' | '__logf' | '__fdividef'
-  | 'min' | 'max' | 'abs';
+  | 'min' | 'max' | 'abs'
+  /** 位操作 —— 和 __ballot_sync 配套用，数掩码里有几位、最低位在哪 */
+  | '__popc' | '__clz' | '__ffs';
+
+/**
+ * warp 内的数据交换方式。
+ *
+ * 真 CUDA 的 `__shfl_*_sync` 系列。它们是 warp 级原语 —— 一个 lane 直接读
+ * 另一个 lane 的寄存器，不经过内存。规约、前缀和、以及 FlashAttention 里
+ * 那些行内归并全靠它。
+ */
+export type ShflMode = 'idx' | 'up' | 'down' | 'xor';
+
+/** 原子操作。真卡上它们的完成顺序不定，这里的处理见 vm.ts 的说明。 */
+export type AtomKind = 'add' | 'sub' | 'exch' | 'min' | 'max' | 'cas' | 'and' | 'or' | 'xor';
 
 export type SpecialReg =
   | 'tid.x' | 'tid.y' | 'tid.z'
@@ -77,6 +91,19 @@ export type Inst =
   /** `__syncthreads()` —— 挂起本 warp，等同 block 的其它 warp */
   | { op: 'bar'; line: number }
   | { op: 'call'; dst: number; fn: BuiltinFn; args: number[]; ty: IrType }
+  /**
+   * warp 内交换：`dst` 拿到 `src` 在另一个 lane 上的值。
+   * `mask` 是参与线程掩码（真 API 的第一个参数），`width` 把 warp 切成段。
+   */
+  | { op: 'shfl'; dst: number; src: number; lane: number; mask: number; mode: ShflMode; width: number; ty: IrType; line: number }
+  /** `__ballot_sync`：把每个 lane 的谓词收成一个 32 位掩码 */
+  | { op: 'ballot'; dst: number; pred: number; mask: number; line: number }
+  /** `__activemask()` */
+  | { op: 'activemask'; dst: number }
+  /** `__syncwarp(mask)` */
+  | { op: 'syncwarp'; mask: number; line: number }
+  /** 原子读改写。返回**旧值**，和真 API 一致。 */
+  | { op: 'atom'; dst: number; addr: number; value: number; compare: number; kind: AtomKind; space: Space; ty: IrType; line: number }
   | { op: 'ret' };
 
 export interface SharedVar {

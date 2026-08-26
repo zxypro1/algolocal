@@ -14,7 +14,8 @@ import {
 } from '../cuda/ast';
 import { CudaCompileError } from '../cuda/lower';
 import type {
-  BinKind, BuiltinFn, CompiledKernel, Inst, IrType, KernelParam, SharedVar, Space,
+  AtomKind, BinKind, BuiltinFn, CompiledKernel, Inst, IrType,
+  KernelParam, SharedVar, ShflMode, Space,
 } from './types';
 
 /** 一个值：寄存器编号 + 它的 CUDA 类型 */
@@ -48,6 +49,30 @@ const BUILTIN_FNS: Record<string, { fn: BuiltinFn; arity: number; ty: IrType }> 
   min: { fn: 'min', arity: 2, ty: 'i32' },
   max: { fn: 'max', arity: 2, ty: 'i32' },
   abs: { fn: 'abs', arity: 1, ty: 'i32' },
+  __popc: { fn: '__popc', arity: 1, ty: 'i32' },
+  __clz: { fn: '__clz', arity: 1, ty: 'i32' },
+  __ffs: { fn: '__ffs', arity: 1, ty: 'i32' },
+};
+
+/** `__shfl_*_sync(mask, var, laneArg, width = warpSize)` */
+const SHFL_FNS: Record<string, ShflMode> = {
+  __shfl_sync: 'idx',
+  __shfl_up_sync: 'up',
+  __shfl_down_sync: 'down',
+  __shfl_xor_sync: 'xor',
+};
+
+/** `atomicXxx(addr, value)`；atomicCAS 多一个参数 */
+const ATOMIC_FNS: Record<string, { kind: AtomKind; arity: number }> = {
+  atomicAdd: { kind: 'add', arity: 2 },
+  atomicSub: { kind: 'sub', arity: 2 },
+  atomicExch: { kind: 'exch', arity: 2 },
+  atomicMin: { kind: 'min', arity: 2 },
+  atomicMax: { kind: 'max', arity: 2 },
+  atomicAnd: { kind: 'and', arity: 2 },
+  atomicOr: { kind: 'or', arity: 2 },
+  atomicXor: { kind: 'xor', arity: 2 },
+  atomicCAS: { kind: 'cas', arity: 3 },
 };
 
 const COMPARISONS = new Set<BinaryOp>(['<', '<=', '>', '>=', '==', '!=']);
@@ -235,16 +260,52 @@ class Compiler {
         return pointer.to;
       }
       case 'call': {
+        if (SHFL_FNS[node.callee]) return this.staticTypeOf(node.args[1]);
+        if (ATOMIC_FNS[node.callee]) {
+          const pointer = this.staticTypeOf(node.args[0]);
+          if (!isPointer(pointer)) this.fail(node.span.line, node.span.column, '原子操作的第一个参数得是指针');
+          return pointer.to;
+        }
+        if (node.callee === '__ballot_sync' || node.callee === '__activemask') {
+          return { kind: 'scalar', scalar: 'uint' };
+        }
+        if (node.callee === '__any_sync' || node.callee === '__all_sync' || node.callee === '__syncwarp') {
+          return { kind: 'scalar', scalar: 'int' };
+        }
         const spec = BUILTIN_FNS[node.callee];
         if (!spec) this.fail(node.span.line, node.span.column, `暂不支持函数 \`${node.callee}\``);
         return spec.ty === 'f32'
           ? { kind: 'scalar', scalar: 'float' }
           : { kind: 'scalar', scalar: 'int' };
       }
+      case 'addressOf': {
+        const target = this.staticTypeOf(node.target);
+        return { kind: 'pointer', to: target, space: this.spaceOfLvalue(node.target) };
+      }
       case 'assign':
         return this.staticTypeOf(node.target);
       case 'incdec':
         return this.staticTypeOf(node.target);
+    }
+  }
+
+  /** 一个左值静态上住在哪个地址空间 */
+  private spaceOfLvalue(node: Expr): Space {
+    switch (node.kind) {
+      case 'name': {
+        const binding = this.lookup(node.name);
+        if (binding?.where === 'shared') return 'shared';
+        if (binding && binding.type.kind === 'pointer') return binding.type.space ?? 'global';
+        return 'global';
+      }
+      case 'subscript':
+        return this.spaceOfLvalue(node.array);
+      case 'deref': {
+        const pointer = this.staticTypeOf(node.pointer);
+        return pointer.kind === 'pointer' ? pointer.space ?? 'global' : 'global';
+      }
+      default:
+        return 'global';
     }
   }
 
@@ -281,7 +342,11 @@ class Compiler {
         if (binding.where === 'shared') {
           const dst = this.alloc();
           this.emit({ op: 'sharedbase', dst, offset: binding.offset }, node.span.line);
-          return { reg: dst, type: binding.type };
+          // 数组名衰减成指针时把地址空间带上
+          const decayed: CudaType = binding.type.kind === 'array'
+            ? { kind: 'pointer', to: binding.type.of, space: 'shared' }
+            : binding.type;
+          return { reg: dst, type: decayed };
         }
         return { reg: binding.reg, type: binding.type };
       }
@@ -348,6 +413,11 @@ class Compiler {
       case 'deref': {
         const address = this.addressOf(node);
         return this.loadFrom(address, node.span.line);
+      }
+
+      case 'addressOf': {
+        const address = this.addressOf(node.target);
+        return { reg: address.reg, type: { kind: 'pointer', to: address.type, space: address.space } };
       }
 
       case 'call':
@@ -479,7 +549,133 @@ class Compiler {
     };
   }
 
+  /**
+   * `__shfl_*_sync` —— warp 内直接读别的 lane 的寄存器。
+   *
+   * `width` 必须是编译期常量（真代码里也总是），因为它决定 warp 被切成
+   * 几段，运行时才知道的话每个 lane 的段边界都要现算。
+   */
+  private shuffle(node: Expr & { kind: 'call' }): Value {
+    const mode = SHFL_FNS[node.callee];
+    const { line, column } = node.span;
+    if (node.args.length < 3 || node.args.length > 4) {
+      this.fail(line, column, `${node.callee} 需要 3 或 4 个参数（mask, var, lane[, width]）`);
+    }
+    const mask = this.convert(this.expr(node.args[0]), { kind: 'scalar', scalar: 'uint' }, line);
+    const value = this.expr(node.args[1]);
+    const lane = this.convert(this.expr(node.args[2]), { kind: 'scalar', scalar: 'int' }, line);
+
+    let width = 32;
+    if (node.args.length === 4) {
+      const literal = node.args[3];
+      if (literal.kind !== 'intLit') {
+        this.fail(line, column, `${node.callee} 的 width 必须是常量`);
+      }
+      width = literal.value;
+      if (width < 1 || width > 32 || (width & (width - 1)) !== 0) {
+        this.fail(line, column, 'width 必须是 1..32 之间的 2 的幂');
+      }
+    }
+
+    const dst = this.alloc();
+    this.emit({
+      op: 'shfl', dst, src: value.reg, lane: lane.reg, mask: mask.reg,
+      mode, width, ty: irTypeOf(value.type), line,
+    }, line);
+    return { reg: dst, type: value.type };
+  }
+
+  private ballot(node: Expr & { kind: 'call' }): Value {
+    const { line, column } = node.span;
+    if (node.args.length !== 2) this.fail(line, column, '__ballot_sync(mask, pred)');
+    const mask = this.convert(this.expr(node.args[0]), { kind: 'scalar', scalar: 'uint' }, line);
+    const pred = this.expr(node.args[1]);
+    const dst = this.alloc();
+    this.emit({ op: 'ballot', dst, pred: pred.reg, mask: mask.reg, line }, line);
+    return { reg: dst, type: { kind: 'scalar', scalar: 'uint' } };
+  }
+
+  /** `__any_sync` / `__all_sync` 就是 ballot 之后看掩码 */
+  private anyAll(node: Expr & { kind: 'call' }): Value {
+    const { line } = node.span;
+    const voted = this.ballot({ ...node, callee: '__ballot_sync' });
+    const dst = this.alloc();
+    if (node.callee === '__any_sync') {
+      const zero = this.constant(0, 'u32', line);
+      this.emit({ op: 'bin', dst, a: voted.reg, b: zero, kind: 'ne', ty: 'u32' }, line);
+    } else {
+      // all：投票掩码要覆盖参与的每一个 lane
+      const participants = this.convert(this.expr(node.args[0]), { kind: 'scalar', scalar: 'uint' }, line);
+      this.emit({ op: 'bin', dst, a: voted.reg, b: participants.reg, kind: 'eq', ty: 'u32' }, line);
+    }
+    return { reg: dst, type: { kind: 'scalar', scalar: 'int' } };
+  }
+
+  /**
+   * `atomicXxx(ptr, value)` —— 返回**旧值**，和真 API 一致。
+   *
+   * 第 5 关的门槛之一是 `atomics <= gridDim`：逼出 shuffle 规约而不是
+   * 每个线程都往同一个地址 atomicAdd。所以这条指令必须单独计数。
+   */
+  private atomic(node: Expr & { kind: 'call' }): Value {
+    const spec = ATOMIC_FNS[node.callee];
+    const { line, column } = node.span;
+    if (node.args.length !== spec.arity) {
+      this.fail(line, column, `${node.callee} 需要 ${spec.arity} 个参数`);
+    }
+
+    const pointer = this.expr(node.args[0]);
+    if (!isPointer(pointer.type)) {
+      this.fail(line, column, `${node.callee} 的第一个参数得是指针`);
+    }
+    const elementType = pointer.type.to;
+    // 共享内存上的原子操作要走共享地址空间 —— 地址是两套独立的偏移
+    const space: Space = pointer.type.space ?? 'global';
+
+    const value = this.convert(this.expr(node.args[1]), elementType, line);
+    let compare = value.reg;
+    if (spec.kind === 'cas') {
+      // atomicCAS(addr, compare, val)：参数顺序是「比较值」在前
+      const cmp = this.convert(this.expr(node.args[1]), elementType, line);
+      const desired = this.convert(this.expr(node.args[2]), elementType, line);
+      compare = cmp.reg;
+      const dst = this.alloc();
+      this.emit({
+        op: 'atom', dst, addr: pointer.reg, value: desired.reg, compare,
+        kind: 'cas', space, ty: irTypeOf(elementType), line,
+      }, line);
+      return { reg: dst, type: elementType };
+    }
+
+    const dst = this.alloc();
+    this.emit({
+      op: 'atom', dst, addr: pointer.reg, value: value.reg, compare,
+      kind: spec.kind, space, ty: irTypeOf(elementType), line,
+    }, line);
+    return { reg: dst, type: elementType };
+  }
+
   private call(node: Expr & { kind: 'call' }): Value {
+    if (SHFL_FNS[node.callee]) return this.shuffle(node);
+    if (ATOMIC_FNS[node.callee]) return this.atomic(node);
+    if (node.callee === '__ballot_sync') return this.ballot(node);
+    if (node.callee === '__any_sync' || node.callee === '__all_sync') return this.anyAll(node);
+    if (node.callee === '__syncwarp') {
+      const { line } = node.span;
+      const mask = node.args.length
+        ? this.convert(this.expr(node.args[0]), { kind: 'scalar', scalar: 'uint' }, line).reg
+        : this.constant(-1, 'u32', line);
+      this.emit({ op: 'syncwarp', mask, line }, line);
+      // 返回值没人用，给一个 0 占位
+      return { reg: this.constant(0, 'i32', line), type: { kind: 'scalar', scalar: 'int' } };
+    }
+    if (node.callee === '__activemask') {
+      if (node.args.length) this.fail(node.span.line, node.span.column, '__activemask() 不带参数');
+      const dst = this.alloc();
+      this.emit({ op: 'activemask', dst }, node.span.line);
+      return { reg: dst, type: { kind: 'scalar', scalar: 'uint' } };
+    }
+
     const spec = BUILTIN_FNS[node.callee];
     if (!spec) {
       this.fail(
@@ -531,7 +727,7 @@ class Compiler {
         if (!isPointer(pointer.type)) {
           this.fail(node.span.line, node.span.column, `${typeName(pointer.type)} 不是指针，不能解引用`);
         }
-        return { reg: pointer.reg, space: 'global', type: pointer.type.to };
+        return { reg: pointer.reg, space: pointer.type.space ?? 'global', type: pointer.type.to };
       }
 
       default:
@@ -552,7 +748,8 @@ class Compiler {
         this.emit({ op: 'sharedbase', dst: reg, offset: binding.offset }, node.span.line);
         return { reg, space: 'shared', type: binding.type };
       }
-      return { reg: binding.reg, space: 'global', type: binding.type };
+      const space = binding.type.kind === 'pointer' ? binding.type.space ?? 'global' : 'global';
+      return { reg: binding.reg, space, type: binding.type };
     }
     if (node.kind === 'subscript') {
       // 多维数组的中间一层：地址算出来，类型降一维
@@ -560,7 +757,8 @@ class Compiler {
       return inner;
     }
     const value = this.expr(node);
-    return { reg: value.reg, space: 'global', type: value.type };
+    const space = value.type.kind === 'pointer' ? value.type.space ?? 'global' : 'global';
+    return { reg: value.reg, space, type: value.type };
   }
 
   private loadFrom(address: { reg: number; space: Space; type: CudaType }, line: number): Value {
@@ -719,9 +917,18 @@ class Compiler {
     }
 
     const reg = this.alloc();
-    this.bind(decl.name, { where: 'reg', reg, type: decl.type });
+    let boundType = decl.type;
     if (decl.init) {
-      const value = this.convert(this.expr(decl.init), decl.type, decl.span.line);
+      // `float* p = &s[0]` —— 声明里写不出地址空间，从初始值继承过来。
+      // 不继承的话 p 会被当成全局指针，读到的是完全不相干的内存。
+      const initType = this.staticTypeOf(decl.init);
+      if (decl.type.kind === 'pointer' && initType.kind === 'pointer' && initType.space) {
+        boundType = { ...decl.type, space: initType.space };
+      }
+    }
+    this.bind(decl.name, { where: 'reg', reg, type: boundType });
+    if (decl.init) {
+      const value = this.convert(this.expr(decl.init), boundType, decl.span.line);
       this.emit({ op: 'mov', dst: reg, src: value.reg }, decl.span.line);
     } else {
       // 未初始化的变量在真卡上是垃圾值。我们给 0，但这是**已知的分叉**：
