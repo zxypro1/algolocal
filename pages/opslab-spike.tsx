@@ -16,7 +16,9 @@ import { createCluster } from '../src/lib/opslab/controllers';
 import { createMachine, Machine } from '../src/lib/labkit/machine';
 import { installClusterCli, sharedCliRuntime } from '../src/lib/opslab/wasm';
 
-const OpsTerminal = dynamic(() => import('../src/components/opslab/OpsTerminal'), { ssr: false });
+const WorkbenchTerminal = dynamic(
+  () => import('../src/components/workbench/WorkbenchTerminal'), { ssr: false }
+);
 
 const IMAGE = 'registry.corp.internal/ledger:0.9';
 
@@ -149,7 +151,7 @@ export default function OpsLabSpikePage() {
             </Text>
           </Stack>
           <div style={{ flex: 1, minHeight: 0 }}>
-            <OpsTerminal prompt={prompt} onCommand={handleCommand} banner={BANNER} />
+            <WorkbenchTerminal prompt={prompt} onCommand={handleCommand} banner={BANNER} />
           </div>
         </div>
       </AppShell.Main>

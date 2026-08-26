@@ -26,6 +26,12 @@ import { resetProgress } from '../../src/lib/engineering/progress';
  */
 const OpsWorkspace = dynamic(() => import('../../src/components/opslab/OpsWorkspace'), { ssr: false });
 
+/**
+ * gpu 工作台同样按需加载：它带着 xterm、Monaco、CUDA 前端的 tree-sitter wasm
+ * 与整台 warp 锁步 VM。只做代码关卡的人不该付这份代价。
+ */
+const GpuWorkspace = dynamic(() => import('../../src/components/gpulab/GpuWorkspace'), { ssr: false });
+
 export default function ProjectWorkspacePage() {
   const router = useRouter();
   const { id } = router.query;
@@ -106,6 +112,9 @@ export default function ProjectWorkspacePage() {
   const kind = workspaceKindOf(project);
   if (kind === 'ops') {
     return <OpsWorkspace session={session} registerClearResults={registerClearResults} />;
+  }
+  if (kind === 'gpu') {
+    return <GpuWorkspace session={session} registerClearResults={registerClearResults} />;
   }
 
   /**

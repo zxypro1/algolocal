@@ -21,7 +21,7 @@ const RED = `${ESC}[31m`;
 const RESET = `${ESC}[0m`;
 const CLEAR_LINE = `${ESC}[K`;
 
-export interface OpsTerminalProps {
+export interface WorkbenchTerminalProps {
   /** 提示符，例如 `ops@ops-ws:~/infra$ ` */
   prompt: string;
   /** 执行一条命令，返回要打印的文本 */
@@ -37,7 +37,9 @@ export interface OpsTerminalProps {
   registerInsert?: (insert: ((command: string) => void) | null) => void;
 }
 
-export default function OpsTerminal({ prompt, onCommand, banner, registerInsert }: OpsTerminalProps) {
+export default function WorkbenchTerminal(
+  { prompt, onCommand, banner, registerInsert }: WorkbenchTerminalProps
+) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   // 命令执行期间不接受新输入，也不重画提示符
