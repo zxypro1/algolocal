@@ -593,6 +593,603 @@ const STAGE_3 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 4 关：bank conflict                                              */
+/* ------------------------------------------------------------------ */
+
+const TILE4 = 32;
+const N4 = TILE4 * TILE4;
+
+const STAGE_4 = {
+  id: 'bank-conflicts',
+  title: t('bank conflict —— 一列 padding 换来 32 倍的共享内存吞吐',
+    'Bank conflicts — one column of padding, 32× the shared-memory throughput'),
+  goal: t(
+    [
+      '第 3 关的 tile 声明是 `float tile[32][33]`，那个 33 当时说了「不是笔误，第 4 关会讲」。',
+      '现在把它改回 `[32][32]`，转置结果一点没变，但 `ncu` 上多了 **992 路 bank 冲突**。',
+      '',
+      '```bash',
+      'nvcc -o bench transpose.cu && ncu ./bench',
+      '```',
+      '',
+      '看 `l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum`。',
+      '',
+      '**为什么**：共享内存被切成 **32 个 bank**，bank 号 = (字节地址 / 4) % 32。',
+      '一个 warp 里 32 个 lane 同时访问，落在**不同 bank** 上就一次做完；',
+      '落在**同一个 bank 的不同地址**上就得排队，n 个不同地址就是 n 路串行。',
+      '',
+      '`tile[x][y]` 这句里，warp 的 32 个 lane 走的是同一列：',
+      '地址依次差 32 个 float，(地址/4) % 32 全都一样，于是 32 个 lane 全挤在一个 bank 上。',
+      '把行宽改成 33，相邻行的同一列就错开一个 bank，冲突归零。',
+      '',
+      '注意**同一个 bank 上读同一个地址不算冲突**，那是广播，一点都不慢。',
+      '',
+      '**通关标准**',
+      '',
+      '- 转置结果不变',
+      '- `bankConflicts = 0`',
+      '- 共享内存的访问次数不许增加（不能靠「少用共享内存」蒙混过关）',
+    ].join('\n'),
+    [
+      'In stage 3 the tile was declared `float tile[32][33]` and the 33 was left unexplained.',
+      'Change it back to `[32][32]`: the transpose is still correct, but `ncu` now reports',
+      '**992 bank-conflict ways**.',
+      '',
+      '```bash',
+      'nvcc -o bench transpose.cu && ncu ./bench',
+      '```',
+      '',
+      'Look at `l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum`.',
+      '',
+      '**Why**: shared memory is split into **32 banks**, bank = (byte address / 4) % 32.',
+      'When the 32 lanes of a warp access it, lanes hitting **different banks** complete together;',
+      'lanes hitting **different addresses in the same bank** serialise, n addresses meaning n ways.',
+      '',
+      'In `tile[x][y]` the warp walks one column: addresses differ by 32 floats, so',
+      '(address/4) % 32 is identical for all lanes and all 32 pile into a single bank.',
+      'Widening a row to 33 shifts each row by one bank and the conflicts vanish.',
+      '',
+      'Note that **the same address in the same bank is a broadcast**, not a conflict, and costs nothing.',
+      '',
+      '**To pass**',
+      '',
+      '- transpose still correct',
+      '- `bankConflicts = 0`',
+      '- shared-memory access count must not drop (no passing by avoiding shared memory)',
+    ].join('\n')
+  ),
+  checklist: [
+    t('跑 ncu，找到 bank 冲突那一行', 'Run ncu and find the bank-conflict line'),
+    t('让相邻行的同一列落在不同的 bank 上', 'Make the same column of adjacent rows land in different banks'),
+    t('确认冲突归零而共享内存访问次数没变',
+      'Confirm conflicts hit zero while shared-memory accesses stay the same'),
+  ],
+  hints: [
+    t('bank 号只看 (字节地址 / 4) % 32。行宽是 32 个 float 时，同一列的所有行都算出同一个 bank。',
+      'The bank is just (byte address / 4) % 32. With a row of 32 floats every row in a column maps to the same bank.'),
+    t('把行宽加 1（`[32][33]`）。多出来的那一列一个字节都不用，只是把后面的行整体挪开一个 bank。',
+      'Widen the row by one (`[32][33]`). The extra column is never used; it just shifts every later row by one bank.'),
+  ],
+  pitfalls: [
+    t('**改成用 `tile[y][x]` 读（不转置了）来消冲突。** 冲突是没了，但转置也没了，用例会挂。',
+      '**Reading `tile[y][x]` instead (no transpose) to remove conflicts.** The conflicts go, and so does the transpose.'),
+    t('**以为多申请的那一列浪费了内存。** 32×33 个 float 是 4224 字节，'
+      + '而共享内存每 SM 有 228KB，这点开销换来 32 倍的吞吐。',
+      '**Worrying about the wasted column.** 32×33 floats is 4224 bytes against 228KB of shared memory per SM, '
+      + 'and it buys a 32× throughput improvement.'),
+  ],
+  extension: t(
+    'padding 不是唯一解。CUTLASS 与 FlashAttention 这类库更常用 **swizzle**：'
+    + '把行内的列按一个异或函数重排，同样错开 bank 而且不浪费任何字节，'
+    + '代价是索引计算复杂一点。做 tensor core 的分块时 swizzle 几乎是标配，'
+    + '因为那里的 tile 尺寸受 MMA 形状约束，不能随便加一列。',
+    'Padding is not the only fix. Libraries such as CUTLASS and FlashAttention prefer **swizzling**: permute '
+    + 'the columns within a row by an XOR function, which staggers the banks without wasting a single byte at '
+    + 'the cost of slightly more index arithmetic. Swizzling is near-universal for tensor-core tiling, where '
+    + 'MMA shapes constrain the tile size so an extra column is not an option.'
+  ),
+  gpu: {
+    files: {
+      '/root/transpose.cu': code`
+        // 转置是对的，但共享内存的列访问全挤在一个 bank 上。
+        //
+        //   nvcc -o bench transpose.cu && ncu ./bench
+        //
+        // 看 l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum
+        __global__ void transpose(const float* in, float* out, int n) {
+          __shared__ float tile[32][32];   // TODO: 这里有问题
+
+          int x = threadIdx.x;
+          int y = threadIdx.y;
+
+          tile[y][x] = in[y * n + x];
+          __syncthreads();
+          out[y * n + x] = tile[x][y];
+        }
+      `,
+    },
+    bench: {
+      sources: ['/root/transpose.cu'],
+      buffers: [
+        { name: 'in', length: N4, fill: { kind: 'iota', scale: 1 } },
+        { name: 'out', length: N4, fill: { kind: 'zeros' } },
+      ],
+      launches: [
+        { kernel: 'transpose', grid: [1], block: [TILE4, TILE4], args: ['in', 'out', TILE4] },
+      ],
+    },
+    referenceFiles: {
+      '/root/transpose.cu': code`
+        __global__ void transpose(const float* in, float* out, int n) {
+          // 行宽 33：相邻行的同一列错开一个 bank，列访问不再串行
+          __shared__ float tile[32][33];
+
+          int x = threadIdx.x;
+          int y = threadIdx.y;
+
+          tile[y][x] = in[y * n + x];
+          __syncthreads();
+          out[y * n + x] = tile[x][y];
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('bank.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const N = ${TILE4};
+
+      describe('无冲突的转置', () => {
+        it('结果仍然正确', async () => {
+          await lab.buildAndRun();
+          const input = lab.buffer('in');
+          const out = lab.buffer('out');
+          const expected = new Float32Array(N * N);
+          for (let y = 0; y < N; y += 1) {
+            for (let x = 0; x < N; x += 1) expected[y * N + x] = input[x * N + y];
+          }
+          expect(lab.compare(out, expected).maxAbs).toBe(0);
+        });
+
+        it('bank 冲突归零', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().shared.bankConflicts).toBe(0);
+        });
+
+        it('还在用共享内存中转 —— 不是靠绕开它蒙混过关', async () => {
+          await lab.buildAndRun();
+          const metrics = lab.metrics();
+          expect(metrics.shared.loadRequests).toBeGreaterThanOrEqual(N);
+          expect(metrics.shared.storeRequests).toBeGreaterThanOrEqual(N);
+          expect(metrics.global.sectorsPerRequest).toBeLessThanOrEqual(4.5);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.shared.bankConflicts', op: 'eq', value: 0,
+      zh: '共享内存 bank 冲突路数（未优化时是 992）', en: 'shared bank-conflict ways (992 before)',
+      dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.shared.loadRequests', op: 'gte', value: TILE4,
+      zh: '共享内存读次数（防止绕开共享内存）', en: 'shared loads (guards against bypassing shared memory)',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['latency'],
+};
+
+/* ------------------------------------------------------------------ */
+/* 第 5 关：发散与 warp 原语                                            */
+/* ------------------------------------------------------------------ */
+
+const N5 = 4096;
+const BLOCK5 = 128;
+const BLOCKS5 = N5 / BLOCK5;
+
+const STAGE_5 = {
+  id: 'warp-reduce',
+  title: t('发散与 warp 原语 —— 把 4096 次原子操作压到 32 次',
+    'Divergence and warp primitives — from 4096 atomics down to 32'),
+  goal: t(
+    [
+      '`reduce.cu` 把 4096 个数求和。做法最直白：每个线程 `atomicAdd(out, in[i])`。',
+      '结果是对的，但 4096 个线程排队往同一个地址加，真卡上这是灾难。',
+      '',
+      '```bash',
+      'nvcc -o bench reduce.cu && ncu ./bench',
+      '```',
+      '',
+      '`Atomic Operations` 那一行是 4096。',
+      '',
+      '**换个做法**：一个 `warp`（32 个线程）内部可以不经过内存直接交换寄存器，',
+      '用的是 `__shfl_xor_sync(0xffffffff, v, delta)` —— 它让每个 lane 拿到',
+      '`lane ^ delta` 那个 lane 的 `v`。做 5 次（delta = 16, 8, 4, 2, 1），',
+      'warp 里 32 个值就归并成了一个，**一次内存都不用碰**。',
+      '然后每个 warp 只出一次 `atomicAdd`。',
+      '',
+      '**通关标准**',
+      '',
+      '- 和仍然正确（fp32 累加，容差见用例）',
+      '- 原子操作次数 ≤ 128（4096 / 32）',
+      '- 一次共享内存都不用',
+      '- warp 内不发散',
+    ].join('\n'),
+    [
+      '`reduce.cu` sums 4096 numbers the most direct way: every thread does `atomicAdd(out, in[i])`.',
+      'The answer is right, but 4096 threads queueing on one address is a disaster on real hardware.',
+      '',
+      '```bash',
+      'nvcc -o bench reduce.cu && ncu ./bench',
+      '```',
+      '',
+      '`Atomic Operations` reads 4096.',
+      '',
+      '**A better way**: the 32 threads of a `warp` can exchange registers directly without going',
+      'through memory, using `__shfl_xor_sync(0xffffffff, v, delta)` which hands each lane the `v`',
+      'held by lane `lane ^ delta`. Five rounds (delta = 16, 8, 4, 2, 1) collapse 32 values into one',
+      '**without touching memory at all**. Then each warp issues a single `atomicAdd`.',
+      '',
+      '**To pass**',
+      '',
+      '- the sum is still correct (fp32 accumulation, tolerance in the spec)',
+      '- at most 128 atomic operations (4096 / 32)',
+      '- no shared memory',
+      '- no divergence inside a warp',
+    ].join('\n')
+  ),
+  checklist: [
+    t('用 5 次 `__shfl_xor_sync` 把 warp 内的 32 个值归并成 1 个',
+      'Collapse 32 values into one with five `__shfl_xor_sync` rounds'),
+    t('让每个 warp 只出一次 atomicAdd', 'Have each warp issue exactly one atomicAdd'),
+    t('用 ncu 确认原子操作次数掉下来了', 'Confirm with ncu that the atomic count dropped'),
+  ],
+  hints: [
+    t('蝶形归并：`for (int d = 16; d > 0; d >>= 1) v += __shfl_xor_sync(0xffffffff, v, d);`',
+      'Butterfly reduction: `for (int d = 16; d > 0; d >>= 1) v += __shfl_xor_sync(0xffffffff, v, d);`'),
+    t('归并完之后每个 lane 手里都是同一个和。用 `(threadIdx.x & 31) == 0` 挑出每个 warp 的 0 号 lane 去写。',
+      'After the butterfly every lane holds the same sum. Pick lane 0 of each warp with `(threadIdx.x & 31) == 0` to write it.'),
+  ],
+  pitfalls: [
+    t('**用 `__shfl_down_sync` 做归并之后，让所有 lane 都去 atomicAdd。** '
+      + 'down 版归并完只有 0 号 lane 手里是对的，别的 lane 是部分和，全加进去结果会偏大。',
+      '**Reducing with `__shfl_down_sync` and then letting every lane atomicAdd.** Only lane 0 holds the '
+      + 'full sum after a down-shuffle; the others hold partial sums and adding them all inflates the result.'),
+    t('**把 `__shfl_xor_sync` 的掩码写成 `__activemask()` 之后又在分歧区里调用。** '
+      + '掩码里没点到的 lane 被读时是未定义值，这里会记成 warp 同步错误并挂掉门槛。',
+      '**Passing `__activemask()` and then calling it inside divergent code.** Reading a lane outside the '
+      + 'mask is undefined; here it is counted as a warp sync error and fails the gate.'),
+  ],
+  extension: t(
+    '这套蝶形归并是 GPU 上一切规约的地基：softmax 求 max 与求和、LayerNorm 求均值与方差、'
+    + 'FlashAttention 的行内归并，全都是它。CUDA 从 sm_80 起还提供了 `__reduce_add_sync`，'
+    + '把整个蝶形压成一条指令。再往上一层是 CUB 的 `BlockReduce`，'
+    + '它把 warp 内归并与跨 warp 的共享内存归并封在一起。',
+    'This butterfly is the foundation of every reduction on a GPU: the max and sum in softmax, the mean and '
+    + 'variance in LayerNorm, the row-wise reductions inside FlashAttention. From sm_80 CUDA also offers '
+    + '`__reduce_add_sync`, collapsing the whole butterfly into one instruction, and above that CUB\'s '
+    + '`BlockReduce` packages the warp-level and cross-warp shared-memory stages together.'
+  ),
+  gpu: {
+    files: {
+      '/root/reduce.cu': code`
+        // 4096 个数求和。
+        //
+        // 结果对，但 4096 个线程排队往同一个地址加。
+        // 用 __shfl_xor_sync 先在 warp 内归并，每个 warp 只出一次 atomicAdd。
+        __global__ void reduceSum(const float* in, float* out, int n) {
+          int i = blockIdx.x * blockDim.x + threadIdx.x;
+          if (i < n) {
+            atomicAdd(out, in[i]);
+          }
+        }
+      `,
+    },
+    bench: {
+      sources: ['/root/reduce.cu'],
+      buffers: [
+        { name: 'in', length: N5, fill: { kind: 'random', seed: 11, min: -2, max: 2 } },
+        { name: 'out', length: 1, fill: { kind: 'zeros' } },
+      ],
+      launches: [
+        { kernel: 'reduceSum', grid: [BLOCKS5], block: [BLOCK5], args: ['in', 'out', N5] },
+      ],
+    },
+    referenceFiles: {
+      '/root/reduce.cu': code`
+        __global__ void reduceSum(const float* in, float* out, int n) {
+          int i = blockIdx.x * blockDim.x + threadIdx.x;
+          float v = (i < n) ? in[i] : 0.0f;
+
+          // 蝶形归并：5 步把 warp 里的 32 个值收成一个
+          for (int d = 16; d > 0; d >>= 1) {
+            v += __shfl_xor_sync(0xffffffff, v, d);
+          }
+
+          // 每个 warp 只出一次原子操作
+          if ((threadIdx.x & 31) == 0) {
+            atomicAdd(out, v);
+          }
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('reduce.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const N = ${N5};
+
+      describe('规约求和', () => {
+        it('和是对的', async () => {
+          await lab.buildAndRun();
+          const input = lab.buffer('in');
+          let expected = 0;
+          for (let i = 0; i < N; i += 1) expected += input[i];
+          const actual = lab.buffer('out')[0];
+          expect(Number.isFinite(actual)).toBe(true);
+          // fp32 累加 4096 项，不同的归并顺序会有差别，按 sqrt(K)*eps 给界
+          const tolerance = 8 * Math.sqrt(N) * Math.pow(2, -23) * Math.max(1, Math.abs(expected));
+          expect(Math.abs(actual - expected)).toBeLessThanOrEqual(Math.max(tolerance, 1e-3));
+        });
+
+        it('原子操作次数掉到每 warp 一次', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().atomics).toBeLessThanOrEqual(N / 32);
+        });
+
+        it('确实用了 warp 原语，而且一次共享内存都没碰', async () => {
+          await lab.buildAndRun();
+          const metrics = lab.metrics();
+          expect(metrics.warp.shuffles).toBeGreaterThan(0);
+          expect(metrics.shared.loadRequests + metrics.shared.storeRequests).toBe(0);
+        });
+
+        it('warp 内不发散', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().warp.activeLaneRatio).toBeGreaterThan(0.9);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.atomics', op: 'lte', value: N5 / 32,
+      zh: '原子操作次数（未优化时是 4096）', en: 'atomic operations (4096 before)',
+      dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.warp.shuffles', op: 'gte', value: 1,
+      zh: 'warp 内交换指令数', en: 'warp shuffle instructions',
+      dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.warp.activeLaneRatio', op: 'gte', value: 0.9,
+      zh: '活跃 lane 占比', en: 'active lane ratio',
+      dimension: 'latency',
+    }),
+  ],
+  focus: ['latency', 'correctness'],
+};
+
+/* ------------------------------------------------------------------ */
+/* 第 6 关：occupancy 与寄存器压力                                       */
+/* ------------------------------------------------------------------ */
+
+const N6 = 2048;
+const TAPS6 = 8;
+
+const STAGE_6 = {
+  id: 'occupancy',
+  title: t('occupancy 与寄存器压力 —— 加了个小数组，怎么就慢了',
+    'Occupancy and register pressure — one little array, and it fell over'),
+  goal: t(
+    [
+      '`filter.cu` 做一个 8 抽头的滑动窗口加权和。它用一个 `float tap[8]` 暂存窗口里的值。',
+      '结果是对的，指令数也正常，但 `ncu` 里有一行不对劲：**Local Memory Traffic 不是 0**。',
+      '',
+      '```bash',
+      'nvcc -o bench filter.cu && ncu ./bench',
+      '```',
+      '',
+      '**为什么**：线程私有的数组只有在**下标全是编译期常量**时才能待在寄存器里。',
+      '只要出现一次动态下标（比如循环变量），整个数组就会被搬到 **local memory** ——',
+      '那块内存名字叫 local，其实住在显存里。于是每次访问都要走一趟显存。',
+      '',
+      '更糟的是它对 occupancy 的影响：占用率是「一个 SM 上能同时驻留多少 warp」，',
+      '决定了访存延迟能不能被别的 warp 的计算盖住。寄存器和共享内存都是每 SM 固定的，',
+      '吃得越多能驻留的 block 越少。`ncu` 的 `Occupancy` 分节会直接告诉你是谁卡住了。',
+      '',
+      '**通关标准**',
+      '',
+      '- 结果不变',
+      '- `local.bytes = 0`（数组回到寄存器里）',
+      '- 理论占用率 ≥ 50%',
+    ].join('\n'),
+    [
+      '`filter.cu` computes an 8-tap weighted sliding window, staging the window in a `float tap[8]`.',
+      'The answer is right and the instruction count is normal, but one `ncu` line is off:',
+      '**Local Memory Traffic is not zero**.',
+      '',
+      '```bash',
+      'nvcc -o bench filter.cu && ncu ./bench',
+      '```',
+      '',
+      '**Why**: a thread-private array can only live in registers when **every subscript is a',
+      'compile-time constant**. A single dynamic index (a loop variable, say) moves the whole array',
+      'to **local memory**, which despite the name lives in device memory. Every access becomes a',
+      'round trip to DRAM.',
+      '',
+      'The occupancy cost is worse. Occupancy is how many warps stay resident on an SM, which decides',
+      'whether memory latency can be hidden behind another warp\'s work. Registers and shared memory',
+      'are fixed per SM, so the more you use the fewer blocks fit. The `Occupancy` section of `ncu`',
+      'names the limiter directly.',
+      '',
+      '**To pass**',
+      '',
+      '- unchanged results',
+      '- `local.bytes = 0` (the array is back in registers)',
+      '- theoretical occupancy at least 50%',
+    ].join('\n')
+  ),
+  checklist: [
+    t('在 ncu 里找到 Local Memory Traffic 那一行', 'Find the Local Memory Traffic line in ncu'),
+    t('把数组的动态下标去掉，或者干脆不用数组',
+      'Remove the dynamic subscript, or drop the array altogether'),
+    t('确认 local.bytes 归零、占用率上来了',
+      'Confirm local.bytes hits zero and occupancy recovers'),
+  ],
+  hints: [
+    t('8 个抽头是固定的。把循环展开，用 8 个标量变量，或者用常量下标访问数组。',
+      'There are exactly eight taps. Unroll the loop into eight scalars, or index the array with constants.'),
+    t('只要有一处写成 `tap[k]`（k 是循环变量），整个数组就会落到 local memory。',
+      'A single `tap[k]` with a loop variable `k` sends the whole array to local memory.'),
+  ],
+  pitfalls: [
+    t('**只把读改成常量下标，写还留着 `tap[k] = ...`。** 判断是按整个数组来的，'
+      + '有一处动态就全落 local memory。',
+      '**Making reads constant but leaving `tap[k] = ...`.** The decision is per array: one dynamic '
+      + 'subscript anywhere sends all of it to local memory.'),
+    t('**盯着寄存器数优化。** 数组落到 local memory 之后寄存器数反而**变少**了，'
+      + '看寄存器数会以为优化成功了。真正的证据是 `local.bytes`。',
+      '**Optimising for register count.** Spilling the array to local memory actually *reduces* the '
+      + 'register count, so that number looks like an improvement. The real evidence is `local.bytes`.'),
+  ],
+  extension: t(
+    '寄存器分块（register tiling）正是把这条规则反过来用：GEMM 里让每个线程算 4×4 甚至 8×8 个输出，'
+    + '那些累加器全部待在寄存器里，于是每从显存读一个数就能做更多次乘加，算术强度直接上去。'
+    + '第 9 关做的就是这件事，前提就是这一关的规则：常量下标才能进寄存器。'
+    + 'nvcc 的 `-maxrregcount` 与 `__launch_bounds__` 可以反过来限制寄存器数来换占用率，'
+    + '那是另一个方向的权衡。',
+    'Register tiling applies this rule in reverse: in a GEMM each thread computes a 4×4 or even 8×8 output '
+    + 'tile whose accumulators all live in registers, so every value loaded from memory feeds many more '
+    + 'multiply-adds and arithmetic intensity rises. That is stage 9, and it depends on the rule learned here. '
+    + 'In the other direction, nvcc\'s `-maxrregcount` and `__launch_bounds__` cap register usage to buy '
+    + 'occupancy back.'
+  ),
+  gpu: {
+    files: {
+      '/root/filter.cu': code`
+        // 8 抽头滑动窗口加权和。
+        //
+        // 结果是对的，但 ncu 里 Local Memory Traffic 不是 0。
+        //   nvcc -o bench filter.cu && ncu ./bench
+        __global__ void filter8(const float* in, float* out, int n) {
+          int i = blockIdx.x * blockDim.x + threadIdx.x;
+          if (i >= n) return;
+
+          float tap[8];
+
+          // 动态下标：整个 tap 数组会被搬到 local memory
+          for (int k = 0; k < 8; ++k) {
+            int j = i + k;
+            tap[k] = (j < n) ? in[j] : 0.0f;
+          }
+
+          float acc = 0.0f;
+          for (int k = 0; k < 8; ++k) {
+            acc += tap[k] * (float)(k + 1);
+          }
+          out[i] = acc;
+        }
+      `,
+    },
+    bench: {
+      sources: ['/root/filter.cu'],
+      buffers: [
+        { name: 'in', length: N6, fill: { kind: 'random', seed: 23, min: -1, max: 1 } },
+        { name: 'out', length: N6, fill: { kind: 'zeros' } },
+      ],
+      launches: [
+        { kernel: 'filter8', grid: [N6 / 256], block: [256], args: ['in', 'out', N6] },
+      ],
+    },
+    referenceFiles: {
+      '/root/filter.cu': code`
+        __global__ void filter8(const float* in, float* out, int n) {
+          int i = blockIdx.x * blockDim.x + threadIdx.x;
+          if (i >= n) return;
+
+          // 8 个标量，全部待在寄存器里 —— 一个字节 local memory 都不用
+          float t0 = (i + 0 < n) ? in[i + 0] : 0.0f;
+          float t1 = (i + 1 < n) ? in[i + 1] : 0.0f;
+          float t2 = (i + 2 < n) ? in[i + 2] : 0.0f;
+          float t3 = (i + 3 < n) ? in[i + 3] : 0.0f;
+          float t4 = (i + 4 < n) ? in[i + 4] : 0.0f;
+          float t5 = (i + 5 < n) ? in[i + 5] : 0.0f;
+          float t6 = (i + 6 < n) ? in[i + 6] : 0.0f;
+          float t7 = (i + 7 < n) ? in[i + 7] : 0.0f;
+
+          out[i] = t0 * 1.0f + t1 * 2.0f + t2 * 3.0f + t3 * 4.0f
+                 + t4 * 5.0f + t5 * 6.0f + t6 * 7.0f + t7 * 8.0f;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('filter.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const N = ${N6};
+      const TAPS = ${TAPS6};
+
+      describe('滑动窗口', () => {
+        it('结果正确', async () => {
+          await lab.buildAndRun();
+          const input = lab.buffer('in');
+          const out = lab.buffer('out');
+          const expected = new Float32Array(N);
+          for (let i = 0; i < N; i += 1) {
+            let acc = 0;
+            for (let k = 0; k < TAPS; k += 1) {
+              const j = i + k;
+              acc = Math.fround(acc + Math.fround((j < N ? input[j] : 0) * (k + 1)));
+            }
+            expected[i] = acc;
+          }
+          const diff = lab.compare(out, expected);
+          expect(diff.hasNonFinite).toBe(false);
+          expect(diff.maxUlp).toBeLessThanOrEqual(4);
+        });
+
+        it('一个字节 local memory 都不用', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().local.bytes).toBe(0);
+        });
+
+        it('理论占用率至少一半', async () => {
+          await lab.buildAndRun();
+          const stat = lab.staticMetrics();
+          expect(stat).not.toBeNull();
+          expect(stat.occupancy.theoretical).toBeGreaterThanOrEqual(0.5);
+        });
+
+        it('没有靠少读数据来蒙混 —— 8 个抽头都读了', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().global.loadRequests).toBeGreaterThanOrEqual((N / 32) * (TAPS - 1));
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.local.bytes', op: 'eq', value: 0,
+      zh: 'local memory 流量（未优化时不为 0）', en: 'local memory traffic (non-zero before)',
+      unit: 'byte', dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.occupancy.theoretical', op: 'gte', value: 0.5,
+      zh: '理论占用率', en: 'theoretical occupancy',
+      dimension: 'latency',
+    }),
+  ],
+  focus: ['latency'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -659,5 +1256,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6],
 };
