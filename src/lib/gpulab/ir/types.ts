@@ -116,6 +116,17 @@ export type Inst =
   | { op: 'syncwarp'; mask: number; line: number }
   /** 原子读改写。返回**旧值**，和真 API 一致。 */
   | { op: 'atom'; dst: number; addr: number; value: number; compare: number; kind: AtomKind; space: Space; ty: IrType; line: number }
+  /**
+   * tensor core 的四条指令。
+   *
+   * fragment 在每个 lane 上占 `m*n/32` 个寄存器槽；`base` 是第一个槽的编号。
+   * 一次 `mma` 需要凑齐整个 warp 的碎片才能算，所以它在执行器里是
+   * **warp 级**的：把 32 个 lane 的寄存器拼成完整的 16×16 再做矩阵乘。
+   */
+  | { op: 'wmmafill'; base: number; slots: number; value: number }
+  | { op: 'wmmaload'; base: number; slots: number; addr: number; stride: number; space: Space; colMajor: boolean; half: boolean; line: number }
+  | { op: 'wmmastore'; base: number; slots: number; addr: number; stride: number; space: Space; colMajor: boolean; line: number }
+  | { op: 'wmmamma'; d: number; a: number; b: number; c: number; slots: number; line: number }
   | { op: 'ret' };
 
 export interface SharedVar {

@@ -9,8 +9,9 @@
  * int 和 unsigned 混算提升到 unsigned。够用，且和真 nvcc 在这个子集上一致。
  */
 import {
-  isPointer, sizeOf, typeName,
-  type BinaryOp, type CudaType, type Expr, type KernelDecl, type Stmt, type VarDecl,
+  fragmentSlots, isFragment, isPointer, sizeOf, typeName,
+  type BinaryOp, type CudaType, type Expr, type FragmentType, type KernelDecl,
+  type Stmt, type VarDecl,
 } from '../cuda/ast';
 import { CudaCompileError } from '../cuda/lower';
 import type {
@@ -34,7 +35,9 @@ type Binding =
   /** 下标全是常量的线程私有数组：整个摊平成一串寄存器 */
   | { where: 'regarray'; base: number; type: CudaType }
   /** 有动态下标的线程私有数组：落到 local memory */
-  | { where: 'local'; offset: number; type: CudaType };
+  | { where: 'local'; offset: number; type: CudaType }
+  /** wmma 的 fragment：每个 lane 占 m*n/32 个寄存器槽 */
+  | { where: 'fragment'; base: number; type: FragmentType };
 
 const BUILTIN_FNS: Record<string, { fn: BuiltinFn; arity: number; ty: IrType }> = {
   fmaf: { fn: 'fmaf', arity: 3, ty: 'f32' },
@@ -88,10 +91,10 @@ const BIN_KIND: Partial<Record<BinaryOp, BinKind>> = {
 };
 
 function irTypeOf(type: CudaType): IrType {
-  if (type.kind === 'pointer') return 'u32';
-  if (type.kind === 'array') return 'u32';
+  if (type.kind === 'pointer' || type.kind === 'array' || type.kind === 'fragment') return 'u32';
   switch (type.scalar) {
-    case 'float': return 'f32';
+    // half 在寄存器里也是按 fp32 存的，只是每次写入都会舍到 fp16 能表示的值
+    case 'float': case 'half': return 'f32';
     case 'uint': return 'u32';
     default: return 'i32';
   }
@@ -303,6 +306,8 @@ class Compiler {
       case 'builtin':
         return { kind: 'scalar', scalar: 'uint' };
       case 'name': {
+        // wmma::mem_row_major 这类枚举名不是变量
+        if (node.name.startsWith('wmma::')) return { kind: 'scalar', scalar: 'int' };
         const binding = this.lookup(node.name);
         if (!binding) this.fail(node.span.line, node.span.column, `没有声明过 \`${node.name}\``);
         if (binding.where === 'local' && binding.type.kind === 'array') {
@@ -343,6 +348,8 @@ class Compiler {
         return pointer.to;
       }
       case 'call': {
+        // wmma 的四个函数都返回 void，用例里也不会拿它们的值
+        if (node.callee.startsWith('wmma::')) return { kind: 'scalar', scalar: 'int' };
         if (SHFL_FNS[node.callee]) return this.staticTypeOf(node.args[1]);
         if (ATOMIC_FNS[node.callee]) {
           const pointer = this.staticTypeOf(node.args[0]);
@@ -421,6 +428,10 @@ class Compiler {
       }
 
       case 'name': {
+        if (node.name.startsWith('wmma::')) {
+          // 枚举名：给一个占位值，真正的语义由调用方按名字判
+          return { reg: this.constant(0, 'i32', node.span.line), type: { kind: 'scalar', scalar: 'int' } };
+        }
         const binding = this.lookup(node.name);
         if (!binding) this.fail(node.span.line, node.span.column, `没有声明过 \`${node.name}\``);
         if (binding.where === 'shared') {
@@ -443,6 +454,10 @@ class Compiler {
         if (binding.where === 'regarray') {
           this.fail(node.span.line, node.span.column,
             `\`${node.name}\` 是一个待在寄存器里的数组，只能按常量下标访问，不能整体当指针用`);
+        }
+        if (binding.where === 'fragment') {
+          this.fail(node.span.line, node.span.column,
+            `\`${node.name}\` 是 wmma 的 fragment，只能交给 wmma::* 那几个函数，不能直接读写`);
         }
         return { reg: binding.reg, type: binding.type };
       }
@@ -755,7 +770,102 @@ class Compiler {
     return { reg: dst, type: elementType };
   }
 
+  /**
+   * `wmma::*` 的四个内建函数。
+   *
+   * fragment 的排布是**我们定义的**：一个 16×16 的 tile 展平之后，
+   * 第 f 个元素放在 lane `f % 32` 的第 `f / 32` 个槽里。
+   * 真硬件上这个排布是未定义的（所以 fragment 才是 opaque 类型），
+   * 我们选一个让 load 尽量合并的排法。
+   */
+  private wmma(node: Expr & { kind: 'call' }): Value {
+    const { line, column } = node.span;
+    const name = node.callee.slice('wmma::'.length);
+    const zero = (): Value => ({
+      reg: this.constant(0, 'i32', line),
+      type: { kind: 'scalar', scalar: 'int' },
+    });
+
+    const fragmentArg = (index: number): { base: number; type: FragmentType } => {
+      const arg = node.args[index];
+      if (arg?.kind !== 'name') this.fail(line, column, `${node.callee} 的第 ${index + 1} 个参数要是一个 fragment 变量`);
+      const binding = this.lookup(arg.name);
+      if (!binding || binding.where !== 'fragment') {
+        this.fail(line, column, `\`${arg.name}\` 不是 fragment`);
+      }
+      return { base: binding.base, type: binding.type };
+    };
+
+    switch (name) {
+      case 'fill_fragment': {
+        if (node.args.length !== 2) this.fail(line, column, 'wmma::fill_fragment(frag, value)');
+        const frag = fragmentArg(0);
+        const value = this.convert(this.expr(node.args[1]), { kind: 'scalar', scalar: 'float' }, line);
+        this.emit({ op: 'wmmafill', base: frag.base, slots: fragmentSlots(frag.type), value: value.reg }, line);
+        return zero();
+      }
+
+      case 'load_matrix_sync': {
+        if (node.args.length < 3) this.fail(line, column, 'wmma::load_matrix_sync(frag, ptr, ldm)');
+        const frag = fragmentArg(0);
+        const pointer = this.expr(node.args[1]);
+        if (!isPointer(pointer.type)) this.fail(line, column, '第二个参数要是指针');
+        const stride = this.convert(this.expr(node.args[2]), { kind: 'scalar', scalar: 'int' }, line);
+        this.emit({
+          op: 'wmmaload', base: frag.base, slots: fragmentSlots(frag.type),
+          addr: pointer.reg, stride: stride.reg,
+          space: pointer.type.space ?? 'global',
+          colMajor: frag.type.layout === 'col_major',
+          half: frag.type.element === 'half',
+          line,
+        }, line);
+        return zero();
+      }
+
+      case 'store_matrix_sync': {
+        if (node.args.length < 3) this.fail(line, column, 'wmma::store_matrix_sync(ptr, frag, ldm, layout)');
+        const pointer = this.expr(node.args[0]);
+        if (!isPointer(pointer.type)) this.fail(line, column, '第一个参数要是指针');
+        const frag = fragmentArg(1);
+        const stride = this.convert(this.expr(node.args[2]), { kind: 'scalar', scalar: 'int' }, line);
+        const layout = node.args[3];
+        const colMajor = layout?.kind === 'name' && layout.name === 'wmma::mem_col_major';
+        this.emit({
+          op: 'wmmastore', base: frag.base, slots: fragmentSlots(frag.type),
+          addr: pointer.reg, stride: stride.reg,
+          space: pointer.type.space ?? 'global',
+          colMajor, line,
+        }, line);
+        return zero();
+      }
+
+      case 'mma_sync': {
+        if (node.args.length !== 4) this.fail(line, column, 'wmma::mma_sync(d, a, b, c)');
+        const d = fragmentArg(0);
+        const a = fragmentArg(1);
+        const b = fragmentArg(2);
+        const c = fragmentArg(3);
+        if (a.type.use !== 'matrix_a' || b.type.use !== 'matrix_b') {
+          this.fail(line, column, 'mma_sync 的第 2、3 个参数要分别是 matrix_a 与 matrix_b 的 fragment');
+        }
+        if (d.type.use !== 'accumulator' || c.type.use !== 'accumulator') {
+          this.fail(line, column, 'mma_sync 的第 1、4 个参数要是 accumulator 的 fragment');
+        }
+        this.emit({
+          op: 'wmmamma', d: d.base, a: a.base, b: b.base, c: c.base,
+          slots: fragmentSlots(d.type), line,
+        }, line);
+        return zero();
+      }
+
+      default:
+        this.fail(line, column,
+          `暂不支持 \`${node.callee}\` —— wmma 里实现了 fill_fragment / load_matrix_sync / store_matrix_sync / mma_sync`);
+    }
+  }
+
   private call(node: Expr & { kind: 'call' }): Value {
+    if (node.callee.startsWith('wmma::')) return this.wmma(node);
     if (SHFL_FNS[node.callee]) return this.shuffle(node);
     if (ATOMIC_FNS[node.callee]) return this.atomic(node);
     if (node.callee === '__ballot_sync') return this.ballot(node);
@@ -853,8 +963,9 @@ class Compiler {
         this.emit({ op: 'localbase', dst: reg, offset: binding.offset }, node.span.line);
         return { reg, space: 'local', type: binding.type };
       }
-      if (binding.where === 'regarray') {
-        this.fail(node.span.line, node.span.column, '内部错误：寄存器数组不该走地址路径');
+      if (binding.where === 'regarray' || binding.where === 'fragment') {
+        this.fail(node.span.line, node.span.column,
+          `\`${node.name}\` 住在寄存器里，取不到地址`);
       }
       const space = binding.type.kind === 'pointer' ? binding.type.space ?? 'global' : 'global';
       return { reg: binding.reg, space, type: binding.type };
@@ -935,8 +1046,8 @@ class Compiler {
     if (target.kind === 'name') {
       const binding = this.lookup(target.name);
       if (!binding) this.fail(line, column, `没有声明过 \`${target.name}\``);
-      if (binding.where === 'shared' || binding.where === 'local' || binding.where === 'regarray') {
-        this.fail(line, column, `不能给数组 \`${target.name}\` 整体赋值`);
+      if (binding.where !== 'reg' && binding.where !== 'param') {
+        this.fail(line, column, `不能给 \`${target.name}\` 整体赋值`);
       }
       const converted = this.convert(value, binding.type, line);
       this.emit({ op: 'mov', dst: binding.reg, src: converted.reg }, line);
@@ -1062,6 +1173,21 @@ class Compiler {
       this.sharedBytes += bytes;
       this.sharedVars.push({ name: decl.name, offset, bytes });
       this.bind(decl.name, { where: 'shared', offset, type: decl.type });
+      return;
+    }
+
+    if (isFragment(decl.type)) {
+      if (decl.init) {
+        this.fail(decl.span.line, decl.span.column,
+          'fragment 不能直接初始化，用 wmma::fill_fragment(frag, 0.0f)');
+      }
+      const slots = fragmentSlots(decl.type);
+      const base = this.numRegs;
+      for (let i = 0; i < slots; i += 1) {
+        const reg = this.alloc();
+        this.emit({ op: 'const', dst: reg, value: 0, ty: 'f32' }, decl.span.line);
+      }
+      this.bind(decl.name, { where: 'fragment', base, type: decl.type });
       return;
     }
 

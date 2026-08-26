@@ -52,6 +52,10 @@ export const OP = {
   SYNCWARP: 22,
   ATOM: 23,
   LOCALBASE: 24,
+  WMMA_FILL: 25,
+  WMMA_LOAD: 26,
+  WMMA_STORE: 27,
+  WMMA_MMA: 28,
 } as const;
 
 export const SHFL = { idx: 0, up: 1, down: 2, xor: 3 } as const;
@@ -281,6 +285,39 @@ export function encode(kernel: CompiledKernel): ExecutableKernel {
         code[at + 5] = spaceCode(inst.space);
         code[at + 6] = tyCode(inst.ty);
         code[at + 7] = inst.compare;
+        break;
+      case 'wmmafill':
+        code[at] = OP.WMMA_FILL;
+        code[at + 1] = inst.base;
+        code[at + 2] = inst.slots;
+        code[at + 3] = inst.value;
+        break;
+      case 'wmmaload':
+        code[at] = OP.WMMA_LOAD;
+        code[at + 1] = inst.base;
+        code[at + 2] = inst.slots;
+        code[at + 3] = inst.addr;
+        code[at + 4] = inst.stride;
+        code[at + 5] = spaceCode(inst.space);
+        code[at + 6] = inst.colMajor ? 1 : 0;
+        code[at + 7] = inst.half ? 1 : 0;
+        break;
+      case 'wmmastore':
+        code[at] = OP.WMMA_STORE;
+        code[at + 1] = inst.base;
+        code[at + 2] = inst.slots;
+        code[at + 3] = inst.addr;
+        code[at + 4] = inst.stride;
+        code[at + 5] = spaceCode(inst.space);
+        code[at + 6] = inst.colMajor ? 1 : 0;
+        break;
+      case 'wmmamma':
+        code[at] = OP.WMMA_MMA;
+        code[at + 1] = inst.d;
+        code[at + 2] = inst.a;
+        code[at + 3] = inst.b;
+        code[at + 4] = inst.c;
+        code[at + 5] = inst.slots;
         break;
       case 'ret':
         code[at] = OP.RET;

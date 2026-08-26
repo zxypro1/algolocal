@@ -14,9 +14,10 @@
  */
 import type { TsNode } from './parser';
 import {
-  BOOL, FLOAT, INT, UINT, VOID,
+  BOOL, FLOAT, HALF, INT, UINT, VOID,
   type BinaryOp, type BuiltinVar, type CudaType, type Expr, type KernelDecl,
-  type Param, type SourceSpan, type Stmt, type TranslationUnit, type UnaryOp, type VarDecl,
+  type FragmentType, type Param, type SourceSpan, type Stmt, type TranslationUnit,
+  type UnaryOp, type VarDecl,
 } from './ast';
 
 export class CudaCompileError extends Error {
@@ -97,11 +98,69 @@ function lowerTypeSpecifier(node: TsNode): CudaType {
       break;
     }
     case 'type_identifier':
-      fail(node, `暂不支持自定义类型 \`${text}\` —— 当前子集只有 int / unsigned / float / bool`);
+      if (text === 'half' || text === '__half') return HALF;
+      fail(node, `暂不支持自定义类型 \`${text}\` —— 当前子集只有 int / unsigned / float / half / bool`);
       break;
     default:
       fail(node, `暂不支持的类型写法：${node.type}`);
   }
+}
+
+/**
+ * `wmma::fragment<use, M, N, K, T[, layout]>` 翻成我们的 FragmentType。
+ *
+ * 这是**唯一**放开的 C++ 语法。理由是「接口真实」：wmma 在 CUDA 里本来
+ * 就是带模板的 C++，造一套 C 风格的假 API 等于教一个真卡上不存在的东西。
+ * 放开的范围严格限定在 wmma 这几个名字上，别的 C++ 照样报错。
+ */
+function lowerFragmentType(node: TsNode): FragmentType | null {
+  if (node.type !== 'qualified_identifier') return null;
+  const children = namedChildren(node);
+  if (children[0]?.text !== 'wmma') return null;
+  const template = children[1];
+  if (!template || template.type !== 'template_type') return null;
+  if (namedChildren(template)[0]?.text !== 'fragment') {
+    fail(template, `wmma 里只支持 fragment，不支持 ${namedChildren(template)[0]?.text}`);
+  }
+
+  const args = namedChildren(namedChildren(template)[1] ?? template)
+    .filter((child) => child.type !== ',');
+  const text = (child: TsNode | undefined) => child?.text.replace('wmma::', '').trim() ?? '';
+
+  const use = text(args[0]);
+  if (use !== 'matrix_a' && use !== 'matrix_b' && use !== 'accumulator') {
+    fail(args[0] ?? node, `fragment 的第一个模板参数要是 matrix_a / matrix_b / accumulator，给的是 ${use}`);
+  }
+  const dims = [args[1], args[2], args[3]].map((child) => {
+    if (!child || child.type !== 'number_literal') fail(child ?? node, 'fragment 的 M/N/K 要是数字');
+    return constIntOf(child);
+  });
+  if (dims[0] !== 16 || dims[1] !== 16 || dims[2] !== 16) {
+    fail(node, `目前只支持 16×16×16 的 fragment，给的是 ${dims.join('×')}`);
+  }
+
+  const element = text(args[4]);
+  if (use === 'accumulator') {
+    if (element !== 'float') fail(args[4] ?? node, 'accumulator 的元素类型必须是 float');
+  } else if (element !== 'half') {
+    fail(args[4] ?? node, `matrix_a / matrix_b 的元素类型必须是 half，给的是 ${element}`);
+  }
+
+  const layout = args[5] ? text(args[5]) : undefined;
+  if (layout && layout !== 'row_major' && layout !== 'col_major') {
+    fail(args[5], `layout 要是 row_major 或 col_major，给的是 ${layout}`);
+  }
+  if (use !== 'accumulator' && !layout) {
+    fail(node, 'matrix_a / matrix_b 的 fragment 必须写明 row_major 或 col_major');
+  }
+
+  return {
+    kind: 'fragment',
+    use: use as FragmentType['use'],
+    m: dims[0], n: dims[1], k: dims[2],
+    element: element as 'half' | 'float',
+    layout: layout as FragmentType['layout'],
+  };
 }
 
 /** 从一串子节点里挑出类型说明符 */
@@ -109,6 +168,11 @@ function findTypeSpecifier(children: TsNode[], at: TsNode): CudaType {
   for (const child of children) {
     if (child.type === 'type_qualifier' || child.type === 'storage_class_specifier') continue;
     if (child.type === '__shared__' || child.type === '__device__' || child.type === '__global__') continue;
+    if (child.type === 'qualified_identifier') {
+      const fragment = lowerFragmentType(child);
+      if (fragment) return fragment;
+      fail(child, `暂不支持带命名空间的类型 \`${child.text}\` —— 只放开了 wmma::fragment`);
+    }
     if (
       child.type === 'primitive_type' ||
       child.type === 'sized_type_specifier' ||
@@ -280,6 +344,16 @@ function lowerExpr(node: TsNode): Expr {
       break;
     }
 
+    case 'qualified_identifier': {
+      // `wmma::mem_row_major` 这类枚举名：当成一个名字，由编译器识别
+      const parts = namedChildren(node);
+      if (parts[0]?.text === 'wmma') {
+        return { kind: 'name', name: `wmma::${parts[1]?.text ?? ''}`, span };
+      }
+      fail(node, `暂不支持带命名空间的名字 \`${node.text}\``);
+      break;
+    }
+
     case 'parenthesized_expression':
       return lowerExpr(namedChildren(node)[0]);
 
@@ -349,6 +423,20 @@ function lowerExpr(node: TsNode): Expr {
     case 'call_expression': {
       const children = namedChildren(node);
       const callee = children[0];
+      if (callee.type === 'qualified_identifier') {
+        const parts = namedChildren(callee);
+        if (parts[0]?.text !== 'wmma') {
+          fail(callee, `暂不支持带命名空间的调用 \`${callee.text}\` —— 只放开了 wmma::`);
+        }
+        const argList = children[1];
+        const args = argList && argList.type === 'argument_list' ? namedChildren(argList) : [];
+        return {
+          kind: 'call',
+          callee: `wmma::${parts[1]?.text ?? ''}`,
+          args: args.map(lowerExpr),
+          span,
+        };
+      }
       if (callee.type !== 'identifier') {
         fail(node, '暂不支持通过表达式调用函数');
       }
@@ -421,7 +509,11 @@ function lowerDeclaration(node: TsNode): Stmt {
       child.type === 'type_qualifier' ||
       child.type === 'primitive_type' ||
       child.type === 'sized_type_specifier' ||
-      child.type === 'storage_class_specifier'
+      child.type === 'storage_class_specifier' ||
+      // 类型说明符本身：`wmma::fragment<...>` 与 `half`，
+      // findTypeSpecifier 已经读过了，这里别再当成声明符
+      child.type === 'qualified_identifier' ||
+      child.type === 'type_identifier'
     ) continue;
 
     const declared = lowerDeclarator(child, base);

@@ -98,6 +98,46 @@ export function rsqrtF32(a: number): number {
   return f32(1 / Math.sqrt(a));
 }
 
+/**
+ * 舍到 fp16 能表示的最近的值。
+ *
+ * tensor core 的输入是 half，精度只有 10 位尾数。第 11 关要学员看到的
+ * 「精度换吞吐」就靠这个：同一个 GEMM 换成 half 输入之后误差会明显变大，
+ * 但累加仍然在 fp32 上做，所以不会垮掉。
+ */
+export function toHalf(value: number): number {
+  if (!Number.isFinite(value)) return value;
+  if (value === 0) return value;
+
+  const sign = value < 0 ? -1 : 1;
+  const abs = Math.abs(value);
+  if (abs >= 65520) return sign * Infinity; // 65520 是舍入到 inf 的分界
+  if (abs < 2.9802322387695312e-8) return sign * 0; // 半个最小次正规数
+
+  // 次正规数：fp16 的最小正规数是 2^-14，再往下步长固定在 2^-24
+  const step = abs < 6.103515625e-5
+    ? 5.960464477539063e-8
+    : Math.pow(2, Math.floor(Math.log2(abs)) - 10);
+
+  return f32(sign * roundHalfToEven(abs / step) * step);
+}
+
+/**
+ * 就近舍入、遇到正中间取偶数。
+ *
+ * **不能用 `Math.round`** —— 它把 0.5 一律往远离零的方向推，
+ * 而 IEEE 754 规定的是取偶数。差别只在恰好落在中点的输入上，
+ * 但那正是「1 + 2^-11 在 fp16 里舍成 1 还是 1+2^-10」这类问题的答案，
+ * 而我们对外承诺过重放逐位一致，所以这里必须是对的。
+ */
+function roundHalfToEven(value: number): number {
+  const floor = Math.floor(value);
+  const diff = value - floor;
+  if (diff > 0.5) return floor + 1;
+  if (diff < 0.5) return floor;
+  return floor % 2 === 0 ? floor : floor + 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* 超越函数：自己实现                                                   */
 /* ------------------------------------------------------------------ */
