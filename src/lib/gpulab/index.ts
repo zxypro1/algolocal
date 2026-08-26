@@ -11,6 +11,7 @@ import { lowerTranslationUnit } from './cuda/lower';
 import { parseCuda, type CudaParserOptions } from './cuda/parser';
 import { flattenMetrics, toMetrics, type GpuMetrics } from './metrics';
 import { LinearMemory } from './vm/memory';
+import { RaceDetector, formatRaceReports, type SanitizerReport } from './vm/sanitizer';
 import { emptyCounters, launchKernel, type Dim3, type GpuCounters, type LaunchConfig, type KernelArg } from './vm/vm';
 
 export { CudaSyntaxError, parseCuda, resetCudaParser } from './cuda/parser';
@@ -18,6 +19,8 @@ export { CudaCompileError } from './cuda/lower';
 export { KernelError, dim3, launchKernel } from './vm/vm';
 export { LinearMemory, MemoryFault, SECTOR_BYTES, WARP_SIZE } from './vm/memory';
 export { flattenMetrics, toMetrics } from './metrics';
+export { RaceDetector, formatRaceReports } from './vm/sanitizer';
+export type { SanitizerReport, RaceReport } from './vm/sanitizer';
 export type { GpuMetrics } from './metrics';
 export type { CompiledKernel } from './ir/types';
 export { encode } from './ir/program';
@@ -64,6 +67,7 @@ export class GpuDevice {
   private readonly sharedCapacity: number;
   private readonly maxWarpInsts: number | undefined;
   private counters = emptyCounters();
+  private lastSanitizer: SanitizerReport = { races: [], truncated: 0 };
 
   constructor(options: DeviceOptions = {}) {
     this.memory = new LinearMemory(options.globalBytes ?? 64 * 1024 * 1024, 'global');
@@ -107,14 +111,62 @@ export class GpuDevice {
     accumulate(this.counters, result.counters);
   }
 
+  /**
+   * 跑一遍 kernel，同时开着竞态检测。
+   *
+   * 分成两个方法而不是加个开关：**判定要两遍都跑** —— 一遍不带检测，
+   * 拿干净的结果与指标；一遍带上，查竞态。这正是现实里用
+   * compute-sanitizer 的方式（它太慢，不会挂在正常跑的路径上）。
+   *
+   * 注意这一遍会真的改写显存，所以调用方要么先跑它、要么接受结果被覆盖。
+   */
+  launchWithRacecheck(
+    kernel: CompiledKernel | ExecutableKernel,
+    config: LaunchConfig,
+    args: KernelArg[]
+  ): SanitizerReport {
+    const detector = new RaceDetector({
+      // 只盯已经分配出去的那部分显存，影子内存跟着题目规模走
+      globalBytes: this.memory.used,
+      sharedBytes: kernel.sharedBytes,
+      blockDim: config.block,
+      gridDim: config.grid,
+    });
+    launchKernel(kernel, config, args, {
+      memory: this.memory,
+      sharedCapacity: this.sharedCapacity,
+      maxWarpInsts: this.maxWarpInsts,
+      raceDetector: detector,
+    });
+    this.lastSanitizer = detector.result();
+    return this.lastSanitizer;
+  }
+
+  /** 最近一次 racecheck 的结果；没跑过就是空的 */
+  sanitizerReport(): SanitizerReport {
+    return this.lastSanitizer;
+  }
+
+  /** compute-sanitizer 样子的文本输出 */
+  formatSanitizerReport(kernelName: string): string {
+    return formatRaceReports(this.lastSanitizer, kernelName);
+  }
+
   /** 这台设备上到目前为止的全部指标 */
   metrics(): GpuMetrics {
     return toMetrics(this.counters);
   }
 
-  /** 摊平成 `gpu.` 路径，直接喂给 MetricGate */
+  /**
+   * 摊平成 `gpu.` 路径，直接喂给 MetricGate。
+   *
+   * `gpu.sanitizer.races` 一并放进来 —— 第 3 关起它是恒为 0 的硬门槛。
+   */
   flatMetrics(): Record<string, number> {
-    return flattenMetrics(this.metrics());
+    return {
+      ...flattenMetrics(this.metrics()),
+      'gpu.sanitizer.races': this.lastSanitizer.races.length + this.lastSanitizer.truncated,
+    };
   }
 
   resetMetrics(): void {
