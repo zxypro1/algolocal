@@ -33,7 +33,7 @@ class TestRunner {
       },
       {
         name: 'Engineering Practice Runtime',
-        file: 'tests/engineering/runtime.test.ts',
+        file: 'tests/engineering',
         description: 'Virtual clock, module runtime, metric gates and preset project solvability'
       },
       {
