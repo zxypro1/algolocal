@@ -15,7 +15,7 @@ import {
   ResourceDefinition,
   Scheme,
 } from '../apiserver';
-import { Controller, ControllerContext } from './framework';
+import { Controller, ControllerContext, Informer } from './framework';
 import { createServiceIpDefaulter } from './serviceip';
 import {
   KYVERNO_LABEL, KYVERNO_RESOURCES, createPsaValidator, digestOf, reviewWithKyverno,
@@ -41,6 +41,9 @@ import {
 import {
   BackupStore, SNAPSHOT_RESOURCES, SnapshotController, VELERO_RESOURCES, VeleroController,
 } from '../backup';
+import {
+  CAPI_RESOURCES, MachineController, MachineDeploymentController, MachineSetController,
+} from '../capi';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
@@ -182,7 +185,7 @@ export class Cluster {
       ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES, ...ARGOCD_RESOURCES,
       ...MESH_RESOURCES, ...RBAC_RESOURCES, ...KYVERNO_RESOURCES, ...ESO_RESOURCES,
       ...OBSERVABILITY_RESOURCES, ...DISRUPTION_RESOURCES, ...ROLLOUT_RESOURCES,
-      ...STORAGE_RESOURCES, ...SNAPSHOT_RESOURCES, ...VELERO_RESOURCES,
+      ...STORAGE_RESOURCES, ...SNAPSHOT_RESOURCES, ...VELERO_RESOURCES, ...CAPI_RESOURCES,
       ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
@@ -655,6 +658,13 @@ export class Cluster {
       new SnapshotController(context, { volumes: this.volumes }),
       // 备份。Backup 对象在集群里，备份内容在桶里 —— 所以 store 不在 registry 上。
       new VeleroController(context, { store: this.backups }),
+      /**
+       * 机器。形状照抄 Deployment 那一套，多出来的是装机时间 ——
+       * 弹性伸缩里所有的等待都来自那一段。
+       */
+      new MachineDeploymentController(context),
+      new MachineSetController(context),
+      new MachineController(context),
       // 入口：控制器自己是集群里的一个工作负载，卸载掉 Gateway 就不再被 program
       new GatewayController(context),
       // 内网 PKI：同样是集群里的一个工作负载，卸载掉就不再签发
@@ -695,16 +705,45 @@ export class Cluster {
           })]
         : []),
       new LoadBalancerController(context, this.options.addressPools ?? DEFAULT_POOLS),
-      ...this.nodeSpecs.flatMap((node) => [
-        new KubeletController(context, node.name, {
-          images: this.options.images,
-          registries: this.options.registries,
-          resolveImage: this.options.resolveImage,
-        }),
-        new NodePressureController(node.name, context, this.options.images ?? {}),
-      ]),
+      ...this.nodeSpecs.flatMap((node) => this.kubeletFor(context, node.name)),
     ];
     for (const controller of this.controllers) controller.start();
+
+    /**
+     * 后来才出现的节点也要有 kubelet。
+     *
+     * kubelet 是**每台机器上**的进程，不是集群里的一个控制器 —— 所以它按节点
+     * 起。Cluster API 造出来的机器如果没人给它起 kubelet，落上去的 Pod 会
+     * 永远 Pending 而且一个事件都没有：这正是真集群里「节点 NotReady，
+     * 但 kubelet 根本没装」的样子，只不过在这里它是我们自己的 bug。
+     */
+    const nodes = new Informer(this.registry, NODES);
+    const known = new Set(this.nodeSpecs.map((node) => node.name));
+    nodes.onChange(() => {
+      for (const node of nodes.list()) {
+        const name = node.metadata.name!;
+        if (known.has(name)) continue;
+        known.add(name);
+        for (const controller of this.kubeletFor(context, name)) {
+          this.controllers.push(controller);
+          controller.start();
+        }
+      }
+    });
+    nodes.start();
+    this.controllers.push({ stop: () => nodes.stop() } as Controller);
+  }
+
+  /** 一台机器上的两个东西：kubelet，以及盯着它资源水位的那部分 */
+  private kubeletFor(context: ControllerContext, name: string): Controller[] {
+    return [
+      new KubeletController(context, name, {
+        images: this.options.images,
+        registries: this.options.registries,
+        resolveImage: this.options.resolveImage,
+      }),
+      new NodePressureController(name, context, this.options.images ?? {}),
+    ];
   }
 
   /** 把世界推到静止 */

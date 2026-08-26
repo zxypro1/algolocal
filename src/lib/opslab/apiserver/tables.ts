@@ -355,6 +355,92 @@ export const TABLE_PRINTERS: Record<string, TablePrinter> = {
       age,
     ],
   },
+  machinedeployments: {
+    columns: [
+      NAME_COLUMN,
+      col('Cluster', 'The cluster this MachineDeployment belongs to.'),
+      col('Desired', 'The desired number of machines.'),
+      col('Replicas', 'The current number of machines.'),
+      col('Ready', 'The number of machines that have joined the cluster.'),
+      col('Updated', 'The number of machines on the latest template.'),
+      col('Unavailable', 'The number of machines not yet available.'),
+      col('Phase', 'The phase of this MachineDeployment.'),
+      AGE_COLUMN,
+      col('Version', 'The Kubernetes version of the machines.', 1),
+    ],
+    cells: (object, age) => {
+      const spec = (object.spec ?? {}) as any;
+      const status = (object.status ?? {}) as any;
+      const desired = spec.replicas ?? 0;
+      const ready = status.readyReplicas ?? 0;
+      return [
+        object.metadata.name,
+        spec.clusterName ?? '',
+        String(desired),
+        String(status.replicas ?? 0),
+        String(ready),
+        String(status.updatedReplicas ?? 0),
+        String(Math.max(0, desired - ready)),
+        status.phase ?? 'ScalingUp',
+        age,
+        spec.template?.spec?.version ?? '',
+      ];
+    },
+  },
+  machinesets: {
+    columns: [
+      NAME_COLUMN,
+      col('Cluster', 'The cluster this MachineSet belongs to.'),
+      col('Desired', 'The desired number of machines.'),
+      col('Replicas', 'The current number of machines.'),
+      col('Ready', 'The number of machines that have joined the cluster.'),
+      col('Available', 'The number of available machines.'),
+      AGE_COLUMN,
+    ],
+    cells: (object, age) => {
+      const spec = (object.spec ?? {}) as any;
+      const status = (object.status ?? {}) as any;
+      return [
+        object.metadata.name,
+        spec.clusterName ?? '',
+        String(spec.replicas ?? 0),
+        String(status.replicas ?? 0),
+        String(status.readyReplicas ?? 0),
+        String(status.availableReplicas ?? 0),
+        age,
+      ];
+    },
+  },
+  /**
+   * NODENAME 那一列是重点。
+   *
+   * Machine 有了不等于 Node 有了：Provisioning 阶段这一列是空的，
+   * 机器在造；Provisioned 阶段 Node 出现但还 NotReady。
+   */
+  machines: {
+    columns: [
+      NAME_COLUMN,
+      col('Cluster', 'The cluster this machine belongs to.'),
+      col('Nodename', 'The node backing this machine.'),
+      col('Providerid', 'The infrastructure provider ID.'),
+      col('Phase', 'The phase of this machine.'),
+      AGE_COLUMN,
+      col('Version', 'The Kubernetes version of this machine.', 1),
+    ],
+    cells: (object, age) => {
+      const spec = (object.spec ?? {}) as any;
+      const status = (object.status ?? {}) as any;
+      return [
+        object.metadata.name,
+        spec.clusterName ?? '',
+        status.nodeRef?.name ?? '',
+        spec.providerID ?? '',
+        status.phase ?? 'Pending',
+        age,
+        spec.version ?? '',
+      ];
+    },
+  },
   poddisruptionbudgets: {
     columns: [
       NAME_COLUMN,
