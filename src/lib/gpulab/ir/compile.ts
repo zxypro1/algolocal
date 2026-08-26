@@ -30,7 +30,11 @@ type Binding =
   /** `__shared__` 的数组：住在共享内存，名字对应一个基地址 */
   | { where: 'shared'; offset: number; type: CudaType }
   /** kernel 参数里的指针：寄存器里存的是字节地址 */
-  | { where: 'param'; reg: number; type: CudaType };
+  | { where: 'param'; reg: number; type: CudaType }
+  /** 下标全是常量的线程私有数组：整个摊平成一串寄存器 */
+  | { where: 'regarray'; base: number; type: CudaType }
+  /** 有动态下标的线程私有数组：落到 local memory */
+  | { where: 'local'; offset: number; type: CudaType };
 
 const BUILTIN_FNS: Record<string, { fn: BuiltinFn; arity: number; ty: IrType }> = {
   fmaf: { fn: 'fmaf', arity: 3, ty: 'f32' },
@@ -93,6 +97,76 @@ function irTypeOf(type: CudaType): IrType {
   }
 }
 
+/**
+ * 一个线程私有的数组能不能待在寄存器里。
+ *
+ * 规则和真 nvcc 一样：**下标全是编译期常量**就能展开成一组寄存器；
+ * 只要有一处是动态下标，整个数组就落到 local memory。
+ *
+ * 判断是保守的 —— 按名字扫整个 kernel，同名的不同作用域会被一起算。
+ * 保守方向是安全的（把能进寄存器的判成 local，学员会看到 local.bytes
+ * 不为 0 然后去改），反过来就会漏掉第 6 关要教的那件事。
+ */
+function arraysWithDynamicIndex(body: Stmt): Set<string> {
+  const dynamic = new Set<string>();
+
+  const isConstIndex = (node: Expr): boolean =>
+    node.kind === 'intLit' ||
+    (node.kind === 'unary' && node.op === '-' && isConstIndex(node.operand)) ||
+    (node.kind === 'binary' && isConstIndex(node.left) && isConstIndex(node.right));
+
+  const visitExpr = (node: Expr): void => {
+    switch (node.kind) {
+      case 'subscript':
+        if (node.array.kind === 'name' && !isConstIndex(node.index)) dynamic.add(node.array.name);
+        visitExpr(node.array);
+        visitExpr(node.index);
+        break;
+      case 'binary': visitExpr(node.left); visitExpr(node.right); break;
+      case 'unary': visitExpr(node.operand); break;
+      case 'ternary': visitExpr(node.cond); visitExpr(node.then); visitExpr(node.otherwise); break;
+      case 'deref': visitExpr(node.pointer); break;
+      case 'addressOf':
+        // 取了地址就说不清了，一律按 local 算
+        if (node.target.kind === 'name') dynamic.add(node.target.name);
+        if (node.target.kind === 'subscript' && node.target.array.kind === 'name') {
+          dynamic.add(node.target.array.name);
+        }
+        visitExpr(node.target);
+        break;
+      case 'cast': visitExpr(node.operand); break;
+      case 'call': node.args.forEach(visitExpr); break;
+      case 'assign': visitExpr(node.target); visitExpr(node.value); break;
+      case 'incdec': visitExpr(node.target); break;
+      default: break;
+    }
+  };
+
+  const visitStmt = (node: Stmt): void => {
+    switch (node.kind) {
+      case 'expr': visitExpr(node.expr); break;
+      case 'decl': node.decls.forEach((decl) => decl.init && visitExpr(decl.init)); break;
+      case 'block': node.body.forEach(visitStmt); break;
+      case 'if':
+        visitExpr(node.cond); visitStmt(node.then);
+        if (node.otherwise) visitStmt(node.otherwise);
+        break;
+      case 'for':
+        if (node.init) visitStmt(node.init);
+        if (node.cond) visitExpr(node.cond);
+        if (node.step) visitExpr(node.step);
+        visitStmt(node.body);
+        break;
+      case 'while': visitExpr(node.cond); visitStmt(node.body); break;
+      case 'return': if (node.value) visitExpr(node.value); break;
+      default: break;
+    }
+  };
+
+  visitStmt(body);
+  return dynamic;
+}
+
 class Compiler {
   private insts: Inst[] = [];
   private lines: number[] = [];
@@ -101,8 +175,12 @@ class Compiler {
   private sharedBytes = 0;
   private sharedVars: SharedVar[] = [];
   private params: KernelParam[] = [];
+  private localBytes = 0;
+  private dynamicArrays: Set<string>;
 
-  constructor(private kernel: KernelDecl) {}
+  constructor(private kernel: KernelDecl) {
+    this.dynamicArrays = arraysWithDynamicIndex(kernel.body);
+  }
 
   compile(): CompiledKernel {
     this.scopes.push(new Map());
@@ -136,6 +214,8 @@ class Compiler {
       numRegs: this.numRegs,
       sharedBytes: this.sharedBytes,
       sharedVars: this.sharedVars,
+      localBytes: this.localBytes,
+      registersPerThread: estimateRegisters(this.insts, this.numRegs),
       lines: this.lines,
     };
   }
@@ -225,6 +305,9 @@ class Compiler {
       case 'name': {
         const binding = this.lookup(node.name);
         if (!binding) this.fail(node.span.line, node.span.column, `没有声明过 \`${node.name}\``);
+        if (binding.where === 'local' && binding.type.kind === 'array') {
+          return { kind: 'pointer', to: binding.type.of, space: 'local' };
+        }
         return binding.type;
       }
       case 'unary':
@@ -295,6 +378,7 @@ class Compiler {
       case 'name': {
         const binding = this.lookup(node.name);
         if (binding?.where === 'shared') return 'shared';
+        if (binding?.where === 'local') return 'local';
         if (binding && binding.type.kind === 'pointer') return binding.type.space ?? 'global';
         return 'global';
       }
@@ -347,6 +431,18 @@ class Compiler {
             ? { kind: 'pointer', to: binding.type.of, space: 'shared' }
             : binding.type;
           return { reg: dst, type: decayed };
+        }
+        if (binding.where === 'local') {
+          const dst = this.alloc();
+          this.emit({ op: 'localbase', dst, offset: binding.offset }, node.span.line);
+          const decayed: CudaType = binding.type.kind === 'array'
+            ? { kind: 'pointer', to: binding.type.of, space: 'local' }
+            : binding.type;
+          return { reg: dst, type: decayed };
+        }
+        if (binding.where === 'regarray') {
+          this.fail(node.span.line, node.span.column,
+            `\`${node.name}\` 是一个待在寄存器里的数组，只能按常量下标访问，不能整体当指针用`);
         }
         return { reg: binding.reg, type: binding.type };
       }
@@ -406,6 +502,10 @@ class Compiler {
       }
 
       case 'subscript': {
+        const direct = this.registerArraySlot(node);
+        if (direct !== null) {
+          return { reg: direct.reg, type: direct.type };
+        }
         const address = this.addressOf(node);
         return this.loadFrom(address, node.span.line);
       }
@@ -748,6 +848,14 @@ class Compiler {
         this.emit({ op: 'sharedbase', dst: reg, offset: binding.offset }, node.span.line);
         return { reg, space: 'shared', type: binding.type };
       }
+      if (binding.where === 'local') {
+        const reg = this.alloc();
+        this.emit({ op: 'localbase', dst: reg, offset: binding.offset }, node.span.line);
+        return { reg, space: 'local', type: binding.type };
+      }
+      if (binding.where === 'regarray') {
+        this.fail(node.span.line, node.span.column, '内部错误：寄存器数组不该走地址路径');
+      }
       const space = binding.type.kind === 'pointer' ? binding.type.space ?? 'global' : 'global';
       return { reg: binding.reg, space, type: binding.type };
     }
@@ -759,6 +867,43 @@ class Compiler {
     const value = this.expr(node);
     const space = value.type.kind === 'pointer' ? value.type.space ?? 'global' : 'global';
     return { reg: value.reg, space, type: value.type };
+  }
+
+  /**
+   * `t[2]` 这种「寄存器数组 + 常量下标」直接落到某个具体寄存器上。
+   * 返回 null 表示不是这种情况，走普通的地址路径。
+   */
+  private registerArraySlot(node: Expr & { kind: 'subscript' }): { reg: number; type: CudaType } | null {
+    // 多维时一层层剥
+    const indices: number[] = [];
+    let cursor: Expr = node;
+    while (cursor.kind === 'subscript') {
+      const constant = foldConstant(cursor.index);
+      if (constant === null) return null;
+      indices.unshift(constant);
+      cursor = cursor.array;
+    }
+    if (cursor.kind !== 'name') return null;
+    const binding = this.lookup(cursor.name);
+    if (!binding || binding.where !== 'regarray') return null;
+
+    let type: CudaType = binding.type;
+    let offset = 0;
+    for (const index of indices) {
+      if (type.kind !== 'array') {
+        this.fail(node.span.line, node.span.column, `${cursor.name} 的维度比下标少`);
+      }
+      if (index < 0 || index >= type.length) {
+        this.fail(node.span.line, node.span.column,
+          `下标 ${index} 越界 —— ${cursor.name} 这一维只有 ${type.length} 个`);
+      }
+      offset = offset * type.length + index;
+      type = type.of;
+    }
+    if (type.kind === 'array') {
+      this.fail(node.span.line, node.span.column, `${cursor.name} 的下标给少了`);
+    }
+    return { reg: binding.base + offset, type };
   }
 
   private loadFrom(address: { reg: number; space: Space; type: CudaType }, line: number): Value {
@@ -790,10 +935,21 @@ class Compiler {
     if (target.kind === 'name') {
       const binding = this.lookup(target.name);
       if (!binding) this.fail(line, column, `没有声明过 \`${target.name}\``);
-      if (binding.where === 'shared') this.fail(line, column, `不能给共享数组 \`${target.name}\` 整体赋值`);
+      if (binding.where === 'shared' || binding.where === 'local' || binding.where === 'regarray') {
+        this.fail(line, column, `不能给数组 \`${target.name}\` 整体赋值`);
+      }
       const converted = this.convert(value, binding.type, line);
       this.emit({ op: 'mov', dst: binding.reg, src: converted.reg }, line);
       return { reg: binding.reg, type: binding.type };
+    }
+
+    if (target.kind === 'subscript') {
+      const direct = this.registerArraySlot(target);
+      if (direct !== null) {
+        const converted = this.convert(value, direct.type, line);
+        this.emit({ op: 'mov', dst: direct.reg, src: converted.reg }, line);
+        return { reg: direct.reg, type: direct.type };
+      }
     }
 
     if (target.kind === 'subscript' || target.kind === 'deref') {
@@ -910,10 +1066,25 @@ class Compiler {
     }
 
     if (decl.type.kind === 'array') {
-      this.fail(
-        decl.span.line, decl.span.column,
-        '暂不支持线程私有的数组 —— 真卡上它会落到 local memory（那正是第 6 关的内容），先用标量'
-      );
+      if (decl.init) {
+        this.fail(decl.span.line, decl.span.column, '数组暂不支持初始化列表，先声明再逐个赋值');
+      }
+      const elements = countElements(decl.type);
+      if (this.dynamicArrays.has(decl.name)) {
+        // 动态下标 → 落到 local memory。**这正是第 6 关要学员亲眼看到的事。**
+        const offset = this.localBytes;
+        this.localBytes += elements * 4;
+        this.bind(decl.name, { where: 'local', offset, type: decl.type });
+      } else {
+        // 下标全是常量 → 展开成一组寄存器，和 nvcc 的做法一致
+        const base = this.numRegs;
+        for (let i = 0; i < elements; i += 1) {
+          const reg = this.alloc();
+          this.emit({ op: 'const', dst: reg, value: 0, ty: irTypeOf(elementScalar(decl.type)) }, decl.span.line);
+        }
+        this.bind(decl.name, { where: 'regarray', base, type: decl.type });
+      }
+      return;
     }
 
     const reg = this.alloc();
@@ -936,6 +1107,130 @@ class Compiler {
       this.emit({ op: 'const', dst: reg, value: 0, ty: irTypeOf(decl.type) }, decl.span.line);
     }
   }
+}
+
+/** 数组一共有多少个标量元素 */
+function countElements(type: CudaType): number {
+  return type.kind === 'array' ? type.length * countElements(type.of) : 1;
+}
+
+/** 剥到最里面的标量类型 */
+function elementScalar(type: CudaType): CudaType {
+  return type.kind === 'array' ? elementScalar(type.of) : type;
+}
+
+/** 能折成编译期常量就折，不能就返回 null */
+function foldConstant(node: Expr): number | null {
+  switch (node.kind) {
+    case 'intLit': return node.value;
+    case 'unary': {
+      const inner = foldConstant(node.operand);
+      if (inner === null) return null;
+      return node.op === '-' ? -inner : node.op === '+' ? inner : null;
+    }
+    case 'binary': {
+      const a = foldConstant(node.left);
+      const b = foldConstant(node.right);
+      if (a === null || b === null) return null;
+      switch (node.op) {
+        case '+': return a + b;
+        case '-': return a - b;
+        case '*': return a * b;
+        case '/': return b === 0 ? null : Math.trunc(a / b);
+        case '%': return b === 0 ? null : a % b;
+        default: return null;
+      }
+    }
+    default: return null;
+  }
+}
+
+/**
+ * 估算每线程要多少寄存器。
+ *
+ * 做法：在扁平 IR 上做一遍后向活跃变量分析，取所有指令点上活跃集合的最大值。
+ * 循环靠迭代到不动点处理。
+ *
+ * **这是估计值，不是真的寄存器分配。** 真 nvcc 还会做合并、重排、
+ * 以及为了提高占用率主动限制寄存器数。所以它只用来算占用率与展示 ——
+ * 门槛用的是精确的 localBytes，见 design/gpulab.md 第七节。
+ */
+function estimateRegisters(insts: Inst[], numRegs: number): number {
+  if (!insts.length || !numRegs) return 0;
+
+  const defs: number[] = [];
+  const uses: number[][] = [];
+  const succs: number[][] = [];
+
+  for (let i = 0; i < insts.length; i += 1) {
+    const inst = insts[i];
+    let def = -1;
+    const use: number[] = [];
+    const next: number[] = [];
+
+    switch (inst.op) {
+      case 'const': def = inst.dst; break;
+      case 'mov': def = inst.dst; use.push(inst.src); break;
+      case 'bin': def = inst.dst; use.push(inst.a, inst.b); break;
+      case 'un': case 'cvt': def = inst.dst; use.push(inst.a); break;
+      case 'sreg': case 'param': case 'sharedbase': case 'localbase': case 'activemask':
+        def = inst.dst; break;
+      case 'load': def = inst.dst; use.push(inst.addr); break;
+      case 'store': use.push(inst.addr, inst.src); break;
+      case 'call': def = inst.dst; use.push(...inst.args); break;
+      case 'shfl': def = inst.dst; use.push(inst.src, inst.lane, inst.mask); break;
+      case 'ballot': def = inst.dst; use.push(inst.pred, inst.mask); break;
+      case 'syncwarp': use.push(inst.mask); break;
+      case 'atom': def = inst.dst; use.push(inst.addr, inst.value, inst.compare); break;
+      case 'push': use.push(inst.cond); break;
+      case 'lcond': use.push(inst.cond); break;
+      default: break;
+    }
+
+    switch (inst.op) {
+      case 'jmp': next.push(inst.target); break;
+      case 'push': next.push(i + 1, inst.elsePc); break;
+      case 'swap': next.push(i + 1, inst.joinPc); break;
+      case 'lcond': next.push(i + 1, inst.exitPc); break;
+      case 'loop': next.push(i + 1, inst.exitPc); break;
+      case 'ret': break;
+      default: next.push(i + 1); break;
+    }
+
+    defs.push(def);
+    uses.push(use);
+    succs.push(next.filter((target) => target >= 0 && target < insts.length));
+  }
+
+  // liveOut[i]：跑完第 i 条之后还活着的寄存器
+  const liveOut: Set<number>[] = insts.map(() => new Set<number>());
+  let changed = true;
+  let rounds = 0;
+  while (changed && rounds < 100) {
+    changed = false;
+    rounds += 1;
+    for (let i = insts.length - 1; i >= 0; i -= 1) {
+      const out = liveOut[i];
+      const before = out.size;
+      for (const next of succs[i]) {
+        // liveIn(next) = uses(next) ∪ (liveOut(next) − def(next))
+        for (const reg of uses[next]) out.add(reg);
+        for (const reg of liveOut[next]) {
+          if (reg !== defs[next]) out.add(reg);
+        }
+      }
+      if (out.size !== before) changed = true;
+    }
+  }
+
+  let peak = 0;
+  for (let i = 0; i < insts.length; i += 1) {
+    const live = new Set(liveOut[i]);
+    for (const reg of uses[i]) live.add(reg);
+    if (live.size > peak) peak = live.size;
+  }
+  // 真卡上还有一些固定开销（地址、谓词、ABI），加一点常数更接近 ncu 的数
+  return peak + 4;
 }
 
 /** 数组或指针的元素类型 */

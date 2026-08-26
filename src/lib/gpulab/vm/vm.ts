@@ -62,6 +62,15 @@ export interface GpuCounters {
   sharedLoadRequests: number;
   sharedStoreRequests: number;
   sharedBankConflicts: number;
+  /**
+   * local memory 的读写字节数。
+   *
+   * **不是 0 就说明有本该待在寄存器里的数组落到了显存上。**
+   * 不做扇区分析 —— 真硬件把 local memory 按线程交错过，合并不是问题；
+   * 问题是它根本不该被用到。
+   */
+  localReadBytes: number;
+  localWriteBytes: number;
   divergentBranches: number;
   activeLanes: number;
   /** 原子操作次数（按 lane 算）—— 第 5 关的门槛读它 */
@@ -84,6 +93,7 @@ export function emptyCounters(): GpuCounters {
     globalLoadRequests: 0, globalStoreRequests: 0,
     globalLoadSectors: 0, globalStoreSectors: 0,
     sharedLoadRequests: 0, sharedStoreRequests: 0, sharedBankConflicts: 0,
+    localReadBytes: 0, localWriteBytes: 0,
     divergentBranches: 0, activeLanes: 0,
     atomics: 0, shuffles: 0, warpSyncErrors: 0,
     barriers: 0, blocksLaunched: 0, warpsLaunched: 0,
@@ -155,6 +165,8 @@ export function launchKernel(
 
 class Executor {
   private readonly shared: LinearMemory;
+  private readonly local: LinearMemory;
+  private readonly localBytesPerThread: number;
   private readonly addresses = new Int32Array(WARP_SIZE);
   /** shuffle 要先把源值快照下来 —— dst 和 src 可能是同一个寄存器 */
   private readonly shflScratch = new Float64Array(WARP_SIZE);
@@ -181,6 +193,7 @@ class Executor {
       );
     }
     this.shared = new LinearMemory(Math.max(4, kernel.sharedBytes), 'shared');
+    this.localBytesPerThread = kernel.localBytes;
     this.maxWarpInsts = options.maxWarpInsts ?? DEFAULT_MAX_WARP_INSTS;
     this.blockThreads = config.block.x * config.block.y * config.block.z;
     if (this.blockThreads === 0) throw new KernelError('blockDim 不能是 0', 0);
@@ -188,6 +201,10 @@ class Executor {
       throw new KernelError(`一个 block 最多 1024 个线程，这里是 ${this.blockThreads}`, 0);
     }
     this.warpsPerBlock = Math.ceil(this.blockThreads / WARP_SIZE);
+    // local memory 是线程私有的，一个 block 一份就够 —— 我们一次只跑一个 block
+    this.local = new LinearMemory(
+      Math.max(4, this.localBytesPerThread * this.blockThreads), 'local'
+    );
     if (args.length !== kernel.params.length) {
       throw new KernelError(
         `${kernel.name} 需要 ${kernel.params.length} 个参数，给了 ${args.length} 个`, 0
@@ -222,6 +239,7 @@ class Executor {
     // 共享内存在 block 之间不保留内容。真卡上它是脏的；我们清零是为了确定性，
     // 这是一处已知分叉 —— 靠未初始化共享内存出错的程序在这里不会暴露。
     this.shared.reset();
+    this.local.reset();
 
     const warps: Warp[] = [];
     for (let w = 0; w < this.warpsPerBlock; w += 1) {
@@ -284,6 +302,8 @@ class Executor {
     const addresses = this.addresses;
     const globalMemory = this.options.memory;
     const sharedMemory = this.shared;
+    const localMemory = this.local;
+    const localStride = this.localBytesPerThread;
     const block = this.config.block;
     const grid = this.config.grid;
     const argValues = this.argValues;
@@ -437,6 +457,18 @@ class Executor {
             break;
           }
 
+          case OP.LOCALBASE: {
+            const dst = code[at + 1] * WARP_SIZE;
+            const offset = code[at + 2];
+            for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+              if ((active & (1 << lane)) === 0) continue;
+              // 每个线程一份，按线程号排开
+              regs[dst + lane] = (warpBase + lane) * localStride + offset;
+            }
+            pc += 1;
+            break;
+          }
+
           case OP.SHAREDBASE: {
             const dst = code[at + 1] * WARP_SIZE;
             const offset = code[at + 2];
@@ -450,9 +482,10 @@ class Executor {
           case OP.LOAD: {
             const dst = code[at + 1] * WARP_SIZE;
             const addr = code[at + 2] * WARP_SIZE;
-            const isGlobal = code[at + 3] === SPACE.GLOBAL;
+            const space = code[at + 3];
             const ty = code[at + 4];
-            const memory = isGlobal ? globalMemory : sharedMemory;
+            const memory = space === SPACE.GLOBAL ? globalMemory
+              : space === SPACE.SHARED ? sharedMemory : localMemory;
             for (let lane = 0; lane < WARP_SIZE; lane += 1) {
               if ((active & (1 << lane)) === 0) continue;
               const address = regs[addr + lane] | 0;
@@ -462,19 +495,22 @@ class Executor {
                 : ty === TY.U32 ? memory.readU32(address)
                 : memory.readI32(address);
             }
-            if (isGlobal) {
+            if (space === SPACE.GLOBAL) {
               counters.globalLoadRequests += 1;
               counters.globalLoadSectors += countSectors(addresses, active);
-            } else {
+            } else if (space === SPACE.SHARED) {
               counters.sharedLoadRequests += 1;
               counters.sharedBankConflicts += countBankConflicts(addresses, active);
+            } else {
+              counters.localReadBytes += lanes * 4;
             }
-            if (detector) {
-              const space = isGlobal ? 'global' : 'shared';
+            // local memory 是线程私有的，不可能有竞态，不用喂给检测器
+            if (detector && space !== SPACE.LOCAL) {
+              const name = space === SPACE.GLOBAL ? 'global' : 'shared';
               const line = lines[pc];
               for (let lane = 0; lane < WARP_SIZE; lane += 1) {
                 if (active & (1 << lane)) {
-                  detector.record(space, addresses[lane], warpBase + lane, 'read', line);
+                  detector.record(name, addresses[lane], warpBase + lane, 'read', line);
                 }
               }
             }
@@ -486,9 +522,10 @@ class Executor {
           case OP.STORE: {
             const addr = code[at + 1] * WARP_SIZE;
             const src = code[at + 2] * WARP_SIZE;
-            const isGlobal = code[at + 3] === SPACE.GLOBAL;
+            const space = code[at + 3];
             const ty = code[at + 4];
-            const memory = isGlobal ? globalMemory : sharedMemory;
+            const memory = space === SPACE.GLOBAL ? globalMemory
+              : space === SPACE.SHARED ? sharedMemory : localMemory;
             for (let lane = 0; lane < WARP_SIZE; lane += 1) {
               if ((active & (1 << lane)) === 0) continue;
               const address = regs[addr + lane] | 0;
@@ -498,19 +535,21 @@ class Executor {
               else if (ty === TY.U32) memory.writeU32(address, value);
               else memory.writeI32(address, value);
             }
-            if (isGlobal) {
+            if (space === SPACE.GLOBAL) {
               counters.globalStoreRequests += 1;
               counters.globalStoreSectors += countSectors(addresses, active);
-            } else {
+            } else if (space === SPACE.SHARED) {
               counters.sharedStoreRequests += 1;
               counters.sharedBankConflicts += countBankConflicts(addresses, active);
+            } else {
+              counters.localWriteBytes += lanes * 4;
             }
-            if (detector) {
-              const space = isGlobal ? 'global' : 'shared';
+            if (detector && space !== SPACE.LOCAL) {
+              const name = space === SPACE.GLOBAL ? 'global' : 'shared';
               const line = lines[pc];
               for (let lane = 0; lane < WARP_SIZE; lane += 1) {
                 if (active & (1 << lane)) {
-                  detector.record(space, addresses[lane], warpBase + lane, 'write', line);
+                  detector.record(name, addresses[lane], warpBase + lane, 'write', line);
                 }
               }
             }
@@ -730,10 +769,11 @@ class Executor {
             const addr = code[at + 2] * WARP_SIZE;
             const value = code[at + 3] * WARP_SIZE;
             const kind = code[at + 4];
-            const isGlobal = code[at + 5] === SPACE.GLOBAL;
+            const atomSpace = code[at + 5];
             const ty = code[at + 6];
             const compare = code[at + 7] * WARP_SIZE;
-            const memory = isGlobal ? globalMemory : sharedMemory;
+            const memory = atomSpace === SPACE.GLOBAL ? globalMemory
+              : atomSpace === SPACE.SHARED ? sharedMemory : localMemory;
 
             // **按 lane 号从小到大依次执行。**
             // 真卡上原子操作的完成顺序是不定的，这正是「同样的种子、同样的

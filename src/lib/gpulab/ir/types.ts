@@ -16,8 +16,15 @@
 /** 值在寄存器里怎么存 —— 决定算术怎么做、访存按几字节 */
 export type IrType = 'i32' | 'u32' | 'f32';
 
-/** 地址空间。决定访存走哪套计量。 */
-export type Space = 'global' | 'shared';
+/**
+ * 地址空间。决定访存走哪套计量。
+ *
+ * `local` 是**线程私有**的那一块。真卡上它其实住在显存里，只是被硬件
+ * 按线程交错过，所以合并访问不是问题 —— 问题是它根本不该被用到：
+ * 一个本该待在寄存器里的数组落到 local memory，占用率与带宽一起塌。
+ * 第 6 关整关就是这件事。
+ */
+export type Space = 'global' | 'shared' | 'local';
 
 export type BinKind =
   | 'add' | 'sub' | 'mul' | 'div' | 'rem'
@@ -68,6 +75,11 @@ export type Inst =
   | { op: 'param'; dst: number; index: number; ty: IrType }
   /** 共享内存里某个变量的基地址（block 内所有 lane 相同） */
   | { op: 'sharedbase'; dst: number; offset: number }
+  /**
+   * local memory 里某个变量的基地址。
+   * 每个线程一份，所以要按线程号算：`tid * 每线程字节数 + 变量偏移`。
+   */
+  | { op: 'localbase'; dst: number; offset: number }
   | { op: 'load'; dst: number; addr: number; space: Space; ty: IrType; line: number }
   | { op: 'store'; addr: number; src: number; space: Space; ty: IrType; line: number }
   /** 无条件跳转 */
@@ -131,6 +143,20 @@ export interface CompiledKernel {
   /** 静态共享内存总字节数 */
   sharedBytes: number;
   sharedVars: SharedVar[];
+  /**
+   * 每个线程用掉多少 local memory 字节。
+   *
+   * **不是 0 就说明有数组没能待在寄存器里。** 第 6 关的硬门槛读它 ——
+   * 它是精确的，而寄存器数是估的。
+   */
+  localBytes: number;
+  /**
+   * 每线程寄存器数的**估计值**。
+   *
+   * 按 IR 上的活跃区间算出来的，不是真的寄存器分配器，会偏。
+   * 所以它只用于算占用率与展示，不单独作门槛 —— 见 design/gpulab.md。
+   */
+  registersPerThread: number;
   /** 指令下标 → 源码行号，报错与剖析要用 */
   lines: number[];
 }

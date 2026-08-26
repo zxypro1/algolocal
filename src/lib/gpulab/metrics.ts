@@ -10,6 +10,8 @@
  */
 import type { GpuCounters } from './vm/vm';
 import { SECTOR_BYTES, WARP_SIZE } from './vm/memory';
+import { computeOccupancy, type DeviceSpec, type Occupancy } from './device';
+import type { CompiledKernel } from './ir/types';
 
 export interface GpuMetrics {
   global: {
@@ -48,6 +50,17 @@ export interface GpuMetrics {
      * 无冲突时是 0。
      */
     bankConflicts: number;
+  };
+  /**
+   * local memory 的流量。
+   *
+   * **`bytes` 不是 0 就说明有本该待在寄存器里的数组落到了显存上。**
+   * 第 6 关的硬门槛读它 —— 它是精确的，而 `registersPerThread` 是估的。
+   */
+  local: {
+    readBytes: number;
+    writeBytes: number;
+    bytes: number;
   };
   warp: {
     /** 一条分支上 lane 分成两拨的次数 */
@@ -100,6 +113,11 @@ export function toMetrics(counters: GpuCounters): GpuMetrics {
       readBytes: counters.globalLoadSectors * SECTOR_BYTES,
       writeBytes: counters.globalStoreSectors * SECTOR_BYTES,
     },
+    local: {
+      readBytes: counters.localReadBytes,
+      writeBytes: counters.localWriteBytes,
+      bytes: counters.localReadBytes + counters.localWriteBytes,
+    },
     shared: {
       loadRequests: counters.sharedLoadRequests,
       storeRequests: counters.sharedStoreRequests,
@@ -124,6 +142,31 @@ export function toMetrics(counters: GpuCounters): GpuMetrics {
       warps: counters.warpsLaunched,
       barriers: counters.barriers,
     },
+  };
+}
+
+/** 静态指标：不用跑就知道的那些，来自编译结果 + 启动配置 */
+export interface StaticMetrics {
+  registersPerThread: number;
+  sharedBytesPerBlock: number;
+  localBytesPerThread: number;
+  occupancy: Occupancy;
+}
+
+export function staticMetricsOf(
+  device: DeviceSpec,
+  kernel: CompiledKernel,
+  threadsPerBlock: number
+): StaticMetrics {
+  return {
+    registersPerThread: kernel.registersPerThread,
+    sharedBytesPerBlock: kernel.sharedBytes,
+    localBytesPerThread: kernel.localBytes,
+    occupancy: computeOccupancy(device, {
+      threadsPerBlock,
+      registersPerThread: kernel.registersPerThread,
+      sharedBytesPerBlock: kernel.sharedBytes,
+    }),
   };
 }
 

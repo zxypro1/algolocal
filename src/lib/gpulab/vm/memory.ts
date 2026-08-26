@@ -20,8 +20,8 @@ export const WARP_SIZE = 32;
 export class MemoryFault extends Error {
   address: number;
   size: number;
-  space: 'global' | 'shared';
-  constructor(space: 'global' | 'shared', address: number, size: number, limit: number) {
+  space: 'global' | 'shared' | 'local';
+  constructor(space: 'global' | 'shared' | 'local', address: number, size: number, limit: number) {
     super(
       `invalid __${space}__ ${size === 4 ? 'read/write' : 'access'} of size ${size} bytes ` +
       `at 0x${(address >>> 0).toString(16)} —— 越界了（这块空间只有 ${limit} 字节）`
@@ -46,7 +46,7 @@ export class LinearMemory {
   private readonly f32: Float32Array;
   private cursor = 16;
 
-  constructor(readonly capacity: number, private readonly space: 'global' | 'shared') {
+  constructor(readonly capacity: number, private readonly space: 'global' | 'shared' | 'local') {
     this.bytes = new ArrayBuffer(capacity);
     this.i32 = new Int32Array(this.bytes);
     this.u32 = new Uint32Array(this.bytes);

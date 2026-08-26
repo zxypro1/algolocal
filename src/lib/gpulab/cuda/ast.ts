@@ -34,7 +34,7 @@ export interface PointerType {
    * 去读 —— 地址对不上，算出来的东西全是错的，而且不报任何错。
    * 缺省是 global，只有从 `__shared__` 变量取地址时才是 shared。
    */
-  space?: 'global' | 'shared';
+  space?: 'global' | 'shared' | 'local';
 }
 
 /** 定长数组。共享内存的 `__shared__ float t[32][33]` 就是它。 */
