@@ -7476,6 +7476,376 @@ const STAGE_27 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 28 关：专家并行                                                    */
+/* ------------------------------------------------------------------ */
+
+const EP_EXPERTS = 8;
+const EP_DIM = 16;
+/** 路由极不均 —— 真实 MoE 就是这样，几个专家吃掉大半 token */
+const EP_COUNTS = [90, 60, 40, 25, 18, 12, 7, 4];
+const EP_TOKENS = 256;
+const EP_CAPACITY = 40;
+
+/** 每个 token 的专家号，按上面的分布铺开 */
+const EP_ROUTE_DECL = (() => {
+  const lines = [];
+  EP_COUNTS.forEach((count, expert) => {
+    for (let i = 0; i < count; i += 1) lines.push(`vec_push(route, ${expert});`);
+  });
+  return lines.join('\n            ');
+})();
+
+const EP_KERNELS = code`
+  __global__ void fill(float* a, float v, int n) {
+    int i = threadIdx.x;
+    if (i < n) a[i] = v;
+  }
+  // **一个 token 一个 block** —— 于是平台数到的 block 数就是这个专家收了几个 token
+  __global__ void expert(float* out, const float* in, int dim) {
+    int t = blockIdx.x;
+    int d = threadIdx.x;
+    if (d < dim) out[t * dim + d] = in[t * dim + d] * 1.5f + 0.25f;
+  }
+`;
+
+const epBench = {
+  sources: ['/root/moe.cu'],
+  buffers: [
+    { name: 'check', length: EP_EXPERTS, fill: { kind: 'zeros' } },
+  ],
+  launches: [],
+};
+
+const STAGE_28 = {
+  id: 'expert-parallel',
+  title: t('专家并行 —— 路由不均是它的命门',
+    'Expert parallelism — routing imbalance is the whole problem'),
+  goal: t(
+    [
+      'MoE 把前馈层换成一组**专家**，每个 token 只走其中一两个。',
+      '参数量涨了几十倍，而每个 token 的计算量几乎没变 ——',
+      '这是 2026 年大模型几乎清一色用 MoE 的原因。',
+      '',
+      '专家并行把这些专家摊到多张卡上：这一关 8 个专家、8 张卡，一卡一个。',
+      'token 按路由结果被**发到**对应专家所在的卡上算，算完再**收回来**。',
+      '这一去一回就是两次 all-to-all，NCCL 里叫 dispatch 与 combine。',
+      '',
+      '问题出在路由上。**路由器学出来的分布从来不均匀。**',
+      '这一关的 256 个 token 是这么分的：',
+      '',
+      '```',
+      '专家   0    1    2    3    4    5    6    7',
+      'token  90   60   40   25   18   12   7    4',
+      '```',
+      '',
+      '于是 0 号卡要算 90 个 token，7 号卡只算 4 个 —— **而一步的时间由最慢的那张卡决定**。',
+      '7 号卡有 95% 的时间在等 0 号卡。8 张卡的算力，实际只用出了三分之一。',
+      '',
+      '标准解法是**容量因子 + 重路由**：给每个专家设一个上限',
+      '（这里是 `ceil(256/8 × 1.25) = 40`），超出的 token 改投当前最闲的专家。',
+      '',
+      '负载不均是这么量的：**平台数每张卡起了多少个 block**，',
+      '而这一关一个 token 一个 block，所以',
+      '',
+      '```',
+      '不均度 = 最忙那张卡的 block 数 / 平均值',
+      '```',
+      '',
+      '想把这个数做好看只有一条路 —— **真的把 token 摊匀**。少发 block 会被',
+      '正确性用例抓住，因为那些 token 就没算。',
+      '',
+      '```bash',
+      'nvcc -o bench moe.cu && ncu ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 不均度 ≤ 1.3（严格按路由是 2.758）',
+      '- **256 个 token 一个不少** —— 重路由不是丢弃',
+    ].join('\n'),
+    [
+      'MoE replaces the feed-forward layer with a set of **experts**, each token visiting only one or',
+      'two. Parameters grow by tens of times while per-token compute barely moves, which is why',
+      'nearly every large model in 2026 is an MoE.',
+      '',
+      'Expert parallelism spreads those experts across GPUs: 8 experts on 8 GPUs here, one each.',
+      'Tokens are **dispatched** to whichever GPU holds their expert and **combined** back',
+      'afterwards. That round trip is two all-to-alls, called dispatch and combine in NCCL.',
+      '',
+      'The problem is the routing. **A learned router is never uniform.** These 256 tokens split like',
+      'this:',
+      '',
+      '```',
+      'expert  0    1    2    3    4    5    6    7',
+      'tokens  90   60   40   25   18   12   7    4',
+      '```',
+      '',
+      'GPU 0 processes 90 tokens and GPU 7 processes 4, **and a step takes as long as the slowest**',
+      'GPU. GPU 7 waits 95% of the time. Eight GPUs of compute deliver about a third of it.',
+      '',
+      'The standard fix is a **capacity factor plus rerouting**: cap each expert (here at',
+      '`ceil(256/8 x 1.25) = 40`) and send overflow tokens to whichever expert is currently least',
+      'loaded.',
+      '',
+      'Imbalance is measured from **how many blocks the platform sees each GPU launch**, and since',
+      'this stage uses one block per token:',
+      '',
+      '```',
+      'imbalance = blocks on the busiest GPU / mean blocks',
+      '```',
+      '',
+      'There is only one way to make that number look good: **actually spread the tokens out.**',
+      'Launching fewer blocks is caught by the correctness check, because those tokens go uncomputed.',
+      '',
+      '```bash',
+      'nvcc -o bench moe.cu && ncu ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- imbalance at most 1.3 (2.758 routing strictly)',
+      '- **all 256 tokens processed**: rerouting is not dropping',
+    ].join('\n')
+  ),
+  checklist: [
+    t('给每个专家设一个容量上限', 'Cap each expert at a capacity'),
+    t('超出容量的 token 改投当前最闲的专家',
+      'Send overflow tokens to whichever expert is currently least loaded'),
+    t('token 一个都不能丢', 'Do not drop any token'),
+  ],
+  hints: [
+    t('"当前最闲"要在分派的过程中动态看 —— 一遍扫下来，'
+      + '每次都挑当下负载最小的那个。',
+      '"Currently least loaded" has to be evaluated during dispatch: in a single pass, pick whichever '
+      + 'expert has the smallest load right now.'),
+    t('容量 40 是 `256 / 8 × 1.25` —— 1.25 就是容量因子。'
+      + '设成 1.0 会把太多 token 挤出去，设太大又起不到限制作用。',
+      'The capacity of 40 is `256 / 8 x 1.25`, where 1.25 is the capacity factor. At 1.0 too many '
+      + 'tokens overflow; too large and it stops constraining anything.'),
+  ],
+  pitfalls: [
+    t('**直接丢掉超出容量的 token。** 那确实能让不均度好看，'
+      + '但那些 token 就没算 —— 正确性用例专门抓这个。'
+      + '真实系统里丢 token 是一个**有意的取舍**（早期的 Switch Transformer 就丢），'
+      + '但现在主流是 drop-less，把它们重路由出去。',
+      '**Simply dropping overflow tokens.** That does make the imbalance look good, but those tokens '
+      + 'never get computed, and the correctness check exists for exactly this. Dropping is a '
+      + 'deliberate trade in real systems (early Switch Transformer did it), but the mainstream now '
+      + 'is drop-less, rerouting them instead.'),
+    t('**"最闲"只看初始负载，不随分派更新。** 那会把所有溢出的 token '
+      + '全堆到同一个专家上，换了个位置不均而已。',
+      '**Picking "least loaded" from the initial counts without updating as you go.** All the '
+      + 'overflow then piles onto one expert and the imbalance simply moves.'),
+  ],
+  extension: t(
+    '负载不均是 MoE 工程的核心难题，解法分两层：'
+    + '\n\n'
+    + '**训练时**加一个辅助的负载均衡损失，逼路由器把 token 分匀一些。'
+    + '代价是它和主损失打架 —— 分得太匀，路由就失去了"专家各有所长"的意义。'
+    + 'DeepSeek 后来改用 **无辅助损失的负载均衡**：给每个专家一个可调的偏置，'
+    + '按历史负载动态调整，不进梯度。'
+    + '\n\n'
+    + '**推理时**就是这一关做的事：容量因子加重路由。'
+    + '容量因子设多大是个真实的取舍 —— 太小则重路由太多，token 走错专家、质量下降；'
+    + '太大则不均度压不下来。'
+    + '\n\n'
+    + '还有一条更狠的：**专家放置**。既然路由分布是长期稳定的，'
+    + '那就把热门专家复制到多张卡上、冷门专家几个挤一张卡。'
+    + 'vLLM 的专家并行部署文档里有这套，2026 年是生产标配。'
+    + '\n\n'
+    + '通信这一侧同样棘手。MoE 的 all-to-all 是**稀疏且不规则**的 ——'
+    + '每张卡发给别的卡的量都不一样，而且每一步都在变。'
+    + 'DeepEP 用 NVSHMEM 与 IBGDA 做设备发起的稀疏 all-to-all，'
+    + '2026 年被重写成 NCCL 的 EP 接口（`ncclEpDispatch` / `ncclEpCombine`），'
+    + '分低延迟与高吞吐两种模式 —— 前者给 decode，后者给训练与 prefill。',
+    'Load imbalance is the central engineering problem of MoE, addressed at two levels.\n\n'
+    + '**In training**, an auxiliary load-balancing loss pushes the router toward spreading tokens. '
+    + 'It fights the main loss: balance it too hard and routing loses the specialisation that made '
+    + 'experts worth having. DeepSeek later moved to **auxiliary-loss-free balancing**, giving each '
+    + 'expert a tunable bias adjusted from observed load and kept out of the gradient.\n\n'
+    + '**At inference** it is what this stage does: a capacity factor plus rerouting. Choosing the '
+    + 'factor is a real trade. Too small and too many tokens get rerouted to the wrong expert, '
+    + 'hurting quality; too large and the imbalance stays.\n\n'
+    + 'There is a more aggressive option: **expert placement**. Since the routing distribution is '
+    + 'stable over time, replicate hot experts across several GPUs and pack cold ones together. '
+    + 'vLLM\'s expert-parallel deployment docs cover this and it is standard in production in 2026.'
+    + '\n\nThe communication side is just as awkward. MoE\'s all-to-all is **sparse and irregular**: '
+    + 'every GPU sends a different amount to every other, and it changes each step. DeepEP used '
+    + 'NVSHMEM and IBGDA for a device-initiated sparse all-to-all, rewritten in 2026 onto NCCL\'s EP '
+    + 'interface (`ncclEpDispatch` / `ncclEpCombine`) with low-latency and high-throughput modes, the '
+    + 'former for decode and the latter for training and prefill.'
+  ),
+  gpu: {
+    world: CLUSTER_WORLD,
+    files: {
+      '/root/moe.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "containers.h"
+
+        ${EP_KERNELS}
+
+        int main(void) {
+          const int E = ${EP_EXPERTS};
+          const int DIM = ${EP_DIM};
+          const int TOKENS = ${EP_TOKENS};
+
+          // 路由器给出的结果：第 t 个 token 该走哪个专家
+          int route = vec_new();
+          ${EP_ROUTE_DECL}
+
+          int buf[8];
+          for (int e = 0; e < E; ++e) {
+            cudaSetDevice(e);
+            float* b;
+            cudaMalloc((void**)&b, TOKENS * DIM * 4);
+            fill<<<1, 16>>>(b, 1.0f, 16);
+            buf[e] = b;
+          }
+
+          // TODO: 严格按路由分派 —— 0 号专家收 90 个 token，7 号只收 4 个。
+          //       一步的时间由最慢那张卡决定，于是 8 张卡的算力只用出三分之一。
+          //       加容量上限（40）与重路由：满了就改投当前最闲的专家。
+          int load = vec_new();
+          for (int e = 0; e < E; ++e) vec_push(load, 0);
+          for (int t = 0; t < TOKENS; ++t) {
+            int e = vec_get(route, t);
+            vec_set(load, e, vec_get(load, e) + 1);
+          }
+
+          // 一个 token 一个 block
+          for (int e = 0; e < E; ++e) {
+            cudaSetDevice(e);
+            expert<<<vec_get(load, e), 16>>>(buf[e], buf[e], DIM);
+          }
+
+          float* check = lab_buffer(0);
+          float host[8];
+          for (int e = 0; e < E; ++e) host[e] = (float)vec_get(load, e);
+          cudaSetDevice(0);
+          cudaMemcpy(check, host, E * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+    bench: epBench,
+    referenceFiles: {
+      '/root/moe.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "containers.h"
+
+        ${EP_KERNELS}
+
+        int main(void) {
+          const int E = ${EP_EXPERTS};
+          const int DIM = ${EP_DIM};
+          const int TOKENS = ${EP_TOKENS};
+          // 容量因子 1.25：ceil(256 / 8 × 1.25) = 40
+          const int CAP = ${EP_CAPACITY};
+
+          int route = vec_new();
+          ${EP_ROUTE_DECL}
+
+          int buf[8];
+          for (int e = 0; e < E; ++e) {
+            cudaSetDevice(e);
+            float* b;
+            cudaMalloc((void**)&b, TOKENS * DIM * 4);
+            fill<<<1, 16>>>(b, 1.0f, 16);
+            buf[e] = b;
+          }
+
+          int load = vec_new();
+          for (int e = 0; e < E; ++e) vec_push(load, 0);
+
+          for (int t = 0; t < TOKENS; ++t) {
+            int e = vec_get(route, t);
+            if (vec_get(load, e) >= CAP) {
+              // 满了：改投**当前**最闲的。注意是当前 ——
+              // 只看初始负载的话，溢出的 token 会全堆到同一个专家上
+              int best = 0;
+              for (int j = 1; j < E; ++j) {
+                if (vec_get(load, j) < vec_get(load, best)) { best = j; }
+              }
+              e = best;
+            }
+            vec_set(load, e, vec_get(load, e) + 1);
+          }
+
+          for (int e = 0; e < E; ++e) {
+            cudaSetDevice(e);
+            expert<<<vec_get(load, e), 16>>>(buf[e], buf[e], DIM);
+          }
+
+          float* check = lab_buffer(0);
+          float host[8];
+          for (int e = 0; e < E; ++e) host[e] = (float)vec_get(load, e);
+          cudaSetDevice(0);
+          cudaMemcpy(check, host, E * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('moe.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const E = ${EP_EXPERTS};
+      const TOKENS = ${EP_TOKENS};
+      const CAP = ${EP_CAPACITY};
+
+      describe('专家并行', () => {
+        it('**256 个 token 一个不少** —— 重路由不是丢弃', async () => {
+          await lab.buildAndRun();
+          const load = lab.buffer('check');
+          let sum = 0;
+          for (let e = 0; e < E; e += 1) sum += load[e];
+          expect(sum).toBe(TOKENS);
+        });
+
+        it('平台数到的 block 数和报的负载对得上 —— 报了不算不作数', async () => {
+          await lab.buildAndRun();
+          const load = lab.buffer('check');
+          const blocks = lab.imbalance().blocksByDevice;
+          for (let e = 0; e < E; e += 1) {
+            // 每卡多一次 fill 的 1 个 block
+            expect(blocks[e]).toBe(load[e] + 1);
+          }
+        });
+
+        it('**负载摊匀了**', async () => {
+          await lab.buildAndRun();
+          expect(lab.imbalance().maxOverMean).toBeLessThanOrEqual(1.3);
+        });
+
+        it('没有哪个专家超过容量太多', async () => {
+          await lab.buildAndRun();
+          const load = lab.buffer('check');
+          for (let e = 0; e < E; e += 1) expect(load[e]).toBeLessThanOrEqual(CAP + 1);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.imbalance.maxOverMean', op: 'lte', value: 1.3,
+      zh: '负载不均：最忙那张卡的 block 数 / 平均值（严格按路由是 2.758）',
+      en: 'imbalance: blocks on the busiest GPU over the mean (2.758 routing strictly)',
+      unit: 'ratio', dimension: 'throughput',
+    }),
+    gate({
+      metric: 'gpu.launch.blocks', op: 'gte', value: 1,
+      zh: '0 号卡起的 block 数 —— 摊匀不等于不干活',
+      en: 'blocks on GPU 0: balancing does not mean doing less',
+      unit: 'block', dimension: 'correctness',
+    }),
+  ],
+  focus: ['throughput', 'correctness'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -7542,5 +7912,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22, STAGE_23, STAGE_24, STAGE_25, STAGE_26, STAGE_27],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22, STAGE_23, STAGE_24, STAGE_25, STAGE_26, STAGE_27, STAGE_28],
 };

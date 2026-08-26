@@ -66,7 +66,13 @@ export function gpuMetricTree(world: GpuWorld): Record<string, unknown> {
      * 和模拟耗时不是一回事。`bytesByLink.ib` 尤其要紧：
      * 张量并行一旦跨了机，它立刻暴增。
      */
-    ...(world.cluster ? { comm: world.cluster.comm, pipeline: world.cluster.pipeline } : {}),
+    ...(world.cluster
+      ? {
+          comm: world.cluster.comm,
+          pipeline: world.cluster.pipeline,
+          imbalance: world.cluster.imbalance(),
+        }
+      : {}),
     /**
      * 算术强度：每从 DRAM 搬一个字节做了多少次浮点运算。
      *
