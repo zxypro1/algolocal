@@ -16,6 +16,7 @@ import { H100, computeOccupancy, type DeviceSpec } from './device';
 import { estimateTiming, roofline, type RooflinePoint, type TimingResult } from './timing';
 import { LinearMemory } from './vm/memory';
 import { RaceDetector, formatRaceReports, type SanitizerReport } from './vm/sanitizer';
+import type { AccessTrace } from './vm/trace';
 import { dim3, emptyCounters, launchKernel, type Dim3, type GpuCounters, type LaunchConfig, type KernelArg } from './vm/vm';
 
 export { CudaSyntaxError, parseCuda, resetCudaParser } from './cuda/parser';
@@ -29,6 +30,8 @@ export type { TimingResult, RooflinePoint, TimingSpec, UnitCycles } from './timi
 export type { DeviceSpec, Occupancy } from './device';
 export type { StaticMetrics } from './metrics';
 export { RaceDetector, formatRaceReports } from './vm/sanitizer';
+export { AccessTrace, sectorsOf, banksOf } from './vm/trace';
+export type { AccessRecord, AccessKind, AccessSpace, SectorView, BankView } from './vm/trace';
 export type { SanitizerReport, RaceReport } from './vm/sanitizer';
 export type { GpuMetrics } from './metrics';
 export type { CompiledKernel } from './ir/types';
@@ -269,6 +272,31 @@ export class GpuDevice {
     });
     if (options.racecheck) this.lastSanitizer = { races, truncated };
     return { stdout: output.join('') };
+  }
+
+  /**
+   * 跑一遍 kernel，同时记下每一条访存打到了哪些地址。
+   *
+   * 和 racecheck 一样是**额外**跑的一遍，所以要先把真实那一遍的指标存住 ——
+   * 门槛读的是真实那一遍。少了这一步，采样一次访存就会把学员刚跑出来的
+   * 数字冲掉，而面板上看不出发生过这件事。
+   */
+  launchWithTrace(
+    kernel: CompiledKernel | ExecutableKernel,
+    config: LaunchConfig,
+    args: KernelArg[],
+    trace: AccessTrace
+  ): void {
+    const preserved = this.snapshotCounters();
+    const threadsPerBlock = config.block.x * config.block.y * config.block.z;
+    this.lastStatic = staticMetricsOf(this.device, kernel, threadsPerBlock);
+    launchKernel(kernel, config, args, {
+      memory: this.memory,
+      sharedCapacity: this.sharedCapacity,
+      maxWarpInsts: this.maxWarpInsts,
+      trace,
+    });
+    this.restoreCounters(preserved);
   }
 
   /**
