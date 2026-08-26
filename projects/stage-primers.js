@@ -1753,6 +1753,50 @@ const primers = {
         + 'alongside throughput, not throughput alone.'
       )
     ),
+    'ring-allreduce': t(
+      p(
+        '数据并行的每一步都要做一次 all-reduce：每张卡各算出一份梯度，'
+        + '加起来，人人都要拿到这个和。'
+        + '最直白的做法是全都发给 0 号卡、加完再广播回去 --'
+        + '结果对，但 0 号卡成了瓶颈，它一张卡要过 2(n-1) 份的量，'
+        + '别的卡只过 2 份。',
+        'ring all-reduce 把缓冲区切成 n 块，分两个阶段各走 n-1 步。'
+        + '第一阶段每张卡把某一块发给右邻居、把收到的加进自己的，'
+        + '走完之后每张卡手上有一块完整的和；'
+        + '第二阶段再转一圈，把这 n 块和分给所有人。'
+        + '每一步只搬一块，所以每张卡搬的总量是 2(n-1)/n 个缓冲区。',
+        '有一件事值得盯着看：ring 并没有减少搬运的总量。'
+        + '朴素版搬多少字节，ring 就搬多少字节，一个不差。'
+        + '差别全在分布，朴素版把这些字节全压在 0 号卡的端口上，'
+        + 'ring 让每张卡各扛一份。瓶颈的差距是 n 除以 2，卡越多差得越远。',
+        '代价也看得见：消息数涨了 n 倍。每条消息都有固定开销，'
+        + '所以缓冲区小的时候 ring 反而更慢 --'
+        + '这正是 NCCL 对小消息改用 tree 算法的原因，'
+        + '它会按消息大小、卡数、拓扑自动选算法。'
+        + '而 2(n-1)/n 这个数就是 nccl-tests 里 all-reduce 的 busbw 修正因子：'
+        + '算法带宽是用户视角，总线带宽才反映硬件实际搬了多少。'
+      ),
+      p(
+        'Every step of data parallelism needs an all-reduce: each GPU computes its own gradients, '
+        + 'they are summed, and everyone needs the sum. The obvious approach sends everything to '
+        + 'GPU 0, which sums and broadcasts back. The result is right, but GPU 0 becomes the '
+        + 'bottleneck, moving 2(n-1) buffers through its own port while every other GPU moves two.',
+        'Ring all-reduce splits the buffer into n chunks across two phases of n-1 steps. In the '
+        + 'first, each GPU sends one chunk to its right neighbour and adds what arrives, so that '
+        + 'afterwards every GPU holds one fully reduced chunk. In the second, those n chunks are '
+        + 'passed around so everyone has all of them. Each step moves one chunk, so each GPU moves '
+        + '2(n-1)/n buffers in total.',
+        'One thing is worth staring at: the ring does not reduce the total bytes moved. It moves '
+        + 'exactly as many as the naive version. The difference is entirely distribution: the naive '
+        + 'version puts all of it through GPU 0, the ring gives every GPU a share. The bottleneck '
+        + 'improves by n over two, and that grows with the cluster.',
+        'The cost is visible too: n times as many messages. Every message carries fixed overhead, so '
+        + 'for small buffers the ring is actually slower, which is why NCCL switches to tree '
+        + 'algorithms there and picks an algorithm from message size, GPU count and topology. And '
+        + '2(n-1)/n is the busbw correction factor for all-reduce in nccl-tests: algorithm bandwidth '
+        + 'is the user view, bus bandwidth is what the hardware actually moved.'
+      )
+    ),
   },
 
   'intranet-k8s': {

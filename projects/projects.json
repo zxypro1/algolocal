@@ -26542,6 +26542,151 @@
           "zh": "GPU 喜欢大批量，可是解码时每条序列的长度差别极大：有的两个 token 就结束，有的要生成几百个。朴素的静态批是凑够一批一起跑、等全部结束再收下一批 --于是短的那条跑完之后，它的槽位要空转到最长那条结束为止。空转不是免费的：padding 的槽位在真卡上照样占着计算资源走完一遍。\n\n连续批处理的做法很简单：不等整批结束，哪个槽位空了就立刻从队列里取下一个请求塞进去。批是流动的，不是一批一批的。Orca 那篇论文（OSDI 2022）提出了它，现在 vLLM、TensorRT-LLM、SGLang 全都是这么做的，TensorRT-LLM 管它叫 in-flight batching。\n\n它和分页 KV 是一对：连续批处理让批一直是满的，分页 KV 让满的批装得下。没有分页，每条序列按最长上下文预留显存，同时能装的序列数很少，连续批处理也就没多少可调度的余地。两件事是一起起作用的。\n\n真实调度器要处理的比这多得多：预填充和解码要不要混在同一批里、显存不够时抢占谁、怎么不让长请求被饿死、以及批大小只能是 CUDA Graph 预先捕获过的那几档 --所以调度器挑的往往不是最优的批，而是最接近某一档的批。还有一件量不出来但很重要的事：连续批处理改善的是吞吐，对单个请求的延迟可能是负面的，因为你的请求要和更多别人的挤在一起。生产里因此同时盯首 token 时延与每 token 时延，而不是只看吞吐。",
           "en": "GPUs like big batches, but decoding sequence lengths vary enormously: some finish in two tokens, some generate hundreds. Naive static batching gathers a batch, runs it, and waits for all of it before taking the next, so once the short sequence finishes its slot idles until the longest one is done. Idling is not free: a padded slot still occupies compute on real hardware for the whole step.\n\nContinuous batching is simple: do not wait for the batch; the moment a slot frees, pull the next request from the queue into it. The batch flows rather than proceeding in lockstep. The Orca paper (OSDI 2022) introduced it and vLLM, TensorRT-LLM and SGLang all work this way now, with TensorRT-LLM calling it in-flight batching.\n\nIt pairs with paged KV: continuous batching keeps the batch full, paging makes a full batch fit. Without paging each sequence reserves memory for its maximum context, few fit at once, and there is little left to schedule. The two work together.\n\nReal schedulers handle far more: whether to mix prefill and decode in one batch, whom to preempt when memory runs out, how to keep long requests from starving, and the fact that batch sizes must be ones a CUDA Graph was captured for, so the scheduler usually picks not the optimal batch but the one nearest a captured size. One more thing that is hard to measure but matters: continuous batching improves throughput and can hurt an individual request latency, since your request now shares the GPU with more of everyone else. Production systems therefore watch time to first token and time per output token alongside throughput, not throughput alone."
         }
+      },
+      {
+        "id": "ring-allreduce",
+        "title": {
+          "zh": "手写 ring all-reduce —— 把 2(n-1)/n 数出来",
+          "en": "Ring all-reduce by hand — count the 2(n-1)/n yourself"
+        },
+        "goal": {
+          "zh": "从这一关开始是 8 张卡。\n\n数据并行的每一步都要做一次 **all-reduce**：每张卡各算出一份梯度，\n加起来，然后人人都要拿到这个和。\n\n`allreduce.cu` 现在的做法最直白：**所有卡把自己的整份发给 0 号，\n0 号加完再广播回去。** 结果是对的，但 0 号卡成了瓶颈 ——\n它一张卡要过 `2(n-1) × 缓冲区` 的量，而别的卡只过 `2 × 缓冲区`。\n\nring all-reduce 把这件事摊开。它分两个阶段，每个阶段 n-1 步：\n\n1. **reduce-scatter**：把缓冲区切成 n 块。第 k 步，每张卡把某一块\n   发给右邻居、把收到的那块加进自己的。走完 n-1 步，\n   每张卡手上有**一块完整的和**（不同的卡拿到不同的块）。\n2. **all-gather**：再转 n-1 步，把这 n 块和转一圈，人人拿全。\n\n每一步只搬 `1/n` 个缓冲区，一共 `2(n-1)` 步 ——\n**每张卡搬的总量因此是 `2(n-1)/n × 缓冲区`。**\n这个数记住，下一关会再见到它。\n\n```bash\nnvcc -o bench allreduce.cu && ./bench\n```\n\n**通关标准**\n\n- 8 张卡都拿到正确的和\n- 最忙那张卡过的字节数 ≤ 1200（朴素版是 3584）\n- **恰好 `2(n-1) × n = 112` 条消息** —— 步数要对得上",
+          "en": "From here on there are 8 GPUs.\n\nEvery step of data parallelism needs an **all-reduce**: each GPU computes its own gradients,\nthey are summed, and everyone needs the sum.\n\n`allreduce.cu` does the obvious thing: **every GPU sends its whole buffer to GPU 0, which\nsums and broadcasts back.** The result is right, but GPU 0 is the bottleneck: it alone moves\n`2(n-1) x buffer` while every other GPU moves only `2 x buffer`.\n\nRing all-reduce spreads that out, in two phases of n-1 steps each:\n\n1. **reduce-scatter**: split the buffer into n chunks. On step k each GPU sends one chunk to\n   its right neighbour and adds the chunk it receives into its own. After n-1 steps each GPU\n   holds **one fully reduced chunk** (a different one per GPU).\n2. **all-gather**: another n-1 steps pass those n chunks around so everyone has all of them.\n\nEach step moves `1/n` of a buffer across `2(n-1)` steps, so **each GPU moves\n`2(n-1)/n x buffer` in total.** Remember that number; it comes back next stage.\n\n```bash\nnvcc -o bench allreduce.cu && ./bench\n```\n\n**To pass**\n\n- all 8 GPUs hold the correct sum\n- the busiest GPU moves at most 1200 bytes (3584 naive)\n- **exactly `2(n-1) x n = 112` messages**: the step count has to match"
+        },
+        "checklist": [
+          {
+            "zh": "把缓冲区切成 n 块",
+            "en": "Split the buffer into n chunks"
+          },
+          {
+            "zh": "reduce-scatter：n-1 步，每步发一块给右邻居并加进来",
+            "en": "reduce-scatter: n-1 steps, each sending a chunk right and adding what arrives"
+          },
+          {
+            "zh": "all-gather：再 n-1 步，把结果转一圈",
+            "en": "all-gather: another n-1 steps to pass the results around"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "第 d 张卡在第 step 步发的是第 `(d - step + n) % n` 块，收到的是第 `(d - 1 - step + n) % n` 块。索引绕圈是这一关唯一的难点，拿 4 张卡在纸上画一遍最快。",
+            "en": "On step `step`, GPU d sends chunk `(d - step + n) % n` and receives chunk `(d - 1 - step + n) % n`. The wrap-around indexing is the only hard part; drawing it out for 4 GPUs is the fastest way through."
+          },
+          {
+            "zh": "all-gather 阶段发的是第 `(d + 1 - step + n) % n` 块 —— reduce-scatter 结束时第 d 张卡手上完整的正是第 `(d + 1) % n` 块。",
+            "en": "In the all-gather phase GPU d sends chunk `(d + 1 - step + n) % n`, because reduce-scatter leaves GPU d holding chunk `(d + 1) % n` complete."
+          },
+          {
+            "zh": "每张卡要一个额外的接收缓冲区 —— 不能收进正在发的那块里。",
+            "en": "Each GPU needs a separate receive buffer; you cannot receive into the chunk you are sending."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**先收后发，或者边发边加。** 8 张卡是同时动的：这一步所有卡都发完，才轮到所有卡去加。混在一个循环里会读到已经被覆盖的数据。",
+            "en": "**Receiving before sending, or adding while still sending.** All 8 GPUs move together: every send in a step completes before any add. Mixing them in one loop reads data that has already been overwritten."
+          },
+          {
+            "zh": "**收进正在发的那块。** 需要一个独立的接收缓冲区，否则发出去的和收进来的会撞在一起。",
+            "en": "**Receiving into the chunk being sent.** A separate receive buffer is required, or the outgoing and incoming data collide."
+          },
+          {
+            "zh": "**all-gather 阶段用了 addRange 而不是 copyRange。** 那一阶段是\"把结果转一圈\"，不是再加一遍 —— 加的话每个值会被多加好几次，而且错得很规律，看起来像是\"少乘了个系数\"。",
+            "en": "**Using addRange instead of copyRange in the all-gather phase.** That phase passes results around, it does not reduce again. Adding makes every value accumulate several extra times, in a regular-looking way that reads like a missing scale factor."
+          }
+        ],
+        "extension": {
+          "zh": "有一件事值得盯着看：**ring 并没有减少搬运的总量。**朴素版一共搬 3584 字节，ring 也搬 3584 字节，一个字节不差。差别全在**分布**：朴素版这 3584 字节全压在 0 号卡的端口上，ring 让 8 张卡各扛 896。瓶颈差 4 倍，而且这个倍数是 `n/2` —— 卡越多，差得越远。\n\n代价也看得见：消息数从 14 涨到 112，**多了 8 倍**。每条消息都有固定开销，所以缓冲区小的时候 ring 反而更慢 ——这正是 NCCL 对小消息改用 tree 算法的原因。NCCL 会按消息大小、卡数、拓扑自动选算法，而它选的那套逻辑，前提就是你现在数出来的这两个量。\n\n最后，你刚刚数出来的 `2(n-1)/n` 就是 nccl-tests 里 all-reduce 的 **busbw 修正因子**。算法带宽 `algbw = 缓冲区字节数 / 耗时` 是用户视角，总线带宽 `busbw = algbw × 2(n-1)/n` 才反映硬件实际搬了多少。下一关起所有的通信门槛都读 busbw —— 而对你来说它不是一个公式，是你刚数出来的步数。",
+          "en": "One thing is worth staring at: **ring does not reduce the total bytes moved.** The naive version moves 3584 bytes and so does the ring, exactly. The difference is entirely in the **distribution**: naive puts all 3584 through GPU 0's port, ring gives each of 8 GPUs 896. The bottleneck improves 4x, and that factor is `n/2`, so it grows with the cluster.\n\nThe cost is visible too: messages go from 14 to 112, **eight times more**. Every message has fixed overhead, so for small buffers the ring is actually slower. That is exactly why NCCL switches to tree algorithms for small messages. NCCL picks an algorithm from message size, GPU count and topology, and the logic it uses rests on the two quantities you just counted.\n\nFinally, the `2(n-1)/n` you just counted is the **busbw correction factor** for all-reduce in nccl-tests. Algorithm bandwidth `algbw = buffer bytes / time` is the user's view; bus bandwidth `busbw = algbw x 2(n-1)/n` reflects what the hardware actually moved. Every communication gate from here on reads busbw, and for you it is not a formula but a step count you derived."
+        },
+        "gpu": {
+          "world": {
+            "globalBytes": 4194304,
+            "cluster": {
+              "devices": 8,
+              "devicesPerNode": 8
+            }
+          },
+          "files": {
+            "/root/allreduce.cu": "        #include \"engine.h\"\n        #include \"cluster.h\"\n\n        __global__ void fill(float* a, float base, int n) {\n  int i = threadIdx.x;\n  if (i < n) a[i] = base + (float)i * 0.01f;\n}\n__global__ void addInto(float* a, const float* b, int n) {\n  int i = threadIdx.x;\n  if (i < n) a[i] = a[i] + b[i];\n}\n// 只加一段：ring 每一步只碰缓冲区的 1/n\n__global__ void addRange(float* dst, const float* src, int offset, int n) {\n  int i = threadIdx.x;\n  if (i < n) dst[offset + i] = dst[offset + i] + src[offset + i];\n}\n__global__ void copyRange(float* dst, const float* src, int offset, int n) {\n  int i = threadIdx.x;\n  if (i < n) dst[offset + i] = src[offset + i];\n}\n\n\n        int main(void) {\n          const int N = 8;\n          const int COUNT = 64;\n\n          int buf[8]; int tmp[8];\n          for (int d = 0; d < N; ++d) {\n            cudaSetDevice(d);\n            float* b; float* t;\n            cudaMalloc((void**)&b, COUNT * 4);\n            cudaMalloc((void**)&t, COUNT * 4);\n            fill<<<1, 64>>>(b, (float)(d + 1), COUNT);\n            buf[d] = b; tmp[d] = t;\n          }\n\n          // TODO: 朴素做法 —— 全都发给 0 号，0 号加完再广播回去。\n          //       0 号卡一张要过 2(n-1) 份，而别的卡只过 2 份。\n          //       改成 ring：reduce-scatter (n-1) 步 + all-gather (n-1) 步。\n          for (int d = 1; d < N; ++d) {\n            cudaMemcpyPeer(tmp[0], 0, buf[d], d, COUNT * 4);\n            cudaSetDevice(0);\n            addInto<<<1, 64>>>(buf[0], tmp[0], COUNT);\n          }\n          for (int d = 1; d < N; ++d) {\n            cudaMemcpyPeer(buf[d], d, buf[0], 0, COUNT * 4);\n          }\n\n          // 把每张卡的第 0 个元素写回平台的缓冲区，判定读它\n          float* check = lab_buffer(0);\n          float host[8];\n          for (int d = 0; d < N; ++d) {\n            cudaSetDevice(d);\n            float one[1];\n            cudaMemcpy(one, buf[d], 4, cudaMemcpyDeviceToHost);\n            host[d] = one[0];\n          }\n          cudaSetDevice(0);\n          cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);\n          return 0;\n        }\n"
+          },
+          "bench": {
+            "sources": [
+              "/root/allreduce.cu"
+            ],
+            "buffers": [
+              {
+                "name": "check",
+                "length": 8,
+                "fill": {
+                  "kind": "zeros"
+                }
+              }
+            ],
+            "launches": []
+          },
+          "referenceFiles": {
+            "/root/allreduce.cu": "        #include \"engine.h\"\n        #include \"cluster.h\"\n\n        __global__ void fill(float* a, float base, int n) {\n  int i = threadIdx.x;\n  if (i < n) a[i] = base + (float)i * 0.01f;\n}\n__global__ void addInto(float* a, const float* b, int n) {\n  int i = threadIdx.x;\n  if (i < n) a[i] = a[i] + b[i];\n}\n// 只加一段：ring 每一步只碰缓冲区的 1/n\n__global__ void addRange(float* dst, const float* src, int offset, int n) {\n  int i = threadIdx.x;\n  if (i < n) dst[offset + i] = dst[offset + i] + src[offset + i];\n}\n__global__ void copyRange(float* dst, const float* src, int offset, int n) {\n  int i = threadIdx.x;\n  if (i < n) dst[offset + i] = src[offset + i];\n}\n\n\n        int main(void) {\n          const int N = 8;\n          const int COUNT = 64;\n          const int CHUNK = COUNT / N;\n\n          int buf[8]; int tmp[8];\n          for (int d = 0; d < N; ++d) {\n            cudaSetDevice(d);\n            float* b; float* t;\n            cudaMalloc((void**)&b, COUNT * 4);\n            cudaMalloc((void**)&t, COUNT * 4);\n            fill<<<1, 64>>>(b, (float)(d + 1), COUNT);\n            buf[d] = b; tmp[d] = t;\n          }\n\n          // 阶段一：reduce-scatter。\n          // **先所有卡都发完，再所有卡去加** —— 8 张卡是同时动的，\n          // 混在一个循环里会读到已经被覆盖的数据。\n          for (int step = 0; step < N - 1; ++step) {\n            for (int d = 0; d < N; ++d) {\n              int sendIdx = (d - step + N) % N;\n              int to = (d + 1) % N;\n              cudaMemcpyPeer(tmp[to] + sendIdx * CHUNK, to,\n                             buf[d] + sendIdx * CHUNK, d, CHUNK * 4);\n            }\n            for (int d = 0; d < N; ++d) {\n              int recvIdx = (d - 1 - step + N) % N;\n              cudaSetDevice(d);\n              addRange<<<1, 8>>>(buf[d], tmp[d], recvIdx * CHUNK, CHUNK);\n            }\n          }\n\n          // 阶段二：all-gather。这时第 d 张卡手上完整的是第 (d + 1) % N 块。\n          // 这一阶段是把结果**转一圈**，不是再加一遍 —— 所以用 copyRange\n          for (int step = 0; step < N - 1; ++step) {\n            for (int d = 0; d < N; ++d) {\n              int sendIdx = (d + 1 - step + N) % N;\n              int to = (d + 1) % N;\n              cudaMemcpyPeer(tmp[to] + sendIdx * CHUNK, to,\n                             buf[d] + sendIdx * CHUNK, d, CHUNK * 4);\n            }\n            for (int d = 0; d < N; ++d) {\n              int recvIdx = (d - step + N) % N;\n              cudaSetDevice(d);\n              copyRange<<<1, 8>>>(buf[d], tmp[d], recvIdx * CHUNK, CHUNK);\n            }\n          }\n\n          float* check = lab_buffer(0);\n          float host[8];\n          for (int d = 0; d < N; ++d) {\n            cudaSetDevice(d);\n            float one[1];\n            cudaMemcpy(one, buf[d], 4, cudaMemcpyDeviceToHost);\n            host[d] = one[0];\n          }\n          cudaSetDevice(0);\n          cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);\n          return 0;\n        }\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "allreduce.spec.ts",
+            "content": "const lab = require('@gpu/lab');\nconst N = 8;\nconst COUNT = 64;\n\ndescribe('ring all-reduce', () => {\n  it('8 张卡都拿到正确的和', async () => {\n    await lab.buildAndRun();\n    const check = lab.buffer('check');\n    // 第 d 张卡的第 0 个元素是 d + 1，加起来是 1+2+...+8 = 36\n    for (let d = 0; d < N; d += 1) {\n      expect(Math.abs(check[d] - 36)).toBeLessThanOrEqual(1e-5);\n    }\n  });\n\n  it('**最忙那张卡的负担降下来了**', async () => {\n    await lab.buildAndRun();\n    expect(lab.comm().maxDeviceBytes).toBeLessThanOrEqual(1200);\n  });\n\n  it('搬运总量一点没变 —— ring 摊的是分布，不是总量', async () => {\n    await lab.buildAndRun();\n    // 2(n-1) 步 × n 张卡 × (缓冲区/n) = 2(n-1) × 缓冲区\n    expect(lab.comm().bytes).toBe(2 * (N - 1) * COUNT * 4);\n  });\n\n  it('恰好 2(n-1) × n 条消息 —— 步数要对得上', async () => {\n    await lab.buildAndRun();\n    expect(lab.comm().messages).toBe(2 * (N - 1) * N);\n  });\n\n  it('全在机内，一个字节都不该走 IB', async () => {\n    await lab.buildAndRun();\n    expect(lab.comm().bytesByLink.ib).toBe(0);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "gpu.sanitizer.races",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "数据竞态",
+              "en": "data races"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.sanitizer.warpSyncErrors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "warp 同步用错",
+              "en": "warp sync errors"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.comm.maxDeviceBytes",
+            "op": "lte",
+            "value": 1200,
+            "label": {
+              "zh": "最忙那张卡过的字节数（朴素版是 3584）",
+              "en": "bytes through the busiest GPU (3584 naive)"
+            },
+            "unit": "byte",
+            "dimension": "throughput"
+          },
+          {
+            "metric": "gpu.comm.bytesByLink.ib",
+            "op": "lte",
+            "value": 0,
+            "label": {
+              "zh": "走 IB 的字节数 —— 8 张卡在同一台机器里，不该有",
+              "en": "bytes over InfiniBand: all 8 GPUs are in one node, so there should be none"
+            },
+            "unit": "byte",
+            "dimension": "correctness"
+          }
+        ],
+        "focus": [
+          "throughput",
+          "correctness"
+        ],
+        "primer": {
+          "zh": "数据并行的每一步都要做一次 all-reduce：每张卡各算出一份梯度，加起来，人人都要拿到这个和。最直白的做法是全都发给 0 号卡、加完再广播回去 --结果对，但 0 号卡成了瓶颈，它一张卡要过 2(n-1) 份的量，别的卡只过 2 份。\n\nring all-reduce 把缓冲区切成 n 块，分两个阶段各走 n-1 步。第一阶段每张卡把某一块发给右邻居、把收到的加进自己的，走完之后每张卡手上有一块完整的和；第二阶段再转一圈，把这 n 块和分给所有人。每一步只搬一块，所以每张卡搬的总量是 2(n-1)/n 个缓冲区。\n\n有一件事值得盯着看：ring 并没有减少搬运的总量。朴素版搬多少字节，ring 就搬多少字节，一个不差。差别全在分布，朴素版把这些字节全压在 0 号卡的端口上，ring 让每张卡各扛一份。瓶颈的差距是 n 除以 2，卡越多差得越远。\n\n代价也看得见：消息数涨了 n 倍。每条消息都有固定开销，所以缓冲区小的时候 ring 反而更慢 --这正是 NCCL 对小消息改用 tree 算法的原因，它会按消息大小、卡数、拓扑自动选算法。而 2(n-1)/n 这个数就是 nccl-tests 里 all-reduce 的 busbw 修正因子：算法带宽是用户视角，总线带宽才反映硬件实际搬了多少。",
+          "en": "Every step of data parallelism needs an all-reduce: each GPU computes its own gradients, they are summed, and everyone needs the sum. The obvious approach sends everything to GPU 0, which sums and broadcasts back. The result is right, but GPU 0 becomes the bottleneck, moving 2(n-1) buffers through its own port while every other GPU moves two.\n\nRing all-reduce splits the buffer into n chunks across two phases of n-1 steps. In the first, each GPU sends one chunk to its right neighbour and adds what arrives, so that afterwards every GPU holds one fully reduced chunk. In the second, those n chunks are passed around so everyone has all of them. Each step moves one chunk, so each GPU moves 2(n-1)/n buffers in total.\n\nOne thing is worth staring at: the ring does not reduce the total bytes moved. It moves exactly as many as the naive version. The difference is entirely distribution: the naive version puts all of it through GPU 0, the ring gives every GPU a share. The bottleneck improves by n over two, and that grows with the cluster.\n\nThe cost is visible too: n times as many messages. Every message carries fixed overhead, so for small buffers the ring is actually slower, which is why NCCL switches to tree algorithms there and picks an algorithm from message size, GPU count and topology. And 2(n-1)/n is the busbw correction factor for all-reduce in nccl-tests: algorithm bandwidth is the user view, bus bandwidth is what the hardware actually moved."
+        }
       }
     ]
   },

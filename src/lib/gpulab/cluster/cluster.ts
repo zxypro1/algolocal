@@ -56,8 +56,22 @@ export interface CommMetrics {
   /** 按链路种类分。张量并行跨机时 ib 会暴增 */
   bytesByLink: Record<LinkKind, number>;
   messagesByLink: Record<LinkKind, number>;
-  /** 通信占用的虚拟时间，秒 */
+  /**
+   * 通信占用的虚拟时间，秒 —— **取最忙那张卡的端口时间**，不是所有传输之和。
+   *
+   * 真硬件上每张卡有一个总的 NVLink 端口带宽，不管对面是谁都共享它。
+   * 所以瓶颈是"最忙的那张卡搬了多少"，而不是"一共搬了多少"。
+   */
   seconds: number;
+  /**
+   * 最忙那张卡的端口上过了多少字节。
+   *
+   * **这是 ring all-reduce 存在的全部理由。** 朴素的"汇总到 0 号再广播"
+   * 搬运总量和 ring 一模一样，差别只在分布：朴素让 0 号一张卡扛
+   * `2(n-1) × 缓冲区`，ring 让每张卡只扛 `2(n-1)/n × 缓冲区` ——
+   * 瓶颈差 n 倍。总字节数是看不出这件事的。
+   */
+  maxDeviceBytes: number;
   /**
    * 算法带宽与总线带宽。
    *
@@ -74,7 +88,7 @@ export function emptyCommMetrics(): CommMetrics {
     bytes: 0, messages: 0,
     bytesByLink: { nvlink: 0, pcie: 0, ib: 0 },
     messagesByLink: { nvlink: 0, pcie: 0, ib: 0 },
-    seconds: 0, algbw: 0, busbw: 0,
+    seconds: 0, maxDeviceBytes: 0, algbw: 0, busbw: 0,
   };
 }
 
@@ -91,12 +105,14 @@ export class Cluster {
 
   private readonly allocations: Allocation[] = [];
   /**
-   * 每条链路各自的忙碌时间。
+   * 每张卡的端口各自忙了多久、过了多少字节。
    *
-   * 多张卡同时通信时，总耗时是**最慢那条链路**的时间，
-   * 不是所有传输之和 —— ring all-reduce 的全部意义就在这里。
+   * 按**卡**记而不是按链路对记：真硬件上一张卡的 NVLink 端口带宽是总的，
+   * 不管对面是谁都共享。朴素 all-reduce 之所以慢，正是因为 0 号卡的
+   * 端口成了瓶颈 —— 按链路对记的话这件事完全看不出来。
    */
-  private readonly linkBusy = new Map<string, number>();
+  private readonly deviceBusy: number[] = [];
+  private readonly deviceBytes: number[] = [];
 
   constructor(options: ClusterOptions) {
     this.spec = options.spec;
@@ -238,10 +254,17 @@ export class Cluster {
     // 于是总通信时间取所有链路里最忙的那一条 ——
     // ring all-reduce 之所以能把 n 张卡的带宽都用上，就是因为
     // 每一步用的都是不同的链路。
-    const key = `${Math.min(from, to)}-${Math.max(from, to)}`;
-    const busy = (this.linkBusy.get(key) ?? 0) + seconds;
-    this.linkBusy.set(key, busy);
-    if (busy > this.comm.seconds) this.comm.seconds = busy;
+    // 发和收都占各自那张卡的端口
+    for (const device of [from, to]) {
+      this.deviceBusy[device] = (this.deviceBusy[device] ?? 0) + seconds;
+      this.deviceBytes[device] = (this.deviceBytes[device] ?? 0) + bytes;
+      if (this.deviceBusy[device] > this.comm.seconds) {
+        this.comm.seconds = this.deviceBusy[device];
+      }
+      if (this.deviceBytes[device] > this.comm.maxDeviceBytes) {
+        this.comm.maxDeviceBytes = this.deviceBytes[device];
+      }
+    }
   }
 
   /**
@@ -267,7 +290,8 @@ export class Cluster {
   reset(): void {
     for (const device of this.devices) device.reset();
     this.allocations.length = 0;
-    this.linkBusy.clear();
+    this.deviceBusy.length = 0;
+    this.deviceBytes.length = 0;
     this.current = 0;
     Object.assign(this.comm, emptyCommMetrics());
   }

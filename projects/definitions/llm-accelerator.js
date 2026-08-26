@@ -5202,6 +5202,368 @@ const STAGE_21 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 22 关：手写 ring all-reduce                                        */
+/* ------------------------------------------------------------------ */
+
+const R_DEVICES = 8;
+const R_COUNT = 64;
+
+/**
+ * 集群关卡共用的世界覆盖：一台 8 卡机。
+ *
+ * 按关覆盖而不是改整个项目 —— 前 21 关是单卡的，
+ * 让它们白白多出七张空转的卡没有任何好处。
+ */
+const CLUSTER_WORLD = {
+  globalBytes: 4 * 1024 * 1024,
+  cluster: { devices: R_DEVICES, devicesPerNode: 8 },
+};
+
+const RING_KERNELS = code`
+  __global__ void fill(float* a, float base, int n) {
+    int i = threadIdx.x;
+    if (i < n) a[i] = base + (float)i * 0.01f;
+  }
+  __global__ void addInto(float* a, const float* b, int n) {
+    int i = threadIdx.x;
+    if (i < n) a[i] = a[i] + b[i];
+  }
+  // 只加一段：ring 每一步只碰缓冲区的 1/n
+  __global__ void addRange(float* dst, const float* src, int offset, int n) {
+    int i = threadIdx.x;
+    if (i < n) dst[offset + i] = dst[offset + i] + src[offset + i];
+  }
+  __global__ void copyRange(float* dst, const float* src, int offset, int n) {
+    int i = threadIdx.x;
+    if (i < n) dst[offset + i] = src[offset + i];
+  }
+`;
+
+const ringBench = {
+  sources: ['/root/allreduce.cu'],
+  buffers: [
+    // 判定从这里读结果：每张卡把自己的第 0 个元素写回来
+    { name: 'check', length: R_DEVICES, fill: { kind: 'zeros' } },
+  ],
+  launches: [],
+};
+
+const STAGE_22 = {
+  id: 'ring-allreduce',
+  title: t('手写 ring all-reduce —— 把 2(n-1)/n 数出来',
+    'Ring all-reduce by hand — count the 2(n-1)/n yourself'),
+  goal: t(
+    [
+      '从这一关开始是 8 张卡。',
+      '',
+      '数据并行的每一步都要做一次 **all-reduce**：每张卡各算出一份梯度，',
+      '加起来，然后人人都要拿到这个和。',
+      '',
+      '`allreduce.cu` 现在的做法最直白：**所有卡把自己的整份发给 0 号，',
+      '0 号加完再广播回去。** 结果是对的，但 0 号卡成了瓶颈 ——',
+      '它一张卡要过 `2(n-1) × 缓冲区` 的量，而别的卡只过 `2 × 缓冲区`。',
+      '',
+      'ring all-reduce 把这件事摊开。它分两个阶段，每个阶段 n-1 步：',
+      '',
+      '1. **reduce-scatter**：把缓冲区切成 n 块。第 k 步，每张卡把某一块',
+      '   发给右邻居、把收到的那块加进自己的。走完 n-1 步，',
+      '   每张卡手上有**一块完整的和**（不同的卡拿到不同的块）。',
+      '2. **all-gather**：再转 n-1 步，把这 n 块和转一圈，人人拿全。',
+      '',
+      '每一步只搬 `1/n` 个缓冲区，一共 `2(n-1)` 步 ——',
+      '**每张卡搬的总量因此是 `2(n-1)/n × 缓冲区`。**',
+      '这个数记住，下一关会再见到它。',
+      '',
+      '```bash',
+      'nvcc -o bench allreduce.cu && ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 8 张卡都拿到正确的和',
+      '- 最忙那张卡过的字节数 ≤ 1200（朴素版是 3584）',
+      '- **恰好 `2(n-1) × n = 112` 条消息** —— 步数要对得上',
+    ].join('\n'),
+    [
+      'From here on there are 8 GPUs.',
+      '',
+      'Every step of data parallelism needs an **all-reduce**: each GPU computes its own gradients,',
+      'they are summed, and everyone needs the sum.',
+      '',
+      '`allreduce.cu` does the obvious thing: **every GPU sends its whole buffer to GPU 0, which',
+      'sums and broadcasts back.** The result is right, but GPU 0 is the bottleneck: it alone moves',
+      '`2(n-1) x buffer` while every other GPU moves only `2 x buffer`.',
+      '',
+      'Ring all-reduce spreads that out, in two phases of n-1 steps each:',
+      '',
+      '1. **reduce-scatter**: split the buffer into n chunks. On step k each GPU sends one chunk to',
+      '   its right neighbour and adds the chunk it receives into its own. After n-1 steps each GPU',
+      '   holds **one fully reduced chunk** (a different one per GPU).',
+      '2. **all-gather**: another n-1 steps pass those n chunks around so everyone has all of them.',
+      '',
+      'Each step moves `1/n` of a buffer across `2(n-1)` steps, so **each GPU moves',
+      '`2(n-1)/n x buffer` in total.** Remember that number; it comes back next stage.',
+      '',
+      '```bash',
+      'nvcc -o bench allreduce.cu && ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- all 8 GPUs hold the correct sum',
+      '- the busiest GPU moves at most 1200 bytes (3584 naive)',
+      '- **exactly `2(n-1) x n = 112` messages**: the step count has to match',
+    ].join('\n')
+  ),
+  checklist: [
+    t('把缓冲区切成 n 块', 'Split the buffer into n chunks'),
+    t('reduce-scatter：n-1 步，每步发一块给右邻居并加进来',
+      'reduce-scatter: n-1 steps, each sending a chunk right and adding what arrives'),
+    t('all-gather：再 n-1 步，把结果转一圈',
+      'all-gather: another n-1 steps to pass the results around'),
+  ],
+  hints: [
+    t('第 d 张卡在第 step 步发的是第 `(d - step + n) % n` 块，'
+      + '收到的是第 `(d - 1 - step + n) % n` 块。索引绕圈是这一关唯一的难点，'
+      + '拿 4 张卡在纸上画一遍最快。',
+      'On step `step`, GPU d sends chunk `(d - step + n) % n` and receives chunk '
+      + '`(d - 1 - step + n) % n`. The wrap-around indexing is the only hard part; drawing it out '
+      + 'for 4 GPUs is the fastest way through.'),
+    t('all-gather 阶段发的是第 `(d + 1 - step + n) % n` 块 —— '
+      + 'reduce-scatter 结束时第 d 张卡手上完整的正是第 `(d + 1) % n` 块。',
+      'In the all-gather phase GPU d sends chunk `(d + 1 - step + n) % n`, because reduce-scatter '
+      + 'leaves GPU d holding chunk `(d + 1) % n` complete.'),
+    t('每张卡要一个额外的接收缓冲区 —— 不能收进正在发的那块里。',
+      'Each GPU needs a separate receive buffer; you cannot receive into the chunk you are sending.'),
+  ],
+  pitfalls: [
+    t('**先收后发，或者边发边加。** 8 张卡是同时动的：这一步所有卡都发完，'
+      + '才轮到所有卡去加。混在一个循环里会读到已经被覆盖的数据。',
+      '**Receiving before sending, or adding while still sending.** All 8 GPUs move together: every '
+      + 'send in a step completes before any add. Mixing them in one loop reads data that has '
+      + 'already been overwritten.'),
+    t('**收进正在发的那块。** 需要一个独立的接收缓冲区，'
+      + '否则发出去的和收进来的会撞在一起。',
+      '**Receiving into the chunk being sent.** A separate receive buffer is required, or the '
+      + 'outgoing and incoming data collide.'),
+    t('**all-gather 阶段用了 addRange 而不是 copyRange。** 那一阶段是"把结果转一圈"，'
+      + '不是再加一遍 —— 加的话每个值会被多加好几次，而且错得很规律，'
+      + '看起来像是"少乘了个系数"。',
+      '**Using addRange instead of copyRange in the all-gather phase.** That phase passes results '
+      + 'around, it does not reduce again. Adding makes every value accumulate several extra times, '
+      + 'in a regular-looking way that reads like a missing scale factor.'),
+  ],
+  extension: t(
+    '有一件事值得盯着看：**ring 并没有减少搬运的总量。**'
+    + '朴素版一共搬 3584 字节，ring 也搬 3584 字节，一个字节不差。'
+    + '差别全在**分布**：朴素版这 3584 字节全压在 0 号卡的端口上，'
+    + 'ring 让 8 张卡各扛 896。瓶颈差 4 倍，而且这个倍数是 `n/2` —— '
+    + '卡越多，差得越远。'
+    + '\n\n'
+    + '代价也看得见：消息数从 14 涨到 112，**多了 8 倍**。'
+    + '每条消息都有固定开销，所以缓冲区小的时候 ring 反而更慢 ——'
+    + '这正是 NCCL 对小消息改用 tree 算法的原因。'
+    + 'NCCL 会按消息大小、卡数、拓扑自动选算法，'
+    + '而它选的那套逻辑，前提就是你现在数出来的这两个量。'
+    + '\n\n'
+    + '最后，你刚刚数出来的 `2(n-1)/n` 就是 nccl-tests 里 all-reduce 的 **busbw 修正因子**。'
+    + '算法带宽 `algbw = 缓冲区字节数 / 耗时` 是用户视角，'
+    + '总线带宽 `busbw = algbw × 2(n-1)/n` 才反映硬件实际搬了多少。'
+    + '下一关起所有的通信门槛都读 busbw —— 而对你来说它不是一个公式，'
+    + '是你刚数出来的步数。',
+    'One thing is worth staring at: **ring does not reduce the total bytes moved.** The naive version '
+    + 'moves 3584 bytes and so does the ring, exactly. The difference is entirely in the '
+    + '**distribution**: naive puts all 3584 through GPU 0\'s port, ring gives each of 8 GPUs 896. '
+    + 'The bottleneck improves 4x, and that factor is `n/2`, so it grows with the cluster.\n\n'
+    + 'The cost is visible too: messages go from 14 to 112, **eight times more**. Every message has '
+    + 'fixed overhead, so for small buffers the ring is actually slower. That is exactly why NCCL '
+    + 'switches to tree algorithms for small messages. NCCL picks an algorithm from message size, '
+    + 'GPU count and topology, and the logic it uses rests on the two quantities you just counted.\n\n'
+    + 'Finally, the `2(n-1)/n` you just counted is the **busbw correction factor** for all-reduce in '
+    + 'nccl-tests. Algorithm bandwidth `algbw = buffer bytes / time` is the user\'s view; bus '
+    + 'bandwidth `busbw = algbw x 2(n-1)/n` reflects what the hardware actually moved. Every '
+    + 'communication gate from here on reads busbw, and for you it is not a formula but a step count '
+    + 'you derived.'
+  ),
+  gpu: {
+    world: CLUSTER_WORLD,
+    files: {
+      '/root/allreduce.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+
+        ${RING_KERNELS}
+
+        int main(void) {
+          const int N = ${R_DEVICES};
+          const int COUNT = ${R_COUNT};
+
+          int buf[8]; int tmp[8];
+          for (int d = 0; d < N; ++d) {
+            cudaSetDevice(d);
+            float* b; float* t;
+            cudaMalloc((void**)&b, COUNT * 4);
+            cudaMalloc((void**)&t, COUNT * 4);
+            fill<<<1, 64>>>(b, (float)(d + 1), COUNT);
+            buf[d] = b; tmp[d] = t;
+          }
+
+          // TODO: 朴素做法 —— 全都发给 0 号，0 号加完再广播回去。
+          //       0 号卡一张要过 2(n-1) 份，而别的卡只过 2 份。
+          //       改成 ring：reduce-scatter (n-1) 步 + all-gather (n-1) 步。
+          for (int d = 1; d < N; ++d) {
+            cudaMemcpyPeer(tmp[0], 0, buf[d], d, COUNT * 4);
+            cudaSetDevice(0);
+            addInto<<<1, 64>>>(buf[0], tmp[0], COUNT);
+          }
+          for (int d = 1; d < N; ++d) {
+            cudaMemcpyPeer(buf[d], d, buf[0], 0, COUNT * 4);
+          }
+
+          // 把每张卡的第 0 个元素写回平台的缓冲区，判定读它
+          float* check = lab_buffer(0);
+          float host[8];
+          for (int d = 0; d < N; ++d) {
+            cudaSetDevice(d);
+            float one[1];
+            cudaMemcpy(one, buf[d], 4, cudaMemcpyDeviceToHost);
+            host[d] = one[0];
+          }
+          cudaSetDevice(0);
+          cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+    bench: ringBench,
+    referenceFiles: {
+      '/root/allreduce.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+
+        ${RING_KERNELS}
+
+        int main(void) {
+          const int N = ${R_DEVICES};
+          const int COUNT = ${R_COUNT};
+          const int CHUNK = COUNT / N;
+
+          int buf[8]; int tmp[8];
+          for (int d = 0; d < N; ++d) {
+            cudaSetDevice(d);
+            float* b; float* t;
+            cudaMalloc((void**)&b, COUNT * 4);
+            cudaMalloc((void**)&t, COUNT * 4);
+            fill<<<1, 64>>>(b, (float)(d + 1), COUNT);
+            buf[d] = b; tmp[d] = t;
+          }
+
+          // 阶段一：reduce-scatter。
+          // **先所有卡都发完，再所有卡去加** —— 8 张卡是同时动的，
+          // 混在一个循环里会读到已经被覆盖的数据。
+          for (int step = 0; step < N - 1; ++step) {
+            for (int d = 0; d < N; ++d) {
+              int sendIdx = (d - step + N) % N;
+              int to = (d + 1) % N;
+              cudaMemcpyPeer(tmp[to] + sendIdx * CHUNK, to,
+                             buf[d] + sendIdx * CHUNK, d, CHUNK * 4);
+            }
+            for (int d = 0; d < N; ++d) {
+              int recvIdx = (d - 1 - step + N) % N;
+              cudaSetDevice(d);
+              addRange<<<1, 8>>>(buf[d], tmp[d], recvIdx * CHUNK, CHUNK);
+            }
+          }
+
+          // 阶段二：all-gather。这时第 d 张卡手上完整的是第 (d + 1) % N 块。
+          // 这一阶段是把结果**转一圈**，不是再加一遍 —— 所以用 copyRange
+          for (int step = 0; step < N - 1; ++step) {
+            for (int d = 0; d < N; ++d) {
+              int sendIdx = (d + 1 - step + N) % N;
+              int to = (d + 1) % N;
+              cudaMemcpyPeer(tmp[to] + sendIdx * CHUNK, to,
+                             buf[d] + sendIdx * CHUNK, d, CHUNK * 4);
+            }
+            for (int d = 0; d < N; ++d) {
+              int recvIdx = (d - step + N) % N;
+              cudaSetDevice(d);
+              copyRange<<<1, 8>>>(buf[d], tmp[d], recvIdx * CHUNK, CHUNK);
+            }
+          }
+
+          float* check = lab_buffer(0);
+          float host[8];
+          for (int d = 0; d < N; ++d) {
+            cudaSetDevice(d);
+            float one[1];
+            cudaMemcpy(one, buf[d], 4, cudaMemcpyDeviceToHost);
+            host[d] = one[0];
+          }
+          cudaSetDevice(0);
+          cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('allreduce.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const N = ${R_DEVICES};
+      const COUNT = ${R_COUNT};
+
+      describe('ring all-reduce', () => {
+        it('8 张卡都拿到正确的和', async () => {
+          await lab.buildAndRun();
+          const check = lab.buffer('check');
+          // 第 d 张卡的第 0 个元素是 d + 1，加起来是 1+2+...+8 = 36
+          for (let d = 0; d < N; d += 1) {
+            expect(Math.abs(check[d] - 36)).toBeLessThanOrEqual(1e-5);
+          }
+        });
+
+        it('**最忙那张卡的负担降下来了**', async () => {
+          await lab.buildAndRun();
+          expect(lab.comm().maxDeviceBytes).toBeLessThanOrEqual(1200);
+        });
+
+        it('搬运总量一点没变 —— ring 摊的是分布，不是总量', async () => {
+          await lab.buildAndRun();
+          // 2(n-1) 步 × n 张卡 × (缓冲区/n) = 2(n-1) × 缓冲区
+          expect(lab.comm().bytes).toBe(2 * (N - 1) * COUNT * 4);
+        });
+
+        it('恰好 2(n-1) × n 条消息 —— 步数要对得上', async () => {
+          await lab.buildAndRun();
+          expect(lab.comm().messages).toBe(2 * (N - 1) * N);
+        });
+
+        it('全在机内，一个字节都不该走 IB', async () => {
+          await lab.buildAndRun();
+          expect(lab.comm().bytesByLink.ib).toBe(0);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.comm.maxDeviceBytes', op: 'lte', value: 1200,
+      zh: '最忙那张卡过的字节数（朴素版是 3584）',
+      en: 'bytes through the busiest GPU (3584 naive)',
+      unit: 'byte', dimension: 'throughput',
+    }),
+    gate({
+      metric: 'gpu.comm.bytesByLink.ib', op: 'lte', value: 0,
+      zh: '走 IB 的字节数 —— 8 张卡在同一台机器里，不该有',
+      en: 'bytes over InfiniBand: all 8 GPUs are in one node, so there should be none',
+      unit: 'byte', dimension: 'correctness',
+    }),
+  ],
+  focus: ['throughput', 'correctness'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -5268,5 +5630,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22],
 };

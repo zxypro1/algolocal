@@ -457,6 +457,14 @@ export interface GpuStageSpec {
   bench?: import('../gpulab/lab').BenchSpec;
   /** 每 block 共享内存上限的覆盖（比如需要 96KB 的关卡） */
   sharedBytesPerBlock?: number;
+  /**
+   * 这一关的世界覆盖，浅合并到项目级的世界上。
+   *
+   * 集群关卡用它：前 21 关是单卡，第 22 关起要 8 张卡。
+   * 与其把整个项目改成集群、让前 21 关白白多出七张空转的卡，
+   * 不如在需要的那几关按关声明。
+   */
+  world?: Partial<import('../gpulab/lab').GpuWorldSpec>;
   /** 进入本关时先替学员跑一遍的命令 */
   setupCommands?: string[];
   /**
