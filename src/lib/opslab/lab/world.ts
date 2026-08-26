@@ -23,6 +23,7 @@ import { materializePki } from './pki';
 import { GitNetwork, createGitCommand, parseCommit, readTree, seedRepository } from '../git';
 import { createIstioctlCommand } from '../mesh';
 import { SignatureStore, createCosignCommand } from '../admission';
+import { OpenBao, createBaoCommand } from '../secrets';
 import { currentNamespaceOf } from './view';
 import { DEFAULT_KUBECONFIG_PATH } from '../wasm';
 import { createExecHandler } from './podshell';
@@ -45,6 +46,8 @@ export interface OpsWorld {
   git: GitNetwork;
   /** 镜像签名 */
   signatures: SignatureStore;
+  /** 内网密钥库。世界没声明就是 undefined。 */
+  bao?: OpenBao;
   /** 装上的真 CLI 名字，如 ['kubectl','helm'] */
   applets: string[];
   /** 敲一条命令，然后让世界自己往前走到静止 */
@@ -66,6 +69,22 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
   const clusterAgeMs = spec.clusterAgeDays !== undefined
     ? spec.clusterAgeDays * 24 * 60 * 60_000
     : DEFAULT_CLUSTER_AGE_MS;
+
+  /**
+   * 内网的密钥库。
+   *
+   * 和镜像仓库、Git 服务一样是**集群外**的东西 —— 这正是它存在的意义：
+   * 密钥不在集群里，集群里只有一份由 ESO 维护的投影。
+   */
+  const bao = spec.secretStore ? new OpenBao(spec.secretStore.address) : undefined;
+  if (bao && spec.secretStore) {
+    for (const [name, rules] of Object.entries(spec.secretStore.policies ?? {})) {
+      bao.addPolicy(name, { rules });
+    }
+    for (const [path, data] of Object.entries(spec.secretStore.data ?? {})) bao.write(path, data);
+    for (const [token, policy] of Object.entries(spec.secretStore.tokens ?? {})) bao.addToken(token, policy);
+    if (spec.secretStore.kubernetesRoles) bao.enableKubernetesAuth(spec.secretStore.kubernetesRoles);
+  }
 
   // 镜像签名。和镜像仓库一样是集群外的东西，cosign 往里写，Kyverno 从里读。
   const signatures = new SignatureStore();
@@ -113,6 +132,50 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     addressPools: spec.addressPools,
     users: spec.users,
     signatures,
+    /**
+     * ESO 去密钥库取值。
+     *
+     * 认证走 SecretStore 里写的那种方式：`kubernetes` 用 ServiceAccount 换
+     * 令牌（集群里该用的），`tokenSecretRef` 直接从一个 Secret 里读静态令牌
+     * （常见但不好 —— 那把令牌本身又是一个要保管的密钥）。
+     */
+    fetchSecret: ({ store, namespace, key, property }) => {
+      if (!bao) return { error: 'no secret store configured in this world' };
+      const provider = ((store.spec ?? {}) as any).provider?.vault ?? {};
+      if (provider.server && provider.server !== bao.address) {
+        return { error: `cannot connect to ${provider.server}: no such host` };
+      }
+      const auth = provider.auth ?? {};
+      let token: string | undefined;
+      if (auth.kubernetes) {
+        const serviceAccount = auth.kubernetes.serviceAccountRef?.name ?? 'default';
+        const login = bao.loginKubernetes(auth.kubernetes.role ?? '', `${namespace}/${serviceAccount}`);
+        if ('error' in login) return { error: login.error };
+        token = login.token;
+      } else if (auth.tokenSecretRef) {
+        const definition = cluster.scheme.get({ group: '', version: 'v1', resource: 'secrets' });
+        const holder = definition && cluster.registry.list(definition, { namespace }).items
+          .find((item) => item.metadata.name === auth.tokenSecretRef.name);
+        const encoded = ((holder ?? {}) as any).data?.[auth.tokenSecretRef.key ?? 'token'];
+        token = encoded ? atob(encoded) : undefined;
+        if (!token) return { error: `token secret "${auth.tokenSecretRef.name}" not found or empty` };
+      } else {
+        return { error: 'no auth method configured on the SecretStore' };
+      }
+
+      const mount = provider.path ? `${provider.path}/` : '';
+      const full = `${mount}${key}`;
+      if (!bao.allows(token, full, 'read')) {
+        return { error: `permission denied on ${full}` };
+      }
+      const data = bao.read(full);
+      if (!data) return { error: `no value found at ${full}` };
+      if (property) {
+        if (data[property] === undefined) return { error: `key "${property}" not found at ${full}` };
+        return { value: data[property] };
+      }
+      return { value: JSON.stringify(data) };
+    },
     /**
      * Argo CD 从这里取仓库内容。
      *
@@ -200,6 +263,12 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
   }
 
   machine.install('openssl', createOpensslCommand());
+
+  if (bao) {
+    machine.install('bao', createBaoCommand({
+      server: (address) => (address.replace(/\/+$/, '') === bao.address ? bao : undefined),
+    }));
+  }
 
   machine.install('cosign', createCosignCommand({
     signatures,
@@ -305,6 +374,7 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     registries,
     git,
     signatures,
+    bao,
     applets,
     now: () => cluster.wallClock(),
     async run(command: string) {

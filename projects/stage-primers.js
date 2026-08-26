@@ -1297,6 +1297,21 @@ const primers = {
       )
     ),
 
+    'external-secrets': t(
+      p(
+        '先说清楚一件常被误解的事：Kubernetes 的 `Secret` **不是加密的**，它只是 base64。`kubectl get secret -o yaml` 拿到的值，接一句 `base64 -d` 就是明文。Secret 在集群里唯一的保护是 RBAC，也就是「谁有权 get 它」。所以把口令写进 Secret 并不算「保护」了它，只是换了个地方放。',
+        '更麻烦的是 GitOps 带来的矛盾：仓库要能被所有人读，密钥不能。把 Secret 的 YAML 提交进 Git，等于把明文分发给每一个有仓库权限的人，而且留在历史里删不掉。`External Secrets Operator` 的答案是让仓库里只放「去哪儿取」的说明：`SecretStore` 说去哪个密钥库、用什么身份，`ExternalSecret` 说取哪几个键、放进哪个 Secret。真值由控制器在集群里生成，谁都不用提交明文。',
+        '外部密钥库这里用 `OpenBao`（Vault 改协议之后 fork 出来的开源版本）。它的 KV v2 引擎有一处容易绊人：挂载路径和读写路径不是一回事，引擎挂在 `kv/` 上时，`bao kv get kv/payments/db` 实际读的是 `kv/data/payments/db`。SecretStore 里的 `path` 指的是挂载路径，`remoteRef.key` 里就不要再重复写它。另外 KV v2 保留版本历史，读到的默认是最新一版。',
+        '认证方式的选择比工具选择更要紧。用静态令牌是个死循环：为了保护密钥，你得先保护一把能读所有密钥的令牌，而那把令牌只能存在集群里的另一个 Secret 里。`Kubernetes 认证`跳出了这个循环：身份由集群自己签发、短期有效、绑定到具体的 ServiceAccount，泄露一个 Pod 的 token 也只拿得到那个 SA 的权限。云上的 IRSA 与 Workload Identity 是同一思路的不同实现。最后记住 ESO 同步出来的 Secret 归控制器管：手改会被下一轮同步盖回去，`refreshInterval` 决定这一轮有多久。'
+      ),
+      p(
+        'Start with a common misconception: a Kubernetes `Secret` is **not encrypted**, it is base64. Take the value from `kubectl get secret -o yaml`, pipe it through `base64 -d`, and there is the plaintext. The only protection a Secret has inside the cluster is RBAC, meaning who may get it. Putting a password into a Secret does not protect it, it relocates it.',
+        'GitOps sharpens the problem: the repository must be readable by everyone and secrets must not be. Committing Secret YAML distributes plaintext to everyone with repository access and leaves it in history where deleting does not help. The `External Secrets Operator` answers by keeping only the instructions in Git: a `SecretStore` says which vault and which identity, an `ExternalSecret` says which keys to fetch into which Secret. The controller materialises the real values in the cluster and nobody commits plaintext.',
+        'The external store here is `OpenBao`, the open-source fork created after Vault changed its licence. Its KV v2 engine trips people on paths: the mount path and the read path differ, so with the engine at `kv/`, `bao kv get kv/payments/db` actually reads `kv/data/payments/db`. In a SecretStore the `path` field is the mount, so `remoteRef.key` should not repeat it. KV v2 also keeps version history, and a read returns the latest version by default.',
+        'Choosing the authentication method matters more than choosing the tool. A static token is circular: protecting your secrets requires protecting a token that reads all of them, and that token can only live in another Secret in the cluster. `Kubernetes auth` breaks the circle, because identity is issued by the cluster, short lived, and bound to a specific ServiceAccount, so a leaked pod token buys only that ServiceAccount permissions. IRSA and Workload Identity are the same idea in the clouds. Finally, the Secret ESO produces belongs to the controller: hand edits are overwritten on the next sync, and `refreshInterval` decides how long that takes.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',

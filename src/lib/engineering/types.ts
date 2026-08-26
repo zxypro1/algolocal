@@ -224,6 +224,23 @@ export interface OpsImageSpec {
   enforcesNetworkPolicy?: boolean;
 }
 
+/** 内网的密钥库（OpenBao） */
+export interface OpsSecretStoreSpec {
+  /** 地址，如 `https://openbao.corp.internal:8200` */
+  address: string;
+  /** 初始内容：路径 -> 键值 */
+  data?: Record<string, Record<string, string>>;
+  /** 策略：名字 -> 路径 -> 能力 */
+  policies?: Record<string, Record<string, string[]>>;
+  /** 发好的静态令牌：token -> 策略名 */
+  tokens?: Record<string, string>;
+  /**
+   * Kubernetes 认证的角色。不声明就是「这台还没开 Kubernetes auth」，
+   * ESO 只能用静态令牌 —— 而那本身又是一个要保管的密钥。
+   */
+  kubernetesRoles?: Record<string, { boundServiceAccounts: string[]; policy: string }>;
+}
+
 /** 内网 Git 服务上的一个仓库 */
 export interface OpsGitRepositorySpec {
   /** 完整 URL，如 `https://git.corp.internal/platform/apps` */
@@ -286,6 +303,8 @@ export interface OpsWorldSpec {
   users?: Record<string, { username: string; groups?: string[] }>;
   /** 内网的 Git 仓库。GitOps 里那份 YAML 就住在这儿。 */
   gitRepositories?: OpsGitRepositorySpec[];
+  /** 内网的密钥库。真正的密钥住在这儿，集群里只有投影。 */
+  secretStore?: OpsSecretStoreSpec;
   machine?: OpsMachineSpec;
   /** 集群外的名字：`git.corp.internal` -> ['10.10.0.30'] */
   externalHosts?: Record<string, string[]>;

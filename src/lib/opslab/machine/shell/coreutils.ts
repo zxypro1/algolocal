@@ -88,7 +88,39 @@ function readInputs(context: CommandContext, values: string[]): { text: string; 
 const lines = (text: string): string[] => (text === '' ? [] : text.replace(/\n$/, '').split('\n'));
 const join = (values: string[]): string => (values.length ? `${values.join('\n')}\n` : '');
 
+/** 读一个文件，读不到就返回一个失败结果（给 base64 这类既收 stdin 又收文件名的命令用） */
+function readOrFail(context: CommandContext, file: string): string | CommandResult {
+  const target = resolve(context, file);
+  if (!context.vfs.exists(target)) return fail(`base64: ${file}: No such file or directory`, 1);
+  return context.vfs.readFile(target);
+}
+
 export const COREUTILS: Record<string, CommandHandler> = {
+  /**
+   * base64
+   *
+   * Kubernetes 的 Secret 是 base64，不是加密 —— 学员要能自己一句
+   * `... | base64 -d` 把这件事看明白，所以这个命令不能少。
+   */
+  base64: (context) => {
+    const decode = context.argv.includes('-d') || context.argv.includes('--decode');
+    const file = context.argv.find((entry) => !entry.startsWith('-'));
+    const input = file ? readOrFail(context, file) : context.stdin;
+    if (typeof input !== 'string') return input;
+    try {
+      if (!decode) {
+        let binary = '';
+        for (const byte of new TextEncoder().encode(input)) binary += String.fromCharCode(byte);
+        return { stdout: `${btoa(binary)}\n` };
+      }
+      const clean = input.replace(/\s+/g, '');
+      const binary = atob(clean);
+      return { stdout: new TextDecoder().decode(Uint8Array.from(binary, (ch) => ch.charCodeAt(0))) };
+    } catch {
+      return fail('base64: invalid input', 1);
+    }
+  },
+
   ls: (context) => {
     const args = parseArgs(context.argv);
     const targets = args.values.length ? args.values : ['.'];

@@ -29,6 +29,7 @@ import {
 import {
   CLUSTERROLEBINDINGS, CLUSTERROLES, RBAC_RESOURCES, ROLEBINDINGS, ROLES, authorize,
 } from '../rbac';
+import { ESO_RESOURCES, ExternalSecretsController } from '../secrets';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
@@ -88,6 +89,8 @@ export interface ClusterOptions {
    * 所有请求都是 cluster-admin —— 前面十几关不必为此各配一套角色。
    */
   users?: Record<string, { username: string; groups?: string[] }>;
+  /** 去外部密钥库取值。由世界注入 —— 集群自己不认识 OpenBao。 */
+  fetchSecret?: import('../secrets').SecretFetcher;
   /** 镜像签名库。由世界注入，和镜像仓库一样是集群外的东西。 */
   signatures?: import('../admission').SignatureStore;
   /** Service 的 VIP 从哪个网段分。默认 10.96.0.0/12，和真集群一样。 */
@@ -145,7 +148,7 @@ export class Cluster {
     this.store = createStore();
     this.scheme = createScheme([
       ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES, ...ARGOCD_RESOURCES,
-      ...MESH_RESOURCES, ...RBAC_RESOURCES, ...KYVERNO_RESOURCES,
+      ...MESH_RESOURCES, ...RBAC_RESOURCES, ...KYVERNO_RESOURCES, ...ESO_RESOURCES,
       ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
@@ -589,6 +592,10 @@ export class Cluster {
       new GatewayController(context),
       // 内网 PKI：同样是集群里的一个工作负载，卸载掉就不再签发
       new CertManagerController(context),
+      // 密钥：真值住在集群外面，这里只维护一份投影
+      ...(this.options.fetchSecret
+        ? [new ExternalSecretsController(context, { fetch: this.options.fetchSecret })]
+        : []),
       // GitOps：仓库里那份 YAML 才是期望状态，集群里的对象是它的投影
       ...(this.options.gitSource
         ? [new ArgoCdController(context, {
