@@ -1,0 +1,181 @@
+/**
+ * 宿主运行时：把 `hostcall` / `launch` 两条指令接到真正的设备上
+ *
+ * VM 只负责把指令翻成一次调用，具体做什么在这里。分开是因为 VM 那一层
+ * 不该知道 `GpuDevice` 的存在 —— 它跑的是指令，不是 CUDA。
+ *
+ * ## 宿主内存 = 那一个线程的 local memory
+ *
+ * 宿主程序在 VM 里就是 grid 1 / block 1 的一个线程，它的局部数组落在
+ * local memory 里。于是 `cudaMemcpy(..., cudaMemcpyHostToDevice)` 的
+ * 「主机端指针」就是 local 空间的地址，「设备端指针」是 global 空间的地址。
+ * **两个空间是真的分开的**，拿主机指针当设备指针用会读到别的东西，
+ * 和真卡上一样 —— 这正是 `cudaMemcpyKind` 那个参数存在的理由。
+ */
+import type { HostServices } from '../vm/vm';
+import type { Dim3 } from '../vm/vm';
+import { HOST } from '../ir/program';
+import { ContainerStore, HostRuntimeError } from './containers';
+
+export interface HostEnvironment {
+  /** 分配设备显存，返回字节地址 */
+  cudaMalloc(bytes: number): number;
+  cudaFree(address: number): void;
+  /** 在两个地址空间之间搬字节 */
+  copy(dst: number, src: number, bytes: number, kind: number): void;
+  memset(address: number, value: number, bytes: number): void;
+  /** 起一个 kernel，同步执行完 */
+  launch(name: string, grid: Dim3, block: Dim3, args: number[], line: number): void;
+  /** 收集标准输出 */
+  write(text: string): void;
+  /**
+   * 关卡在 `BenchSpec.buffers` 里声明的第 index 个缓冲区。
+   *
+   * 真实的推理引擎从权重加载器拿张量，这里是同一件事的最小版本 ——
+   * 数据由平台准备（所以判定知道它是什么），学员的 `main` 拿到的是
+   * 一个正常的设备指针。
+   */
+  buffer(index: number): { address: number; length: number };
+}
+
+/** 一个宿主程序跑起来需要的全部状态 */
+export class HostRuntime implements HostServices {
+  private readonly containers = new ContainerStore();
+
+  constructor(
+    private readonly env: HostEnvironment,
+    /** printf 的格式串常量池 */
+    private readonly strings: string[]
+  ) {}
+
+  call(fn: number, args: number[], line: number): number {
+    try {
+      return this.dispatch(fn, args);
+    } catch (error) {
+      if (error instanceof HostRuntimeError) {
+        throw new HostRuntimeError(`第 ${line} 行：${error.message}`);
+      }
+      throw error;
+    }
+  }
+
+  launch(name: string, grid: Dim3, block: Dim3, args: number[], line: number): void {
+    this.env.launch(name, grid, block, args, line);
+  }
+
+  private dispatch(fn: number, args: number[]): number {
+    const store = this.containers;
+    switch (fn) {
+      /* ---- CUDA runtime ---- */
+      case HOST.cudaMalloc:
+        return this.env.cudaMalloc(args[0] | 0);
+      case HOST.cudaFree:
+        this.env.cudaFree(args[0] | 0);
+        return 0;
+      case HOST.cudaMemcpy:
+        this.env.copy(args[0] | 0, args[1] | 0, args[2] | 0, args[3] | 0);
+        return 0;
+      case HOST.cudaMemset:
+        this.env.memset(args[0] | 0, args[1] | 0, args[2] | 0);
+        return 0;
+      case HOST.lab_buffer:
+        return this.env.buffer(args[0] | 0).address;
+      case HOST.lab_buffer_len:
+        return this.env.buffer(args[0] | 0).length;
+
+      case HOST.cudaDeviceSynchronize:
+        // 我们的 launch 是同步的，所以这里没有实际工作。**保留它不是装样子**：
+        // 真卡上少写这一句、紧接着读回结果，是最经典的一类 bug，
+        // 关卡的正文会讲到，代码里出现过学员才有印象。
+        return 0;
+
+      /* ---- 标准输出 ---- */
+      case HOST.printf: {
+        const format = this.strings[args[0] | 0];
+        if (format === undefined) throw new HostRuntimeError('printf 的格式串丢了');
+        this.env.write(formatPrintf(format, args.slice(1)));
+        return 0;
+      }
+
+      /* ---- vec ---- */
+      case HOST.vec_new: return store.vecNew();
+      case HOST.vec_push: store.vec(args[0]).push(args[1] | 0); return 0;
+      case HOST.vec_pop: {
+        const list = store.vec(args[0]);
+        if (!list.length) throw new HostRuntimeError('vec_pop 在空的 vec 上');
+        return list.pop() as number;
+      }
+      case HOST.vec_get: {
+        const list = store.vec(args[0]);
+        store.checkIndex(list, args[1] | 0, 'vec_get');
+        return list[args[1] | 0];
+      }
+      case HOST.vec_set: {
+        const list = store.vec(args[0]);
+        store.checkIndex(list, args[1] | 0, 'vec_set');
+        list[args[1] | 0] = args[2] | 0;
+        return 0;
+      }
+      case HOST.vec_len: return store.vec(args[0]).length;
+      case HOST.vec_clear: store.vec(args[0]).length = 0; return 0;
+
+      /* ---- map ---- */
+      case HOST.map_new: return store.mapNew();
+      case HOST.map_set: store.map(args[0]).set(args[1], args[2] | 0); return 0;
+      case HOST.map_get: return store.map(args[0]).get(args[1], args[2] | 0);
+      case HOST.map_has: return store.map(args[0]).has(args[1]) ? 1 : 0;
+      case HOST.map_del: store.map(args[0]).delete(args[1]); return 0;
+      case HOST.map_len: return store.map(args[0]).size;
+
+      /* ---- ring ---- */
+      case HOST.ring_new: return store.ringNew();
+      case HOST.ring_push: store.ring(args[0]).push(args[1] | 0); return 0;
+      case HOST.ring_pop: {
+        const queue = store.ring(args[0]);
+        if (!queue.length) throw new HostRuntimeError('ring_pop 在空的队列上');
+        return queue.shift() as number;
+      }
+      case HOST.ring_peek: {
+        const queue = store.ring(args[0]);
+        if (!queue.length) throw new HostRuntimeError('ring_peek 在空的队列上');
+        return queue[0];
+      }
+      case HOST.ring_len: return store.ring(args[0]).length;
+
+      default:
+        throw new HostRuntimeError(`不认识的宿主调用编号 ${fn}`);
+    }
+  }
+}
+
+/**
+ * printf 的格式串。
+ *
+ * 支持 `%d` / `%u` / `%f` / `%g` / `%x` / `%%`，够打调试信息了。
+ * 和 C 一样：**格式串决定怎么解释这个数**，寄存器里存的只是一个数。
+ * 宽度与精度只认 `%.Nf` 这一种，别的原样输出而不是猜。
+ */
+export function formatPrintf(format: string, values: number[]): string {
+  let out = '';
+  let index = 0;
+  for (let i = 0; i < format.length; i += 1) {
+    if (format[i] !== '%') { out += format[i]; continue; }
+
+    const match = /^%(?:\.(\d+))?([dufgx%])/.exec(format.slice(i));
+    if (!match) { out += format[i]; continue; }
+    i += match[0].length - 1;
+
+    if (match[2] === '%') { out += '%'; continue; }
+    const value = values[index] ?? 0;
+    index += 1;
+    switch (match[2]) {
+      case 'd': out += String(value | 0); break;
+      case 'u': out += String(value >>> 0); break;
+      case 'x': out += (value >>> 0).toString(16); break;
+      case 'f': out += value.toFixed(match[1] !== undefined ? Number(match[1]) : 6); break;
+      case 'g': out += String(Number(value.toPrecision(6))); break;
+      default: break;
+    }
+  }
+  return out;
+}

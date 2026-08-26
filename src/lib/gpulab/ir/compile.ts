@@ -10,13 +10,13 @@
  */
 import {
   fragmentSlots, isFragment, isPointer, sizeOf, typeName,
-  type BinaryOp, type CudaType, type Expr, type FragmentType, type KernelDecl,
-  type Stmt, type VarDecl,
+  type BinaryOp, type CudaType, type Expr, type FragmentType, type FuncDecl,
+  type KernelDecl, type Stmt, type VarDecl,
 } from '../cuda/ast';
 import { CudaCompileError } from '../cuda/lower';
 import type {
-  AtomKind, BinKind, BuiltinFn, CompiledKernel, Inst, IrType,
-  KernelParam, SharedVar, ShflMode, Space,
+  AtomKind, BinKind, BuiltinFn, CompiledHost, CompiledKernel, HostFn, Inst, IrType,
+  KernelParam, LaunchSite, SharedVar, ShflMode, Space,
 } from './types';
 
 /** 一个值：寄存器编号 + 它的 CUDA 类型 */
@@ -121,9 +121,23 @@ function arraysWithDynamicIndex(body: Stmt): Set<string> {
   const visitExpr = (node: Expr): void => {
     switch (node.kind) {
       case 'subscript':
-        if (node.array.kind === 'name' && !isConstIndex(node.index)) dynamic.add(node.array.name);
-        visitExpr(node.array);
+        if (node.array.kind === 'name') {
+          // 这里**不能**往下走 visitExpr(node.array)：那是下标的基址，
+          // 不是「数组名当值用」。走下去的话每个数组都会被当成退化了。
+          if (!isConstIndex(node.index)) dynamic.add(node.array.name);
+        } else {
+          visitExpr(node.array);
+        }
         visitExpr(node.index);
+        break;
+      case 'name':
+        // 数组名单独出现 = 退化成指针（传给 cudaMemcpy、传给 kernel、
+        // 赋给一个 float*）。寄存器里的数组没有地址，退化不了，
+        // 所以这种用法一律落到 local memory。
+        //
+        // 这一条以前是漏的：`float h[4]` 只用常量下标写、再整个
+        // cudaMemcpy 出去，会被提升进寄存器，然后报「不能整体当指针用」。
+        dynamic.add(node.name);
         break;
       case 'binary': visitExpr(node.left); visitExpr(node.right); break;
       case 'unary': visitExpr(node.operand); break;
@@ -162,6 +176,11 @@ function arraysWithDynamicIndex(body: Stmt): Set<string> {
         break;
       case 'while': visitExpr(node.cond); visitStmt(node.body); break;
       case 'return': if (node.value) visitExpr(node.value); break;
+      case 'launch':
+        node.grid.forEach(visitExpr);
+        node.block.forEach(visitExpr);
+        node.args.forEach(visitExpr);
+        break;
       default: break;
     }
   };
@@ -169,6 +188,77 @@ function arraysWithDynamicIndex(body: Stmt): Set<string> {
   visitStmt(body);
   return dynamic;
 }
+
+/**
+ * 宿主侧的平台函数。
+ *
+ * 名字与签名照抄真 CUDA runtime 与一份最小容器库 —— 学员在这里敲的
+ * `cudaMemcpy(d, h, n, cudaMemcpyHostToDevice)` 和真卡上一模一样。
+ * 容器（vec / map / ring）的实现在平台侧，声明写在只读的 `containers.h` 里。
+ */
+const HOST_FNS: Record<string, { fn: HostFn; arity: number; scalar: 'int' | 'void' }> = {
+  cudaFree: { fn: 'cudaFree', arity: 1, scalar: 'int' },
+  cudaMemcpy: { fn: 'cudaMemcpy', arity: 4, scalar: 'int' },
+  cudaMemset: { fn: 'cudaMemset', arity: 3, scalar: 'int' },
+  cudaDeviceSynchronize: { fn: 'cudaDeviceSynchronize', arity: 0, scalar: 'int' },
+
+  lab_buffer: { fn: 'lab_buffer', arity: 1, scalar: 'int' },
+  lab_buffer_len: { fn: 'lab_buffer_len', arity: 1, scalar: 'int' },
+
+  vec_new: { fn: 'vec_new', arity: 0, scalar: 'int' },
+  vec_push: { fn: 'vec_push', arity: 2, scalar: 'void' },
+  vec_pop: { fn: 'vec_pop', arity: 1, scalar: 'int' },
+  vec_get: { fn: 'vec_get', arity: 2, scalar: 'int' },
+  vec_set: { fn: 'vec_set', arity: 3, scalar: 'void' },
+  vec_len: { fn: 'vec_len', arity: 1, scalar: 'int' },
+  vec_clear: { fn: 'vec_clear', arity: 1, scalar: 'void' },
+
+  map_new: { fn: 'map_new', arity: 0, scalar: 'int' },
+  map_set: { fn: 'map_set', arity: 3, scalar: 'void' },
+  map_get: { fn: 'map_get', arity: 3, scalar: 'int' },
+  map_has: { fn: 'map_has', arity: 2, scalar: 'int' },
+  map_del: { fn: 'map_del', arity: 2, scalar: 'void' },
+  map_len: { fn: 'map_len', arity: 1, scalar: 'int' },
+
+  ring_new: { fn: 'ring_new', arity: 0, scalar: 'int' },
+  ring_push: { fn: 'ring_push', arity: 2, scalar: 'void' },
+  ring_pop: { fn: 'ring_pop', arity: 1, scalar: 'int' },
+  ring_peek: { fn: 'ring_peek', arity: 1, scalar: 'int' },
+  ring_len: { fn: 'ring_len', arity: 1, scalar: 'int' },
+};
+
+/** `cudaMemcpyKind` 的四个取值，和真头文件里的顺序一致 */
+const HOST_CONSTANTS: Record<string, number> = {
+  cudaMemcpyHostToHost: 0,
+  cudaMemcpyHostToDevice: 1,
+  cudaMemcpyDeviceToHost: 2,
+  cudaMemcpyDeviceToDevice: 3,
+  cudaSuccess: 0,
+};
+
+/** 编译一个函数时需要知道的上下文 */
+interface CompilerContext {
+  /** 自己写的函数，按名字查，调用点整个内联进去 */
+  functions: Map<string, FuncDecl>;
+  /**
+   * 宿主模式。
+   *
+   * 开着才认 CUDA runtime 与容器，也才允许 `break` 与提前 `return` ——
+   * 理由见 `unwindTo`。
+   */
+  host: boolean;
+}
+
+/**
+ * 编译期的作用域帧。
+ *
+ * 只用来算「跳出去要弹几层掩码」，和 VM 的重收敛栈是一一对应的：
+ * 每一个 `mask` / `loop` 帧在 VM 那边都有一项。
+ */
+type Frame =
+  | { kind: 'mask' }
+  | { kind: 'loop'; breaks: number[] }
+  | { kind: 'fn'; returns: number[]; result: number; type: CudaType; name: string };
 
 class Compiler {
   private insts: Inst[] = [];
@@ -180,8 +270,22 @@ class Compiler {
   private params: KernelParam[] = [];
   private localBytes = 0;
   private dynamicArrays: Set<string>;
+  private frames: Frame[] = [];
+  /** 内联链，用来发现递归 */
+  private inlineStack: string[] = [];
+  /**
+   * 作用域可见性的下界。
+   *
+   * 内联进来的函数体**看不见调用者的局部变量** —— 少了这道屏障，
+   * 一个函数里写 `int i` 就会撞上调用者循环里的 `i`，而且是静默地撞上。
+   */
+  private scopeFloor: number[] = [];
+  private strings: string[] = [];
+  private launches: LaunchSite[] = [];
+  /** 顶层 return 的跳转，编译到最后统一补目标 */
+  private topReturns: number[] = [];
 
-  constructor(private kernel: KernelDecl) {
+  constructor(private kernel: KernelDecl, private ctx: CompilerContext) {
     this.dynamicArrays = arraysWithDynamicIndex(kernel.body);
   }
 
@@ -207,8 +311,19 @@ class Compiler {
       });
     });
 
+    if (this.ctx.host) {
+      for (const [name, value] of Object.entries(HOST_CONSTANTS)) {
+        const reg = this.constant(value, 'i32', this.kernel.span.line);
+        this.bind(name, { where: 'reg', reg, type: { kind: 'scalar', scalar: 'int' } });
+      }
+    }
+
     this.stmt(this.kernel.body);
+    const exitAt = this.here();
     this.emit({ op: 'ret' }, this.kernel.span.line);
+    for (const at of this.topReturns) {
+      (this.insts[at] as { target: number }).target = exitAt;
+    }
 
     return {
       name: this.kernel.name,
@@ -220,6 +335,8 @@ class Compiler {
       localBytes: this.localBytes,
       registersPerThread: estimateRegisters(this.insts, this.numRegs),
       lines: this.lines,
+      ...(this.strings.length ? { strings: this.strings } : {}),
+      ...(this.launches.length ? { launches: this.launches } : {}),
     };
   }
 
@@ -248,7 +365,8 @@ class Compiler {
   }
 
   private lookup(name: string): Binding | undefined {
-    for (let i = this.scopes.length - 1; i >= 0; i -= 1) {
+    const floor = this.scopeFloor.length ? this.scopeFloor[this.scopeFloor.length - 1] : 0;
+    for (let i = this.scopes.length - 1; i >= floor; i -= 1) {
       const found = this.scopes[i].get(name);
       if (found) return found;
     }
@@ -363,10 +481,24 @@ class Compiler {
           return { kind: 'scalar', scalar: 'int' };
         }
         const spec = BUILTIN_FNS[node.callee];
-        if (!spec) this.fail(node.span.line, node.span.column, `暂不支持函数 \`${node.callee}\``);
-        return spec.ty === 'f32'
-          ? { kind: 'scalar', scalar: 'float' }
-          : { kind: 'scalar', scalar: 'int' };
+        if (spec) {
+          return spec.ty === 'f32'
+            ? { kind: 'scalar', scalar: 'float' }
+            : { kind: 'scalar', scalar: 'int' };
+        }
+        const user = this.ctx.functions.get(node.callee);
+        if (user) {
+          return user.returnType.kind === 'scalar' && user.returnType.scalar === 'void'
+            ? { kind: 'scalar', scalar: 'int' }
+            : user.returnType;
+        }
+        if (node.callee === 'lab_buffer') {
+          return { kind: 'pointer', to: { kind: 'scalar', scalar: 'float' }, space: 'global' };
+        }
+        if (node.callee === 'cudaMalloc' || node.callee === 'printf' || HOST_FNS[node.callee]) {
+          return { kind: 'scalar', scalar: 'int' };
+        }
+        this.fail(node.span.line, node.span.column, `暂不支持函数 \`${node.callee}\``);
       }
       case 'addressOf': {
         const target = this.staticTypeOf(node.target);
@@ -376,6 +508,9 @@ class Compiler {
         return this.staticTypeOf(node.target);
       case 'incdec':
         return this.staticTypeOf(node.target);
+      case 'strLit':
+        // 字符串只当 printf 的格式串用，不参与任何运算
+        return { kind: 'scalar', scalar: 'int' };
     }
   }
 
@@ -537,6 +672,11 @@ class Compiler {
 
       case 'call':
         return this.call(node);
+
+      case 'strLit':
+        this.fail(node.span.line, node.span.column,
+          '字符串只能作为 printf 的格式串出现 —— 这个子集没有 char*');
+        break;
 
       case 'assign':
         return this.assign(node);
@@ -888,6 +1028,18 @@ class Compiler {
 
     const spec = BUILTIN_FNS[node.callee];
     if (!spec) {
+      // 内建之外还有两条路：自己写的函数（内联展开）、宿主运行时。
+      const user = this.ctx.functions.get(node.callee);
+      if (user) {
+        if (user.role === 'host' && !this.ctx.host) {
+          this.fail(node.span.line, node.span.column,
+            `\`${node.callee}\` 是宿主函数，kernel 里调用不了 —— 给它加 __device__`);
+        }
+        return this.inlineCall(user, node);
+      }
+      if (node.callee === 'cudaMalloc' || node.callee === 'printf' || HOST_FNS[node.callee]) {
+        return this.hostCall(node);
+      }
       this.fail(
         node.span.line, node.span.column,
         `暂不支持函数 \`${node.callee}\` —— 内建的只有 ${Object.keys(BUILTIN_FNS).join(' / ')}`
@@ -1101,10 +1253,12 @@ class Compiler {
           { op: 'push', cond: cond.reg, elsePc: -1, joinPc: -1, line: node.span.line },
           node.span.line
         );
+        this.frames.push({ kind: 'mask' });
         this.stmt(node.then);
         const swapAt = this.here();
         this.emit({ op: 'swap', joinPc: -1 }, node.span.line);
         if (node.otherwise) this.stmt(node.otherwise);
+        this.frames.pop();
         const joinAt = this.here();
         this.emit({ op: 'pop' }, node.span.line);
         this.patchPush(pushAt, swapAt, joinAt);
@@ -1117,12 +1271,16 @@ class Compiler {
         const condAt = this.here();
         const cond = this.expr(node.cond);
         const lcondAt = this.emit({ op: 'lcond', cond: cond.reg, exitPc: -1 }, node.span.line);
+        const frame: Frame = { kind: 'loop', breaks: [] };
+        this.frames.push(frame);
         this.stmt(node.body);
+        this.frames.pop();
         this.emit({ op: 'jmp', target: condAt }, node.span.line);
         const exitAt = this.here();
         this.emit({ op: 'pop' }, node.span.line);
         (this.insts[loopAt] as { exitPc: number }).exitPc = exitAt;
         (this.insts[lcondAt] as { exitPc: number }).exitPc = exitAt;
+        this.patchBreaks(frame, exitAt);
         break;
       }
 
@@ -1136,13 +1294,17 @@ class Compiler {
           const cond = this.expr(node.cond);
           lcondAt = this.emit({ op: 'lcond', cond: cond.reg, exitPc: -1 }, node.span.line);
         }
+        const frame: Frame = { kind: 'loop', breaks: [] };
+        this.frames.push(frame);
         this.stmt(node.body);
+        this.frames.pop();
         if (node.step) this.expr(node.step);
         this.emit({ op: 'jmp', target: condAt }, node.span.line);
         const exitAt = this.here();
         this.emit({ op: 'pop' }, node.span.line);
         (this.insts[loopAt] as { exitPc: number }).exitPc = exitAt;
         if (lcondAt >= 0) (this.insts[lcondAt] as { exitPc: number }).exitPc = exitAt;
+        this.patchBreaks(frame, exitAt);
         this.popScope();
         break;
       }
@@ -1152,13 +1314,280 @@ class Compiler {
         break;
 
       case 'return':
-        if (node.value) this.fail(node.span.line, node.span.column, 'kernel 是 void，return 不能带值');
-        // 提前 return 会让部分 lane 退出，那是发散的一种。当前子集里只允许
-        // 出现在 kernel 末尾 —— 别处的 return 需要一条「退出掩码」，
-        // 和 break 是同一件事，一起等后续实现。
-        this.emit({ op: 'ret' }, node.span.line);
+        this.returnStmt(node.value, node.span.line, node.span.column);
+        break;
+
+      case 'break': {
+        this.requireHost(node.span.line, node.span.column, 'break');
+        const loop = this.innermostLoop();
+        if (!loop) this.fail(node.span.line, node.span.column, 'break 不在循环里');
+        // 弹掉这个循环之上开着的每一层掩码；循环自己那一层由跳转目标处的
+        // pop 负责，所以不在这里弹。
+        this.unwindAbove(loop, node.span.line);
+        loop.breaks.push(this.emit({ op: 'jmp', target: -1 }, node.span.line));
+        break;
+      }
+
+      case 'launch':
+        this.launchStmt(node);
         break;
     }
+  }
+
+  /* ---------------- 自己写的函数：整个内联进来 ---------------- */
+
+  /**
+   * 把一个函数内联到调用点。
+   *
+   * 没有调用栈，也就没有递归 —— 撞见递归明确报错，而不是编出一个
+   * 会把寄存器数撑爆的东西。真卡上 `__device__` 函数本来也是全内联的
+   * （GPU 上维护调用栈太贵），所以设备侧这不是简化；宿主侧是我们的
+   * 实现选择，语义上没有区别。
+   */
+  private inlineCall(fn: FuncDecl, node: Extract<Expr, { kind: 'call' }>): Value {
+    if (this.inlineStack.includes(fn.name)) {
+      this.fail(node.span.line, node.span.column,
+        `\`${fn.name}\` 递归调用了自己 —— 函数是内联展开的，展不开递归。`
+        + '改成循环');
+    }
+    if (this.inlineStack.length >= 12) {
+      this.fail(node.span.line, node.span.column, '函数内联层数超过 12 层，太深了');
+    }
+    if (node.args.length !== fn.params.length) {
+      this.fail(node.span.line, node.span.column,
+        `\`${fn.name}\` 要 ${fn.params.length} 个参数，给了 ${node.args.length} 个`);
+    }
+
+    // 实参在**调用者的**作用域里求值，然后才切进去
+    const actuals = fn.params.map((param, index) => {
+      const value = this.expr(node.args[index]);
+      return isPointer(param.type) ? value : this.convert(value, param.type, node.span.line);
+    });
+
+    // 被内联的函数体里如果有动态下标的数组，也得落到 local memory。
+    // 名字撞车会让调用者的同名数组一起落下去 —— 偏保守，不会算错。
+    for (const name of arraysWithDynamicIndex(fn.body)) this.dynamicArrays.add(name);
+
+    this.scopeFloor.push(this.scopes.length);
+    this.pushScope();
+    fn.params.forEach((param, index) => {
+      const reg = this.alloc();
+      this.emit({ op: 'mov', dst: reg, src: actuals[index].reg }, node.span.line);
+      this.bind(param.name, { where: 'reg', reg, type: param.type });
+    });
+
+    const isVoid = fn.returnType.kind === 'scalar' && fn.returnType.scalar === 'void';
+    const result = this.alloc();
+    this.emit(
+      { op: 'const', dst: result, value: 0, ty: isVoid ? 'i32' : irTypeOf(fn.returnType) },
+      node.span.line
+    );
+
+    const frame: Frame = {
+      kind: 'fn', returns: [], result, type: fn.returnType, name: fn.name,
+    };
+    this.frames.push(frame);
+    this.inlineStack.push(fn.name);
+    this.stmt(fn.body);
+    this.inlineStack.pop();
+    this.frames.pop();
+
+    if (frame.kind === 'fn' && frame.returns.length) {
+      // 跳转目标必须是一条真指令 —— 补一条无害的搬运当锚点，
+      // 它算在记账指令里，时序模型会扣掉。
+      const anchor = this.here();
+      this.emit({ op: 'mov', dst: result, src: result }, node.span.line);
+      for (const at of frame.returns) (this.insts[at] as { target: number }).target = anchor;
+    }
+
+    this.popScope();
+    this.scopeFloor.pop();
+    return { reg: result, type: isVoid ? { kind: 'scalar', scalar: 'int' } : fn.returnType };
+  }
+
+  /* ---------------- 宿主运行时 ---------------- */
+
+  private hostCall(node: Extract<Expr, { kind: 'call' }>): Value {
+    const { line, column } = node.span;
+    if (!this.ctx.host) {
+      this.fail(line, column,
+        `\`${node.callee}\` 是宿主侧的函数，kernel 里调用不了`);
+    }
+
+    // cudaMalloc 的第一个参数是「指针的地址」。这个子集里标量住在寄存器里、
+    // 没有地址，所以在语法层面认这个模式，把结果直接写回那个指针变量。
+    // 保留真签名是有意的：学员在真卡上敲的就是这一行。
+    if (node.callee === 'cudaMalloc') {
+      if (node.args.length !== 2) this.fail(line, column, 'cudaMalloc 要两个参数：(void**)&指针, 字节数');
+      const target = unwrapCast(node.args[0]);
+      if (target.kind !== 'addressOf' || target.target.kind !== 'name') {
+        this.fail(line, column,
+          'cudaMalloc 的第一个参数要写成 `(void**)&指针变量` —— 这个子集只认这一种写法');
+      }
+      const binding = this.lookup(target.target.name);
+      if (!binding || binding.where !== 'reg' || !isPointer(binding.type)) {
+        this.fail(line, column,
+          `\`${target.target.name}\` 不是一个已经声明的指针变量`);
+      }
+      const bytes = this.convert(this.expr(node.args[1]), { kind: 'scalar', scalar: 'int' }, line);
+      const status = this.alloc();
+      this.emit(
+        { op: 'hostcall', dst: binding.reg, fn: 'cudaMalloc', args: [bytes.reg], line },
+        line
+      );
+      this.emit({ op: 'const', dst: status, value: 0, ty: 'i32' }, line);
+      return { reg: status, type: { kind: 'scalar', scalar: 'int' } };
+    }
+
+    if (node.callee === 'printf') {
+      if (!node.args.length) this.fail(line, column, 'printf 至少要一个格式串');
+      const format = node.args[0];
+      if (format.kind !== 'strLit') {
+        this.fail(line, column, 'printf 的第一个参数必须是字符串字面量');
+      }
+      if (node.args.length > 4) {
+        this.fail(line, column, 'printf 最多带三个值 —— 多的分几行打');
+      }
+      const index = this.strings.length;
+      this.strings.push(format.value);
+      const args = [this.constant(index, 'i32', line)];
+      for (const arg of node.args.slice(1)) args.push(this.expr(arg).reg);
+      const dst = this.alloc();
+      this.emit({ op: 'hostcall', dst, fn: 'printf', args, line }, line);
+      return { reg: dst, type: { kind: 'scalar', scalar: 'int' } };
+    }
+
+    const spec = HOST_FNS[node.callee];
+    if (!spec) this.fail(line, column, `暂不支持函数 \`${node.callee}\``);
+    if (node.args.length !== spec.arity) {
+      this.fail(line, column, `\`${node.callee}\` 要 ${spec.arity} 个参数，给了 ${node.args.length} 个`);
+    }
+    const args = node.args.map((arg) => {
+      const value = this.expr(arg);
+      return isPointer(value.type)
+        ? value.reg
+        : this.convert(value, { kind: 'scalar', scalar: 'int' }, line).reg;
+    });
+    const dst = this.alloc();
+    this.emit({ op: 'hostcall', dst, fn: spec.fn, args, line }, line);
+    // lab_buffer 交回来的是一个**设备指针**，类型必须是 float* ——
+    // 当成 int 的话 `p[i]` 会按标量算，静默读到别的地方
+    const type: CudaType = spec.fn === 'lab_buffer'
+      ? { kind: 'pointer', to: { kind: 'scalar', scalar: 'float' }, space: 'global' }
+      : { kind: 'scalar', scalar: 'int' };
+    return { reg: dst, type };
+  }
+
+  /* ---------------- 跳出去：弹掩码 ---------------- */
+
+  /**
+   * 从当前位置跳到某个外层出口之前，要弹掉几层掩码。
+   *
+   * **这套办法只在宿主代码里正确，所以只在宿主代码里放开。**
+   * VM 是掩码栈机器：`pop` 恢复的是进入那一层之前的 active 掩码。
+   * 32 个 lane 时，只有一部分 lane 执行到 `break`，直接 pop 会把没 break
+   * 的 lane 也一起带走 —— 正确的做法是维护一条贯穿循环的「已退出」掩码，
+   * 那是另一件事。宿主代码只有一个 lane：要么整条路径在跑（active=1），
+   * 要么整个区域被跳过（VM 在 active=0 时根本不进来），于是静态地弹掉
+   * 开着的那几层就是对的。
+   */
+  private unwindAbove(target: Frame, line: number): void {
+    for (let i = this.frames.length - 1; i >= 0; i -= 1) {
+      const frame = this.frames[i];
+      if (frame === target) return;
+      if (frame.kind !== 'fn') this.emit({ op: 'pop' }, line);
+    }
+  }
+
+  /** 一路弹到函数边界（含边界之上的循环帧） */
+  private unwindToFunction(line: number): { kind: 'fn'; returns: number[]; result: number; type: CudaType; name: string } | null {
+    for (let i = this.frames.length - 1; i >= 0; i -= 1) {
+      const frame = this.frames[i];
+      if (frame.kind === 'fn') return frame;
+      this.emit({ op: 'pop' }, line);
+    }
+    return null;
+  }
+
+  private innermostLoop(): { kind: 'loop'; breaks: number[] } | null {
+    for (let i = this.frames.length - 1; i >= 0; i -= 1) {
+      const frame = this.frames[i];
+      if (frame.kind === 'loop') return frame;
+      if (frame.kind === 'fn') return null;
+    }
+    return null;
+  }
+
+  private patchBreaks(frame: { kind: 'loop'; breaks: number[] }, exitAt: number): void {
+    for (const at of frame.breaks) (this.insts[at] as { target: number }).target = exitAt;
+  }
+
+  private requireHost(line: number, column: number, what: string): void {
+    if (this.ctx.host) return;
+    this.fail(line, column,
+      `\`${what}\` 暂时只在宿主代码里支持 —— 设备侧要让一部分 lane 提前跳出，`
+      + '需要一条贯穿的退出掩码，这个子集还没有。用 if / else 改写');
+  }
+
+  private returnStmt(value: Expr | undefined, line: number, column: number): void {
+    // 先算返回值（还在原来的掩码下），再弹栈跳出去
+    const enclosing = this.frames.find((frame) => frame.kind === 'fn') as
+      | { kind: 'fn'; returns: number[]; result: number; type: CudaType; name: string }
+      | undefined;
+
+    if (enclosing) {
+      if (value) {
+        if (enclosing.type.kind === 'scalar' && enclosing.type.scalar === 'void') {
+          this.fail(line, column, `\`${enclosing.name}\` 返回 void，return 不能带值`);
+        }
+        const produced = this.convert(this.expr(value), enclosing.type, line);
+        this.emit({ op: 'mov', dst: enclosing.result, src: produced.reg }, line);
+      }
+      // 内联进来的函数体里，只要不是最后一句就得跳出去
+      const above = this.frames.length - 1 - this.frames.lastIndexOf(enclosing);
+      if (above > 0) this.requireHost(line, column, '函数里的提前 return');
+      this.unwindToFunction(line);
+      enclosing.returns.push(this.emit({ op: 'jmp', target: -1 }, line));
+      return;
+    }
+
+    // 顶层：kernel 是 void，宿主的 main 返回退出码（当前不往外传，
+    // 但语法上要收下，否则学员写的 `return 0;` 会报错）
+    if (value && !this.ctx.host) {
+      this.fail(line, column, 'kernel 是 void，return 不能带值');
+    }
+    if (value) this.expr(value);
+    if (this.ctx.host && this.frames.length > 0) {
+      this.unwindToFunction(line);
+      this.topReturns.push(this.emit({ op: 'jmp', target: -1 }, line));
+      return;
+    }
+    // 设备侧：`ret` 把**当前活跃的那些 lane** 标成退出，别的 lane 接着跑。
+    // `if (i >= n) return;` 这句 CUDA 里最常见的守卫就靠它成立。
+    this.emit({ op: 'ret' }, line);
+  }
+
+  /* ---------------- 起 kernel ---------------- */
+
+  private launchStmt(node: Extract<Stmt, { kind: 'launch' }>): void {
+    if (!this.ctx.host) {
+      this.fail(node.span.line, node.span.column,
+        '只有宿主代码能起 kernel —— 设备侧起 kernel 是动态并行，这个子集不支持');
+    }
+    const dim = (parts: Expr[]): number[] => {
+      const regs = parts.map((part) => {
+        const value = this.convert(this.expr(part), { kind: 'scalar', scalar: 'int' }, node.span.line);
+        return value.reg;
+      });
+      while (regs.length < 3) regs.push(this.constant(1, 'i32', node.span.line));
+      return regs;
+    };
+    const grid = dim(node.grid);
+    const block = dim(node.block);
+    const args = node.args.map((arg) => this.expr(arg).reg);
+    const site = this.launches.length;
+    this.launches.push({ kernel: node.kernel, grid, block, args, line: node.span.line });
+    this.emit({ op: 'launch', site, line: node.span.line }, node.span.line);
   }
 
   private declare(decl: VarDecl): void {
@@ -1359,6 +1788,13 @@ function estimateRegisters(insts: Inst[], numRegs: number): number {
   return peak + 4;
 }
 
+/** 剥掉外层的强制转换，`(void**)&p` 里要看的是 `&p` */
+function unwrapCast(node: Expr): Expr {
+  let current = node;
+  while (current.kind === 'cast') current = current.operand;
+  return current;
+}
+
 /** 数组或指针的元素类型 */
 function elementOf(type: CudaType): CudaType | null {
   if (type.kind === 'array') return type.of;
@@ -1366,7 +1802,34 @@ function elementOf(type: CudaType): CudaType | null {
   return null;
 }
 
-export function compileKernel(kernel: KernelDecl): CompiledKernel {
-  return new Compiler(kernel).compile();
+const NO_FUNCTIONS = new Map<string, FuncDecl>();
+
+export function compileKernel(
+  kernel: KernelDecl,
+  functions: Map<string, FuncDecl> = NO_FUNCTIONS
+): CompiledKernel {
+  return new Compiler(kernel, { functions, host: false }).compile();
+}
+
+/**
+ * 编译宿主程序的 `main`。
+ *
+ * 它编出来的东西和一个 kernel 长得一样，因为它就是用同一台 VM 跑的 ——
+ * grid 与 block 都是 1，只有一个 lane 活着。
+ */
+export function compileHost(
+  main: FuncDecl,
+  functions: Map<string, FuncDecl>
+): CompiledHost {
+  if (main.params.length) {
+    throw new CudaCompileError(
+      'main 暂时不收参数 —— 写成 `int main(void)`',
+      main.span
+    );
+  }
+  const decl: KernelDecl = {
+    name: 'main', params: [], body: main.body, span: main.span,
+  };
+  return new Compiler(decl, { functions, host: true }).compile();
 }
 

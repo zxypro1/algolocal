@@ -13,7 +13,7 @@
  * 但**位置、行号、以及「哪一行出错」是准的**。
  */
 import type { CommandHandler, CommandResult } from '../../labkit/machine';
-import { compileSource } from '../index';
+import { compileProgram } from '../index';
 import { CudaCompileError } from '../cuda/lower';
 import { CudaSyntaxError } from '../cuda/parser';
 import { KernelError } from '../vm/vm';
@@ -94,14 +94,18 @@ export function createNvcc(world: GpuWorld): CommandHandler {
     const displayName = sources[0].split('/').pop() ?? sources[0];
 
     try {
-      const kernels = await compileSource(text);
+      const { kernels, host } = await compileProgram(text);
       world.artifacts.set(resolve(cwd, output), {
         path: resolve(cwd, output),
         kernels,
+        host,
         sources: sources.map((source) => resolve(cwd, source)),
       });
       // 磁盘上留一个真的文件，`ls` / `cat` 看得见
-      vfs.writeFile(resolve(cwd, output), `#!gpulab-binary\n${[...kernels.keys()].join('\n')}\n`);
+      vfs.writeFile(
+        resolve(cwd, output),
+        `#!gpulab-binary\n${[...kernels.keys(), ...(host ? ['main'] : [])].join('\n')}\n`
+      );
       // 让 `./bench` 能敲。
       //
       // labkit 的 shell 只按名字查已注册的命令，不会去磁盘上找可执行文件 ——
@@ -208,6 +212,30 @@ export async function runBench(
 
   const startedAt = Date.now();
   const out: string[] = [];
+
+  // 学员写了 `int main()` 的关卡：跑他的 main，别跑关卡声明的那套固定流程。
+  // 缓冲区照样由平台分配与填充 —— 判定要知道输入是什么，
+  // `main` 通过 `lab_buffer(i)` 拿到它们的设备指针。
+  if (artifact.host) {
+    const ordered = bench.buffers.map((buffer) => {
+      const found = world.buffers.get(buffer.name);
+      return { address: found?.address ?? 0, length: found?.length ?? 0 };
+    });
+    try {
+      const result = world.gpu.runHost(artifact.host, artifact.kernels, ordered, {
+        racecheck: options.racecheck,
+      });
+      world.lastRun = { artifact, launches: [], wallClockMs: Date.now() - startedAt };
+      if (preserved) world.gpu.restoreCounters(preserved);
+      return { stdout: result.stdout, stderr: '', code: 0 };
+    } catch (error) {
+      const detail = error instanceof KernelError
+        ? error.message
+        : String((error as Error)?.message ?? error);
+      if (preserved) world.gpu.restoreCounters(preserved);
+      return { stdout: out.join('\n'), stderr: `${detail}\n`, code: 1 };
+    }
+  }
 
   for (const launch of bench.launches) {
     const kernel = artifact.kernels.get(launch.kernel);

@@ -15,7 +15,8 @@
 import type { TsNode } from './parser';
 import {
   BOOL, FLOAT, HALF, INT, UINT, VOID,
-  type BinaryOp, type BuiltinVar, type CudaType, type Expr, type KernelDecl,
+  type BinaryOp, type BuiltinVar, type CudaType, type Expr,
+  type FuncDecl, type FunctionRole, type KernelDecl,
   type FragmentType, type Param, type SourceSpan, type Stmt, type TranslationUnit,
   type UnaryOp, type VarDecl,
 } from './ast';
@@ -310,6 +311,16 @@ function lowerExpr(node: TsNode): Expr {
   const span = spanOf(node);
 
   switch (node.type) {
+    case 'string_literal': {
+      // tree-sitter 把内容放在 string_content 里，转义序列是独立节点
+      let text = '';
+      for (const child of allChildren(node)) {
+        if (child.type === 'string_content') text += child.text;
+        else if (child.type === 'escape_sequence') text += unescapeC(child.text, node);
+      }
+      return { kind: 'strLit', value: text, span };
+    }
+
     case 'number_literal': {
       const parsed = parseNumberLiteral(node);
       return parsed.isFloat
@@ -539,6 +550,66 @@ function conditionOf(node: TsNode): Expr {
   return lowerExpr(inner);
 }
 
+/**
+ * `kernel<<<grid, block>>>(args)`
+ *
+ * 真 CUDA 的 `<<<>>>` 还能带第三、四个参数（动态共享内存字节数、流）。
+ * 这个子集只收前两个，多写的**明确报错**而不是悄悄忽略 ——
+ * 被忽略的动态共享内存会让 kernel 读到一片根本没分配的内存。
+ */
+/** printf 的格式串里能出现的转义 */
+function unescapeC(text: string, node: TsNode): string {
+  switch (text) {
+    case '\\n': return '\n';
+    case '\\t': return '\t';
+    case '\\r': return '\r';
+    case '\\\\': return '\\';
+    case '\\"': return '"';
+    case "\\'": return "'";
+    case '\\0': return '\0';
+    default: fail(node, `暂不支持的转义 \`${text}\``);
+  }
+}
+
+function lowerLaunch(node: TsNode, syntax: TsNode, span: SourceSpan): Stmt {
+  const children = namedChildren(node);
+  const callee = children[0];
+  if (callee?.type !== 'identifier') fail(node, '起 kernel 时 <<< 前面要写 kernel 的名字');
+
+  const config = namedChildren(syntax);
+  if (config.length < 2) fail(syntax, '<<<>>> 里至少要写 grid 与 block 两个参数');
+  if (config.length > 2) {
+    fail(syntax, '<<<>>> 的第三、四个参数（动态共享内存、流）暂不支持 —— '
+      + '共享内存请用 __shared__ 静态声明');
+  }
+
+  const argList = children.find((child) => child.type === 'argument_list');
+  const args = argList ? namedChildren(argList).map(lowerExpr) : [];
+
+  return {
+    kind: 'launch',
+    kernel: callee.text,
+    grid: lowerDim(config[0]),
+    block: lowerDim(config[1]),
+    args,
+    span,
+  };
+}
+
+/** grid / block 可以写成一个整数，也可以写成 `dim3(x, y, z)` */
+function lowerDim(node: TsNode): Expr[] {
+  if (node.type === 'call_expression') {
+    const parts = namedChildren(node);
+    if (parts[0]?.type === 'identifier' && parts[0].text === 'dim3') {
+      const argList = parts.find((child) => child.type === 'argument_list');
+      const args = argList ? namedChildren(argList) : [];
+      if (!args.length || args.length > 3) fail(node, 'dim3 要写 1 到 3 个分量');
+      return args.map(lowerExpr);
+    }
+  }
+  return [lowerExpr(node)];
+}
+
 function lowerStmt(node: TsNode): Stmt {
   const span = spanOf(node);
 
@@ -558,6 +629,13 @@ function lowerStmt(node: TsNode): Stmt {
         if (callee?.type === 'identifier' && callee.text === '__syncthreads') {
           return { kind: 'syncthreads', span };
         }
+        // `kernel<<<grid, block>>>(args)`：语法上还是 call_expression，
+        // 只是中间多了一个 kernel_call_syntax 节点。它是语句不是表达式 ——
+        // 起 kernel 没有返回值。
+        const launchSyntax = namedChildren(inner).find(
+          (child) => child.type === 'kernel_call_syntax'
+        );
+        if (launchSyntax) return lowerLaunch(inner, launchSyntax, span);
       }
       return { kind: 'expr', expr: lowerExpr(inner), span };
     }
@@ -579,6 +657,9 @@ function lowerStmt(node: TsNode): Stmt {
         span,
       };
     }
+
+    case 'break_statement':
+      return { kind: 'break', span };
 
     case 'while_statement': {
       const cond = conditionOf(node);
@@ -670,50 +751,77 @@ function lowerParam(node: TsNode): Param {
   return { name: declared.name, type: declared.type, span: spanOf(node) };
 }
 
-function lowerFunction(node: TsNode): KernelDecl | null {
+function lowerFunction(node: TsNode): FuncDecl {
   const kinds = allChildren(node).map((child) => child.text.trim());
-  const isGlobal = kinds.includes('__global__');
-  const isDevice = kinds.includes('__device__');
-
-  if (!isGlobal) {
-    if (isDevice) {
-      fail(node, '暂不支持自己写的 __device__ 函数 —— 先把逻辑内联进 kernel');
-    }
-    fail(node, '这一版只支持 __global__ kernel，还不支持宿主函数');
-  }
+  const role: FunctionRole = kinds.includes('__global__')
+    ? 'kernel'
+    : kinds.includes('__device__')
+      ? 'device'
+      : 'host';
 
   const declarator = namedChildren(node).find((child) => child.type === 'function_declarator');
-  if (!declarator) fail(node, '看不出这个 kernel 的名字与参数');
+  if (!declarator) fail(node, '看不出这个函数的名字与参数');
 
   const nameNode = namedChildren(declarator).find((child) => child.type === 'identifier');
-  if (!nameNode) fail(declarator, 'kernel 缺少名字');
+  if (!nameNode) fail(declarator, '函数缺少名字');
 
   const paramList = namedChildren(declarator).find((child) => child.type === 'parameter_list');
   const params = paramList
     ? namedChildren(paramList)
         .filter((child) => child.type === 'parameter_declaration')
+        // `int main(void)` 里的 void 不是参数
+        .filter((child) => child.text.trim() !== 'void')
         .map(lowerParam)
     : [];
 
   const body = namedChildren(node).find((child) => child.type === 'compound_statement');
-  if (!body) fail(node, 'kernel 缺少函数体');
+  if (!body) fail(node, '函数缺少函数体');
 
   const returnType = findTypeSpecifier(namedChildren(node), node);
-  if (!(returnType.kind === 'scalar' && returnType.scalar === 'void')) {
+  if (role === 'kernel' && !(returnType.kind === 'scalar' && returnType.scalar === 'void')) {
     fail(node, 'kernel 的返回类型必须是 void');
   }
+  if (returnType.kind === 'array') fail(node, '函数不能返回数组');
 
-  return { name: nameNode.text, params, body: lowerStmt(body), span: spanOf(node) };
+  return {
+    name: nameNode.text,
+    role,
+    params,
+    returnType,
+    body: lowerStmt(body),
+    span: spanOf(node),
+  };
+}
+
+/**
+ * 顶层的 `declaration` 有两种：函数原型与全局变量。
+ * 原型是合法的（`containers.h` 里全是原型），全局变量还不支持。
+ */
+function isPrototype(node: TsNode): boolean {
+  return namedChildren(node).some((child) => child.type === 'function_declarator');
 }
 
 export function lowerTranslationUnit(root: TsNode): TranslationUnit {
   const kernels: KernelDecl[] = [];
+  const functions = new Map<string, FuncDecl>();
+  let main: FuncDecl | null = null;
 
   for (const child of namedChildren(root)) {
     switch (child.type) {
       case 'function_definition': {
-        const kernel = lowerFunction(child);
-        if (kernel) kernels.push(kernel);
+        const fn = lowerFunction(child);
+        if (functions.has(fn.name) || kernels.some((k) => k.name === fn.name)) {
+          fail(child, `\`${fn.name}\` 定义了两次`);
+        }
+        if (fn.role === 'kernel') {
+          kernels.push({ name: fn.name, params: fn.params, body: fn.body, span: fn.span });
+          break;
+        }
+        functions.set(fn.name, fn);
+        if (fn.name === 'main') {
+          if (fn.role !== 'host') fail(child, 'main 不能带 __device__');
+          main = fn;
+        }
         break;
       }
       case 'comment':
@@ -724,6 +832,7 @@ export function lowerTranslationUnit(root: TsNode): TranslationUnit {
         fail(child, '暂不支持 #define —— 用 const 变量代替');
         break;
       case 'declaration':
+        if (isPrototype(child)) break;
         fail(child, '暂不支持全局变量');
         break;
       default:
@@ -731,8 +840,11 @@ export function lowerTranslationUnit(root: TsNode): TranslationUnit {
     }
   }
 
-  if (!kernels.length) {
-    throw new CudaCompileError('这份源码里没有 __global__ kernel', { line: 1, column: 1 });
+  if (!kernels.length && !main) {
+    throw new CudaCompileError(
+      '这份源码里既没有 __global__ kernel，也没有 int main()',
+      { line: 1, column: 1 }
+    );
   }
-  return { kernels };
+  return { kernels, functions, main };
 }

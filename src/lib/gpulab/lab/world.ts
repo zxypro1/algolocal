@@ -16,6 +16,7 @@ import { GpuDevice, type DeviceOptions } from '../index';
 import { B200, H100, type DeviceSpec } from '../device';
 import type { ExecutableKernel } from '../ir/program';
 import type { Dim3 } from '../vm/vm';
+import { HOST_HEADERS } from '../host/headers';
 
 /** 缓冲区里一开始装什么。要能写进 JSON，所以是声明而不是函数。 */
 export type BufferFill =
@@ -74,6 +75,15 @@ export interface CompiledArtifact {
   path: string;
   /** 名字 → kernel */
   kernels: Map<string, ExecutableKernel>;
+  /**
+   * 源码里的 `int main()`，编出来的宿主程序。
+   *
+   * 有它的时候 `./bench` 跑的是学员自己写的 `main`；没有的时候
+   * 跑的是关卡在 `BenchSpec` 里声明的那套固定流程。
+   * 前半程的关卡只写 kernel，后半程（KV cache、分页 KV、引擎组装、
+   * 调度器）主要逻辑在宿主侧，走的就是前一条路。
+   */
+  host?: ExecutableKernel | null;
   /** 编译时用的源文件 */
   sources: string[];
 }
@@ -164,7 +174,9 @@ export function createGpuWorld(spec: GpuWorldSpec): GpuWorld {
     hostname: spec.machine?.hostname ?? 'gpu-01',
     user: spec.machine?.user ?? 'root',
     cwd: spec.machine?.cwd ?? '/root',
-    files: spec.machine?.files,
+    // 平台的头文件先铺进去，关卡自己的文件盖在上面 ——
+    // 万一某一关要换掉某个头文件，它说了算
+    files: { ...HOST_HEADERS, ...(spec.machine?.files ?? {}) },
   });
 
   const world: GpuWorld = {

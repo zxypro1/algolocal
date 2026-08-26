@@ -19,7 +19,7 @@
  * 保留的理由是架构而不是一个测出来的加速比。
  */
 import type {
-  AtomKind, BinKind, BuiltinFn, CompiledKernel, Inst, IrType,
+  AtomKind, BinKind, BuiltinFn, CompiledKernel, HostFn, Inst, IrType,
   ShflMode, Space, SpecialReg, UnKind,
 } from './types';
 
@@ -56,7 +56,24 @@ export const OP = {
   WMMA_LOAD: 26,
   WMMA_STORE: 27,
   WMMA_MMA: 28,
+  HOSTCALL: 29,
+  LAUNCH: 30,
 } as const;
+
+/**
+ * 宿主运行时函数的编号。
+ *
+ * 和 `FN` 一样用查表而不是判断区间：区间判断依赖枚举顺序，
+ * 将来往中间插一个函数就会静默算错。
+ */
+export const HOST: Record<HostFn, number> = {
+  cudaMalloc: 0, cudaFree: 1, cudaMemcpy: 2, cudaMemset: 3, cudaDeviceSynchronize: 4,
+  printf: 5,
+  lab_buffer: 6, lab_buffer_len: 7,
+  vec_new: 10, vec_push: 11, vec_pop: 12, vec_get: 13, vec_set: 14, vec_len: 15, vec_clear: 16,
+  map_new: 20, map_set: 21, map_get: 22, map_has: 23, map_del: 24, map_len: 25,
+  ring_new: 30, ring_push: 31, ring_pop: 32, ring_peek: 33, ring_len: 34,
+};
 
 export const SHFL = { idx: 0, up: 1, down: 2, xor: 3 } as const;
 
@@ -252,6 +269,20 @@ export function encode(kernel: CompiledKernel): ExecutableKernel {
         code[at + 4] = inst.args[0] ?? 0;
         code[at + 5] = inst.args[1] ?? 0;
         code[at + 6] = inst.args[2] ?? 0;
+        break;
+      case 'hostcall':
+        code[at] = OP.HOSTCALL;
+        code[at + 1] = inst.dst;
+        code[at + 2] = HOST[inst.fn];
+        code[at + 3] = inst.args.length;
+        code[at + 4] = inst.args[0] ?? 0;
+        code[at + 5] = inst.args[1] ?? 0;
+        code[at + 6] = inst.args[2] ?? 0;
+        code[at + 7] = inst.args[3] ?? 0;
+        break;
+      case 'launch':
+        code[at] = OP.LAUNCH;
+        code[at + 1] = inst.site;
         break;
       case 'shfl':
         code[at] = OP.SHFL;

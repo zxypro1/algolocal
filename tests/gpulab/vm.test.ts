@@ -56,7 +56,10 @@ describe('CUDA 前端', () => {
       ['__global__ void k(float* a) { struct P { int x; }; }', /暂不支持|struct/],
       ['__global__ void k(float* a) { double d = 1.0; }', /double/],
       ['__global__ void k(float* a) { for (int i=0;i<4;++i) { break; } }', /break/],
-      ['__device__ float f(float x) { return x; }', /__device__/],
+      // __device__ 函数现在支持了（编译期内联，见 tests/gpulab/host.test.ts）。
+      // 换成还没做的：函数里的提前 return 在设备侧需要按层保存的退出掩码。
+      ['__device__ int f(int x) { if (x > 0) { return 1; } return 0; }\n'
+        + '__global__ void k(int* a) { a[0] = f(a[0]); }', /退出掩码/],
       ['__global__ void k(float* a) { extern __shared__ float s[]; }', /extern|动态共享内存/],
       // 线程私有数组现在支持了（常量下标进寄存器、动态下标落 local memory），
       // 这一行换成还没做的：数组初始化列表
