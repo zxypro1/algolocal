@@ -21,16 +21,17 @@ function fail(message) {
 }
 
 function validate(project, source) {
-  const ops = project.workspace?.kind === 'ops';
-  // ops 形态没有「工作区文件」这个概念：学员编辑的是机器磁盘上的文件，
-  // 由 stage.ops.files 铺下去
+  const kind = project.workspace?.kind;
+  // ops / gpu 形态没有「工作区文件」这个概念：学员编辑的是机器磁盘上的文件，
+  // 由 stage.ops.files / stage.gpu.files 铺下去
+  const machineBased = kind === 'ops' || kind === 'gpu';
   const required = ['id', 'title', 'summary', 'difficulty', 'brief', 'stages']
-    .concat(ops ? [] : ['files']);
+    .concat(machineBased ? [] : ['files']);
   for (const field of required) {
     if (!project[field]) fail(`${source}: 缺少字段 ${field}`);
   }
-  if (ops && !project.workspace.world) {
-    fail(`${source}: ops 形态必须声明 workspace.world`);
+  if (machineBased && !project.workspace.world) {
+    fail(`${source}: ${kind} 形态必须声明 workspace.world`);
   }
   if (!Array.isArray(project.stages) || project.stages.length === 0) {
     fail(`${source}: stages 不能为空`);
@@ -65,8 +66,10 @@ function main() {
     validate(project, name);
 
     // 题目只写一份 TypeScript，JS 版在这里自动派生，避免两份内容漂移。
-    // ops 形态没有「用另一种语言重做一遍」这回事 —— 学员写的是 YAML 和命令。
-    if (project.language !== 'javascript' && project.workspace?.kind !== 'ops') {
+    // ops / gpu 形态没有「用另一种语言重做一遍」这回事 ——
+    // 学员写的是 YAML、命令，或者 CUDA C。
+    const machineBased = project.workspace?.kind === 'ops' || project.workspace?.kind === 'gpu';
+    if (project.language !== 'javascript' && !machineBased) {
       project.variants = { javascript: deriveJavaScriptVariant(project) };
     }
 

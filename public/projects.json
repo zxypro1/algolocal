@@ -14948,6 +14948,509 @@
     ]
   },
   {
+    "id": "llm-accelerator",
+    "title": {
+      "zh": "CUDA GPU 编程：搭一个 LLM 加速引擎",
+      "en": "CUDA GPU programming: build an LLM inference engine"
+    },
+    "summary": {
+      "zh": "写真 CUDA，用真 ncu 剖析。从第一个 kernel 一路做到能跑的推理引擎，最后摊到 16 卡集群上。",
+      "en": "Write real CUDA, profile with real ncu. From your first kernel to a working inference engine, then out to a 16-GPU cluster."
+    },
+    "difficulty": "Hard",
+    "domain": "gpu",
+    "tags": [
+      "cuda",
+      "gpu",
+      "performance",
+      "llm",
+      "parallel"
+    ],
+    "estimatedMinutes": 2400,
+    "language": "typescript",
+    "brief": {
+      "zh": "## 这是什么\n\n一台 H100，一个终端，一个 IDE。你写 CUDA C，敲 `nvcc` 编译、`ncu` 剖析、\n`compute-sanitizer` 查错 —— 命令、参数、指标名都和真机一样。\n\n## 判定标准\n\n**优化生效与否不是自称的。** 每一关的门槛都建立在平台侧的结构性计量上：\nDRAM 传输字节、32B 扇区数、bank 冲突路数、发散分支数、local memory 字节、\n占用率。这些量在给定内存模型后是精确的，而且**与硬件型号无关** ——\n换到真卡上一个不差。\n\n模拟耗时只用来展示和同关比较，**不作门槛**。\n\n## 已知的边界\n\n- 写的是 C99 子集 + CUDA 扩展，没有模板与类\n- 报错文本贴 nvcc 的形状，但做不到逐字节一致\n- 原子操作在这里按 lane 号定序，因此可复现；真卡上顺序不定",
+      "en": "## What this is\n\nOne H100, one terminal, one IDE. You write CUDA C and drive `nvcc`, `ncu` and\n`compute-sanitizer` — same commands, same flags, same metric names as the real thing.\n\n## How it is judged\n\n**Whether an optimisation worked is measured, not claimed.** Every gate is built on\nstructural counters: DRAM bytes, 32-byte sectors, bank-conflict ways, divergent branches,\nlocal-memory traffic, occupancy. Given the memory model these are exact, and they are\n**independent of the specific GPU** — they carry over to real hardware unchanged.\n\nSimulated time is shown and compared within a stage, but never gates anything.\n\n## Known boundaries\n\n- a C99 subset plus CUDA extensions; no templates or classes\n- diagnostics follow nvcc's shape but are not byte-identical\n- atomics are ordered by lane here, so they reproduce; real hardware does not guarantee order"
+    },
+    "weights": {
+      "correctness": 3,
+      "latency": 3,
+      "resilience": 1,
+      "encapsulation": 1,
+      "elegance": 1
+    },
+    "workspace": {
+      "kind": "gpu",
+      "world": {
+        "seed": 20260826,
+        "device": "H100",
+        "globalBytes": 33554432,
+        "sharedBytesPerBlock": 49152,
+        "machine": {
+          "hostname": "gpu-01",
+          "user": "root",
+          "cwd": "/root"
+        }
+      }
+    },
+    "files": [],
+    "stages": [
+      {
+        "id": "first-kernel",
+        "title": {
+          "zh": "第一个 kernel —— 线程、块、网格",
+          "en": "Your first kernel — threads, blocks, grids"
+        },
+        "goal": {
+          "zh": "磁盘上有一个 `kernel.cu`，里面的 `vecAdd` 还是空的。把它写出来：`c[i] = a[i] + b[i]`。\n\n数组长度是 **1000**，而启动配置是 4 个 block × 256 线程 = **1024 个线程**。\n多出来的 24 个线程必须什么都不做 —— 让它们去写 `c[1000]` 就是越界，\n真卡上这会踩坏别人的显存，在这里会被 `compute-sanitizer` 当场抓住。\n\n```bash\nnvcc -o bench kernel.cu\n./bench\ncompute-sanitizer --tool memcheck ./bench\n```\n\n**通关标准**\n\n- 1000 个元素全部算对\n- 一次越界都没有\n- 每个线程只负责一个元素 —— 不许一个线程用循环把全部算完",
+          "en": "There is a `kernel.cu` on disk with an empty `vecAdd`. Fill it in: `c[i] = a[i] + b[i]`.\n\nThe array holds **1000** elements but the launch is 4 blocks × 256 threads = **1024 threads**.\nThe extra 24 threads must do nothing. Letting them write `c[1000]` is out of bounds;\non a real GPU that corrupts memory belonging to someone else, and here\n`compute-sanitizer` catches it immediately.\n\n```bash\nnvcc -o bench kernel.cu\n./bench\ncompute-sanitizer --tool memcheck ./bench\n```\n\n**To pass**\n\n- all 1000 elements correct\n- no out-of-bounds access\n- one element per thread — no single thread looping over everything"
+        },
+        "checklist": [
+          {
+            "zh": "用 blockIdx / blockDim / threadIdx 算出这个线程负责哪个元素",
+            "en": "Derive this thread's element index from blockIdx / blockDim / threadIdx"
+          },
+          {
+            "zh": "加上边界检查，让多出来的线程什么都不做",
+            "en": "Guard the tail so the extra threads do nothing"
+          },
+          {
+            "zh": "`nvcc -o bench kernel.cu && ./bench` 跑通",
+            "en": "Get `nvcc -o bench kernel.cu && ./bench` to succeed"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "全局线程号是 `blockIdx.x * blockDim.x + threadIdx.x`。",
+            "en": "The global thread index is `blockIdx.x * blockDim.x + threadIdx.x`."
+          },
+          {
+            "zh": "边界检查写成 `if (i < n) { ... }`。n 是传进来的参数，不要写死 1000。",
+            "en": "Guard with `if (i < n) { ... }`. `n` is a parameter — do not hard-code 1000."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**用 `threadIdx.x` 当全局下标。** 每个 block 里的 threadIdx 都从 0 开始，于是 4 个 block 会把同样的 256 个元素算 4 遍，剩下的 744 个一个都没动。",
+            "en": "**Using `threadIdx.x` as the global index.** It restarts at 0 in every block, so the four blocks all compute the same 256 elements and the remaining 744 are never touched."
+          },
+          {
+            "zh": "**忘了边界检查。** 结果看起来可能是对的（多写的那几个格子没人读），但 memcheck 会报越界 —— 真卡上那是别人的显存。",
+            "en": "**Forgetting the guard.** The result may look right (nobody reads those slots) but memcheck reports an out-of-bounds write — on a real GPU that memory belongs to someone else."
+          }
+        ],
+        "extension": {
+          "zh": "真实的 kernel 常写成 **grid-stride loop**：`for (int i = idx; i < n; i += gridDim.x * blockDim.x)`。这样同一份代码在任何启动配置下都正确，而且能复用已经驻留在 SM 上的 block。NVIDIA 的官方博客 [CUDA Pro Tip: Write Flexible Kernels with Grid-Stride Loops](https://developer.nvidia.com/blog/cuda-pro-tip-write-flexible-kernels-grid-stride-loops/) 讲的就是它。",
+          "en": "Real kernels often use a **grid-stride loop**: `for (int i = idx; i < n; i += gridDim.x * blockDim.x)`. The same code is then correct for any launch configuration and reuses blocks already resident on an SM. See NVIDIA's [CUDA Pro Tip: Write Flexible Kernels with Grid-Stride Loops](https://developer.nvidia.com/blog/cuda-pro-tip-write-flexible-kernels-grid-stride-loops/)."
+        },
+        "gpu": {
+          "files": {
+            "/root/kernel.cu": "// 每个线程负责一个元素：c[i] = a[i] + b[i]\n//\n// 注意 n = 1000，而启动的是 1024 个线程。\n__global__ void vecAdd(const float* a, const float* b, float* c, int n) {\n  // TODO: 算出这个线程负责哪个元素，加上边界检查\n}\n"
+          },
+          "bench": {
+            "sources": [
+              "/root/kernel.cu"
+            ],
+            "buffers": [
+              {
+                "name": "a",
+                "length": 1000,
+                "fill": {
+                  "kind": "iota",
+                  "scale": 0.5
+                }
+              },
+              {
+                "name": "b",
+                "length": 1000,
+                "fill": {
+                  "kind": "iota",
+                  "scale": -0.25,
+                  "offset": 7
+                }
+              },
+              {
+                "name": "c",
+                "length": 1000,
+                "fill": {
+                  "kind": "const",
+                  "value": -999
+                }
+              }
+            ],
+            "launches": [
+              {
+                "kernel": "vecAdd",
+                "grid": [
+                  4
+                ],
+                "block": [
+                  256
+                ],
+                "args": [
+                  "a",
+                  "b",
+                  "c",
+                  1000
+                ]
+              }
+            ]
+          },
+          "referenceFiles": {
+            "/root/kernel.cu": "__global__ void vecAdd(const float* a, const float* b, float* c, int n) {\n  int i = blockIdx.x * blockDim.x + threadIdx.x;\n  if (i < n) c[i] = a[i] + b[i];\n}\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "vecadd.spec.ts",
+            "content": "const lab = require('@gpu/lab');\n\ndescribe('向量加法', () => {\n  it('1000 个元素全部算对', async () => {\n    await lab.buildAndRun();\n    const a = lab.buffer('a');\n    const b = lab.buffer('b');\n    const c = lab.buffer('c');\n    const expected = new Float32Array(a.length);\n    for (let i = 0; i < a.length; i += 1) expected[i] = Math.fround(a[i] + b[i]);\n    const diff = lab.compare(c, expected);\n    expect(diff.hasNonFinite).toBe(false);\n    expect(diff.maxAbs).toBe(0);\n  });\n\n  it('一次越界都没有', async () => {\n    const result = await lab.sh('compute-sanitizer --tool memcheck ./bench');\n    expect(result.code).toBe(0);\n  });\n\n  it('每个线程只算一个元素，没人用循环把全部包了', async () => {\n    await lab.buildAndRun();\n    const metrics = lab.metrics();\n    // 1024 个线程，每个做一次读 a、一次读 b、一次写 c。\n    // 有人写循环的话 lane 指令数会翻好几十倍。\n    expect(metrics.global.loadRequests).toBeLessThanOrEqual(4 * 8 * 2 + 8);\n    expect(metrics.inst.laneExecuted).toBeLessThan(60000);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "gpu.sanitizer.races",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "数据竞态",
+              "en": "data races"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.sanitizer.warpSyncErrors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "warp 同步用错",
+              "en": "warp sync errors"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.global.sectorsPerRequest",
+            "op": "lte",
+            "value": 4.5,
+            "label": {
+              "zh": "每次访存打到的 32B 扇区数",
+              "en": "sectors per memory request"
+            },
+            "unit": "sector/req",
+            "dimension": "latency"
+          }
+        ],
+        "focus": [
+          "correctness"
+        ],
+        "primer": {
+          "zh": "GPU 上的一次计算叫一次`kernel 启动`。启动时你要说清楚开多少线程，而且线程是**分两层**组织的：若干个`线程块`（block）组成一张`网格`（grid），每个 block 里有固定数量的线程。写成 `vecAdd<<<4, 256>>>(...)` 就是 4 个 block、每块 256 个线程。\n\n这两层不是摆设。同一个 block 里的线程跑在同一个 SM 上、能共享一小块高速内存、能互相同步；不同 block 之间没有任何顺序保证，也不能直接通信。所以 block 内和 block 间是两套完全不同的编程方式。\n\n每个线程通过三个内建变量知道自己是谁：`threadIdx` 是它在 block 里的编号，`blockIdx` 是它所在的 block 编号，`blockDim` 是每个 block 有多少线程。把它们拼起来得到全局编号：`blockIdx.x * blockDim.x + threadIdx.x`。\n\n**线程数几乎总是比数据多。** 数据长度很少正好是 block 大小的整数倍，所以每个 kernel 开头都要有一句边界检查 —— 多出来的线程必须什么都不做。让它们越界写，在真卡上就是踩坏别人的显存。",
+          "en": "One computation on a GPU is a `kernel launch`. You state how many threads to start, and threads are organised in **two levels**: a `grid` of `thread blocks`, each block holding a fixed number of threads. `vecAdd<<<4, 256>>>(...)` means 4 blocks of 256 threads.\n\nThe two levels are not decoration. Threads in one block run on the same SM, share a small fast memory, and can synchronise with each other. Different blocks have no ordering guarantee and cannot communicate directly. Programming within a block and across blocks are two different things.\n\nEach thread learns who it is from three built-in variables: `threadIdx` is its index inside the block, `blockIdx` is which block it belongs to, and `blockDim` is how many threads a block has. Combine them for a global index: `blockIdx.x * blockDim.x + threadIdx.x`.\n\n**There are almost always more threads than data.** Lengths are rarely an exact multiple of the block size, so every kernel begins with a bounds check and the surplus threads do nothing. Letting them write out of range corrupts memory belonging to something else on a real GPU."
+        }
+      },
+      {
+        "id": "coalescing",
+        "title": {
+          "zh": "访存合并 —— 同一段逻辑，换个下标慢 8 倍",
+          "en": "Coalescing — same logic, 8× the traffic"
+        },
+        "goal": {
+          "zh": "`scale.cu` 把一个 64×64 的矩阵每个元素乘以 2，算出来是对的。\n但 `ncu` 说它每次访存要打 **32 个 32B 扇区** —— 完美情况下应该是 4 个。\n\n```bash\nnvcc -o bench scale.cu && ncu ./bench\n```\n\n看 `Memory Workload Analysis` 那一节的\n`l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio`。\n\n**为什么**：一个 warp 里 32 个 lane 的地址会被硬件归并成对 32 字节扇区的请求。\n32 个 lane 读连续的 32 个 float = 128 字节 = **4 个扇区**；\n如果它们各隔一整行，就是 **32 个扇区**，也就是 8 倍的传输量。\n指令一条没多，搬的字节数翻了 8 倍。\n\n**通关标准**\n\n- 结果和现在完全一样（每个元素都乘到了）\n- `sectorsPerRequest ≤ 4.5`\n- DRAM 读字节数降到理论下限附近",
+          "en": "`scale.cu` multiplies every element of a 64×64 matrix by 2. The result is correct.\nBut `ncu` reports **32 sectors per request** where a perfect kernel would need 4.\n\n```bash\nnvcc -o bench scale.cu && ncu ./bench\n```\n\nLook at `l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio`\nunder `Memory Workload Analysis`.\n\n**Why**: the 32 lanes of a warp have their addresses coalesced into 32-byte sector requests.\n32 lanes reading 32 consecutive floats = 128 bytes = **4 sectors**. If each lane instead\nreads a different row, that is **32 sectors** — 8× the traffic for the same instructions.\n\n**To pass**\n\n- identical results\n- `sectorsPerRequest ≤ 4.5`\n- DRAM read bytes near the theoretical minimum"
+        },
+        "checklist": [
+          {
+            "zh": "让同一个 warp 里相邻的 lane 访问相邻的元素",
+            "en": "Make neighbouring lanes touch neighbouring elements"
+          },
+          {
+            "zh": "用 `ncu ./bench` 确认扇区数掉到 4",
+            "en": "Confirm with `ncu ./bench` that sectors drop to 4"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "现在的下标是「lane 决定行、warp 决定列」，正好把连续的 lane 拆到了不同的行上。",
+            "en": "Right now the lane picks the row and the warp picks the column, which scatters consecutive lanes across rows."
+          },
+          {
+            "zh": "把它换成「相邻线程 → 相邻列」：`row = i / cols; col = i % cols;`，或者干脆按一维下标走。",
+            "en": "Switch to neighbouring threads → neighbouring columns: `row = i / cols; col = i % cols;` or just use the flat index."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**以为「反正总字节数一样」。** 总元素数确实一样，但传输是按 32 字节一整块走的：只用到其中 4 个字节，剩下 28 个字节也被搬过来了，然后扔掉。",
+            "en": "**Assuming the byte count is the same either way.** The element count is, but transfers move whole 32-byte sectors: use 4 bytes of one and the other 28 come along anyway, then get thrown away."
+          },
+          {
+            "zh": "**只改读、不改写。** 写回也要合并，`ncu` 里 store 的扇区数是单独一行。",
+            "en": "**Fixing loads but not stores.** Stores coalesce too; ncu reports their sectors separately."
+          }
+        ],
+        "extension": {
+          "zh": "这条规则是所有 GPU 访存优化的地基。矩阵转置之所以难，正是因为读和写不可能同时合并 ——第 3、4 关就是用共享内存把这个矛盾解开。NVIDIA 的经典博客 [How to Access Global Memory Efficiently in CUDA C/C++ Kernels](https://developer.nvidia.com/blog/how-access-global-memory-efficiently-cuda-c-kernels/) 把各种步长的代价量了一遍。",
+          "en": "This rule underpins every GPU memory optimisation. Matrix transpose is hard precisely because reads and writes cannot both be coalesced — stages 3 and 4 resolve that with shared memory. NVIDIA's [How to Access Global Memory Efficiently in CUDA C/C++ Kernels](https://developer.nvidia.com/blog/how-access-global-memory-efficiently-cuda-c-kernels/) measures the cost of each stride."
+        },
+        "gpu": {
+          "files": {
+            "/root/scale.cu": "// 把 64×64 的矩阵每个元素乘以 2。\n//\n// 结果是对的，但 ncu 说每次访存要打 32 个扇区。\n// 想想一个 warp 里相邻的 lane 现在落在哪儿。\n__global__ void scale(const float* in, float* out, int rows, int cols) {\n  int i = blockIdx.x * blockDim.x + threadIdx.x;\n  int lane = i % 32;\n  int group = i / 32;\n\n  // lane 决定行、group 决定列 —— 相邻的 lane 隔了一整行\n  int row = lane * (rows / 32) + group / cols;\n  int col = group % cols;\n\n  if (row < rows && col < cols) {\n    out[row * cols + col] = in[row * cols + col] * 2.0f;\n  }\n}\n"
+          },
+          "bench": {
+            "sources": [
+              "/root/scale.cu"
+            ],
+            "buffers": [
+              {
+                "name": "in",
+                "length": 4096,
+                "fill": {
+                  "kind": "iota",
+                  "scale": 0.125
+                }
+              },
+              {
+                "name": "out",
+                "length": 4096,
+                "fill": {
+                  "kind": "zeros"
+                }
+              }
+            ],
+            "launches": [
+              {
+                "kernel": "scale",
+                "grid": [
+                  32
+                ],
+                "block": [
+                  128
+                ],
+                "args": [
+                  "in",
+                  "out",
+                  64,
+                  64
+                ]
+              }
+            ]
+          },
+          "referenceFiles": {
+            "/root/scale.cu": "__global__ void scale(const float* in, float* out, int rows, int cols) {\n  int i = blockIdx.x * blockDim.x + threadIdx.x;\n  // 相邻线程 → 相邻元素，一个 warp 正好覆盖连续的 128 字节\n  if (i < rows * cols) out[i] = in[i] * 2.0f;\n}\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "coalescing.spec.ts",
+            "content": "const lab = require('@gpu/lab');\n\nconst ROWS = 64;\nconst COLS = 64;\n\ndescribe('矩阵缩放', () => {\n  it('每个元素都乘到了', async () => {\n    await lab.buildAndRun();\n    const input = lab.buffer('in');\n    const out = lab.buffer('out');\n    const expected = new Float32Array(input.length);\n    for (let i = 0; i < input.length; i += 1) expected[i] = Math.fround(input[i] * 2);\n    const diff = lab.compare(out, expected);\n    expect(diff.hasNonFinite).toBe(false);\n    expect(diff.maxAbs).toBe(0);\n  });\n\n  it('读和写都合并了', async () => {\n    await lab.buildAndRun();\n    const metrics = lab.metrics();\n    // 每次 warp 级访存 32 lane × 4 字节 = 128 字节 = 4 个扇区\n    expect(metrics.global.loadSectors / metrics.global.loadRequests).toBeLessThanOrEqual(4.5);\n    expect(metrics.global.storeSectors / metrics.global.storeRequests).toBeLessThanOrEqual(4.5);\n  });\n\n  it('DRAM 传输量降到理论下限附近', async () => {\n    await lab.buildAndRun();\n    const metrics = lab.metrics();\n    const ideal = ROWS * COLS * 4;\n    // 允许 10% 余量：尾块与对齐会带来一点额外传输\n    expect(metrics.memory.readBytes).toBeLessThanOrEqual(ideal * 1.1);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "gpu.sanitizer.races",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "数据竞态",
+              "en": "data races"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.sanitizer.warpSyncErrors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "warp 同步用错",
+              "en": "warp sync errors"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.global.sectorsPerRequest",
+            "op": "lte",
+            "value": 4.5,
+            "label": {
+              "zh": "每次访存打到的 32B 扇区数（未优化时是 32）",
+              "en": "sectors per request (32 before optimising)"
+            },
+            "unit": "sector/req",
+            "dimension": "latency"
+          },
+          {
+            "metric": "gpu.memory.readBytes",
+            "op": "lte",
+            "value": 18022,
+            "label": {
+              "zh": "DRAM 读字节数",
+              "en": "DRAM bytes read"
+            },
+            "unit": "byte",
+            "dimension": "latency"
+          }
+        ],
+        "focus": [
+          "latency"
+        ],
+        "primer": {
+          "zh": "GPU 的显存不是按单个数取的。硬件一次搬运的最小单位是一个 **32 字节的扇区**，哪怕你只要其中 4 个字节，剩下的 28 个也会被一起搬过来然后扔掉。\n\n一个 `warp`（32 个线程，GPU 调度的最小单位）同时发出的 32 个访存请求会被硬件合并：落在同一个扇区里的合成一次传输。于是同样是读 32 个 float，**连续读**只要 4 个扇区（32 × 4 = 128 字节），而**每个 lane 隔得很远**就要 32 个扇区 —— 传输量差 8 倍，指令却一条没多。\n\n这就是「合并访问」。判断方法很简单：看同一个 warp 里相邻的线程，它们访问的地址是不是相邻的。在 `ncu` 里对应的指标叫 `l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio`，完美是 4.0，最坏是 32.0。\n\n几乎所有 GPU 访存优化最后都归到这一条。它也是矩阵转置为什么难的原因：按行读就得按列写，两边不可能同时合并。",
+          "en": "GPU memory is not fetched one value at a time. The smallest unit the hardware moves is a **32-byte sector**; asking for 4 bytes brings the other 28 along and then discards them.\n\nThe 32 memory requests issued by one `warp` (32 threads, the GPU's scheduling unit) are coalesced: lanes landing in the same sector become one transfer. Reading 32 consecutive floats therefore costs **4 sectors** (32 × 4 = 128 bytes), while 32 scattered lanes cost **32 sectors** — 8× the traffic for exactly the same instructions.\n\nThat is coalescing. The test is simple: do neighbouring threads in a warp touch neighbouring addresses? In `ncu` the metric is `l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio`, 4.0 at best and 32.0 at worst.\n\nNearly every GPU memory optimisation reduces to this rule. It is also why matrix transpose is hard: reading along rows forces writing along columns, and both cannot coalesce at once."
+        }
+      },
+      {
+        "id": "shared-memory-race",
+        "title": {
+          "zh": "共享内存与竞态 —— 跑对了，但它是错的",
+          "en": "Shared memory and races — it works, and it is still wrong"
+        },
+        "goal": {
+          "zh": "转置一个 32×32 的矩阵。读和写不可能同时合并 —— 按行读就得按列写。\n解法是先把整块搬进**共享内存**（block 内所有线程共用的一小块高速内存），\n再从共享内存里按转置的顺序读出来写回去。这样读和写都是合并的。\n\n`transpose.cu` 已经这么写了。**它算出来的结果是错的**，而且每次错得一模一样。\n\n```bash\nnvcc -o bench transpose.cu && ./bench\ncompute-sanitizer --tool racecheck ./bench\n```\n\nracecheck 会告诉你：一个线程写的格子，另一个线程在没有任何同步的情况下读了。\n`tile[y][x] = ...` 和 `... = tile[x][y]` 之间需要一个 **`__syncthreads()`** ——\n它让整个 block 的线程都停下来等，直到所有人都写完。\n\n**为什么这一关重要**：在这个模拟器里，warp 是按固定顺序跑的，\n所以有竞态的 kernel 会给出一个**稳定的**结果。这次它恰好是错的；\n换一种访问模式，它会**恰好是对的** —— 你跑一万遍都对，然后换到真卡上就炸。\n所以竞态不能靠「结果对不对」来发现，只能靠 racecheck。\n\n**通关标准**\n\n- 转置结果正确\n- `compute-sanitizer --tool racecheck` 报 0 hazards\n- 读写都合并（`sectorsPerRequest ≤ 4.5`）",
+          "en": "Transpose a 32×32 matrix. Reads and writes cannot both be coalesced — reading along rows\nmeans writing along columns. The fix is to stage the tile through **shared memory**\n(a small fast block-local memory) and then read it back transposed, so both sides coalesce.\n\n`transpose.cu` already does that. **It produces the wrong answer**, and it is wrong the\nsame way every single run.\n\n```bash\nnvcc -o bench transpose.cu && ./bench\ncompute-sanitizer --tool racecheck ./bench\n```\n\nracecheck tells you: one thread writes a slot and another reads it with no synchronisation\nin between. You need a **`__syncthreads()`** between `tile[y][x] = ...` and `... = tile[x][y]` —\nit stops every thread in the block until all of them have finished writing.\n\n**Why this stage matters**: warps run in a fixed order in this simulator, so a racy kernel\nproduces a *stable* result. Here it happens to be wrong. With a different access pattern it\nwould happen to be **right** — correct ten thousand times here, broken on a real GPU.\nRaces cannot be found by checking the answer. Only racecheck finds them.\n\n**To pass**\n\n- correct transpose\n- `compute-sanitizer --tool racecheck` reports 0 hazards\n- both sides coalesced (`sectorsPerRequest ≤ 4.5`)"
+        },
+        "checklist": [
+          {
+            "zh": "跑一次 racecheck，看它指到哪两行",
+            "en": "Run racecheck and read which two lines it points at"
+          },
+          {
+            "zh": "在写共享内存和读共享内存之间加 `__syncthreads()`",
+            "en": "Add `__syncthreads()` between the shared-memory write and read"
+          },
+          {
+            "zh": "确认 racecheck 报 0 hazards",
+            "en": "Confirm racecheck reports 0 hazards"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "`__syncthreads()` 必须让整个 block 都执行到 —— 不能放在 `if` 里面。",
+            "en": "`__syncthreads()` must be reached by every thread in the block — never put it inside an `if`."
+          },
+          {
+            "zh": "只需要一个屏障，位置在两次共享内存访问之间。",
+            "en": "One barrier is enough, between the two shared-memory accesses."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**把 `__syncthreads()` 放进 `if` 里。** 只有一部分线程到达屏障，真卡上这是未定义行为、通常直接挂死；这里会明确报错。",
+            "en": "**Putting `__syncthreads()` inside an `if`.** Only some threads reach the barrier; on real hardware that is undefined behaviour and usually hangs. Here it is reported as an error."
+          },
+          {
+            "zh": "**靠「多跑几遍看看」找竞态。** 这个模拟器是确定的，跑一万遍是同一个结果。真卡上也未必能重现 —— 竞态最擅长的就是在你观察它的时候表现正常。",
+            "en": "**Re-running to see if a race shows up.** This simulator is deterministic: ten thousand runs, one answer. Real hardware may not reproduce it either — races are best at looking fine while watched."
+          }
+        ],
+        "extension": {
+          "zh": "`compute-sanitizer --tool racecheck` 是真工具，用法和这里一模一样。它的原理是给共享内存的每个字配一份影子，记住最近是谁读的、谁写的、以及中间过了几次屏障；同一个「屏障纪元」里两个不同线程冲突访问同一个字，就是竞态。我们实现的是同一套判据 —— 见 [NVIDIA 的 racecheck 文档](https://docs.nvidia.com/cuda/compute-sanitizer/index.html#racecheck-tool)。",
+          "en": "`compute-sanitizer --tool racecheck` is the real tool and works exactly like this. It shadows every shared-memory word with the last reader, the last writer, and how many barriers have passed; two different threads accessing the same word inside one barrier epoch is a race. We implement the same rule — see [NVIDIA's racecheck documentation](https://docs.nvidia.com/cuda/compute-sanitizer/index.html#racecheck-tool)."
+        },
+        "gpu": {
+          "files": {
+            "/root/transpose.cu": "// 32×32 转置，经共享内存中转，好让读和写都合并。\n//\n// 结果是错的，而且每次错得一模一样 —— 先跑一次\n//   compute-sanitizer --tool racecheck ./bench\n// 看它指到哪两行。\n__global__ void transpose(const float* in, float* out, int n) {\n  __shared__ float tile[32][33];   // 33 不是笔误，第 4 关会讲\n\n  int x = threadIdx.x;\n  int y = threadIdx.y;\n\n  tile[y][x] = in[y * n + x];\n\n  // TODO: 这里少了点什么\n\n  out[y * n + x] = tile[x][y];\n}\n"
+          },
+          "bench": {
+            "sources": [
+              "/root/transpose.cu"
+            ],
+            "buffers": [
+              {
+                "name": "in",
+                "length": 1024,
+                "fill": {
+                  "kind": "iota",
+                  "scale": 1
+                }
+              },
+              {
+                "name": "out",
+                "length": 1024,
+                "fill": {
+                  "kind": "zeros"
+                }
+              }
+            ],
+            "launches": [
+              {
+                "kernel": "transpose",
+                "grid": [
+                  1
+                ],
+                "block": [
+                  32,
+                  32
+                ],
+                "args": [
+                  "in",
+                  "out",
+                  32
+                ]
+              }
+            ]
+          },
+          "referenceFiles": {
+            "/root/transpose.cu": "__global__ void transpose(const float* in, float* out, int n) {\n  __shared__ float tile[32][33];\n\n  int x = threadIdx.x;\n  int y = threadIdx.y;\n\n  tile[y][x] = in[y * n + x];\n\n  // 整个 block 都写完了，才能开始读别人写的格子\n  __syncthreads();\n\n  out[y * n + x] = tile[x][y];\n}\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "transpose.spec.ts",
+            "content": "const lab = require('@gpu/lab');\n\nconst N = 32;\n\ndescribe('转置', () => {\n  it('结果正确', async () => {\n    await lab.buildAndRun();\n    const input = lab.buffer('in');\n    const out = lab.buffer('out');\n    const expected = new Float32Array(N * N);\n    for (let y = 0; y < N; y += 1) {\n      for (let x = 0; x < N; x += 1) expected[y * N + x] = input[x * N + y];\n    }\n    const diff = lab.compare(out, expected);\n    expect(diff.hasNonFinite).toBe(false);\n    expect(diff.maxAbs).toBe(0);\n  });\n\n  it('racecheck 报 0 hazards', async () => {\n    const report = await lab.racecheck();\n    expect(report.races.length).toBe(0);\n  });\n\n  it('确实用了屏障，而不是绕开共享内存', async () => {\n    await lab.buildAndRun();\n    const metrics = lab.metrics();\n    expect(metrics.launch.barriers).toBeGreaterThan(0);\n    expect(metrics.shared.storeRequests).toBeGreaterThan(0);\n    expect(metrics.shared.loadRequests).toBeGreaterThan(0);\n  });\n\n  it('读和写都合并', async () => {\n    await lab.buildAndRun();\n    const metrics = lab.metrics();\n    expect(metrics.global.sectorsPerRequest).toBeLessThanOrEqual(4.5);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "gpu.sanitizer.races",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "数据竞态",
+              "en": "data races"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.sanitizer.warpSyncErrors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "warp 同步用错",
+              "en": "warp sync errors"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.launch.barriers",
+            "op": "gte",
+            "value": 1,
+            "label": {
+              "zh": "屏障次数",
+              "en": "barriers"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.global.sectorsPerRequest",
+            "op": "lte",
+            "value": 4.5,
+            "label": {
+              "zh": "每次访存打到的 32B 扇区数",
+              "en": "sectors per request"
+            },
+            "unit": "sector/req",
+            "dimension": "latency"
+          }
+        ],
+        "focus": [
+          "correctness"
+        ],
+        "primer": {
+          "zh": "`共享内存`是每个 block 独有的一小块内存，比显存快一个数量级，用 `__shared__` 声明。它的典型用法是「中转」：先把一块数据按合并的方式读进来，再按任意顺序从共享内存里取用 —— 于是读和写都能保持合并。矩阵转置就是这么解的。\n\n但共享内存是**共用**的，这就带来了竞态。一个线程写 `tile[y][x]`、另一个线程读 `tile[x][y]`，如果中间没有同步，读的人完全可能读到还没被写进去的旧值。`__syncthreads()` 就是那道同步：整个 block 的线程都停在这里，等所有人都到齐了再一起走。\n\n**`__syncthreads()` 必须让整个 block 都执行到。** 把它写进 `if` 里，只有一部分线程到达屏障，真卡上是未定义行为，通常直接挂死。\n\n竞态最麻烦的地方是它**不一定表现出来**。GPU 上 warp 的执行顺序不确定，同一份有竞态的代码可能今天对、明天错，也可能在你的卡上一直对、在别人的卡上一直错。所以不能靠「多跑几遍看看」，要用 `compute-sanitizer --tool racecheck` ——它给共享内存的每个字记住最近谁读谁写、中间过了几次屏障，冲突就报出来。",
+          "en": "`Shared memory` is a small per-block memory an order of magnitude faster than device memory, declared with `__shared__`. Its classic use is staging: read a tile in coalesced, then take values out of shared memory in any order — so both the read and the write stay coalesced. That is how matrix transpose is solved.\n\nBut shared memory is **shared**, which introduces races. If one thread writes `tile[y][x]` and another reads `tile[x][y]` with nothing in between, the reader may well see a value that has not been written yet. `__syncthreads()` is the barrier: every thread in the block waits there until all of them have arrived.\n\n**`__syncthreads()` must be reached by the whole block.** Inside an `if`, only some threads reach it — undefined behaviour on real hardware, usually a hang.\n\nThe hard part about races is that they **need not show up**. Warp scheduling is not deterministic, so the same racy code can be right today and wrong tomorrow, or always right on your GPU and always wrong on someone else's. Re-running proves nothing. Use `compute-sanitizer --tool racecheck`: it shadows every shared-memory word with its last reader, last writer and barrier epoch, and reports the conflicts."
+        }
+      }
+    ]
+  },
+  {
     "id": "message-broker",
     "title": {
       "zh": "高并发消息系统",
