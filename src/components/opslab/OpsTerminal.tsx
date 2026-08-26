@@ -98,7 +98,13 @@ export default function OpsTerminal({ prompt, onCommand, banner, registerInsert 
           // 「ResizeObserver loop completed with undelivered notifications」
           const proposed = fit.proposeDimensions();
           if (!proposed?.cols || !proposed?.rows) return false;
-          if (proposed.cols === active.cols && proposed.rows === active.rows) return true;
+          if (proposed.cols === active.cols && proposed.rows === active.rows) {
+            // 行列数没变，但走到这儿说明元素尺寸变了 —— 多半是从隐藏的 tab 里
+            // 切回来。fit 会顺带触发重绘，跳过它就得自己补一次，
+            // 否则 DOM 渲染器留着一屏空行。
+            active.refresh(0, active.rows - 1);
+            return true;
+          }
           fit.fit();
           return true;
         } catch {

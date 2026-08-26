@@ -86,9 +86,17 @@ export interface TopologyViewProps {
   onInspect?: (command: string) => void;
   /** 包路径停在哪个节点上，圈出来 */
   highlight?: string;
+  /**
+   * 这块面板现在是不是被选中的那一页。
+   *
+   * 它和终端、IDE 同属一组 tab，切走时整块是 display:none。ReactFlow 只在
+   * 初始化时 fitView 一次，而它初始化的那一刻容器是 0×0 —— 不管的话切回来
+   * 是一张几乎空白的画布，只有角落里露出半个节点。
+   */
+  active?: boolean;
 }
 
-export default function TopologyView({ graph, onInspect, highlight }: TopologyViewProps) {
+export default function TopologyView({ graph, onInspect, highlight, active = true }: TopologyViewProps) {
   const initialNodes = useMemo<Node[]>(
     () => graph.nodes.map((node) => ({
       id: node.id,
@@ -124,30 +132,25 @@ export default function TopologyView({ graph, onInspect, highlight }: TopologyVi
   useEffect(() => { setEdges(initialEdges); }, [initialEdges, setEdges]);
 
   /**
-   * 从隐藏的 tab 里露出来之后要重新 fitView。
+   * 被选中的时候补一次 fitView。
    *
-   * 这张图和终端、IDE 是同一组 tab，切走的时候整块是 display:none。
-   * ReactFlow 的 `fitView` 只在初始化时算一次，而它初始化的那一刻容器是 0×0 ——
-   * 于是切回来看到的是一张几乎空白的画布，只有左上角露出半个节点。
-   * 尺寸从 0 变成正常值会触发 ResizeObserver，在那一下补一次 fitView。
+   * 早先这里挂的是 ResizeObserver，靠「宽度从 0 变正」判断自己露出来了。
+   * 不可靠：ReactFlow 内部也在用 ResizeObserver 量尺寸，两个观察者的回调
+   * 顺序不保证，先跑我们这个的话它内部还是 0×0，fitView 算出来没有意义。
+   * 由 tab 状态驱动就确定多了 —— effect 跑在提交之后，那时布局已经定了；
+   * 再推一帧，等 ReactFlow 也量完。
    */
   const containerRef = useRef<HTMLDivElement>(null);
   const flowRef = useRef<ReactFlowInstance | null>(null);
   const onInit = useCallback((instance: ReactFlowInstance) => { flowRef.current = instance; }, []);
 
   useEffect(() => {
-    const host = containerRef.current;
-    if (!host) return undefined;
-    let wasVisible = host.getBoundingClientRect().width > 0;
-    const observer = new ResizeObserver(() => {
-      const visible = host.getBoundingClientRect().width > 0;
-      // 只在「从看不见到看得见」这一下补，不然每次拖分隔条都会把用户的平移缩放重置掉
-      if (visible && !wasVisible) flowRef.current?.fitView();
-      wasVisible = visible;
+    if (!active) return undefined;
+    const frame = requestAnimationFrame(() => {
+      try { flowRef.current?.fitView(); } catch { /* 实例还没好，下次选中还会再来 */ }
     });
-    observer.observe(host);
-    return () => observer.disconnect();
-  }, []);
+    return () => cancelAnimationFrame(frame);
+  }, [active]);
 
   if (graph.nodes.length === 0) {
     return (

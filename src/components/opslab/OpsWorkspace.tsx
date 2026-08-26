@@ -156,9 +156,17 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
     insertRef.current = insert;
   }, []);
 
+  /**
+   * 在拓扑图上点一个节点，把对应的只读命令填进终端。
+   *
+   * 终端和拓扑现在是同一组 tab 里的两页，所以填完得把 tab 切过去 ——
+   * 不然命令进了一个看不见的终端，学员只会觉得点了没反应。
+   * 仍然只是**填进去**，不替他回车。
+   */
   const handleInspect = useCallback((command: string) => {
+    selectRightTab('terminal');
     insertRef.current?.(command);
-  }, []);
+  }, [selectRightTab]);
 
   const handleVerify = useCallback(async () => {
     if (!ops.world) return;
@@ -434,7 +442,12 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
 
               <Tabs.Panel value="topology" style={{ flex: 1, minHeight: 0 }}>
                 <ErrorBoundary fallback={renderPanelError}>
-                  <TopologyView graph={ops.topology} onInspect={handleInspect} highlight={highlight} />
+                  <TopologyView
+                    graph={ops.topology}
+                    onInspect={handleInspect}
+                    highlight={highlight}
+                    active={rightTab === 'topology'}
+                  />
                 </ErrorBoundary>
               </Tabs.Panel>
 
