@@ -139,6 +139,14 @@ export class Cluster {
   private busyThisStep = new Set<number>();
   /** 当前 cudaSetDevice 选中的卡 */
   current = 0;
+  /**
+   * 已经掉了的卡。
+   *
+   * 真硬件上一张卡掉出总线之后，对它的所有调用都会返回错误。
+   * 这里照着做：`cudaSetDevice` 返回非零，起 kernel 直接抛 ——
+   * **不检查返回值就会崩**，而那正是真实系统里会发生的事。
+   */
+  private readonly dead = new Set<number>();
 
   private readonly allocations: Allocation[] = [];
   /**
@@ -180,11 +188,28 @@ export class Cluster {
     return this.devices.length;
   }
 
-  setDevice(index: number): void {
+  /** 返回 0 表示成功，非零是错误码（真 CUDA 的 cudaError_t 惯例） */
+  setDevice(index: number): number {
     if (!Number.isInteger(index) || index < 0 || index >= this.count) {
       throw new ClusterError(`没有编号 ${index} 的设备 —— 一共 ${this.count} 张卡`);
     }
+    // 掉了的卡选不中，也不改变当前设备 —— 和真 CUDA 一样返回错误码。
+    // **不检查返回值就会在下一次 launch 上崩。**
+    if (this.dead.has(index)) return 46;   // cudaErrorDevicesUnavailable
     this.current = index;
+    return 0;
+  }
+
+  /** 让一张卡掉线 */
+  failDevice(index: number): void {
+    if (!Number.isInteger(index) || index < 0 || index >= this.count) {
+      throw new ClusterError(`没有编号 ${index} 的设备 —— 一共 ${this.count} 张卡`);
+    }
+    this.dead.add(index);
+  }
+
+  isDead(index: number): boolean {
+    return this.dead.has(index);
   }
 
   /** 在当前设备上分配，返回**带设备号的**地址 */
@@ -256,6 +281,12 @@ export class Cluster {
 
   launch(name: string, kernel: ExecutableKernel, config: LaunchConfig, args: number[]): void {
     const device = this.current;
+    if (this.dead.has(device)) {
+      throw new ClusterError(
+        `设备 ${device} 已经掉线了，还在往上起 kernel \`${name}\` —— `
+        + '真卡上这是 cudaErrorDevicesUnavailable。cudaSetDevice 的返回值要检查'
+      );
+    }
     this.busyThisStep.add(device);
     const translated = args.map((arg, index) => (
       this.isPointer(arg)
@@ -283,6 +314,11 @@ export class Cluster {
     }
     new Uint8Array(to.bytes, dstLocal, bytes).set(new Uint8Array(from.bytes, srcLocal, bytes));
 
+    if (this.dead.has(srcDevice) || this.dead.has(dstDevice)) {
+      throw new ClusterError(
+        `cudaMemcpyPeer 碰到掉线的卡（${this.dead.has(srcDevice) ? srcDevice : dstDevice}）`
+      );
+    }
     if (srcDevice === dstDevice) return;   // 同卡内的拷贝不算通信
     this.account(srcDevice, dstDevice, bytes);
   }
@@ -364,6 +400,7 @@ export class Cluster {
     this.deviceBusy.length = 0;
     this.deviceBytes.length = 0;
     this.current = 0;
+    this.dead.clear();
     this.busyThisStep.clear();
     Object.assign(this.comm, emptyCommMetrics());
     Object.assign(this.pipeline, emptyPipelineMetrics());

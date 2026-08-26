@@ -49,7 +49,9 @@ export interface HostEnvironment {
   writeHostInts?(address: number, values: number[]): void;
   /** 读宿主端的 int 数组 —— ncclCommInitAll 的 devlist 是这么收的 */
   readHostInts?(address: number, count: number): number[];
-  setDevice?(index: number): void;
+  setDevice?(index: number): number;
+  /** 让一张卡掉线 */
+  failDevice?(index: number): void;
   getDevice?(): number;
   peerCopy?(dst: number, dstDevice: number, src: number, srcDevice: number, bytes: number): void;
   /** 流水线步边界 */
@@ -305,8 +307,8 @@ export class HostRuntime implements HostServices {
       case HOST.cudaGetDevice:
         return this.requireCluster('cudaGetDevice').getDevice!();
       case HOST.cudaSetDevice:
-        this.requireCluster('cudaSetDevice').setDevice!(args[0] | 0);
-        return 0;
+        // 返回 cudaError_t：0 是成功，非零是错误。掉线的卡选不中
+        return this.requireCluster('cudaSetDevice').setDevice!(args[0] | 0);
       /* ---- 流 ---- */
       case HOST.cudaStreamCreate: {
         const handle = this.nextStream;
@@ -321,6 +323,9 @@ export class HostRuntime implements HostServices {
         this.outstanding.delete(args[0] | 0);
         return 0;
 
+      case HOST.lab_fail_device:
+        this.requireCluster('lab_fail_device').failDevice!(args[0] | 0);
+        return 0;
       case HOST.pipe_step:
         this.requireCluster('pipe_step').pipeStep!();
         return 0;

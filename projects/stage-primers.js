@@ -2070,6 +2070,57 @@ const primers = {
         + 'amount to every other and the pattern changing each step.'
       )
     ),
+    'disaggregated-serving': t(
+      p(
+        'prefill 与 decode 是两种完全不同的负载。'
+        + 'prefill 一次算几千个 token，受限于算力，本来就把 GPU 喂饱了；'
+        + 'decode 一次只算一个 token，受限于访存与提交开销，批越大越好。'
+        + '混在一起跑两边都被拖累：一个大 prefill 插进来，'
+        + '所有正在 decode 的请求都要等它算完 --'
+        + '这就是首 token 时延好看而每 token 时延发抖的来源。',
+        '所以生产里把它们分到不同的卡上，prefill 完的 KV cache 传给 decode 那一侧接着跑。'
+        + '最大的好处不是吞吐，而是两条 SLO 可以分开调：'
+        + 'prefill 集群按首 token 时延调，decode 集群按每 token 时延调，'
+        + '两边的批大小、并行策略、甚至卡型都可以不一样。'
+        + '代价是 KV cache 要跨卡传，一条长上下文的 KV 可能有好几个 GB，'
+        + '传它的时间可能比 prefill 本身还长 --'
+        + '所以真实系统会走 NVLink 而不是网络、一边 prefill 一边分层传、'
+        + '以及把 KV 量化到 fp8 再传。',
+        '容错这一侧，几百上千张卡跑上几个月，掉一张是常态而不是意外。'
+        + '一张卡掉出总线之后，对它的所有调用都返回错误 --'
+        + '不检查返回值的话，下一次起 kernel 就直接崩。'
+        + '发现之后要做的是把请求转移到还活着的卡上，而不是跳过它：'
+        + '容错的意思是转移，不是放弃。'
+        + '也不能全都压给同一张备用卡，那只是把瓶颈换了个位置。',
+        '值得对比的是训练侧的容错难得多。推理的请求是无状态的，转走就行；'
+        + '训练的整个集群共享一份同步的状态，掉一张卡意味着整步作废、'
+        + '得从检查点恢复。所以训练侧的功夫花在检查点写得多快、'
+        + '以及能不能只重算掉的那一部分上。'
+      ),
+      p(
+        'Prefill and decode are entirely different workloads. Prefill computes thousands of tokens '
+        + 'at once, is compute-bound, and already saturates the GPU; decode computes one token, is '
+        + 'bound by memory and launch overhead, and wants the largest batch it can get. Run together '
+        + 'both suffer, because one large prefill forces every decoding request to wait for it. That '
+        + 'is where good time-to-first-token with jittery time-per-output-token comes from.',
+        'Production therefore splits them across GPUs, handing the finished KV cache to the decode '
+        + 'side. The biggest benefit is not throughput but that the two SLOs can be tuned '
+        + 'separately, with different batch sizes, parallel strategies and even GPU models on each '
+        + 'side. The cost is moving the KV cache between GPUs: a long-context sequence can carry '
+        + 'several GB and transferring it can take longer than the prefill itself, so real systems '
+        + 'move it over NVLink rather than the network, stream it layer by layer as prefill '
+        + 'proceeds, and quantise it to fp8 first.',
+        'On the fault-tolerance side, run hundreds or thousands of GPUs for months and losing one is '
+        + 'routine rather than exceptional. Once a GPU falls off the bus every call to it returns an '
+        + 'error, and without checking return values the next launch simply crashes. The response is '
+        + 'to migrate the request to a live GPU rather than skip it: fault tolerance means migrating, '
+        + 'not abandoning. Nor should everything pile onto one spare, which just moves the bottleneck.',
+        'Training fault tolerance is much harder by comparison. Inference requests are stateless and '
+        + 'can be moved; a training cluster shares synchronised state, so losing one GPU invalidates '
+        + 'the step and requires recovering from a checkpoint. Effort there goes into how fast '
+        + 'checkpoints can be written and whether only the lost portion can be recomputed.'
+      )
+    ),
   },
 
   'intranet-k8s': {

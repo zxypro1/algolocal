@@ -223,6 +223,8 @@ export const CLUSTER_H = `/* cluster.h -- 多卡
 #define CLUSTER_H
 
 int cudaGetDeviceCount(int* count);
+/* 返回 cudaError_t：0 是成功。**掉线的卡返回非零，而且不改变当前设备** ——
+ * 不检查返回值，下一次 launch 就会崩。真卡上是 cudaErrorDevicesUnavailable。 */
 int cudaSetDevice(int device);
 int cudaGetDevice(int* device);
 int cudaMemcpyPeer(void* dst, int dstDevice, const void* src, int srcDevice, int bytes);
@@ -237,6 +239,10 @@ int cudaMemcpyPeer(void* dst, int dstDevice, const void* src, int srcDevice, int
  *
  * 少报步数能让这个数好看，所以判定同时校验总工作量 —— 两头对上才算数。 */
 void pipe_step(void);
+
+/* 让一张卡掉线。容错那一关的脚手架用它注入故障 —— 真硬件上你当然
+ * 没有这个函数，掉卡是掉给你看的，不是你调用的。 */
+void lab_fail_device(int device);
 
 #endif
 `;

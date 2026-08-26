@@ -221,6 +221,7 @@ const HOST_FNS: Record<string, { fn: HostFn; arity: number; scalar: 'int' | 'voi
   cudaGetDevice: { fn: 'cudaGetDevice', arity: 1, scalar: 'int' },
   cudaMemcpyPeer: { fn: 'cudaMemcpyPeer', arity: 5, scalar: 'int' },
   pipe_step: { fn: 'pipe_step', arity: 0, scalar: 'void' },
+  lab_fail_device: { fn: 'lab_fail_device', arity: 1, scalar: 'void' },
   cudaStreamSynchronize: { fn: 'cudaStreamSynchronize', arity: 1, scalar: 'int' },
   cudaStreamDestroy: { fn: 'cudaStreamDestroy', arity: 1, scalar: 'int' },
   cudaStreamCreate: { fn: 'cudaStreamCreate', arity: 1, scalar: 'int' },
