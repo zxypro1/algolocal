@@ -5,7 +5,7 @@
  * 真 cosign 还做 keyless（Fulcio + Rekor），那套依赖公网的 CA 与透明日志，
  * 在内网场景里本来也用不上。
  */
-import type { CommandHandler } from '../machine/shell/shell';
+import type { CommandHandler } from '../../labkit/machine/shell/shell';
 import { digestOf, signDigest, type SignatureStore } from './cosign';
 import { encodePrivateKeyPem, publicKeyPem } from '../crypto/x509';
 import { keyFor } from '../crypto/keys';

@@ -4,12 +4,12 @@
  * 判定标准还是「跟真 docker 一致」：命令怎么敲、输出长什么样、
  * 报错说了什么、digest 是不是真算出来的。
  */
-import { createMachine, Machine } from '../../src/lib/opslab/machine';
+import { createMachine, Machine } from '../../src/lib/labkit/machine';
 import {
   ImageStore, Registry, RegistryNetwork, buildImage, createDockerCommand,
   digestOf, flattenLayers, imageRootfs, normalizeReference, parseDockerfile, parseReference,
   finalizeImage, makeLayer,
-} from '../../src/lib/opslab/machine/oci';
+} from '../../src/lib/opslab/oci';
 
 const CREATED = '2026-01-01T00:00:00Z';
 const NOW = Date.parse('2026-01-01T00:05:00Z');

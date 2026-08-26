@@ -5,7 +5,7 @@
  * 能重定向、能写在脚本里 —— 因为它走的是同一个 shell 派发路径。
  * 它读的 kubeconfig、`-f` 指到的 manifest，也和 IDE 编辑的是同一棵树。
  */
-import { Machine } from '../machine/machine';
+import { Machine } from '../../labkit/machine/machine';
 import { CliRuntime, CliRunOptions, FetchLike } from './runtime';
 import type { StreamServer, UpgradeRequest } from '../net/websocket';
 import { DEFAULT_KUBECONFIG_PATH, KubeconfigSpec, defaultKubeconfig, renderKubeconfig } from './kubeconfig';

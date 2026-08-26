@@ -10,9 +10,9 @@
  * 那样学员在终端里做的事就白做了。
  */
 import type { KubeObject } from '../apiserver';
-import type { CommandRecord } from '../machine';
-import type { Image } from '../machine/oci';
-import { imageRootfs } from '../machine/oci';
+import type { CommandRecord } from '../../labkit/machine';
+import type { Image } from '../oci';
+import { imageRootfs } from '../oci';
 import type { OpsWorld } from './world';
 
 export interface OpsLabApi {

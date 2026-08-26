@@ -12,7 +12,7 @@ import {
   GitNetwork, Repository, hashObject, parseCommit, readTree, seedRepository, statusOf, writeTree,
   ObjectStore,
 } from '../../src/lib/opslab/git';
-import { createVfs } from '../../src/lib/opslab/machine';
+import { createVfs } from '../../src/lib/labkit/machine';
 import type { OpsWorldSpec } from '../../src/lib/engineering/types';
 
 const NOW = Date.parse('2026-03-02T09:00:00Z');

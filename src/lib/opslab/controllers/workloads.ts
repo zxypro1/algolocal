@@ -5,7 +5,7 @@
  * 于是那些微妙的中间状态（Pending 一小会儿、observedGeneration 落后一拍、
  * Endpoints 里只有 Ready 的 Pod）自然就对，不用逐个去仿。
  */
-import { Priority } from '../kernel';
+import { Priority } from '../../labkit/kernel';
 import { ApiError, formatTimestamp, KubeObject, Registry, ResourceDefinition } from '../apiserver';
 import {
   Controller,

@@ -116,8 +116,8 @@ L1 机器层   VFS / 进程 / shell / coreutils      ←── 直接复用 opsl
 L0 内核     虚拟时钟 · 确定性调度 · 种子 RNG    ←── 直接复用 opslab
 ```
 
-**能从 opslab 白拿的**：`src/lib/opslab/kernel/`（虚拟时钟、优先级定序、
-settle / 死锁检测）、`src/lib/opslab/machine/`（VFS、tree-sitter shell、
+**能从 labkit 白拿的**（已上移，见 `src/lib/labkit/`）：`kernel/`（虚拟时钟、优先级定序、
+settle / 死锁检测、种子 RNG）、`machine/`（VFS、tree-sitter shell、
 30 个 coreutils）、`src/components/opslab/OpsTerminal.tsx`、拓扑视图的
 「自算坐标 + `@xyflow/react` 渲染」那套做法、以及 `ops` 关卡的判定管线
 （`runOpsStage` → `StageRunReport` → 结果面板 / 计分卡 / AI 评审 / 进度存档）。
@@ -988,9 +988,9 @@ kernel / memcpy / NCCL op 作为条带」。**并进集群面板，不新开第�
 
 | 目录 | 行数 | 去向 |
 | --- | ---: | --- |
-| `opslab/kernel/`（VirtualClock、Priority、settle / 死锁检测、种子 RNG） | 630 | **全部上移** |
-| `opslab/machine/` 的 `vfs.ts` + `shell/` + `machine.ts` + `index.ts` | 约 2543 | **上移** |
-| `opslab/machine/oci/`（Dockerfile、镜像、registry） | 1691 | **留在 opslab** —— k8s 专用 |
+| `opslab/kernel/`（VirtualClock、Priority、settle / 死锁检测、种子 RNG） | 630 | **已上移** → `labkit/kernel/` |
+| `opslab/machine/` 的 `vfs.ts` + `shell/` + `machine.ts` + `index.ts` | 约 2543 | **已上移** → `labkit/machine/` |
+| `opslab/machine/oci/`（Dockerfile、镜像、registry） | 1691 | **已提到** `opslab/oci/` —— k8s 专用 |
 | 合计移动 | **约 3170** | |
 
 **为什么是「移动」而不是「抽象」**：两个消费者是好抽象的最低样本量，

@@ -9,11 +9,11 @@ import type {
   OpsImageSpec, OpsStageSpec, OpsWorldSpec,
 } from '../../engineering/types';
 import { Cluster, createCluster } from '../controllers';
-import { Machine, createMachine, type CommandHandler } from '../machine';
+import { Machine, createMachine, type CommandHandler } from '../../labkit/machine';
 import {
   ImageStore, Registry as ImageRegistry, RegistryNetwork, createDockerCommand,
   normalizeReference, parseReference, type Image,
-} from '../machine/oci';
+} from '../oci';
 import type { ImageBehavior } from '../controllers';
 import { baseImageOf, toolchainFor } from './toolchains';
 import { createNetTools } from '../net';

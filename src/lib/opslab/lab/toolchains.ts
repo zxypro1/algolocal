@@ -8,8 +8,8 @@
  *
  * 题目里只写工具链的名字，实现在这里，因为「命令的行为」写不进 JSON。
  */
-import type { CommandHandler } from '../machine';
-import { finalizeImage, makeLayer, normalizeReference, type Image } from '../machine/oci';
+import type { CommandHandler } from '../../labkit/machine';
+import { finalizeImage, makeLayer, normalizeReference, type Image } from '../oci';
 
 export type ToolchainName = 'node' | 'python' | 'static';
 

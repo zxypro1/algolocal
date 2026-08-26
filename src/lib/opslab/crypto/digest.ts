@@ -4,7 +4,7 @@
  * 镜像那边已经有一份十六进制的实现（machine/oci/digest.ts），这里只是把
  * 同一套算法的字节形式导出来给签名用 —— 复用它而不是再写一遍。
  */
-import { sha256Hex } from '../machine/oci/digest';
+import { sha256Hex } from '../oci/digest';
 
 export function sha256Bytes(input: Uint8Array | string): Uint8Array {
   const hex = sha256Hex(input);

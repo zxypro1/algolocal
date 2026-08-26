@@ -4,7 +4,7 @@
  * 这是工作台真正拿在手里的东西：`cluster.apiServer.handle` 喂给 kubectl，
  * `cluster.settle()` 把世界推到静止，`cluster.advanceBy()` 快进时间。
  */
-import { Kernel, createKernel, Priority } from '../kernel';
+import { Kernel, createKernel, Priority } from '../../labkit/kernel';
 import { createStore, Store } from '../store';
 import {
   ApiServer,

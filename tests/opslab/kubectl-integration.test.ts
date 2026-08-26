@@ -19,7 +19,7 @@ import {
   Registry,
   ResourceDefinition,
 } from '../../src/lib/opslab/apiserver';
-import { createVfs } from '../../src/lib/opslab/machine';
+import { createVfs } from '../../src/lib/labkit/machine';
 import type { ExecRequest } from '../../src/lib/opslab/apiserver';
 import { CliRuntime, createCliRuntime, defaultKubeconfig, renderKubeconfig } from '../../src/lib/opslab/wasm';
 import { createOpsWorld } from '../../src/lib/opslab/lab';

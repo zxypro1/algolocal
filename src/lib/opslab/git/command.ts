@@ -7,8 +7,8 @@
  *
  * 输出照抄真 git —— 学员在这里练出来的读法要能带走。
  */
-import type { CommandHandler } from '../machine/shell/shell';
-import type { Vfs } from '../machine/vfs';
+import type { CommandHandler } from '../../labkit/machine/shell/shell';
+import type { Vfs } from '../../labkit/machine/vfs';
 import { GitNetwork, type BareRepository } from './remote';
 import { DEFAULT_BRANCH, Repository, statusOf } from './repository';
 import { hashObject, readTree } from './objects';

@@ -4,10 +4,10 @@
  * 判断标准是「跟真 bash 一致」：命令怎么写、输出什么样、退出码是几。
  * 所以这里的断言基本都是把真 bash 的行为抄下来。
  */
-import { createMachine, Machine } from '../../src/lib/opslab/machine';
-import { createVfs, VfsError } from '../../src/lib/opslab/machine/vfs';
-import { matchesGlob } from '../../src/lib/opslab/machine/shell/shell';
-import { loadShellParser, parseShell, resetShellParser, ShellSyntaxError } from '../../src/lib/opslab/machine/shell/parser';
+import { createMachine, Machine } from '../../src/lib/labkit/machine';
+import { createVfs, VfsError } from '../../src/lib/labkit/machine/vfs';
+import { matchesGlob } from '../../src/lib/labkit/machine/shell/shell';
+import { loadShellParser, parseShell, resetShellParser, ShellSyntaxError } from '../../src/lib/labkit/machine/shell/parser';
 import fs from 'node:fs';
 import path from 'node:path';
 

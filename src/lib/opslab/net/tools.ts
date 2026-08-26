@@ -10,7 +10,7 @@
  *
  * 退出码也是真的（6 / 7 / 28 / 22），因为脚本里会拿它当条件。
  */
-import type { CommandHandler, CommandResult } from '../machine';
+import type { CommandHandler, CommandResult } from '../../labkit/machine';
 import type { Network } from './network';
 import type { Source, Target } from './types';
 

@@ -16,7 +16,7 @@
  * 第 4 步是排查的关键：路由不生效时，`kubectl describe httproute` 里的
  * ResolvedRefs=False 会直接说出是后端 Service 不存在还是端口对不上。
  */
-import { Priority } from '../kernel';
+import { Priority } from '../../labkit/kernel';
 import type { KubeObject, ResourceDefinition } from '../apiserver';
 import {
   Controller, ControllerContext, Informer, isConflict, isNotFound, objectKey, splitKey,

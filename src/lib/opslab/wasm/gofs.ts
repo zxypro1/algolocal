@@ -9,7 +9,7 @@
  * 「同一棵」是重点：IDE 里改完的文件，终端里 kubectl apply 立刻就能看到，
  * 因为根本没有第二份数据。
  */
-import { Vfs, normalizePath } from '../machine/vfs';
+import { Vfs, normalizePath } from '../../labkit/machine/vfs';
 
 type Sink = (bytes: Uint8Array) => void;
 type Callback = (error: unknown, ...rest: unknown[]) => void;

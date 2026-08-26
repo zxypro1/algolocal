@@ -6,7 +6,7 @@
  * 真人在真集群里用的就是它，而且 `velero backup describe` 打出来的那几行
  * （尤其是 warnings 和 volume snapshots 的计数）正是这一关要学员看懂的东西。
  */
-import type { CommandHandler, CommandResult } from '../machine/shell/shell';
+import type { CommandHandler, CommandResult } from '../../labkit/machine/shell/shell';
 import type { KubeObject, Registry, Scheme } from '../apiserver';
 import { BACKUPS, BACKUPSTORAGELOCATIONS, RESTORES } from './velero';
 

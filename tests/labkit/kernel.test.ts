@@ -12,7 +12,7 @@ import {
   DeadlockError,
   Kernel,
   Priority,
-} from '../../src/lib/opslab/kernel';
+} from '../../src/lib/labkit/kernel';
 
 describe('确定性随机数', () => {
   it('同一个种子给出同一串数', () => {
