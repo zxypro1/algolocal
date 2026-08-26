@@ -137,7 +137,7 @@ describe('NCCL', () => {
     int main(void) {
       const int N = 16;
       int comms[8];
-      ncclCommInitAll(comms, ${n});
+      ncclCommInitAll(comms, ${n}, 0);
       int send[8]; int recv[8];
       for (int d = 0; d < ${n}; ++d) {
         cudaSetDevice(d);
@@ -190,7 +190,7 @@ describe('NCCL', () => {
     await expect(run(`
       int main(void) {
         int comms[8];
-        ncclCommInitAll(comms, 2);
+        ncclCommInitAll(comms, 2, 0);
         int send[8]; int recv[8];
         for (int d = 0; d < 2; ++d) {
           cudaSetDevice(d);
@@ -209,7 +209,7 @@ describe('NCCL', () => {
       int main(void) {
         const int N = 4;
         int comms[8];
-        ncclCommInitAll(comms, 4);
+        ncclCommInitAll(comms, 4, 0);
         int send[8]; int recv[8];
         for (int d = 0; d < 4; ++d) {
           cudaSetDevice(d);
@@ -240,7 +240,7 @@ describe('NCCL', () => {
       int main(void) {
         const int PER = 4;
         int comms[8];
-        ncclCommInitAll(comms, 4);
+        ncclCommInitAll(comms, 4, 0);
         int send[8]; int recv[8];
         for (int d = 0; d < 4; ++d) {
           cudaSetDevice(d);
@@ -269,7 +269,7 @@ describe('确定性', () => {
       int main(void) {
         const int N = 32;
         int comms[8];
-        ncclCommInitAll(comms, 4);
+        ncclCommInitAll(comms, 4, 0);
         int send[8]; int recv[8];
         for (int d = 0; d < 4; ++d) {
           cudaSetDevice(d);

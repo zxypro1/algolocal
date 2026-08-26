@@ -98,16 +98,20 @@ export function runClusterHost(
       const view = new Int32Array(hostLocal.bytes, address, values.length);
       for (let i = 0; i < values.length; i += 1) view[i] = values[i] | 0;
     },
+    readHostInts: (address, count) => (
+      Array.from(new Int32Array(hostLocal.bytes, address, count))
+    ),
     collective: (kind, ranks, count, op, root) => {
+      // 环按**实际的卡**走，不是按 rank 号 —— 一个组摊在两台机器上时，
+      // 环上就会有跨机的边，`comm.bytesByLink.ib` 立刻暴增
       const sorted = ranks.slice().sort((a, b) => a.device - b.device);
       if (sorted.length < 1) return;
-      for (let i = 0; i < sorted.length; i += 1) {
-        if (sorted[i].device !== i) {
-          throw new HostRuntimeError(
-            `${kind}：group 里的通信子应该是 0..${sorted.length - 1} 各一个，`
-            + `实际有 ${sorted.map((r) => r.device).join(', ')}`
-          );
+      const seen = new Set<number>();
+      for (const rank of sorted) {
+        if (seen.has(rank.device)) {
+          throw new HostRuntimeError(`${kind}：设备 ${rank.device} 在同一个 group 里出现了两次`);
         }
+        seen.add(rank.device);
       }
       const reduce = redOpOf(op);
       switch (kind) {

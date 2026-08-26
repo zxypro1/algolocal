@@ -45,6 +45,8 @@ export interface HostEnvironment {
   deviceCount?(): number;
   /** 往宿主端的 int 数组里写 —— ncclCommInitAll 的出参是这么给的 */
   writeHostInts?(address: number, values: number[]): void;
+  /** 读宿主端的 int 数组 —— ncclCommInitAll 的 devlist 是这么收的 */
+  readHostInts?(address: number, count: number): number[];
   setDevice?(index: number): void;
   getDevice?(): number;
   peerCopy?(dst: number, dstDevice: number, src: number, srcDevice: number, bytes: number): void;
@@ -282,8 +284,9 @@ export class HostRuntime implements HostServices {
 
       /* ---- NCCL ---- */
       case HOST.ncclCommInitAll: {
-        // comms 是一个 int 数组，第 i 项是设备 i 的通信子。
-        // 这个子集里通信子就是 rank 号加一（0 留给"没初始化"）。
+        // 真签名是 (comms, ndev, devlist)。通信子在这个子集里就是
+        // **它所在的那张卡的编号** —— 于是集合操作能知道环上每一跳
+        // 走的是哪条链路。devlist 传 0 表示用 0..ndev-1。
         const count = args[1] | 0;
         const env = this.requireCluster('ncclCommInitAll');
         if (count > env.deviceCount!()) {
@@ -295,7 +298,17 @@ export class HostRuntime implements HostServices {
         // 真 API 是 ncclCommInitAll(comms, ndev, devlist)，把每个设备的
         // 通信子写进 comms。这个子集里通信子就是 rank 号本身，
         // devlist 省掉了（设备固定是 0..n-1），这条偏差写在 nccl.h 里。
-        env.writeHostInts!(args[0] | 0, Array.from({ length: count }, (_, i) => i));
+        const devlist = (args[2] | 0) !== 0
+          ? env.readHostInts!(args[2] | 0, count)
+          : Array.from({ length: count }, (_, i) => i);
+        for (const device of devlist) {
+          if (device < 0 || device >= env.deviceCount!()) {
+            throw new HostRuntimeError(
+              `devlist 里有编号 ${device} 的设备，但一共只有 ${env.deviceCount!()} 张卡`
+            );
+          }
+        }
+        env.writeHostInts!(args[0] | 0, devlist);
         return 0;
       }
       case HOST.ncclCommDestroy:

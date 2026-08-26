@@ -5748,7 +5748,7 @@ const STAGE_23 = {
           ${DP_DECL}
 
           int comms[8];
-          ncclCommInitAll(comms, N);
+          ncclCommInitAll(comms, N, 0);
 
           int grad[8]; int out[8];
           for (int d = 0; d < N; ++d) {
@@ -5810,7 +5810,7 @@ const STAGE_23 = {
           ${DP_DECL}
 
           int comms[8];
-          ncclCommInitAll(comms, N);
+          ncclCommInitAll(comms, N, 0);
 
           int grad[8]; int out[8];
           for (int d = 0; d < N; ++d) {
@@ -5922,6 +5922,416 @@ const STAGE_23 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 24 关：张量并行                                                    */
+/* ------------------------------------------------------------------ */
+
+const TP_HIDDEN = 128;
+const TP_TOKENS = 32;
+const TP_WAYS = 8;
+
+/** 两台 8 卡机，一共 16 张 —— 跨机那件事得有机器可跨 */
+const TWO_NODE_WORLD = {
+  globalBytes: 2 * 1024 * 1024,
+  cluster: { devices: 16, devicesPerNode: 8 },
+};
+
+const TP_KERNELS = code`
+  __global__ void fill(float* a, float v, int n) {
+    int i = threadIdx.x;
+    if (i < n) a[i] = v;
+  }
+  // y = x W，W 是 [hidden, shard] 的一片
+  __global__ void matmulShard(const float* x, const float* W, float* y,
+                              int tokens, int hidden, int shard) {
+    int t = blockIdx.x;
+    int c = threadIdx.x;
+    if (c >= shard) return;
+    float acc = 0.0f;
+    for (int k = 0; k < hidden; ++k) acc = fmaf(x[t * hidden + k], W[k * shard + c], acc);
+    y[t * shard + c] = acc;
+  }
+`;
+
+const tpBench = {
+  sources: ['/root/tensorparallel.cu'],
+  buffers: [
+    { name: 'check', length: TP_WAYS, fill: { kind: 'zeros' } },
+  ],
+  launches: [],
+};
+
+const STAGE_24 = {
+  id: 'tensor-parallel',
+  title: t('张量并行 —— 一层只该通信一次，而且不能跨机',
+    'Tensor parallelism — one collective per layer, and never across nodes'),
+  goal: t(
+    [
+      '模型大到一张卡放不下时，就得把**单个权重矩阵**切开放到多张卡上 ——',
+      '这就是张量并行。这一关有 16 张卡（两台 8 卡机），做 8 路张量并行。',
+      '',
+      '一个前馈层是两次矩阵乘：`y = (x W1) W2`。切法有讲究：',
+      '',
+      '- **列并行**切 W1 的列。每张卡算出中间结果的一竖条 ——',
+      '  各算各的，**不需要通信**。',
+      '- **行并行**切 W2 的行。每张卡拿自己那一竖条中间结果，',
+      '  乘 W2 的对应横条，得到一个**部分和**。',
+      '  所有卡的部分和加起来才是答案 —— 这里需要一次 all-reduce。',
+      '',
+      '关键在于**列并行的输出形状正好是行并行想要的输入形状**。',
+      '于是一整层只需要**末尾一次** all-reduce。',
+      '',
+      '`tensorparallel.cu` 现在有两个问题：',
+      '',
+      '1. 它在两次矩阵乘**中间**也 all-reduce 了一次 —— 把分片的中间结果凑全。',
+      '   凑全了才能做行并行？不对，行并行要的就是分片的。',
+      '2. 它挑的 8 张卡是 0-3 和 8-11 —— **摊在两台机器上了**。',
+      '',
+      '第二条的代价比看上去大得多。这一关的两条链路：',
+      '',
+      '| | 单向带宽 | 延迟 |',
+      '| --- | --- | --- |',
+      '| NVLink 4（机内） | 450 GB/s | 1.5 µs |',
+      '| InfiniBand NDR（跨机） | 50 GB/s | 5 µs |',
+      '',
+      '**差 9 倍。** 而张量并行是每层都要通信的 ——',
+      '数据并行一步只 all-reduce 一次，张量并行 80 层就是 80 次。',
+      '这就是「scale-up 走 NVLink，scale-out 走 IB」那条铁律的由来。',
+      '',
+      '```bash',
+      'nvcc -o bench tensorparallel.cu && ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 结果正确',
+      '- **走 IB 的字节数为 0** —— 8 路张量并行必须落在同一台机器里',
+      '- 通信总量 ≤ 240 KB（起始版是 252 KB）',
+    ].join('\n'),
+    [
+      'When a model is too large for one GPU, individual **weight matrices** get split across GPUs.',
+      'That is tensor parallelism. This stage has 16 GPUs (two 8-GPU nodes) and does 8-way TP.',
+      '',
+      'A feed-forward layer is two matmuls: `y = (x W1) W2`. How you split them matters:',
+      '',
+      '- **Column parallel** splits W1 by columns. Each GPU computes one vertical strip of the',
+      '  intermediate result, independently, with **no communication**.',
+      '- **Row parallel** splits W2 by rows. Each GPU takes its own strip of the intermediate,',
+      '  multiplies by the matching horizontal strip of W2, and gets a **partial sum**. Summing all',
+      '  the partials gives the answer, and that needs one all-reduce.',
+      '',
+      'The key is that **column-parallel output has exactly the shape row-parallel wants as input**,',
+      'so a whole layer needs only **one all-reduce, at the end**.',
+      '',
+      '`tensorparallel.cu` has two problems:',
+      '',
+      '1. It also all-reduces **between** the two matmuls, to assemble the full intermediate. But row',
+      '   parallel wants the sharded one, not the full one.',
+      '2. The 8 GPUs it picks are 0-3 and 8-11, **spread across two nodes**.',
+      '',
+      'The second costs far more than it looks. The two links here:',
+      '',
+      '| | one-way bandwidth | latency |',
+      '| --- | --- | --- |',
+      '| NVLink 4 (in-node) | 450 GB/s | 1.5 µs |',
+      '| InfiniBand NDR (cross-node) | 50 GB/s | 5 µs |',
+      '',
+      '**A factor of nine.** And tensor parallelism communicates every layer: data parallelism',
+      'all-reduces once per step, TP does it 80 times for 80 layers. That is where the rule',
+      '"scale up over NVLink, scale out over InfiniBand" comes from.',
+      '',
+      '```bash',
+      'nvcc -o bench tensorparallel.cu && ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- correct results',
+      '- **zero bytes over InfiniBand**: 8-way TP has to fit in one node',
+      '- at most 240 KB of communication (252 KB to start)',
+    ].join('\n')
+  ),
+  checklist: [
+    t('去掉两次矩阵乘中间那次 all-reduce', 'Remove the all-reduce between the two matmuls'),
+    t('把 8 路张量并行落在同一台机器的 8 张卡上',
+      'Put the 8-way TP group on one node\'s 8 GPUs'),
+    t('末尾保留那一次 all-reduce —— 部分和必须加起来',
+      'Keep the final all-reduce: the partial sums do have to be summed'),
+  ],
+  hints: [
+    t('`ncclCommInitAll` 的第三个参数 `devlist` 决定第 i 个 rank 在哪张卡上。'
+      + '**它不是摆设** —— ring 是按实际的卡走的。',
+      'The third argument to `ncclCommInitAll`, `devlist`, decides which GPU each rank sits on. '
+      + '**It is not decorative**: the ring follows the actual GPUs.'),
+    t('列并行之后每张卡手上是中间结果的一竖条，正好就是行并行要的那一片 —— '
+      + '什么都不用做，直接喂给第二次矩阵乘。',
+      'After the column-parallel step each GPU holds one vertical strip of the intermediate, which '
+      + 'is exactly the slice row parallel needs. Feed it straight into the second matmul.'),
+  ],
+  pitfalls: [
+    t('**以为行并行需要完整的中间结果。** 正相反 —— 行并行要的就是分片的那一条。'
+      + '凑全了再切开，等于白白通信一次。',
+      '**Thinking row parallel needs the full intermediate.** The opposite is true: it wants exactly '
+      + 'the shard. Assembling the whole thing and re-splitting it is a wasted collective.'),
+    t('**把 TP 组摊到两台机器上。** 结果完全正确，只是慢得多 —— '
+      + '而且慢的方式很隐蔽：单看一层的耗时只是"有点慢"，'
+      + '乘上 80 层就是训练吞吐掉一半。`comm.bytesByLink.ib` 是唯一能直接看出来的地方。',
+      '**Spreading the TP group across nodes.** The results are perfectly correct, just much slower, '
+      + 'and slower in a sneaky way: one layer merely looks a bit slow, but across 80 layers it '
+      + 'halves training throughput. `comm.bytesByLink.ib` is the one place it shows directly.'),
+  ],
+  extension: t(
+    'Megatron-LM 那篇论文（2019）提出的就是这个切法，'
+    + '而"列并行接行并行"这个顺序是它最核心的设计 ——'
+    + '换成"行并行接列并行"，中间就得通信一次，一层两次 all-reduce。'
+    + '\n\n'
+    + '注意力层是同一个套路：QKV 投影按**头**切（等价于列并行），'
+    + '输出投影按行切，于是整个注意力块也只需要末尾一次 all-reduce。'
+    + '一个 Transformer 层因此是**两次** all-reduce（注意力一次、前馈一次），'
+    + '反向传播再两次。80 层的模型每步就是 320 次集合操作 ——'
+    + '这个频率解释了为什么张量并行对延迟极其敏感。'
+    + '\n\n'
+    + '所以现实中的并行策略是分层的：'
+    + '**张量并行只在机内**（8 张卡，NVLink），'
+    + '**流水线并行跨机**（IB，每级之间只传一次激活），'
+    + '**数据并行在最外层**（每步一次 all-reduce，频率最低）。'
+    + 'Megatron 的 6D 并行就是这几个维度的组合，而维度的排布顺序'
+    + '几乎完全由"这一维通信多频繁"决定。'
+    + '\n\n'
+    + '顺带一提，这一关的两条链路差 9 倍带宽、3 倍延迟。'
+    + 'GB200 NVL72 把 72 张卡用 NVLink 5 连成一个域，'
+    + '就是为了把"机内"这个范围从 8 张卡扩到 72 张 ——'
+    + '于是张量并行的可用宽度一下子大了 9 倍。',
+    'Megatron-LM (2019) introduced this split, and the column-then-row ordering is its core design. '
+    + 'Row-then-column would need a collective in the middle, two all-reduces per layer.\n\n'
+    + 'Attention layers follow the same pattern: QKV projections split by **head** (equivalent to '
+    + 'column parallel), the output projection splits by row, so an attention block also needs only '
+    + 'one all-reduce at the end. A Transformer layer is therefore **two** all-reduces (attention, '
+    + 'feed-forward) plus two more in backward. For an 80-layer model that is 320 collectives per '
+    + 'step, and that frequency is why tensor parallelism is so latency-sensitive.\n\n'
+    + 'Real parallel strategies are layered accordingly: **tensor parallelism stays in-node** (8 '
+    + 'GPUs, NVLink), **pipeline parallelism goes across nodes** (InfiniBand, one activation '
+    + 'transfer per stage boundary), and **data parallelism sits outermost** (one all-reduce per '
+    + 'step, the lowest frequency). Megatron\'s 6D parallelism combines these dimensions, and their '
+    + 'ordering is decided almost entirely by how often each one communicates.\n\n'
+    + 'Incidentally, the two links here differ by 9x in bandwidth and 3x in latency. GB200 NVL72 '
+    + 'connects 72 GPUs into one NVLink 5 domain precisely to stretch "in-node" from 8 GPUs to 72, '
+    + 'making the usable width for tensor parallelism nine times larger.'
+  ),
+  gpu: {
+    world: TWO_NODE_WORLD,
+    files: {
+      '/root/tensorparallel.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "nccl.h"
+
+        ${TP_KERNELS}
+
+        int main(void) {
+          const int TP = ${TP_WAYS};
+          const int HIDDEN = ${TP_HIDDEN};
+          const int TOKENS = ${TP_TOKENS};
+          const int SHARD = HIDDEN / TP;
+
+          // TODO: 这 8 张卡摊在两台机器上了（0-3 在节点 0，8-11 在节点 1）。
+          //       8 路张量并行必须落在同一台机器里。
+          int devs[16];
+          devs[0] = 0; devs[1] = 1; devs[2] = 2; devs[3] = 3;
+          devs[4] = 8; devs[5] = 9; devs[6] = 10; devs[7] = 11;
+
+          int comms[16];
+          ncclCommInitAll(comms, TP, devs);
+
+          int x[16]; int w1[16]; int mid[16]; int w2[16]; int part[16]; int outb[16];
+          for (int i = 0; i < TP; ++i) {
+            cudaSetDevice(devs[i]);
+            float* a; float* b; float* c; float* d2; float* e; float* f;
+            cudaMalloc((void**)&a, TOKENS * HIDDEN * 4);
+            cudaMalloc((void**)&b, HIDDEN * SHARD * 4);
+            cudaMalloc((void**)&c, TOKENS * SHARD * 4);
+            cudaMalloc((void**)&d2, SHARD * HIDDEN * 4);
+            cudaMalloc((void**)&e, TOKENS * HIDDEN * 4);
+            cudaMalloc((void**)&f, TOKENS * HIDDEN * 4);
+            fill<<<1, 64>>>(a, 0.1f, 64);
+            fill<<<1, 64>>>(b, 0.01f, 64);
+            fill<<<1, 64>>>(d2, 0.02f, 64);
+            x[i] = a; w1[i] = b; mid[i] = c; w2[i] = d2; part[i] = e; outb[i] = f;
+          }
+
+          // 列并行：各算各的一竖条，不需要通信
+          for (int i = 0; i < TP; ++i) {
+            cudaSetDevice(devs[i]);
+            matmulShard<<<TOKENS, 32>>>(x[i], w1[i], mid[i], TOKENS, HIDDEN, SHARD);
+          }
+
+          // TODO: 这一次 all-reduce 是多余的。行并行要的就是分片的中间结果，
+          //       凑全了再切开等于白白通信一次。
+          ncclGroupStart();
+          for (int i = 0; i < TP; ++i) {
+            ncclAllReduce(mid[i], mid[i], TOKENS * SHARD, ncclFloat, ncclSum, comms[i], 0);
+          }
+          ncclGroupEnd();
+
+          // 行并行：得到部分和
+          for (int i = 0; i < TP; ++i) {
+            cudaSetDevice(devs[i]);
+            matmulShard<<<TOKENS, 32>>>(mid[i], w2[i], part[i], TOKENS, SHARD, HIDDEN);
+          }
+
+          // 部分和相加 —— 这一次是必须的
+          ncclGroupStart();
+          for (int i = 0; i < TP; ++i) {
+            ncclAllReduce(part[i], outb[i], TOKENS * HIDDEN, ncclFloat, ncclSum, comms[i], 0);
+          }
+          ncclGroupEnd();
+
+          float* check = lab_buffer(0);
+          float host[8];
+          for (int i = 0; i < TP; ++i) {
+            cudaSetDevice(devs[i]);
+            float one[1];
+            cudaMemcpy(one, outb[i], 4, cudaMemcpyDeviceToHost);
+            host[i] = one[0];
+          }
+          cudaSetDevice(0);
+          cudaMemcpy(check, host, TP * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+    bench: tpBench,
+    referenceFiles: {
+      '/root/tensorparallel.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "nccl.h"
+
+        ${TP_KERNELS}
+
+        int main(void) {
+          const int TP = ${TP_WAYS};
+          const int HIDDEN = ${TP_HIDDEN};
+          const int TOKENS = ${TP_TOKENS};
+          const int SHARD = HIDDEN / TP;
+
+          // 8 路张量并行落在节点 0 的 8 张卡上 —— 全走 NVLink
+          int devs[16];
+          for (int i = 0; i < TP; ++i) devs[i] = i;
+
+          int comms[16];
+          ncclCommInitAll(comms, TP, devs);
+
+          int x[16]; int w1[16]; int mid[16]; int w2[16]; int part[16]; int outb[16];
+          for (int i = 0; i < TP; ++i) {
+            cudaSetDevice(devs[i]);
+            float* a; float* b; float* c; float* d2; float* e; float* f;
+            cudaMalloc((void**)&a, TOKENS * HIDDEN * 4);
+            cudaMalloc((void**)&b, HIDDEN * SHARD * 4);
+            cudaMalloc((void**)&c, TOKENS * SHARD * 4);
+            cudaMalloc((void**)&d2, SHARD * HIDDEN * 4);
+            cudaMalloc((void**)&e, TOKENS * HIDDEN * 4);
+            cudaMalloc((void**)&f, TOKENS * HIDDEN * 4);
+            fill<<<1, 64>>>(a, 0.1f, 64);
+            fill<<<1, 64>>>(b, 0.01f, 64);
+            fill<<<1, 64>>>(d2, 0.02f, 64);
+            x[i] = a; w1[i] = b; mid[i] = c; w2[i] = d2; part[i] = e; outb[i] = f;
+          }
+
+          // 列并行：各算各的一竖条
+          for (int i = 0; i < TP; ++i) {
+            cudaSetDevice(devs[i]);
+            matmulShard<<<TOKENS, 32>>>(x[i], w1[i], mid[i], TOKENS, HIDDEN, SHARD);
+          }
+
+          // **这里什么都不做。** 列并行的输出形状正好是行并行想要的输入形状 ——
+          // 凑全了再切开等于白白通信一次
+          for (int i = 0; i < TP; ++i) {
+            cudaSetDevice(devs[i]);
+            matmulShard<<<TOKENS, 32>>>(mid[i], w2[i], part[i], TOKENS, SHARD, HIDDEN);
+          }
+
+          // 一整层唯一的一次通信：把部分和加起来
+          ncclGroupStart();
+          for (int i = 0; i < TP; ++i) {
+            ncclAllReduce(part[i], outb[i], TOKENS * HIDDEN, ncclFloat, ncclSum, comms[i], 0);
+          }
+          ncclGroupEnd();
+
+          float* check = lab_buffer(0);
+          float host[8];
+          for (int i = 0; i < TP; ++i) {
+            cudaSetDevice(devs[i]);
+            float one[1];
+            cudaMemcpy(one, outb[i], 4, cudaMemcpyDeviceToHost);
+            host[i] = one[0];
+          }
+          cudaSetDevice(0);
+          cudaMemcpy(check, host, TP * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('tensorparallel.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const TP = ${TP_WAYS};
+
+      describe('张量并行', () => {
+        it('八张卡的结果一致且有限', async () => {
+          await lab.buildAndRun();
+          const check = lab.buffer('check');
+          for (let i = 0; i < TP; i += 1) {
+            expect(Number.isFinite(check[i])).toBe(true);
+            expect(Math.abs(check[i] - check[0])).toBeLessThanOrEqual(1e-4);
+          }
+          // all-reduce 真的做了：部分和加起来不会是 0
+          expect(Math.abs(check[0])).toBeGreaterThan(0);
+        });
+
+        it('**一个字节都不该走 IB** —— 8 路张量并行必须落在同一台机器里', async () => {
+          await lab.buildAndRun();
+          expect(lab.comm().bytesByLink.ib).toBe(0);
+        });
+
+        it('一整层只通信一次', async () => {
+          await lab.buildAndRun();
+          // 一次 all-reduce = 2(n-1) × n 条消息
+          expect(lab.comm().messages).toBe(2 * (TP - 1) * TP);
+        });
+
+        it('通信总量降下来了', async () => {
+          await lab.buildAndRun();
+          expect(lab.comm().bytes).toBeLessThanOrEqual(240 * 1024);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.comm.bytesByLink.ib', op: 'lte', value: 0,
+      zh: '走 IB 的字节数 —— 张量并行跨机就是被这条抓住的',
+      en: 'bytes over InfiniBand: this is the gate that catches TP spanning nodes',
+      unit: 'byte', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'gpu.comm.bytes', op: 'lte', value: 240 * 1024,
+      zh: '通信总量（起始版是 252KB，多了中间那次多余的 all-reduce）',
+      en: 'total communication (252KB to start, including the redundant middle all-reduce)',
+      unit: 'byte', dimension: 'throughput',
+    }),
+    gate({
+      metric: 'gpu.comm.messages', op: 'lte', value: 2 * 7 * 8,
+      zh: '消息条数 —— 一整层只该有一次 all-reduce',
+      en: 'messages: a whole layer should need only one all-reduce',
+      unit: 'message', dimension: 'throughput',
+    }),
+  ],
+  focus: ['throughput', 'correctness'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -5988,5 +6398,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22, STAGE_23],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22, STAGE_23, STAGE_24],
 };
