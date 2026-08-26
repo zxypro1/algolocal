@@ -24,7 +24,7 @@ import { encode, type ExecutableKernel, type Program, ATOM, BIN, FN, OP, SFU_FNS
 import type { CompiledKernel } from '../ir/types';
 import {
   addF32, divF32, expF32, fastDivF32, fastExpF32, fastLogF32, floatToInt, floatToUint,
-  fmaF32, logF32, maxF32, minF32, mulF32, powF32, rsqrtF32, sqrtF32, subF32, tanhF32,
+  fmaF32, logF32, maxF32, minF32, mulF32, powF32, rsqrtF32, sqrtF32, subF32, tanhF32, toHalf,
 } from './float';
 import {
   LinearMemory, MemoryFault, SECTOR_BYTES, WARP_SIZE,
@@ -187,6 +187,10 @@ class Executor {
   private readonly addresses = new Int32Array(WARP_SIZE);
   /** shuffle 要先把源值快照下来 —— dst 和 src 可能是同一个寄存器 */
   private readonly shflScratch = new Float64Array(WARP_SIZE);
+  /** wmma 把整个 warp 的碎片拼成 16×16 用的暂存 */
+  private readonly tileA = new Float64Array(256);
+  private readonly tileB = new Float64Array(256);
+  private readonly tileC = new Float64Array(256);
   private readonly maxWarpInsts: number;
   private readonly blockThreads: number;
   private readonly warpsPerBlock: number;
@@ -849,6 +853,150 @@ class Executor {
             // 原子操作是并发更新的**正确**做法，不该被 racecheck 报成竞态 ——
             // 真的 racecheck 也不报它们。所以这里不喂给检测器。
             instLdSt += lanes;
+            pc += 1;
+            break;
+          }
+
+          case OP.WMMA_FILL: {
+            const base = code[at + 1];
+            const slots = code[at + 2];
+            const value = code[at + 3] * WARP_SIZE;
+            for (let slot = 0; slot < slots; slot += 1) {
+              const dst = (base + slot) * WARP_SIZE;
+              for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+                if (active & (1 << lane)) regs[dst + lane] = regs[value + lane];
+              }
+            }
+            pc += 1;
+            break;
+          }
+
+          case OP.WMMA_LOAD: {
+            const base = code[at + 1];
+            const slots = code[at + 2];
+            const addr = code[at + 3] * WARP_SIZE;
+            const strideReg = code[at + 4] * WARP_SIZE;
+            const space = code[at + 5];
+            const colMajor = code[at + 6] === 1;
+            const isHalf = code[at + 7] === 1;
+            const memory = space === SPACE.GLOBAL ? globalMemory
+              : space === SPACE.SHARED ? sharedMemory : localMemory;
+
+            // fragment 的排布是我们定的：展平后第 f 个元素在 lane f%32 的第 f/32 槽
+            const baseAddr = regs[addr] | 0;
+            const stride = regs[strideReg] | 0;
+            for (let slot = 0; slot < slots; slot += 1) {
+              const dst = (base + slot) * WARP_SIZE;
+              for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+                if ((active & (1 << lane)) === 0) continue;
+                const flat = slot * WARP_SIZE + lane;
+                const r = (flat / 16) | 0;
+                const c = flat % 16;
+                const offset = colMajor ? c * stride + r : r * stride + c;
+                const address = baseAddr + offset * 4;
+                addresses[lane] = address;
+                const raw = memory.readF32(address);
+                regs[dst + lane] = isHalf ? toHalf(raw) : raw;
+              }
+              if (space === SPACE.GLOBAL) {
+                counters.globalLoadRequests += 1;
+                counters.globalLoadSectors += countSectors(addresses, active);
+              } else if (space === SPACE.SHARED) {
+                counters.sharedLoadRequests += 1;
+                counters.sharedBankConflicts += countBankConflicts(addresses, active);
+              } else {
+                counters.localReadBytes += lanes * 4;
+              }
+            }
+            instLdSt += lanes * slots;
+            pc += 1;
+            break;
+          }
+
+          case OP.WMMA_STORE: {
+            const base = code[at + 1];
+            const slots = code[at + 2];
+            const addr = code[at + 3] * WARP_SIZE;
+            const strideReg = code[at + 4] * WARP_SIZE;
+            const space = code[at + 5];
+            const colMajor = code[at + 6] === 1;
+            const memory = space === SPACE.GLOBAL ? globalMemory
+              : space === SPACE.SHARED ? sharedMemory : localMemory;
+
+            const baseAddr = regs[addr] | 0;
+            const stride = regs[strideReg] | 0;
+            for (let slot = 0; slot < slots; slot += 1) {
+              const src = (base + slot) * WARP_SIZE;
+              for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+                if ((active & (1 << lane)) === 0) continue;
+                const flat = slot * WARP_SIZE + lane;
+                const r = (flat / 16) | 0;
+                const c = flat % 16;
+                const offset = colMajor ? c * stride + r : r * stride + c;
+                const address = baseAddr + offset * 4;
+                addresses[lane] = address;
+                memory.writeF32(address, regs[src + lane]);
+              }
+              if (space === SPACE.GLOBAL) {
+                counters.globalStoreRequests += 1;
+                counters.globalStoreSectors += countSectors(addresses, active);
+              } else if (space === SPACE.SHARED) {
+                counters.sharedStoreRequests += 1;
+                counters.sharedBankConflicts += countBankConflicts(addresses, active);
+              } else {
+                counters.localWriteBytes += lanes * 4;
+              }
+            }
+            instLdSt += lanes * slots;
+            pc += 1;
+            break;
+          }
+
+          case OP.WMMA_MMA: {
+            // 一次 mma 要凑齐整个 warp 的碎片：先拼成完整的 16×16，
+            // 算完再散回去。真硬件上这是一条指令，碎片怎么分布是未定义的 ——
+            // 我们能拼是因为执行器本来就同时握着 32 个 lane 的寄存器。
+            const dBase = code[at + 1];
+            const aBase = code[at + 2];
+            const bBase = code[at + 3];
+            const cBase = code[at + 4];
+            const slots = code[at + 5];
+            const A = this.tileA;
+            const B = this.tileB;
+            const C = this.tileC;
+
+            for (let slot = 0; slot < slots; slot += 1) {
+              const aReg = (aBase + slot) * WARP_SIZE;
+              const bReg = (bBase + slot) * WARP_SIZE;
+              const cReg = (cBase + slot) * WARP_SIZE;
+              for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+                const flat = slot * WARP_SIZE + lane;
+                A[flat] = regs[aReg + lane];
+                B[flat] = regs[bReg + lane];
+                C[flat] = regs[cReg + lane];
+              }
+            }
+
+            // D = A * B + C，累加在 fp32 上（真 tensor core 也是这样）
+            for (let r = 0; r < 16; r += 1) {
+              for (let c = 0; c < 16; c += 1) {
+                let acc = C[r * 16 + c];
+                for (let k = 0; k < 16; k += 1) {
+                  acc = fmaF32(A[r * 16 + k], B[k * 16 + c], acc);
+                }
+                C[r * 16 + c] = acc;
+              }
+            }
+
+            for (let slot = 0; slot < slots; slot += 1) {
+              const dReg = (dBase + slot) * WARP_SIZE;
+              for (let lane = 0; lane < WARP_SIZE; lane += 1) {
+                if (active & (1 << lane)) regs[dReg + lane] = C[slot * WARP_SIZE + lane];
+              }
+            }
+
+            // 16×16×16 = 4096 次乘加，走 tensor core 而不是 FMA 流水
+            counters.instMma += 16 * 16 * 16;
             pc += 1;
             break;
           }

@@ -17,7 +17,7 @@ export interface SourceSpan {
 /* 类型                                                                */
 /* ------------------------------------------------------------------ */
 
-export type ScalarKind = 'int' | 'uint' | 'float' | 'bool' | 'void';
+export type ScalarKind = 'int' | 'uint' | 'float' | 'half' | 'bool' | 'void';
 
 export interface ScalarType {
   kind: 'scalar';
@@ -44,16 +44,44 @@ export interface ArrayType {
   length: number;
 }
 
-export type CudaType = ScalarType | PointerType | ArrayType;
+/**
+ * `wmma::fragment<...>` —— tensor core 的一块碎片。
+ *
+ * 它是**不透明**的：一个 16×16 的 tile 被拆散在 warp 的 32 个 lane 的寄存器里，
+ * 具体谁拿哪几个元素**真硬件上是未定义的**（这正是 CUDA 把它做成 opaque
+ * 类型的原因）。所以我们定义自己的排布，比假装存在一个「真布局」更诚实。
+ */
+export interface FragmentType {
+  kind: 'fragment';
+  use: 'matrix_a' | 'matrix_b' | 'accumulator';
+  m: number;
+  n: number;
+  k: number;
+  /** 元素类型：a/b 是 half，accumulator 是 float */
+  element: 'half' | 'float';
+  layout?: 'row_major' | 'col_major';
+}
+
+export type CudaType = ScalarType | PointerType | ArrayType | FragmentType;
 
 export const INT: ScalarType = { kind: 'scalar', scalar: 'int' };
 export const UINT: ScalarType = { kind: 'scalar', scalar: 'uint' };
 export const FLOAT: ScalarType = { kind: 'scalar', scalar: 'float' };
+export const HALF: ScalarType = { kind: 'scalar', scalar: 'half' };
 export const BOOL: ScalarType = { kind: 'scalar', scalar: 'bool' };
 export const VOID: ScalarType = { kind: 'scalar', scalar: 'void' };
 
 export function isFloat(type: CudaType): boolean {
-  return type.kind === 'scalar' && type.scalar === 'float';
+  return type.kind === 'scalar' && (type.scalar === 'float' || type.scalar === 'half');
+}
+
+export function isFragment(type: CudaType): type is FragmentType {
+  return type.kind === 'fragment';
+}
+
+/** 一个 fragment 在每个 lane 上占几个寄存器槽 */
+export function fragmentSlots(type: FragmentType): number {
+  return (type.m * type.n) / 32;
 }
 
 export function isPointer(type: CudaType): type is PointerType {
@@ -69,6 +97,8 @@ export function sizeOf(type: CudaType): number {
       return 4;
     case 'array':
       return sizeOf(type.of) * type.length;
+    case 'fragment':
+      return type.m * type.n * 4;
   }
 }
 
@@ -80,6 +110,8 @@ export function typeName(type: CudaType): string {
       return `${typeName(type.to)}*`;
     case 'array':
       return `${typeName(type.of)}[${type.length}]`;
+    case 'fragment':
+      return `wmma::fragment<${type.use}, ${type.m}, ${type.n}, ${type.k}, ${type.element}>`;
   }
 }
 
