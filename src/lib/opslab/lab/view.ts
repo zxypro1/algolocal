@@ -155,8 +155,13 @@ function toNode(object: KubeObject, index: number, y: number): TopologyNode {
   };
 }
 
-/** 节点上那行小字，抄的是 `kubectl get` 里最要紧的那一列 */
-function describe(object: KubeObject): { detail: string; status: TopologyStatus } {
+/**
+ * 节点上那行小字，抄的是 `kubectl get` 里最要紧的那一列，外加一个健康度。
+ *
+ * 导出是给 AI 上下文用的 —— 喂给模型的集群快照和拓扑图上看到的应该是
+ * 同一套判断，不然学员会问「它说我这个 Pod 没问题，可图上是红的」。
+ */
+export function describe(object: KubeObject): { detail: string; status: TopologyStatus } {
   const status = (object.status ?? {}) as Record<string, unknown>;
   const spec = (object.spec ?? {}) as Record<string, unknown>;
 

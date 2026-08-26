@@ -12,5 +12,10 @@ export {
 
 export { toolchainFor, baseImageOf, type ToolchainName } from './toolchains';
 export { createExecHandler, normalizeCommand } from './podshell';
-export { buildPacketPath, buildPacketPaths } from './view';
+export { buildPacketPath, buildPacketPaths, describe } from './view';
+export { buildOpsSnapshot, summarizeReport, SNAPSHOT_LIMITS } from './aicontext';
+export type {
+  OpsSnapshot, OpsSnapshotOptions, OpsReportSummary, SnapshotObject, SnapshotEvent, SnapshotCommand,
+  SnapshotLimits,
+} from './aicontext';
 export type { PacketPath, PacketStep } from './view';

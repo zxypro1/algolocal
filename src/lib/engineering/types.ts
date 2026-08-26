@@ -637,3 +637,32 @@ export interface AiReview {
   strengths: string[];
   nextSteps: string[];
 }
+
+/* ------------------------------------------------------------------ *
+ * ops 工作台的 AI 复盘
+ *
+ * 和代码形态的 AiReview 是两回事：那边评的是「这段代码能不能合」，这边评的是
+ * 「这一关他是怎么操作过来的」—— 学员没写代码，他敲了一串命令、改了几个
+ * manifest，把集群从坏改成好。所以维度也不一样，判分看的是排查路径本身。
+ * ------------------------------------------------------------------ */
+
+export const OPS_DIMENSION_KEYS = ['diagnosis', 'outcome', 'safety', 'efficiency', 'understanding'] as const;
+
+export type OpsDimensionKey = (typeof OPS_DIMENSION_KEYS)[number];
+
+export interface OpsReviewIssue {
+  title: string;
+  severity: 'blocker' | 'major' | 'minor' | 'nit';
+  /** 出问题的地方：一条命令、一个集群对象，或者一个文件 */
+  where?: string;
+  detail: string;
+  suggestion?: string;
+}
+
+export interface OpsReview {
+  summary: string;
+  dimensions: Array<{ key: OpsDimensionKey; score: number; comment: string }>;
+  issues: OpsReviewIssue[];
+  strengths: string[];
+  nextSteps: string[];
+}

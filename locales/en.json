@@ -624,6 +624,38 @@
       "note": "Recorded across the whole acceptance run. Steps carry the file they came from, so the view follows execution across files."
     }
   },
+  "opslab": {
+    "chat": {
+      "tab": "AI assistant",
+      "title": "On-call buddy",
+      "empty": "I can see what you just ran in the terminal, which objects in the cluster are unhealthy, and which verification checks did not pass. Ask when you are stuck and I will give you the next command to run — you type it, I never touch this cluster.",
+      "placeholder": "Ask about this stage… (Enter to send, Shift+Enter for a newline)",
+      "prompts": {
+        "lastError": "Why did that last command fail?",
+        "whyFailing": "What is the failing check actually asserting?",
+        "whereToLook": "Where should I look next?",
+        "explainStage": "What is this stage asking me to do?"
+      }
+    },
+    "review": {
+      "title": "AI review",
+      "subtitle": "Judges how you operated, not whether the checks passed",
+      "request": "Review my run",
+      "running": "Reviewing…",
+      "empty": "Come here after you finish a stage — or when you are stuck. The AI walks back through the commands you ran: whether the path made sense, whether the cluster is actually correct now, and whether you took a shortcut that would not fly on a real cluster.",
+      "issues": "Worth fixing",
+      "strengths": "Done well",
+      "nextSteps": "Next steps",
+      "noWorld": "The cluster is not up yet — wait for the terminal to be ready.",
+      "dimensions": {
+        "diagnosis": "Diagnosis",
+        "outcome": "Outcome",
+        "safety": "Safety",
+        "efficiency": "Efficiency",
+        "understanding": "Understanding"
+      }
+    }
+  },
   "editor": {
     "toggleWrap": "Word wrap",
     "toggleMinimap": "Minimap",

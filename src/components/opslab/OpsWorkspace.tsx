@@ -14,7 +14,7 @@ import {
 } from '@mantine/core';
 import {
   IconAlertTriangle, IconDeviceDesktop, IconFileCode, IconPlayerPlay,
-  IconRefresh, IconRoute, IconSitemap, IconTimeline,
+  IconRefresh, IconRobot, IconRoute, IconSitemap, IconTimeline,
 } from '@tabler/icons-react';
 import { useMantineColorScheme } from '@mantine/core';
 import Editor from '@monaco-editor/react';
@@ -35,6 +35,8 @@ import type { StageRunReport } from '../../lib/engineering/types';
 const OpsTerminal = dynamic(() => import('./OpsTerminal'), { ssr: false });
 const TopologyView = dynamic(() => import('./TopologyView'), { ssr: false });
 const PacketPathPanel = dynamic(() => import('./PacketPathPanel'), { ssr: false });
+const OpsChat = dynamic(() => import('./OpsChat'), { ssr: false });
+const OpsReview = dynamic(() => import('./OpsReview'), { ssr: false });
 
 export interface OpsWorkspaceProps {
   session: ProjectSession;
@@ -50,7 +52,7 @@ const BANNER = [
 ].join('\r\n');
 
 /** 右侧那一组 tab，以及记住选择用的键 */
-const RIGHT_TABS = ['terminal', 'ide', 'topology', 'changes', 'packets'];
+const RIGHT_TABS = ['terminal', 'ide', 'topology', 'changes', 'packets', 'chat'];
 const RIGHT_TAB_KEY = 'opslab.rightTab.v1';
 const SPLIT_KEY = 'opslab.split.v1';
 
@@ -300,6 +302,7 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                 <Tabs.Tab value="result" fz="xs">
                   验收{report ? ` · ${report.totals.passed}/${report.totals.total}` : ''}
                 </Tabs.Tab>
+                <Tabs.Tab value="review" fz="xs">复盘</Tabs.Tab>
               </Tabs.List>
               <Tabs.Panel value="goal" style={{ flex: 1, minHeight: 0 }}>
                 <ScrollArea h="100%" type="auto" p="sm">
@@ -326,6 +329,30 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                     : <Text size="xs" c="dimmed">还没跑过验收</Text>}
                 </ScrollArea>
               </Tabs.Panel>
+              {/**
+                * 复盘。评的是操作过程，不是验收结果 —— 验收只查关键点，
+                * 把 replicas 调成 0 也能让 CrashLoopBackOff 消失。
+                */}
+              <Tabs.Panel value="review" style={{ flex: 1, minHeight: 0 }}>
+                <ScrollArea h="100%" type="auto" p="sm">
+                  <ErrorBoundary fallback={renderPanelError}>
+                    <OpsReview
+                      projectTitle={project.title}
+                      projectSummary={project.summary}
+                      stageTitle={stage.title}
+                      stageGoal={stage.goal}
+                      stageIndex={stageIndex}
+                      stageCount={project.stages.length}
+                      checklist={stage.checklist}
+                      world={ops.world}
+                      history={ops.history}
+                      namespace={ops.namespace}
+                      files={machineFiles}
+                      report={report}
+                    />
+                  </ErrorBoundary>
+                </ScrollArea>
+              </Tabs.Panel>
             </Tabs>
           )}
           right={(
@@ -348,6 +375,9 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                   <Tabs.Tab value="topology" fz="xs" leftSection={<IconSitemap size={13} />}>拓扑</Tabs.Tab>
                   <Tabs.Tab value="changes" fz="xs" leftSection={<IconTimeline size={13} />}>事件与变更</Tabs.Tab>
                   <Tabs.Tab value="packets" fz="xs" leftSection={<IconRoute size={13} />}>包路径</Tabs.Tab>
+                  <Tabs.Tab value="chat" fz="xs" leftSection={<IconRobot size={13} />}>
+                    {t('opslab.chat.tab')}
+                  </Tabs.Tab>
                 </Tabs.List>
 
                 {/* 只跟集群视图有关的控件。切到终端或者 IDE 的时候它们没有意义，就别占地方。 */}
@@ -466,6 +496,31 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
               <Tabs.Panel value="packets" style={{ flex: 1, minHeight: 0 }}>
                 <ErrorBoundary fallback={renderPanelError}>
                   <PacketPathPanel paths={ops.packetPaths} onHighlight={setHighlight} />
+                </ErrorBoundary>
+              </Tabs.Panel>
+
+              {/**
+                * AI 助手。
+                *
+                * 保持挂载：对话历史不能因为切去看一眼拓扑就没了。
+                * 它只读世界，不执行任何命令 —— 建议的命令由学员自己敲进终端。
+                */}
+              <Tabs.Panel value="chat" style={{ flex: 1, minHeight: 0 }}>
+                <ErrorBoundary fallback={renderPanelError}>
+                  <OpsChat
+                    projectTitle={project.title}
+                    projectSummary={project.summary}
+                    stageTitle={stage.title}
+                    stageGoal={stage.goal}
+                    stageIndex={stageIndex}
+                    stageCount={project.stages.length}
+                    checklist={stage.checklist}
+                    world={ops.world}
+                    history={ops.history}
+                    namespace={ops.namespace}
+                    files={machineFiles}
+                    report={report}
+                  />
                 </ErrorBoundary>
               </Tabs.Panel>
             </Tabs>
