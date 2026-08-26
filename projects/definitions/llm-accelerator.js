@@ -2233,6 +2233,664 @@ const STAGE_11 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 12 关：softmax                                                    */
+/* ------------------------------------------------------------------ */
+
+const ROWS12 = 64;
+const COLS12 = 256;
+const N12 = ROWS12 * COLS12;
+
+/** 一行一个 warp 的场景，第 12、13 关共用 */
+const rowBench = (kernel) => ({
+  sources: ['/root/kernel.cu'],
+  buffers: [
+    { name: 'in', length: N12, fill: { kind: 'random', seed: 51, min: -20, max: 20 } },
+    { name: 'out', length: N12, fill: { kind: 'zeros' } },
+  ],
+  launches: [
+    { kernel, grid: [ROWS12], block: [32], args: ['in', 'out', ROWS12, COLS12] },
+  ],
+});
+
+const STAGE_12 = {
+  id: 'online-softmax',
+  title: t('softmax —— 三遍读变两遍，代价是更多的 expf',
+    'Softmax — three passes down to two, paid for in expf'),
+  goal: t(
+    [
+      'softmax 是注意力里的那一步：`out[i] = exp(x[i]) / Σ exp(x[j])`。',
+      '直接这么写会溢出 —— `exp(20)` 已经很大，`exp(100)` 就是 inf 了。',
+      '标准做法是先减去这一行的最大值：`exp(x[i] - m) / Σ exp(x[j] - m)`，',
+      '结果完全一样，但每个指数的输入都 ≤ 0，永远不会溢出。',
+      '',
+      '于是朴素写法要读三遍：一遍求 max，一遍求和，一遍写结果。',
+      '`kernel.cu` 里就是这样，`ncu` 上 DRAM 读量是张量的 **3 倍**。',
+      '',
+      '**在线 softmax**把前两遍合成一遍。诀窍是边走边修正：',
+      '维护当前的最大值 `m` 和当前的和 `s`，看到一个更大的值时，',
+      '把已经累加的和按 `exp(m_old - m_new)` 缩放一下就行 —— 数学上完全等价。',
+      '',
+      '```cuda',
+      'float mNew = fmaxf(m, v);',
+      's = s * expf(m - mNew) + expf(v - mNew);',
+      'm = mNew;',
+      '```',
+      '',
+      'warp 内归并时也要按同样的方式合并两个 `(m, s)` 对。',
+      '',
+      '**这一步不是免费的**：修正项要额外算 `expf`，而 SFU 的吞吐只有 FMA 的 1/8。',
+      '跑完之后对比一下 `ncu` 里 SFU 那一行 —— 你会看到访存省下来的，一部分还给了 SFU。',
+      '这个取舍在 FlashAttention 里被推到了极致，第 16 关会回到它。',
+      '',
+      '**通关标准**',
+      '',
+      '- 结果和 fp64 参考对得上，且没有 inf / nan（输入里有 ±20 的值）',
+      '- DRAM 读量 ≤ 张量的 2.2 倍（三遍版是 3 倍）',
+    ].join('\n'),
+    [
+      'Softmax is the step inside attention: `out[i] = exp(x[i]) / Σ exp(x[j])`. Written directly it',
+      'overflows: `exp(20)` is already large and `exp(100)` is inf. The standard fix subtracts the row',
+      'maximum first, `exp(x[i] - m) / Σ exp(x[j] - m)`, which is mathematically identical while every',
+      'exponent argument is now ≤ 0 and can never overflow.',
+      '',
+      'That costs three passes: one for the max, one for the sum, one to write. `kernel.cu` does exactly',
+      'that and `ncu` reports **3×** the tensor size in DRAM reads.',
+      '',
+      '**Online softmax** merges the first two. The trick is correcting as you go: keep a running max `m`',
+      'and running sum `s`, and when a larger value appears, rescale the accumulated sum by',
+      '`exp(m_old - m_new)`. Mathematically exact.',
+      '',
+      '```cuda',
+      'float mNew = fmaxf(m, v);',
+      's = s * expf(m - mNew) + expf(v - mNew);',
+      'm = mNew;',
+      '```',
+      '',
+      'The warp-level reduction must combine two `(m, s)` pairs the same way.',
+      '',
+      '**This is not free**: the correction needs extra `expf`, and SFU throughput is one eighth of FMA.',
+      'Compare the SFU line in `ncu` afterwards; part of what you saved in memory went back to the SFU.',
+      'FlashAttention pushes this trade to its limit, and stage 16 returns to it.',
+      '',
+      '**To pass**',
+      '',
+      '- results match an fp64 reference with no inf/nan (inputs reach ±20)',
+      '- DRAM reads at most 2.2× the tensor (3× for the three-pass version)',
+    ].join('\n')
+  ),
+  checklist: [
+    t('把求 max 与求和合成一遍', 'Merge the max and sum passes into one'),
+    t('warp 归并时同时合并 (m, s) 两个量', 'Combine both `m` and `s` in the warp reduction'),
+    t('比一比优化前后 ncu 里的 SFU 那一行', 'Compare the SFU line in ncu before and after'),
+  ],
+  hints: [
+    t('每个 lane 先在自己负责的那些列上跑在线更新，再做 warp 归并。',
+      'Run the online update over each lane\'s own columns first, then reduce across the warp.'),
+    t('归并两个 (m, s)：`mNew = max(m1, m2)`，'
+      + '`sNew = s1 * exp(m1 - mNew) + s2 * exp(m2 - mNew)`。',
+      'Merging two pairs: `mNew = max(m1, m2)` and `sNew = s1 * exp(m1 - mNew) + s2 * exp(m2 - mNew)`.'),
+  ],
+  pitfalls: [
+    t('**忘了减最大值。** 输入里有 20 附近的值，`exp` 直接把和推到 inf，'
+      + '再一除就是 nan。用例里专门查了这一条。',
+      '**Forgetting to subtract the maximum.** Inputs reach 20, `exp` pushes the sum to inf, and the '
+      + 'division yields nan. There is a dedicated check for this.'),
+    t('**归并时只合并 max 不合并 sum。** 两个 lane 的和是在**各自的** max 下算的，'
+      + '直接相加是错的，必须先各自缩放到共同的 max。',
+      '**Merging only the max and not the sum.** Each lane accumulated its sum under its *own* max, so '
+      + 'adding them directly is wrong; both must first be rescaled to the shared maximum.'),
+  ],
+  extension: t(
+    '在线 softmax 是 FlashAttention 的核心。注意力里那个 S = QK^T 矩阵是 O(S²) 大的，'
+    + '物化出来显存就爆了；而有了在线 softmax，就可以一块一块地算 S、一块一块地更新 (m, s)，'
+    + '**永远不把完整的 S 存下来**。第 15、16 关做的就是这件事。'
+    + '这个算法最早出现在 Milakov 与 Gimelshein 2018 年的 Online normalizer calculation for softmax，'
+    + '后来被 FlashAttention 用成了标准部件。',
+    'Online softmax is the heart of FlashAttention. The S = QK^T matrix inside attention is O(S²) and '
+    + 'materialising it exhausts memory; with online softmax you can compute S tile by tile and update '
+    + '(m, s) tile by tile, **never storing the full S**. Stages 15 and 16 do exactly that. The algorithm '
+    + 'first appeared in Milakov and Gimelshein\'s 2018 "Online normalizer calculation for softmax" and '
+    + 'became a standard component through FlashAttention.'
+  ),
+  gpu: {
+    files: {
+      '/root/kernel.cu': code`
+        // 一行一个 warp 的 softmax。结果是对的，但读了三遍。
+        //
+        //   nvcc -o bench kernel.cu && ncu ./bench
+        //
+        // 把「求 max」和「求和」合成一遍。
+        __global__ void softmax(const float* in, float* out, int rows, int cols) {
+          int row = blockIdx.x;
+          int lane = threadIdx.x;
+          const float* r = in + row * cols;
+
+          // 第一遍：求这一行的最大值
+          float m = -3.4e38f;
+          for (int c = lane; c < cols; c += 32) m = fmaxf(m, r[c]);
+          for (int d = 16; d > 0; d >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffff, m, d));
+
+          // 第二遍：求和
+          float s = 0.0f;
+          for (int c = lane; c < cols; c += 32) s += expf(r[c] - m);
+          for (int d = 16; d > 0; d >>= 1) s += __shfl_xor_sync(0xffffffff, s, d);
+
+          // 第三遍：写结果
+          for (int c = lane; c < cols; c += 32) out[row * cols + c] = expf(r[c] - m) / s;
+        }
+      `,
+    },
+    bench: rowBench('softmax'),
+    referenceFiles: {
+      '/root/kernel.cu': code`
+        __global__ void softmax(const float* in, float* out, int rows, int cols) {
+          int row = blockIdx.x;
+          int lane = threadIdx.x;
+          const float* r = in + row * cols;
+
+          // 一遍走完，边走边修正
+          float m = -3.4e38f;
+          float s = 0.0f;
+          for (int c = lane; c < cols; c += 32) {
+            float v = r[c];
+            float mNew = fmaxf(m, v);
+            s = s * expf(m - mNew) + expf(v - mNew);
+            m = mNew;
+          }
+
+          // 归并时把两个 (m, s) 对合起来，注意各自先缩放到共同的 max
+          for (int d = 16; d > 0; d >>= 1) {
+            float mOther = __shfl_xor_sync(0xffffffff, m, d);
+            float sOther = __shfl_xor_sync(0xffffffff, s, d);
+            float mNew = fmaxf(m, mOther);
+            s = s * expf(m - mNew) + sOther * expf(mOther - mNew);
+            m = mNew;
+          }
+
+          for (int c = lane; c < cols; c += 32) {
+            out[row * cols + c] = expf(r[c] - m) / s;
+          }
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('softmax.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const ROWS = ${ROWS12};
+      const COLS = ${COLS12};
+
+      describe('softmax', () => {
+        it('结果对得上，且没有 inf / nan', async () => {
+          await lab.buildAndRun();
+          const input = lab.buffer('in');
+          const out = lab.buffer('out');
+          for (let row = 0; row < ROWS; row += 5) {
+            let max = -Infinity;
+            for (let c = 0; c < COLS; c += 1) max = Math.max(max, input[row * COLS + c]);
+            let sum = 0;
+            for (let c = 0; c < COLS; c += 1) sum += Math.exp(input[row * COLS + c] - max);
+            for (let c = 0; c < COLS; c += 11) {
+              const expected = Math.exp(input[row * COLS + c] - max) / sum;
+              const actual = out[row * COLS + c];
+              expect(Number.isFinite(actual)).toBe(true);
+              expect(Math.abs(actual - expected)).toBeLessThanOrEqual(1e-5);
+            }
+          }
+        });
+
+        it('每一行加起来是 1', async () => {
+          await lab.buildAndRun();
+          const out = lab.buffer('out');
+          for (let row = 0; row < ROWS; row += 7) {
+            let sum = 0;
+            for (let c = 0; c < COLS; c += 1) sum += out[row * COLS + c];
+            expect(sum).toBeCloseTo(1, 4);
+          }
+        });
+
+        it('DRAM 读量从三遍降到两遍', async () => {
+          await lab.buildAndRun();
+          const bytes = ROWS * COLS * 4;
+          expect(lab.metrics().memory.readBytes).toBeLessThanOrEqual(bytes * 2.2);
+        });
+
+        it('省下来的访存有一部分还给了 SFU —— 这是真实的取舍', async () => {
+          await lab.buildAndRun();
+          // 在线版的修正项要额外算 expf，SFU 指令数反而更多
+          expect(lab.metrics().inst.sfu).toBeGreaterThan(ROWS * COLS);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.memory.readBytes', op: 'lte', value: Math.round(N12 * 4 * 2.2),
+      zh: 'DRAM 读字节数（三遍版是张量的 3 倍）', en: 'DRAM bytes read (3× tensor for three passes)',
+      unit: 'byte', dimension: 'latency',
+    }),
+  ],
+  focus: ['latency', 'correctness'],
+};
+
+/* ------------------------------------------------------------------ */
+/* 第 13 关：LayerNorm 与 Welford                                       */
+/* ------------------------------------------------------------------ */
+
+const STAGE_13 = {
+  id: 'welford-layernorm',
+  title: t('RMSNorm 与 Welford —— 两遍求方差变一遍',
+    'RMSNorm and Welford — variance in one pass instead of two'),
+  goal: t(
+    [
+      '归一化是每个 Transformer 层都要做两次的事。',
+      'LayerNorm 要算均值与方差；现代 LLM（Llama 系列起）大多改用 **RMSNorm**，',
+      '只算平方均值，省掉减均值那一步：`out[i] = x[i] / sqrt(mean(x²) + eps)`。',
+      '',
+      '`kernel.cu` 里是两遍写法：一遍求平方和，一遍写结果 —— 加起来读了张量的 3 倍。',
+      '（因为求和那一遍读一次、写结果那一遍又读一次原始数据。）',
+      '',
+      '把它压成一遍：**在第一遍就把数据留在寄存器里**。',
+      '每个 lane 负责的列数是固定的（`cols / 32 = 8`），',
+      '所以可以在求和的同时把这 8 个值存进 8 个标量，写结果时直接用。',
+      '',
+      '**注意第 6 关的规则**：那 8 个值必须是常量下标才待得住寄存器。',
+      '',
+      '```bash',
+      'nvcc -o bench kernel.cu && ncu ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 结果和 fp64 参考对得上',
+      '- DRAM 读量 ≤ 张量的 1.2 倍（两遍版是 2 倍）',
+      '- `local.bytes = 0`',
+    ].join('\n'),
+    [
+      'Normalisation happens twice in every Transformer layer. LayerNorm needs a mean and a variance;',
+      'modern LLMs (from the Llama family onward) mostly use **RMSNorm**, which needs only the mean',
+      'square and skips the mean subtraction: `out[i] = x[i] / sqrt(mean(x²) + eps)`.',
+      '',
+      '`kernel.cu` uses two passes, one for the sum of squares and one to write, reading the tensor',
+      'twice in total.',
+      '',
+      'Collapse it into one: **keep the data in registers during the first pass**. Each lane owns a',
+      'fixed number of columns (`cols / 32 = 8`), so it can accumulate the sum and stash those eight',
+      'values in eight scalars at the same time, then use them directly when writing.',
+      '',
+      '**Remember stage 6**: those eight values need constant subscripts to stay in registers.',
+      '',
+      '```bash',
+      'nvcc -o bench kernel.cu && ncu ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- results match an fp64 reference',
+      '- DRAM reads at most 1.2× the tensor (2× for two passes)',
+      '- `local.bytes = 0`',
+    ].join('\n')
+  ),
+  checklist: [
+    t('第一遍读的时候把值留在寄存器里', 'Keep the values in registers during the first pass'),
+    t('用 8 个标量而不是带循环下标的数组', 'Use eight scalars rather than a loop-indexed array'),
+    t('确认 DRAM 读量减半、local.bytes 为 0',
+      'Confirm DRAM reads halved and local.bytes is zero'),
+  ],
+  hints: [
+    t('`cols / 32 = 8`，所以每个 lane 正好 8 个值：`v0 = r[lane]`、`v1 = r[lane + 32]`……',
+      '`cols / 32 = 8`, so each lane owns exactly eight values: `v0 = r[lane]`, `v1 = r[lane + 32]`, and so on.'),
+    t('平方和先在 lane 内累完，再用 5 次 `__shfl_xor_sync` 归并到整个 warp。',
+      'Accumulate the sum of squares within the lane first, then reduce across the warp with five `__shfl_xor_sync` rounds.'),
+  ],
+  pitfalls: [
+    t('**用 `float v[8]` 加循环。** 循环变量当下标，整个数组落 local memory，'
+      + '省下的 DRAM 读又以另一种形式还回去了 —— `local.bytes` 门槛会挂。',
+      '**Using `float v[8]` with a loop.** A loop variable as subscript sends the array to local memory '
+      + 'and the DRAM traffic you saved comes back in another form. The `local.bytes` gate fails.'),
+    t('**RMSNorm 当成 LayerNorm 写。** RMSNorm 不减均值，'
+      + '分母是 `sqrt(mean(x²) + eps)` 而不是标准差。多减一次均值结果就不对了。',
+      '**Writing LayerNorm when RMSNorm is asked for.** RMSNorm does not subtract the mean; the '
+      + 'denominator is `sqrt(mean(x²) + eps)`, not the standard deviation.'),
+  ],
+  extension: t(
+    'LayerNorm 要同时算均值与方差，两遍写法会读三次。**Welford 算法**能一遍算完：'
+    + '维护 `(count, mean, M2)` 三元组，每来一个新值按增量公式更新，'
+    + '数值稳定性还比「先求平方和再减均值平方」那个公式好得多 —— 后者在均值远大于方差时会灾难性抵消。'
+    + 'RMSNorm 用不上 Welford（它不需要均值），但真做 LayerNorm 时这是标准做法。'
+    + 'PyTorch 与 Triton 的 LayerNorm 内核都是这么写的。',
+    'LayerNorm needs both a mean and a variance and takes three reads in its two-pass form. **Welford\'s '
+    + 'algorithm** does it in one: keep a `(count, mean, M2)` triple and update it incrementally per '
+    + 'value. It is also far more numerically stable than "sum of squares minus square of mean", which '
+    + 'suffers catastrophic cancellation when the mean dwarfs the variance. RMSNorm does not need Welford '
+    + 'since it has no mean, but it is the standard approach for real LayerNorm, and both the PyTorch and '
+    + 'Triton LayerNorm kernels are written that way.'
+  ),
+  gpu: {
+    files: {
+      '/root/kernel.cu': code`
+        // RMSNorm：out[i] = x[i] / sqrt(mean(x^2) + eps)
+        //
+        // 两遍写法：一遍求平方和，一遍写结果。张量被读了两次。
+        __global__ void rmsnorm(const float* in, float* out, int rows, int cols) {
+          int row = blockIdx.x;
+          int lane = threadIdx.x;
+          const float* r = in + row * cols;
+
+          float sum = 0.0f;
+          for (int c = lane; c < cols; c += 32) sum = fmaf(r[c], r[c], sum);
+          for (int d = 16; d > 0; d >>= 1) sum += __shfl_xor_sync(0xffffffff, sum, d);
+
+          float scale = rsqrtf(sum / (float)cols + 1e-6f);
+
+          for (int c = lane; c < cols; c += 32) out[row * cols + c] = r[c] * scale;
+        }
+      `,
+    },
+    bench: rowBench('rmsnorm'),
+    referenceFiles: {
+      '/root/kernel.cu': code`
+        __global__ void rmsnorm(const float* in, float* out, int rows, int cols) {
+          int row = blockIdx.x;
+          int lane = threadIdx.x;
+          const float* r = in + row * cols;
+
+          // 一遍读完，值留在寄存器里 —— cols / 32 = 8，每个 lane 正好 8 个
+          float v0 = r[lane +   0];
+          float v1 = r[lane +  32];
+          float v2 = r[lane +  64];
+          float v3 = r[lane +  96];
+          float v4 = r[lane + 128];
+          float v5 = r[lane + 160];
+          float v6 = r[lane + 192];
+          float v7 = r[lane + 224];
+
+          float sum = 0.0f;
+          sum = fmaf(v0, v0, sum); sum = fmaf(v1, v1, sum);
+          sum = fmaf(v2, v2, sum); sum = fmaf(v3, v3, sum);
+          sum = fmaf(v4, v4, sum); sum = fmaf(v5, v5, sum);
+          sum = fmaf(v6, v6, sum); sum = fmaf(v7, v7, sum);
+
+          for (int d = 16; d > 0; d >>= 1) sum += __shfl_xor_sync(0xffffffff, sum, d);
+
+          float scale = rsqrtf(sum / (float)cols + 1e-6f);
+
+          float* o = out + row * cols;
+          o[lane +   0] = v0 * scale; o[lane +  32] = v1 * scale;
+          o[lane +  64] = v2 * scale; o[lane +  96] = v3 * scale;
+          o[lane + 128] = v4 * scale; o[lane + 160] = v5 * scale;
+          o[lane + 192] = v6 * scale; o[lane + 224] = v7 * scale;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('rmsnorm.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const ROWS = ${ROWS12};
+      const COLS = ${COLS12};
+
+      describe('RMSNorm', () => {
+        it('结果对得上', async () => {
+          await lab.buildAndRun();
+          const input = lab.buffer('in');
+          const out = lab.buffer('out');
+          for (let row = 0; row < ROWS; row += 5) {
+            let sum = 0;
+            for (let c = 0; c < COLS; c += 1) sum += input[row * COLS + c] * input[row * COLS + c];
+            const scale = 1 / Math.sqrt(sum / COLS + 1e-6);
+            for (let c = 0; c < COLS; c += 11) {
+              const expected = input[row * COLS + c] * scale;
+              expect(Math.abs(out[row * COLS + c] - expected))
+                .toBeLessThanOrEqual(Math.max(1e-4, Math.abs(expected) * 1e-4));
+            }
+          }
+        });
+
+        it('张量只读了一遍', async () => {
+          await lab.buildAndRun();
+          const bytes = ROWS * COLS * 4;
+          expect(lab.metrics().memory.readBytes).toBeLessThanOrEqual(bytes * 1.2);
+        });
+
+        it('值留在寄存器里，没有掉到 local memory', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().local.bytes).toBe(0);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.memory.readBytes', op: 'lte', value: Math.round(N12 * 4 * 1.2),
+      zh: 'DRAM 读字节数（两遍版是张量的 2 倍）', en: 'DRAM bytes read (2× tensor for two passes)',
+      unit: 'byte', dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.local.bytes', op: 'eq', value: 0,
+      zh: 'local memory 流量', en: 'local memory traffic',
+      unit: 'byte', dimension: 'latency',
+    }),
+  ],
+  focus: ['latency'],
+};
+
+/* ------------------------------------------------------------------ */
+/* 第 14 关：算子融合                                                    */
+/* ------------------------------------------------------------------ */
+
+const N14 = 8192;
+
+const STAGE_14 = {
+  id: 'operator-fusion',
+  title: t('算子融合 —— 别让中间结果落回显存',
+    'Operator fusion — keep intermediates out of memory'),
+  goal: t(
+    [
+      'Transformer 的前馈层里有一串逐元素操作：加 bias、过激活函数、加残差。',
+      '每一步单独写成一个 kernel 的话，中间结果要**写回显存再读回来**，',
+      '而这些数据本来就在寄存器里。',
+      '',
+      '`kernel.cu` 模拟了这种写法：三步之间用一块 scratch 缓冲区中转。',
+      '`ncu` 上 DRAM 的读写加起来是张量的 **8 倍**（5 次读 + 3 次写）。',
+      '',
+      '**融合**就是把三步写进一个 kernel，中间值一直待在寄存器里：',
+      '读 x、读 bias、读 residual、写 out —— **4 趟**搞定，而不是 8 趟。',
+      '',
+      '激活函数用 GELU 的 tanh 近似（这是 GPT 系列的标准写法）：',
+      '',
+      '```cuda',
+      'float g = 0.5f * v * (1.0f + tanhf(0.7978845608f * (v + 0.044715f * v * v * v)));',
+      '```',
+      '',
+      '```bash',
+      'nvcc -o bench kernel.cu && ncu ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 结果不变',
+      '- DRAM 读写总量 ≤ 张量的 4.5 倍（分开写是 8 倍）',
+      '- 一个字节 scratch 都不用',
+    ].join('\n'),
+    [
+      'A Transformer feed-forward block ends with a chain of element-wise steps: add a bias, apply an',
+      'activation, add the residual. Written as three separate kernels, every intermediate is **written',
+      'to memory and read back**, even though the data was already sitting in registers.',
+      '',
+      '`kernel.cu` mimics that shape, routing the three steps through a scratch buffer. `ncu` shows DRAM',
+      'reads plus writes at **6×** the tensor size.',
+      '',
+      '**Fusion** puts all three in one kernel with the intermediates staying in registers: read x once,',
+      'read x, bias and the residual, write out once. **Four trips** instead of eight.',
+      '',
+      'The activation is the tanh approximation of GELU, standard in the GPT family:',
+      '',
+      '```cuda',
+      'float g = 0.5f * v * (1.0f + tanhf(0.7978845608f * (v + 0.044715f * v * v * v)));',
+      '```',
+      '',
+      '```bash',
+      'nvcc -o bench kernel.cu && ncu ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- unchanged results',
+      '- DRAM reads plus writes at most 4.5× the tensor (8× unfused)',
+      '- not a single byte of scratch',
+    ].join('\n')
+  ),
+  checklist: [
+    t('把三步写进一个 kernel', 'Put all three steps in one kernel'),
+    t('中间值只用局部变量，不碰 scratch', 'Keep intermediates in locals and never touch scratch'),
+    t('确认 DRAM 读写总量降下来', 'Confirm total DRAM traffic dropped'),
+  ],
+  hints: [
+    t('三步是纯逐元素的，一个线程从头做到尾就行，不需要任何同步。',
+      'All three steps are element-wise, so one thread can carry a value through with no synchronisation.'),
+    t('`scratch` 参数留着不用就行，用例查的是它有没有被写过。',
+      'Leave the `scratch` parameter unused; the spec checks whether anything was written to it.'),
+  ],
+  pitfalls: [
+    t('**只融合了两步。** 三步都要在一个 kernel 里，少融一步 DRAM 就多两趟。',
+      '**Fusing only two of the three.** All three must share one kernel; each unfused step adds two more trips.'),
+    t('**用 `__expf` 之类的快速版换性能。** GELU 的 tanh 近似本身已经是近似了，'
+      + '再叠一层低精度会让误差超出容差。',
+      '**Reaching for `__expf` and friends.** The tanh approximation of GELU is already an approximation; '
+      + 'stacking a low-precision variant on top pushes the error past tolerance.'),
+  ],
+  extension: t(
+    '融合是推理引擎里收益最直接的一类优化，因为逐元素算子几乎全部是带宽受限的：'
+    + '算得再快也没用，时间全花在搬数据上。`torch.compile` 的主要工作之一就是自动做这件事 ——'
+    + '它把一串逐元素操作合成一个 Triton 内核。'
+    + '手写的库里，Liger-Kernel 把 LLM 常见的融合模式（RMSNorm + 旋转位置编码、SwiGLU、'
+    + '交叉熵）全部实现了一遍，整个库都是 Triton 写的。'
+    + '再往上就是把 GEMM 与它后面的逐元素操作也融进去，那叫 epilogue fusion，是 CUTLASS 的招牌能力。',
+    'Fusion is the most directly profitable optimisation in an inference engine because element-wise '
+    + 'operators are almost all bandwidth-bound: computing faster does not help when the time goes into '
+    + 'moving data. One of the main jobs of `torch.compile` is doing this automatically, collapsing a '
+    + 'chain of element-wise operations into a single Triton kernel. Among hand-written libraries, '
+    + 'Liger-Kernel implements the common LLM fusion patterns (RMSNorm plus rotary embeddings, SwiGLU, '
+    + 'cross-entropy) and is written entirely in Triton. One level further up, fusing a GEMM with the '
+    + 'element-wise work that follows it is called epilogue fusion and is a signature CUTLASS capability.'
+  ),
+  gpu: {
+    files: {
+      '/root/kernel.cu': code`
+        // bias -> GELU -> residual
+        //
+        // 现在三步之间经 scratch 中转，中间结果写回显存又读回来。
+        // 把它们融进一个 kernel，中间值留在寄存器里。
+        __global__ void ffn(const float* x, const float* bias, const float* residual,
+                            float* scratch, float* out, int n) {
+          int i = blockIdx.x * blockDim.x + threadIdx.x;
+          if (i >= n) return;
+
+          // 第一步：加 bias，写回显存
+          scratch[i] = x[i] + bias[i % 256];
+
+          // 第二步：读回来过 GELU，再写回去
+          float v = scratch[i];
+          float g = 0.5f * v * (1.0f + tanhf(0.7978845608f * (v + 0.044715f * v * v * v)));
+          scratch[i] = g;
+
+          // 第三步：再读回来加残差
+          out[i] = scratch[i] + residual[i];
+        }
+      `,
+    },
+    bench: {
+      sources: ['/root/kernel.cu'],
+      buffers: [
+        { name: 'x', length: N14, fill: { kind: 'random', seed: 61, min: -3, max: 3 } },
+        { name: 'bias', length: 256, fill: { kind: 'random', seed: 67, min: -1, max: 1 } },
+        { name: 'residual', length: N14, fill: { kind: 'random', seed: 71, min: -1, max: 1 } },
+        { name: 'scratch', length: N14, fill: { kind: 'zeros' } },
+        { name: 'out', length: N14, fill: { kind: 'zeros' } },
+      ],
+      launches: [
+        {
+          kernel: 'ffn', grid: [N14 / 256], block: [256],
+          args: ['x', 'bias', 'residual', 'scratch', 'out', N14],
+        },
+      ],
+    },
+    referenceFiles: {
+      '/root/kernel.cu': code`
+        __global__ void ffn(const float* x, const float* bias, const float* residual,
+                            float* scratch, float* out, int n) {
+          int i = blockIdx.x * blockDim.x + threadIdx.x;
+          if (i >= n) return;
+
+          // 三步一气呵成，中间值全程在寄存器里，scratch 一个字节都不用
+          float v = x[i] + bias[i % 256];
+          float g = 0.5f * v * (1.0f + tanhf(0.7978845608f * (v + 0.044715f * v * v * v)));
+          out[i] = g + residual[i];
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('fusion.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const N = ${N14};
+
+      function gelu(v) {
+        const inner = 0.7978845608 * (v + 0.044715 * v * v * v);
+        return 0.5 * v * (1 + Math.tanh(inner));
+      }
+
+      describe('融合的前馈尾巴', () => {
+        it('结果对得上', async () => {
+          await lab.buildAndRun();
+          const x = lab.buffer('x');
+          const bias = lab.buffer('bias');
+          const residual = lab.buffer('residual');
+          const out = lab.buffer('out');
+          for (let i = 0; i < N; i += 13) {
+            const expected = gelu(x[i] + bias[i % 256]) + residual[i];
+            expect(Number.isFinite(out[i])).toBe(true);
+            expect(Math.abs(out[i] - expected))
+              .toBeLessThanOrEqual(Math.max(2e-4, Math.abs(expected) * 2e-4));
+          }
+        });
+
+        it('中间结果没有落回显存', async () => {
+          await lab.buildAndRun();
+          const scratch = lab.buffer('scratch');
+          expect(scratch.every((value) => value === 0)).toBe(true);
+        });
+
+        it('DRAM 读写总量从 8 趟降到 4 趟', async () => {
+          await lab.buildAndRun();
+          const metrics = lab.metrics();
+          const bytes = N * 4;
+          expect(metrics.memory.readBytes + metrics.memory.writeBytes)
+            .toBeLessThanOrEqual(bytes * 4.5);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.memory.readBytes', op: 'lte', value: Math.round(N14 * 4 * 3.5),
+      zh: 'DRAM 读字节数（分开写是 5 倍张量）', en: 'DRAM bytes read (5× tensor unfused)',
+      unit: 'byte', dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.memory.writeBytes', op: 'lte', value: Math.round(N14 * 4 * 1.2),
+      zh: 'DRAM 写字节数（分开写是 3 倍张量）', en: 'DRAM bytes written (3× tensor unfused)',
+      unit: 'byte', dimension: 'latency',
+    }),
+  ],
+  focus: ['latency'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -2299,5 +2957,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14],
 };

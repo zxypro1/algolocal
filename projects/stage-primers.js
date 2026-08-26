@@ -1392,6 +1392,98 @@ const primers = {
         + 'dedicating some warps to moving data and others to computing. FlashAttention-4 is written that way.'
       )
     ),
+    'online-softmax': t(
+      p(
+        'softmax 把一行数变成一个概率分布：`out[i] = exp(x[i]) / sum(exp(x[j]))`。'
+        + '直接按定义算会溢出，因为 `exp` 涨得太快了，输入到 100 就已经是 inf。'
+        + '标准做法是先减去这一行的最大值，结果完全等价，但每个指数的输入都不大于 0，永远安全。',
+        '代价是要先知道最大值，于是朴素实现要读三遍：求 max、求和、写结果。'
+        + '对于一个带宽受限的算子来说，读三遍就是慢三倍。',
+        '`在线 softmax`把前两遍合成一遍，办法是边走边修正。'
+        + '维护当前的最大值 m 与当前的和 s，遇到更大的值时把已经攒的和按 `exp(m_old - m_new)` 缩放。'
+        + '这在数学上是恒等变形，不是近似。',
+        '但它**不是免费的**：每次修正都要多算一个 `expf`，而 SFU 的吞吐只有 FMA 的八分之一。'
+        + '省下的访存有一部分还给了 SFU。这个取舍在带宽紧张时划算、在 SFU 紧张时不划算，'
+        + '而 FlashAttention 正是把它推到极致的地方。'
+      ),
+      p(
+        'Softmax turns a row of numbers into a probability distribution: `out[i] = exp(x[i]) / '
+        + 'sum(exp(x[j]))`. Computing that literally overflows, because `exp` grows too fast and an input '
+        + 'of 100 is already inf. The standard fix subtracts the row maximum first: mathematically '
+        + 'identical, but every exponent argument is now at most 0 and always safe.',
+        'The cost is needing the maximum up front, so the naive implementation reads three times: max, '
+        + 'sum, write. For a bandwidth-bound operator, three reads means three times slower.',
+        '`Online softmax` merges the first two passes by correcting as it goes. Keep a running maximum m '
+        + 'and running sum s; when a larger value appears, rescale the accumulated sum by '
+        + '`exp(m_old - m_new)`. This is an algebraic identity, not an approximation.',
+        'It is **not free**, though: each correction costs an extra `expf`, and SFU throughput is one '
+        + 'eighth of FMA. Part of the memory traffic saved goes back to the SFU. The trade pays off when '
+        + 'bandwidth is tight and not when the SFU is, and FlashAttention is where it gets pushed hardest.'
+      )
+    ),
+    'welford-layernorm': t(
+      p(
+        '归一化在 Transformer 里无处不在：每一层前后各一次。'
+        + '经典的 LayerNorm 算均值与方差再标准化；从 Llama 开始，主流模型大多改用 `RMSNorm`，'
+        + '只算平方均值、不减均值，效果相当而计算量更小。',
+        '这类算子的共同点是**带宽受限**：每个元素只做几次乘除，时间全花在读写上。'
+        + '所以优化它们的唯一方向是减少访存次数，而不是减少运算。',
+        '两遍写法（先求和、再写结果）会把张量读两次。'
+        + '压成一遍的办法很直接：第一遍读的时候就把值**留在寄存器里**，写结果时直接用。'
+        + '前提是每个线程负责的元素数是编译期已知的，而且要用常量下标，这正是第 6 关那条规则。',
+        '真做 LayerNorm 时还有一个经典技巧：`Welford 算法`。'
+        + '它维护 (count, mean, M2) 三元组增量更新，一遍算完均值与方差，'
+        + '而且比「平方和减均值平方」那个公式稳定得多，后者在均值远大于方差时会灾难性抵消，'
+        + '算出负的方差都有可能。'
+      ),
+      p(
+        'Normalisation is everywhere in a Transformer, once before and once after every layer. Classic '
+        + 'LayerNorm computes a mean and variance then standardises; from Llama onward most models use '
+        + '`RMSNorm`, which needs only the mean square and skips the mean subtraction for comparable '
+        + 'quality at lower cost.',
+        'What these operators share is being **bandwidth-bound**: each element takes only a few '
+        + 'multiplications, and the time goes into reading and writing. The only useful direction is '
+        + 'fewer memory accesses, not fewer operations.',
+        'A two-pass version reads the tensor twice. Collapsing it is direct: **keep the values in '
+        + 'registers** during the first pass and reuse them when writing. That requires the per-thread '
+        + 'element count to be known at compile time and the subscripts to be constants, which is exactly '
+        + 'the stage-6 rule.',
+        'Real LayerNorm has one more classic trick: `Welford\'s algorithm`. It keeps a (count, mean, M2) '
+        + 'triple updated incrementally, produces mean and variance in one pass, and is far more stable '
+        + 'than "sum of squares minus square of mean", which suffers catastrophic cancellation when the '
+        + 'mean dwarfs the variance and can even yield a negative variance.'
+      )
+    ),
+    'operator-fusion': t(
+      p(
+        '一个 Transformer 层的尾巴上挂着一串逐元素操作：加偏置、过激活函数、加残差。'
+        + '每一步写成一个独立的 kernel 最省事，但每一步都要把整个张量读进来、写回去。'
+        + '三步就是六趟访存，而真正的计算只有每个元素几次乘加。',
+        '`算子融合`把它们合成一个 kernel：读一次、在寄存器里连着做完三步、写一次。'
+        + '访存从六趟降到三趟，而这类算子的时间几乎全在访存上，所以收益差不多就是两倍。',
+        '融合之所以是推理引擎里收益最直接的优化，正因为逐元素算子**全部**是带宽受限的。'
+        + '给它们更多算力毫无意义，唯一能做的就是少搬几次数据。',
+        '`torch.compile` 的主要工作之一就是自动做这件事，把一串逐元素操作编成一个 Triton 内核。'
+        + '手写的库里，Liger-Kernel 把 LLM 常见的融合模式都实现了一遍。'
+        + '再往上一层是把 GEMM 和它后面的逐元素操作也融进去，那叫 epilogue fusion。'
+      ),
+      p(
+        'The tail of a Transformer layer is a chain of element-wise operations: add a bias, apply an '
+        + 'activation, add the residual. Writing each as its own kernel is easiest, but every step reads '
+        + 'the whole tensor and writes it back. Three steps means six trips through memory for what is '
+        + 'only a handful of arithmetic operations per element.',
+        '`Operator fusion` merges them into one kernel: read once, carry the value through all three '
+        + 'steps in registers, write once. Memory traffic drops from six trips to three, and since these '
+        + 'operators spend essentially all their time in memory, the speedup is close to two times.',
+        'Fusion is the most directly profitable optimisation in an inference engine precisely because '
+        + 'element-wise operators are **all** bandwidth-bound. Giving them more compute changes nothing; '
+        + 'the only lever is moving data fewer times.',
+        'One of the main jobs of `torch.compile` is doing this automatically, compiling a chain of '
+        + 'element-wise operations into a single Triton kernel. Among hand-written libraries, '
+        + 'Liger-Kernel implements the common LLM fusion patterns. One level up, fusing a GEMM with the '
+        + 'element-wise work that follows it is called epilogue fusion.'
+      )
+    ),
   },
 
   'intranet-k8s': {
