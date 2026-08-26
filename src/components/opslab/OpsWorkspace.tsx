@@ -24,7 +24,7 @@ import MarkdownRenderer from '../MarkdownRenderer';
 import ErrorBoundary from '../ErrorBoundary';
 import { RunReportPanel } from '../engineering/ResultPanels';
 import ChangeStream from './ChangeStream';
-import WorkbenchSplit from './WorkbenchSplit';
+import WorkbenchSplit from '../workbench/WorkbenchSplit';
 import MachineFiles from './MachineFiles';
 import { useOpsWorkspace } from '../../hooks/useOpsWorkspace';
 import { emptyMetrics, runOpsStage } from '../../lib/opslab/lab';
@@ -32,7 +32,9 @@ import { resolveTranspiler } from '../../lib/engineering/transpile';
 import type { ProjectSession, ResultScope } from '../../hooks/useProjectSession';
 import type { StageRunReport } from '../../lib/engineering/types';
 
-const OpsTerminal = dynamic(() => import('./OpsTerminal'), { ssr: false });
+const WorkbenchTerminal = dynamic(
+  () => import('../workbench/WorkbenchTerminal'), { ssr: false }
+);
 const TopologyView = dynamic(() => import('./TopologyView'), { ssr: false });
 const PacketPathPanel = dynamic(() => import('./PacketPathPanel'), { ssr: false });
 const OpsChat = dynamic(() => import('./OpsChat'), { ssr: false });
@@ -437,7 +439,7 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                   </Alert>
                 )}
                 {ops.status === 'ready' && (
-                  <OpsTerminal
+                  <WorkbenchTerminal
                     prompt={ops.prompt}
                     banner={BANNER}
                     onCommand={ops.runCommand}
