@@ -56,6 +56,7 @@ module.exports = {
     '!public/opslab/*.wasm',
     'public/labkit/web-tree-sitter.wasm',
     'public/labkit/tree-sitter-bash.wasm',
+    'public/gpulab/tree-sitter-cuda.wasm',
     'public/opslab/opslab-cli.wasm',
     'problems/**/*',
     'projects/**/*',
@@ -131,6 +132,7 @@ module.exports = {
     'public/opslab/opslab-cli.wasm',
     'public/labkit/web-tree-sitter.wasm',
     'public/labkit/tree-sitter-bash.wasm',
+    'public/gpulab/tree-sitter-cuda.wasm',
     'public/icon.png',
     'public/favicon.ico'
   ],

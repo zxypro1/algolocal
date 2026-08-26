@@ -14,6 +14,8 @@
  * 「看起来跑了但语义不对」—— 那种失败最难查。
  */
 
+import { createTreeSitterParser, isBrowser } from '../../treesitter';
+
 export type Redirect =
   /** `< file` */
   | { kind: 'in'; source: string }
@@ -169,34 +171,16 @@ export interface ShellParserOptions {
 /** tree-sitter 的运行时与语法都是 WASM，加载一次复用 */
 export async function loadShellParser(options: ShellParserOptions = {}): Promise<TsParser> {
   if (parserPromise) return parserPromise;
-  parserPromise = (async () => {
-    const treeSitter: any = await import('web-tree-sitter');
-    const Parser = treeSitter.Parser ?? treeSitter.default?.Parser;
-    const Language = treeSitter.Language ?? treeSitter.default?.Language;
-
-    const runtimeUrl = options.runtimeWasmUrl ?? (isBrowser() ? '/labkit/web-tree-sitter.wasm' : undefined);
-    await Parser.init(runtimeUrl ? { locateFile: () => runtimeUrl } : undefined);
-
-    const grammar = options.grammar ?? defaultGrammarPath();
-    // 自己把字节读出来再交给 Language.load。它自带的按路径加载会走动态
-    // import()，在 jest 的 CJS 环境里直接抛 —— 而且浏览器里那条路也走不通。
-    const language = await Language.load(
-      typeof grammar === 'string' ? await readWasm(grammar) : grammar
-    );
-    const parser = new Parser();
-    parser.setLanguage(language);
-    return parser as TsParser;
-  })();
+  parserPromise = createTreeSitterParser<TsParser>({
+    runtimeWasmUrl: options.runtimeWasmUrl,
+    grammar: options.grammar ?? defaultGrammarPath(),
+  });
   return parserPromise;
 }
 
 /** 测试之间要能换 wasm 路径重来 */
 export function resetShellParser(): void {
   parserPromise = null;
-}
-
-function isBrowser(): boolean {
-  return typeof window !== 'undefined' && typeof document !== 'undefined';
 }
 
 /**
@@ -209,17 +193,6 @@ function defaultGrammarPath(): string {
   return isBrowser()
     ? '/labkit/tree-sitter-bash.wasm'
     : 'node_modules/tree-sitter-bash/tree-sitter-bash.wasm';
-}
-
-async function readWasm(location: string): Promise<Uint8Array> {
-  if (isBrowser()) {
-    const response = await fetch(location);
-    if (!response.ok) throw new Error(`failed to fetch ${location}: ${response.status}`);
-    return new Uint8Array(await response.arrayBuffer());
-  }
-  // Node 专用分支。用 eval 拿 require，免得打包器把 fs 打进浏览器包。
-  const nodeRequire = eval('require') as (id: string) => any;
-  return new Uint8Array(nodeRequire('fs').readFileSync(location));
 }
 
 const literal = (text: string): Word => ({ parts: [{ kind: 'literal', text }], quoted: 'none' });

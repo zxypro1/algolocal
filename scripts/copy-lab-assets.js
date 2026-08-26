@@ -24,6 +24,7 @@ const ROOT = path.join(__dirname, '..');
 const ASSETS = [
   ['web-tree-sitter/web-tree-sitter.wasm', 'labkit/web-tree-sitter.wasm'],
   ['tree-sitter-bash/tree-sitter-bash.wasm', 'labkit/tree-sitter-bash.wasm'],
+  ['tree-sitter-cuda/tree-sitter-cuda.wasm', 'gpulab/tree-sitter-cuda.wasm'],
 ];
 
 let copied = 0;
