@@ -1708,6 +1708,51 @@ const primers = {
         + 'arbitrary ones.'
       )
     ),
+    'continuous-batching': t(
+      p(
+        'GPU 喜欢大批量，可是解码时每条序列的长度差别极大：'
+        + '有的两个 token 就结束，有的要生成几百个。'
+        + '朴素的静态批是凑够一批一起跑、等全部结束再收下一批 --'
+        + '于是短的那条跑完之后，它的槽位要空转到最长那条结束为止。'
+        + '空转不是免费的：padding 的槽位在真卡上照样占着计算资源走完一遍。',
+        '连续批处理的做法很简单：不等整批结束，哪个槽位空了就立刻从队列里'
+        + '取下一个请求塞进去。批是流动的，不是一批一批的。'
+        + 'Orca 那篇论文（OSDI 2022）提出了它，现在 vLLM、TensorRT-LLM、SGLang '
+        + '全都是这么做的，TensorRT-LLM 管它叫 in-flight batching。',
+        '它和分页 KV 是一对：连续批处理让批一直是满的，分页 KV 让满的批装得下。'
+        + '没有分页，每条序列按最长上下文预留显存，同时能装的序列数很少，'
+        + '连续批处理也就没多少可调度的余地。两件事是一起起作用的。',
+        '真实调度器要处理的比这多得多：预填充和解码要不要混在同一批里、'
+        + '显存不够时抢占谁、怎么不让长请求被饿死、'
+        + '以及批大小只能是 CUDA Graph 预先捕获过的那几档 --'
+        + '所以调度器挑的往往不是最优的批，而是最接近某一档的批。'
+        + '还有一件量不出来但很重要的事：连续批处理改善的是吞吐，'
+        + '对单个请求的延迟可能是负面的，因为你的请求要和更多别人的挤在一起。'
+        + '生产里因此同时盯首 token 时延与每 token 时延，而不是只看吞吐。'
+      ),
+      p(
+        'GPUs like big batches, but decoding sequence lengths vary enormously: some finish in two '
+        + 'tokens, some generate hundreds. Naive static batching gathers a batch, runs it, and waits '
+        + 'for all of it before taking the next, so once the short sequence finishes its slot idles '
+        + 'until the longest one is done. Idling is not free: a padded slot still occupies compute on '
+        + 'real hardware for the whole step.',
+        'Continuous batching is simple: do not wait for the batch; the moment a slot frees, pull the '
+        + 'next request from the queue into it. The batch flows rather than proceeding in lockstep. '
+        + 'The Orca paper (OSDI 2022) introduced it and vLLM, TensorRT-LLM and SGLang all work this '
+        + 'way now, with TensorRT-LLM calling it in-flight batching.',
+        'It pairs with paged KV: continuous batching keeps the batch full, paging makes a full batch '
+        + 'fit. Without paging each sequence reserves memory for its maximum context, few fit at '
+        + 'once, and there is little left to schedule. The two work together.',
+        'Real schedulers handle far more: whether to mix prefill and decode in one batch, whom to '
+        + 'preempt when memory runs out, how to keep long requests from starving, and the fact that '
+        + 'batch sizes must be ones a CUDA Graph was captured for, so the scheduler usually picks '
+        + 'not the optimal batch but the one nearest a captured size. One more thing that is hard to '
+        + 'measure but matters: continuous batching improves throughput and can hurt an individual '
+        + 'request latency, since your request now shares the GPU with more of everyone else. '
+        + 'Production systems therefore watch time to first token and time per output token '
+        + 'alongside throughput, not throughput alone.'
+      )
+    ),
   },
 
   'intranet-k8s': {

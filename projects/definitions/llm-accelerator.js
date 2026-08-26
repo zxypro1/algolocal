@@ -4836,6 +4836,372 @@ const STAGE_20 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 21 关：连续批处理                                                  */
+/* ------------------------------------------------------------------ */
+
+const B_DIM = 32;
+const B_SLOTS = 4;
+/** 长度差别很大 —— 静态批的痛点全在这里 */
+const B_LENGTHS = [40, 3, 25, 5, 60, 4, 18, 6, 33, 2, 50, 8];
+const B_TOTAL = B_LENGTHS.reduce((sum, n) => sum + n, 0);
+
+/**
+ * 一步一个槽位。
+ *
+ * `active[slot] == 0` 的槽位直接返回 —— 那是 padding，
+ * 真卡上它一样要占着计算资源走完一遍。
+ * `progress[req]` 由**平台**记账，学员改不了：
+ * 判定要的是「每个请求都被服务到了它该有的步数」，
+ * 而这个数只有 kernel 自己数得准。
+ */
+const BATCH_KERNEL = code`
+  __global__ void stepSlot(int* progress, float* state, const int* active,
+                           int slot, int req, int dim) {
+    int d = threadIdx.x;
+    if (active[slot] == 0) return;
+    if (d == 0) progress[req] = progress[req] + 1;
+    state[slot * dim + d] = state[slot * dim + d] * 1.0009765625f + 0.001f;
+  }
+`;
+
+const B_LENS = B_LENGTHS.map((n) => `vec_push(lens, ${n});`).join('\n            ');
+
+const batchBench = {
+  sources: ['/root/scheduler.cu'],
+  buffers: [
+    { name: 'state', length: B_SLOTS * B_DIM, fill: { kind: 'const', value: 0.5 } },
+    { name: 'progress', length: B_LENGTHS.length, type: 'int', fill: { kind: 'zeros' } },
+  ],
+  launches: [],
+};
+
+const STAGE_21 = {
+  id: 'continuous-batching',
+  title: t('连续批处理 —— 空出来的槽位立刻补上',
+    'Continuous batching — refill a slot the moment it frees'),
+  goal: t(
+    [
+      'GPU 喜欢大批量。可是解码时每条序列**长度差别极大**：',
+      '有的两个 token 就结束，有的要生成几百个。',
+      '',
+      '朴素的做法是**静态批**：凑够 4 条一起跑，等这一批全部结束再收下一批。',
+      '于是那条 2 个 token 的请求跑完之后，它的槽位要空转到最长那条结束为止 ——',
+      '空转不是免费的，padding 的槽位在真卡上照样占着计算资源走完一遍。',
+      '',
+      '这 12 个请求的长度是 40 / 3 / 25 / 5 / 60 / 4 / 18 / 6 / 33 / 2 / 50 / 8，',
+      '一共 254 个真实的槽位步。静态批要跑 **150 步 × 4 槽 = 600** ——',
+      '**58% 花在 padding 上**。',
+      '',
+      '连续批处理（continuous batching，也叫 in-flight batching）的做法很简单：',
+      '**不等整批结束，哪个槽位空了就立刻从队列里取下一个请求塞进去。**',
+      '批是流动的，不是一批一批的。',
+      '',
+      '`scheduler.cu` 现在是静态批。改成连续批：',
+      '',
+      '1. 请求排成一个队列（`ring`）',
+      '2. 每一步开始前先扫一遍槽位，空的就补一个新请求进来',
+      '3. 照常跑这一步',
+      '',
+      '```bash',
+      'nvcc -o bench scheduler.cu && ncu ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- **12 个请求一个不漏，每个都跑够它自己的步数**（平台记账，改不了）',
+      '- 提交次数 ≤ 400（静态批是 600）',
+    ].join('\n'),
+    [
+      'GPUs like big batches. But during decoding, sequence lengths **vary enormously**: some finish',
+      'in two tokens, some generate hundreds.',
+      '',
+      'The naive approach is **static batching**: gather 4 sequences, run them together, wait for the',
+      'whole batch before taking the next. So once that 2-token request finishes, its slot idles',
+      'until the longest one is done, and idling is not free: a padded slot still occupies compute on',
+      'real hardware for the whole step.',
+      '',
+      'These 12 requests are 40 / 3 / 25 / 5 / 60 / 4 / 18 / 6 / 33 / 2 / 50 / 8 tokens long, 254',
+      'real slot-steps in total. Static batching runs **150 steps x 4 slots = 600**, so **58% goes',
+      'to padding**.',
+      '',
+      'Continuous batching (also called in-flight batching) is simple: **do not wait for the batch;',
+      'the moment a slot frees, pull the next request from the queue into it.** The batch flows',
+      'rather than proceeding in lockstep.',
+      '',
+      '`scheduler.cu` is static right now. Make it continuous:',
+      '',
+      '1. put the requests in a queue (`ring`)',
+      '2. before each step, scan the slots and refill any that are empty',
+      '3. run the step as before',
+      '',
+      '```bash',
+      'nvcc -o bench scheduler.cu && ncu ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- **all 12 requests served, each for exactly its own number of steps** (counted by the',
+      '  platform, not by you)',
+      '- at most 400 submissions (600 static)',
+    ].join('\n')
+  ),
+  checklist: [
+    t('用 ring 排队等待的请求', 'Queue the waiting requests in a `ring`'),
+    t('每一步开始前把空槽位补上', 'Refill empty slots before each step'),
+    t('槽位空了就立刻补，不等整批结束', 'Refill as soon as a slot frees, not after the batch'),
+  ],
+  hints: [
+    t('每个槽位记两件事：**还剩几步**，以及**在跑哪个请求**。'
+      + '补位时两个一起换。',
+      'Track two things per slot: **steps remaining** and **which request is in it**. Refill swaps '
+      + 'both at once.'),
+    t('队列空了之后还有槽位在跑 —— 那时候补不了位，剩下的照常跑完。'
+      + '所以循环的结束条件是「所有槽位都空且队列也空」。',
+      'Once the queue empties some slots are still running and cannot be refilled; let them finish. '
+      + 'So the loop ends when every slot is empty and the queue is too.'),
+  ],
+  pitfalls: [
+    t('**补位时忘了换请求号。** 步数对了，但记账全记到上一个请求头上 ——'
+      + '于是有的请求"跑了两倍的步数"，有的一步没跑。这一关的判定专抓这个。',
+      '**Refilling the step count but not the request id.** The steps are right but the accounting '
+      + 'all lands on the previous request, so some appear to run twice as long and others not at '
+      + 'all. The check here is built to catch exactly this.'),
+    t('**只在整批空了才补位。** 那还是静态批，只是写法绕了一圈。'
+      + '补位要在**每一步**开始前做。',
+      '**Only refilling when the whole batch is empty.** That is still static batching with extra '
+      + 'steps. Refill before **every** step.'),
+    t('**队列空了之后死循环。** 结束条件要同时看槽位和队列，'
+      + '只看队列的话最后几条序列还没跑完就退出了。',
+      '**Looping forever once the queue is empty.** The exit condition must consider both slots and '
+      + 'queue; checking only the queue exits while the last sequences are still running.'),
+  ],
+  extension: t(
+    '连续批处理是 Orca 那篇论文（OSDI 2022）提出的，'
+    + '现在 vLLM、TensorRT-LLM、SGLang 全都是这么做的。'
+    + 'TensorRT-LLM 管它叫 in-flight batching，名字不同东西一样。'
+    + '\n\n'
+    + '它和第 18 关的分页 KV 是一对：**连续批处理让批一直是满的，'
+    + '分页 KV 让满的批装得下**。'
+    + '没有分页，每条序列按最长上下文预留显存，同时能装的序列数很少，'
+    + '连续批处理也就没多少可调度的余地了。vLLM 的吞吐提升是这两件事一起来的。'
+    + '\n\n'
+    + '真实调度器要处理的事比这一关多得多：预填充和解码要不要混在同一批里'
+    + '（chunked prefill）、显存不够时抢占谁（vLLM 的 preemption 会把一条序列的'
+    + 'KV 换出去、之后重算或换回来）、怎么保证长请求不被饿死、'
+    + '以及第 20 关提到的那个约束 —— **批大小只能是 CUDA Graph 预先捕获过的那几档**，'
+    + '所以调度器挑的往往不是"最优的批"，而是"最接近某一档的批"。'
+    + '\n\n'
+    + '还有一个这一关量不出来但很重要的事：连续批处理改善的是**吞吐**，'
+    + '对单个请求的**延迟**可能是负面的 —— 你的请求会和更多别人的请求挤在一起。'
+    + '所以生产里通常同时盯 TTFT（首 token 时延）与 TPOT（每 token 时延）两条线，'
+    + '而不是只看吞吐。',
+    'Continuous batching came from the Orca paper (OSDI 2022) and is now how vLLM, TensorRT-LLM and '
+    + 'SGLang all work. TensorRT-LLM calls it in-flight batching; same thing, different name.\n\n'
+    + 'It pairs with paged KV from stage 18: **continuous batching keeps the batch full, paging '
+    + 'makes a full batch fit.** Without paging, each sequence reserves memory for its maximum '
+    + 'context, few fit at once, and there is little left to schedule. vLLM\'s throughput gain comes '
+    + 'from both together.\n\n'
+    + 'Real schedulers handle far more: whether to mix prefill and decode in one batch (chunked '
+    + 'prefill), whom to preempt when memory runs out (vLLM swaps a sequence\'s KV out and either '
+    + 'recomputes or swaps it back), how to keep long requests from starving, and the constraint '
+    + 'from stage 20 that **batch sizes must be ones a CUDA Graph was captured for**, so the '
+    + 'scheduler usually picks not the optimal batch but the one nearest a captured size.\n\n'
+    + 'One more thing this stage cannot measure but that matters: continuous batching improves '
+    + '**throughput** and can hurt an individual request\'s **latency**, since your request now '
+    + 'shares the GPU with more of everyone else\'s. Production systems therefore watch TTFT (time '
+    + 'to first token) and TPOT (time per output token) alongside throughput, not throughput alone.'
+  ),
+  gpu: {
+    files: {
+      '/root/scheduler.cu': code`
+        #include "engine.h"
+        #include "containers.h"
+
+        ${BATCH_KERNEL}
+
+        int main(void) {
+          const int DIM = ${B_DIM};
+          const int SLOTS = ${B_SLOTS};
+          const int N = ${B_LENGTHS.length};
+
+          int lens = vec_new();
+          ${B_LENS}
+
+          float* state = lab_buffer(0);
+          int* progress;
+          cudaMalloc((void**)&progress, N * 4);
+          cudaMemset(progress, 0, N * 4);
+
+          int* active;
+          cudaMalloc((void**)&active, SLOTS * 4);
+          int host[4];
+
+          // TODO: 静态批 —— 凑够一批跑到全部结束，再收下一批。
+          //       改成连续批：哪个槽位空了就立刻从队列里补一个进来。
+          int next = 0;
+          while (next < N) {
+            int remain = vec_new();
+            int who = vec_new();
+            for (int s = 0; s < SLOTS; ++s) {
+              if (next < N) {
+                vec_push(remain, vec_get(lens, next));
+                vec_push(who, next);
+                next += 1;
+              } else {
+                vec_push(remain, 0);
+                vec_push(who, 0);
+              }
+            }
+
+            int alive = 1;
+            while (alive == 1) {
+              alive = 0;
+              for (int s = 0; s < SLOTS; ++s) {
+                host[s] = vec_get(remain, s) > 0 ? 1 : 0;
+                if (host[s] == 1) { alive = 1; }
+              }
+              if (alive == 0) { break; }
+              cudaMemcpy(active, host, SLOTS * 4, cudaMemcpyHostToDevice);
+              for (int s = 0; s < SLOTS; ++s) {
+                stepSlot<<<1, DIM>>>(progress, state, active, s, vec_get(who, s), DIM);
+              }
+              for (int s = 0; s < SLOTS; ++s) {
+                int r = vec_get(remain, s);
+                if (r > 0) vec_set(remain, s, r - 1);
+              }
+            }
+          }
+
+          // 把记账拷回平台准备的缓冲区
+          cudaMemcpy(lab_buffer(1), progress, N * 4, cudaMemcpyDeviceToDevice);
+          cudaFree(progress);
+          cudaFree(active);
+          return 0;
+        }
+      `,
+    },
+    bench: batchBench,
+    referenceFiles: {
+      '/root/scheduler.cu': code`
+        #include "engine.h"
+        #include "containers.h"
+
+        ${BATCH_KERNEL}
+
+        int main(void) {
+          const int DIM = ${B_DIM};
+          const int SLOTS = ${B_SLOTS};
+          const int N = ${B_LENGTHS.length};
+
+          int lens = vec_new();
+          ${B_LENS}
+
+          float* state = lab_buffer(0);
+          int* progress;
+          cudaMalloc((void**)&progress, N * 4);
+          cudaMemset(progress, 0, N * 4);
+
+          int* active;
+          cudaMalloc((void**)&active, SLOTS * 4);
+          int host[4];
+
+          // 等待的请求排成一个队列
+          int queue = ring_new();
+          for (int i = 0; i < N; ++i) ring_push(queue, i);
+
+          // 每个槽位记两件事：还剩几步、在跑哪个请求
+          int remain = vec_new();
+          int who = vec_new();
+          for (int s = 0; s < SLOTS; ++s) { vec_push(remain, 0); vec_push(who, 0); }
+
+          int alive = 1;
+          while (alive == 1) {
+            alive = 0;
+
+            // 补位：空槽立刻取下一个请求。**两件事一起换** ——
+            // 只换步数不换请求号，记账就全记到上一个请求头上了
+            for (int s = 0; s < SLOTS; ++s) {
+              if (vec_get(remain, s) == 0) {
+                if (ring_len(queue) > 0) {
+                  int req = ring_pop(queue);
+                  vec_set(who, s, req);
+                  vec_set(remain, s, vec_get(lens, req));
+                }
+              }
+            }
+
+            for (int s = 0; s < SLOTS; ++s) {
+              host[s] = vec_get(remain, s) > 0 ? 1 : 0;
+              if (host[s] == 1) { alive = 1; }
+            }
+            // 槽位全空且队列也空，才是真的结束
+            if (alive == 0) { break; }
+
+            cudaMemcpy(active, host, SLOTS * 4, cudaMemcpyHostToDevice);
+            for (int s = 0; s < SLOTS; ++s) {
+              stepSlot<<<1, DIM>>>(progress, state, active, s, vec_get(who, s), DIM);
+            }
+            for (int s = 0; s < SLOTS; ++s) {
+              int r = vec_get(remain, s);
+              if (r > 0) vec_set(remain, s, r - 1);
+            }
+          }
+
+          cudaMemcpy(lab_buffer(1), progress, N * 4, cudaMemcpyDeviceToDevice);
+          cudaFree(progress);
+          cudaFree(active);
+          return 0;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('scheduler.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const LENGTHS = ${JSON.stringify(B_LENGTHS)};
+      const TOTAL = ${B_TOTAL};
+
+      describe('连续批处理', () => {
+        it('**12 个请求一个不漏，每个都跑够它自己的步数**', async () => {
+          await lab.buildAndRun();
+          const progress = lab.bufferInts('progress');
+          expect(Array.from(progress)).toEqual(LENGTHS);
+        });
+
+        it('真实工作量没变 —— 省的是 padding', async () => {
+          await lab.buildAndRun();
+          const progress = lab.bufferInts('progress');
+          const done = Array.from(progress).reduce((sum, n) => sum + n, 0);
+          expect(done).toBe(TOTAL);
+        });
+
+        it('提交次数降下来了', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().launch.kernels).toBeLessThanOrEqual(400);
+        });
+
+        it('padding 的比例降到三成以下', async () => {
+          await lab.buildAndRun();
+          // 每次提交就是一个槽位一步，其中只有 TOTAL 次是真活
+          const submitted = lab.metrics().launch.kernels;
+          expect(1 - TOTAL / submitted).toBeLessThan(0.3);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.launch.kernels', op: 'lte', value: 400,
+      zh: '提交次数（静态批是 600，其中 58% 是 padding）',
+      en: 'submissions (600 static, 58% of it padding)',
+      unit: 'launch', dimension: 'throughput',
+    }),
+  ],
+  focus: ['throughput', 'correctness'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -4902,5 +5268,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21],
 };
