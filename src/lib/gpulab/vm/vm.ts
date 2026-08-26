@@ -102,6 +102,15 @@ export interface GpuCounters {
   warpSyncErrors: number;
   barriers: number;
   blocksLaunched: number;
+  /**
+   * **提交到设备上的次数**，不是 block 数。
+   *
+   * 一次 `kernel<<<...>>>` 算一次；一次 `cudaGraphLaunch` 不管里面有
+   * 多少个 kernel 也只算一次 —— 这正是 CUDA Graph 省下来的东西。
+   * 真卡上每次提交有几微秒的固定开销，解码那种"每步计算量很小"的场景里
+   * 它本身就能成为瓶颈。
+   */
+  kernelLaunches: number;
   warpsLaunched: number;
 }
 
@@ -114,7 +123,7 @@ export function emptyCounters(): GpuCounters {
     localReadBytes: 0, localWriteBytes: 0,
     divergentBranches: 0, activeLanes: 0,
     atomics: 0, shuffles: 0, warpSyncErrors: 0,
-    barriers: 0, blocksLaunched: 0, warpsLaunched: 0,
+    barriers: 0, blocksLaunched: 0, warpsLaunched: 0, kernelLaunches: 0,
   };
 }
 

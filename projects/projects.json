@@ -26265,6 +26265,151 @@
           "zh": "量化是拿精度换显存与带宽。把 KV cache 从 fp32 换成 fp8，显存降到四分之一，读它的带宽也降到四分之一 --而解码本来就是访存受限的，所以这一步同时省显存和提吞吐。\n\n难的不是格式转换，是 scale。fp8 的 E4M3 只覆盖不到 19 个二进制数量级，所以必须先乘一个 scale 把数搬进这个范围。scale 怎么定，决定了量化是几乎无损还是彻底毁掉。\n\nSmoothQuant 给了最直白的算法：设通道 i 的最大值是 mi、整个矩阵的最大值是 m，那么通道 i 实际用得上的量化格点数就是 2 的 8 次方乘以 mi 除以 m。真实激活里离群通道能比正常通道大一百倍，于是正常通道在 256 个格点里只剩两三个。而《Massive Activations》在 LLaMA2-7B 上量到的最大激活值是 2622、中位数 0.2，差一万倍，那时候正常值连一个格点都分不到，直接归零。\n\n解法是把 scale 的粒度做细：每若干个元素一个 scale，离群值被关进它自己那一小块，别的块不受影响。为什么不干脆每个通道一个 scale？因为那和 GEMM kernel 不兼容 --scale 必须能在归约维度上提出来。整条 microscaling 硬件路线（NVFP4 每 16 个元素一个 scale、MXFP4 每 32 个）就是为了让硬件原生支持这件事。",
           "en": "Quantisation trades accuracy for memory and bandwidth. Moving the KV cache from fp32 to fp8 cuts memory to a quarter and cuts the bandwidth needed to read it by the same factor. Decoding is memory-bound to begin with, so this saves memory and raises throughput at once.\n\nThe hard part is not the format conversion, it is the scale. fp8 E4M3 covers under 19 binary orders of magnitude, so values must be multiplied by a scale to land inside that range. How that scale is chosen decides whether quantisation is nearly lossless or completely destructive.\n\nSmoothQuant gives the cleanest arithmetic: if channel i has maximum mi and the whole matrix has maximum m, the effective number of levels available to channel i is 2 to the 8th times mi over m. Real activations have outlier channels a hundred times larger than the rest, leaving normal channels two or three of the 256 levels. Massive Activations measured a maximum of 2622 against a median of 0.2 in LLaMA2-7B, a factor of ten thousand, at which point normal values do not get a single level and go straight to zero.\n\nThe fix is finer scale granularity: one scale per small group of elements, so an outlier is confined to its own group and the rest are untouched. Why not one scale per channel? Because that is incompatible with GEMM kernels, where the scale has to factor out along the reduction dimension. The whole microscaling hardware line, NVFP4 with one scale per 16 elements and MXFP4 per 32, exists so hardware can do this natively."
         }
+      },
+      {
+        "id": "cuda-graph",
+        "title": {
+          "zh": "CUDA Graph —— 把一步的五次提交合成一次",
+          "en": "CUDA Graphs — five submissions per step become one"
+        },
+        "goal": {
+          "zh": "第 17 关末尾留过一个观察：重算版比缓存版慢，**起 kernel 的次数**多了 12.75 倍，\n而算力只多了 21.8 倍。这两个数字量级相当，说明提交次数不是个小头。\n\n解码的处境很特别：每一步的**计算量极小**（一个 token），而 kernel 数量不少\n（这一关简化到 5 个，真实的一层 Transformer 有几十个，80 层就是上千个）。\n真卡上每次提交有几微秒的固定开销，于是**提交本身成了瓶颈** ——\nGPU 大部分时间在等下一个 kernel 被交上来。\n\nCUDA Graph 解决的就是这个：把一串 launch 录下来，之后一次性提交。\n省下来的是**提交开销**，kernel 该干的活一点没少。\n\n```cuda\ncudaStreamBeginCapture(0, cudaStreamCaptureModeGlobal);\n  ...一串 kernel...\ncudaStreamEndCapture(0, &graph);\ncudaGraphInstantiate(&exec, graph, 0);\nfor (...) cudaGraphLaunch(exec, 0);      // 每次只算一次提交\n```\n\n`engine.cu` 里现在是逐个提交：48 步 × 5 个 kernel = 240 次。\n改成捕获一次、重放 48 次。\n\n**为什么这五个 kernel 都从显存读长度**：graph 录下来的是**捕获那一刻的实参值**。\n指针是稳定的地址，重放没问题；而按值传的 `len` 录下来就定死了。\n真实引擎为了能用 graph，会把所有随步数变化的量都做成显存里的值 ——\n这几个签名就是那么来的。\n\n```bash\nnvcc -o bench engine.cu && ncu ./bench\n```\n\n**通关标准**\n\n- 结果和逐个提交的版本逐位相同\n- 提交次数 ≤ 60（逐个提交是 240）\n- block 数一个不少 —— 省的是提交，不是计算",
+          "en": "Stage 17 left an observation: the recomputing version was slower with 12.75x the **kernel\nlaunches** against 21.8x the arithmetic. Those two numbers are comparable, so launches are\nnot a rounding error.\n\nDecoding is peculiar: each step does **very little work** (one token) across quite a few\nkernels (five here, dozens in a real Transformer layer, thousands across 80 layers). On real\nhardware each submission costs a few microseconds of fixed overhead, so **submission itself\nbecomes the bottleneck** and the GPU spends most of its time waiting to be handed more work.\n\nCUDA Graphs fix precisely this: record a run of launches, then submit them in one go. What is\nsaved is the submission overhead; the kernels do exactly as much work as before.\n\n```cuda\ncudaStreamBeginCapture(0, cudaStreamCaptureModeGlobal);\n  ...a run of kernels...\ncudaStreamEndCapture(0, &graph);\ncudaGraphInstantiate(&exec, graph, 0);\nfor (...) cudaGraphLaunch(exec, 0);      // one submission each\n```\n\n`engine.cu` submits one at a time: 48 steps x 5 kernels = 240. Capture once, replay 48 times.\n\n**Why all five kernels read the length from device memory**: a graph records the **argument\nvalues at capture time**. Pointers are stable addresses so replay is fine, but a `len` passed\nby value is frozen. Real engines make every step-varying quantity device-resident so graphs\ncan be used at all, and these signatures come from that.\n\n```bash\nnvcc -o bench engine.cu && ncu ./bench\n```\n\n**To pass**\n\n- results bit-identical to the one-at-a-time version\n- at most 60 submissions (240 one at a time)\n- the same number of blocks: submissions are saved, not computation"
+        },
+        "checklist": [
+          {
+            "zh": "在循环外捕获一次这五个 kernel",
+            "en": "Capture the five kernels once, outside the loop"
+          },
+          {
+            "zh": "实例化成 graphExec",
+            "en": "Instantiate it into a graphExec"
+          },
+          {
+            "zh": "循环里只 cudaGraphLaunch",
+            "en": "Only call cudaGraphLaunch inside the loop"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "捕获期间 kernel **不会执行**，所以捕获这一遍不产生任何结果 —— 48 步就老老实实重放 48 次。",
+            "en": "Kernels do not execute during capture, so the capture pass produces nothing. Replay 48 times for 48 steps."
+          },
+          {
+            "zh": "长度住在显存里，`bumpLen` 也在 graph 里 —— 于是每次重放都会往前走一格，不需要宿主插手。",
+            "en": "The length lives in device memory and `bumpLen` is inside the graph, so each replay advances by one on its own with no host involvement."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**把捕获放进循环里。** 那就变成每步录一张新图，提交次数一次没省，还多了捕获与实例化的开销。",
+            "en": "**Capturing inside the loop.** That records a fresh graph every step, saves no submissions at all, and adds capture and instantiation costs on top."
+          },
+          {
+            "zh": "**忘了长度必须在显存里。** 这个子集的五个 kernel 都收指针，所以踩不到；真卡上按值传 `len` 会得到一个安静的错误 —— 程序照跑，结果是拿第一步的长度算了 48 遍。",
+            "en": "**Forgetting the length must be device-resident.** The five kernels here all take pointers so you cannot hit it, but on real hardware passing `len` by value fails silently: the program runs fine and computes 48 steps at the first step's length."
+          },
+          {
+            "zh": "**在捕获区里放 cudaMemcpy 却以为它立刻生效。** 它会被录成图里的一个节点，每次重放都重做一遍 —— 这通常正是你要的，但如果你指望\"先拷一次初始值\"，就错了。",
+            "en": "**Putting a cudaMemcpy in the capture and expecting it to happen now.** It becomes a node and reruns on every replay, which is usually what you want, but not if you meant it as a one-off initialisation."
+          }
+        ],
+        "extension": {
+          "zh": "CUDA Graph 是所有推理引擎的标配。vLLM 叫它 CUDA graph capture，TensorRT-LLM 内建，SGLang 有 CUDA graph mode ——而它们都有同一个限制：**图是按形状固定的**。批大小变了、序列长度跨过某个桶了，就得换一张图。于是引擎会预先为若干个批大小各捕获一张（比如 1/2/4/8/16/32），运行时挑最接近的那张、把多余的位置填成 padding。\n\n这也解释了一个现象：连续批处理的批大小往往不是任意数，而是几个固定档位。不是调度器不想精确，是 graph 只有那么几张。\n\n另外注意这一关**没有省下任何计算**：block 数一个不少，FMA 一次不差。省的纯粹是提交开销。这也是为什么它对预填充（一次算几千个 token）几乎没用 ——那时候每个 kernel 本来就要跑很久，几微秒的提交开销可以忽略。**CUDA Graph 是解码专属的优化。**",
+          "en": "CUDA Graphs are standard equipment in every inference engine: vLLM calls it CUDA graph capture, TensorRT-LLM builds it in, SGLang has a CUDA graph mode. All of them share one limitation: **graphs are fixed by shape.** Change the batch size, or cross a sequence-length bucket, and you need a different graph. So engines capture one per batch size ahead of time (1/2/4/8/16/32 and so on) and at runtime pick the nearest, padding the unused slots.\n\nThat explains something you may have noticed: continuous batching tends to use a handful of fixed batch sizes rather than arbitrary ones. The scheduler is not being imprecise; there are only so many graphs.\n\nNote also that this stage saves **no computation at all**: the same blocks, the same FMAs. Only submission overhead. Which is why it does almost nothing for prefill, where each kernel already runs for a long time and a few microseconds of submission is noise. **CUDA Graphs are a decode-side optimisation.**"
+        },
+        "gpu": {
+          "files": {
+            "/root/engine.cu": "        #include \"engine.h\"\n        #include \"cuda_runtime.h\"\n\n        __global__ void project(const float* x, const float* W,\n                        float* q, float* k, float* v, int dim) {\n  int d = threadIdx.x;\n  float aq = 0.0f; float ak = 0.0f; float av = 0.0f;\n  for (int j = 0; j < dim; ++j) {\n    float xv = x[j];\n    aq = fmaf(xv, W[j * dim + d], aq);\n    ak = fmaf(xv, W[dim * dim + j * dim + d], ak);\n    av = fmaf(xv, W[2 * dim * dim + j * dim + d], av);\n  }\n  q[d] = aq; k[d] = ak; v[d] = av;\n}\n\n// 把这一步的 k / v 追加到缓存末尾。位置由**显存里的** len 决定\n__global__ void appendKv(float* kCache, float* vCache,\n                         const float* k, const float* v,\n                         const int* len, int dim) {\n  int d = threadIdx.x;\n  int slot = len[0];\n  kCache[slot * dim + d] = k[d];\n  vCache[slot * dim + d] = v[d];\n}\n\n// 长度加一，同样在显存里改\n__global__ void bumpLen(int* len) {\n  if (threadIdx.x == 0) len[0] = len[0] + 1;\n}\n\n__global__ void attendLen(const float* q, const float* kCache, const float* vCache,\n                          float* out, const int* len, int dim) {\n  int lane = threadIdx.x;\n  int n = len[0];\n  float scale = rsqrtf((float)dim);\n  float m = -3.4e38f; float l = 0.0f; float a0 = 0.0f; float a1 = 0.0f;\n  for (int j = 0; j < n; ++j) {\n    float p = 0.0f;\n    for (int d = lane; d < dim; d += 32) p = fmaf(q[d], kCache[j * dim + d], p);\n    for (int dd = 16; dd > 0; dd >>= 1) p += __shfl_xor_sync(0xffffffff, p, dd);\n    p = p * scale;\n    float mN = fmaxf(m, p); float c = expf(m - mN); float w = expf(p - mN);\n    l = l * c + w;\n    a0 = a0 * c + w * vCache[j * dim + lane];\n    a1 = a1 * c + w * vCache[j * dim + lane + 32];\n    m = mN;\n  }\n  out[lane] = a0 / l; out[lane + 32] = a1 / l;\n}\n\n// 把输出接回输入，准备下一步\n__global__ void feedback(float* x, const float* out, int dim) {\n  int d = threadIdx.x;\n  x[d] = out[d];\n}\n\n\n        int main(void) {\n          const int DIM = 64;\n          const int STEPS = 48;\n          float* W = lab_buffer(0);\n          float* x = lab_buffer(1);\n\n          float* kCache; float* vCache; float* q; float* k; float* v; float* out;\n          int* len;\n          cudaMalloc((void**)&kCache, STEPS * DIM * 4);\n          cudaMalloc((void**)&vCache, STEPS * DIM * 4);\n          cudaMalloc((void**)&q, DIM * 4); cudaMalloc((void**)&k, DIM * 4);\n          cudaMalloc((void**)&v, DIM * 4); cudaMalloc((void**)&out, DIM * 4);\n          cudaMalloc((void**)&len, 4);\n          cudaMemset(len, 0, 4);\n\n          // TODO: 这五个 kernel 每步提交一次，48 步就是 240 次。\n          //       捕获成一张 graph，循环里只重放。\n          for (int step = 0; step < STEPS; ++step) {\n            project<<<1, DIM>>>(x, W, q, k, v, DIM);\n            appendKv<<<1, DIM>>>(kCache, vCache, k, v, len, DIM);\n            bumpLen<<<1, 32>>>(len);\n            attendLen<<<1, 32>>>(q, kCache, vCache, out, len, DIM);\n            feedback<<<1, DIM>>>(x, out, DIM);\n          }\n\n          cudaFree(kCache); cudaFree(vCache); cudaFree(q);\n          cudaFree(k); cudaFree(v); cudaFree(out); cudaFree(len);\n          return 0;\n        }\n"
+          },
+          "bench": {
+            "sources": [
+              "/root/engine.cu"
+            ],
+            "buffers": [
+              {
+                "name": "W",
+                "length": 12288,
+                "fill": {
+                  "kind": "random",
+                  "seed": 23,
+                  "min": -0.15,
+                  "max": 0.15
+                }
+              },
+              {
+                "name": "x",
+                "length": 64,
+                "fill": {
+                  "kind": "const",
+                  "value": 0.1
+                }
+              }
+            ],
+            "launches": []
+          },
+          "referenceFiles": {
+            "/root/engine.cu": "        #include \"engine.h\"\n        #include \"cuda_runtime.h\"\n\n        __global__ void project(const float* x, const float* W,\n                        float* q, float* k, float* v, int dim) {\n  int d = threadIdx.x;\n  float aq = 0.0f; float ak = 0.0f; float av = 0.0f;\n  for (int j = 0; j < dim; ++j) {\n    float xv = x[j];\n    aq = fmaf(xv, W[j * dim + d], aq);\n    ak = fmaf(xv, W[dim * dim + j * dim + d], ak);\n    av = fmaf(xv, W[2 * dim * dim + j * dim + d], av);\n  }\n  q[d] = aq; k[d] = ak; v[d] = av;\n}\n\n// 把这一步的 k / v 追加到缓存末尾。位置由**显存里的** len 决定\n__global__ void appendKv(float* kCache, float* vCache,\n                         const float* k, const float* v,\n                         const int* len, int dim) {\n  int d = threadIdx.x;\n  int slot = len[0];\n  kCache[slot * dim + d] = k[d];\n  vCache[slot * dim + d] = v[d];\n}\n\n// 长度加一，同样在显存里改\n__global__ void bumpLen(int* len) {\n  if (threadIdx.x == 0) len[0] = len[0] + 1;\n}\n\n__global__ void attendLen(const float* q, const float* kCache, const float* vCache,\n                          float* out, const int* len, int dim) {\n  int lane = threadIdx.x;\n  int n = len[0];\n  float scale = rsqrtf((float)dim);\n  float m = -3.4e38f; float l = 0.0f; float a0 = 0.0f; float a1 = 0.0f;\n  for (int j = 0; j < n; ++j) {\n    float p = 0.0f;\n    for (int d = lane; d < dim; d += 32) p = fmaf(q[d], kCache[j * dim + d], p);\n    for (int dd = 16; dd > 0; dd >>= 1) p += __shfl_xor_sync(0xffffffff, p, dd);\n    p = p * scale;\n    float mN = fmaxf(m, p); float c = expf(m - mN); float w = expf(p - mN);\n    l = l * c + w;\n    a0 = a0 * c + w * vCache[j * dim + lane];\n    a1 = a1 * c + w * vCache[j * dim + lane + 32];\n    m = mN;\n  }\n  out[lane] = a0 / l; out[lane + 32] = a1 / l;\n}\n\n// 把输出接回输入，准备下一步\n__global__ void feedback(float* x, const float* out, int dim) {\n  int d = threadIdx.x;\n  x[d] = out[d];\n}\n\n\n        int main(void) {\n          const int DIM = 64;\n          const int STEPS = 48;\n          float* W = lab_buffer(0);\n          float* x = lab_buffer(1);\n\n          float* kCache; float* vCache; float* q; float* k; float* v; float* out;\n          int* len;\n          cudaMalloc((void**)&kCache, STEPS * DIM * 4);\n          cudaMalloc((void**)&vCache, STEPS * DIM * 4);\n          cudaMalloc((void**)&q, DIM * 4); cudaMalloc((void**)&k, DIM * 4);\n          cudaMalloc((void**)&v, DIM * 4); cudaMalloc((void**)&out, DIM * 4);\n          cudaMalloc((void**)&len, 4);\n          cudaMemset(len, 0, 4);\n\n          // 一步的五个 kernel 录成一张图。**捕获期间它们不执行**，\n          // 所以这一遍不产生任何结果，48 步就重放 48 次。\n          int graph; int exec;\n          cudaStreamBeginCapture(0, cudaStreamCaptureModeGlobal);\n          project<<<1, DIM>>>(x, W, q, k, v, DIM);\n          appendKv<<<1, DIM>>>(kCache, vCache, k, v, len, DIM);\n          bumpLen<<<1, 32>>>(len);\n          attendLen<<<1, 32>>>(q, kCache, vCache, out, len, DIM);\n          feedback<<<1, DIM>>>(x, out, DIM);\n          cudaStreamEndCapture(0, &graph);\n          cudaGraphInstantiate(&exec, graph, 0);\n\n          // 长度住在显存里、bumpLen 也在图里，所以每次重放自己往前走一格\n          for (int step = 0; step < STEPS; ++step) {\n            cudaGraphLaunch(exec, 0);\n          }\n\n          cudaGraphExecDestroy(exec);\n          cudaGraphDestroy(graph);\n          cudaFree(kCache); cudaFree(vCache); cudaFree(q);\n          cudaFree(k); cudaFree(v); cudaFree(out); cudaFree(len);\n          return 0;\n        }\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "engine.spec.ts",
+            "content": "const lab = require('@gpu/lab');\nconst GOLDEN = [[0,0.02064613252878189],[1,-0.011575520969927311],[15,0.0026778569445014],[31,-0.008708021603524685],[47,0.01248313020914793],[63,-0.010222419165074825]];\n\ndescribe('CUDA Graph', () => {\n  it('结果和逐个提交的版本逐位相同', async () => {\n    await lab.buildAndRun();\n    const x = lab.buffer('x');\n    for (const [index, expected] of GOLDEN) {\n      expect(Math.abs(x[index] - expected)).toBeLessThanOrEqual(1e-9);\n    }\n  });\n\n  it('**提交次数降下来了**', async () => {\n    await lab.buildAndRun();\n    expect(lab.metrics().launch.kernels).toBeLessThanOrEqual(60);\n  });\n\n  it('计算量一点没少 —— 省的是提交，不是活', async () => {\n    await lab.buildAndRun();\n    // 48 步 × (project 2 warp + appendKv 2 + bumpLen 1 + attend 1 + feedback 2)\n    expect(lab.metrics().launch.blocks).toBe(48 * 5);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "gpu.sanitizer.races",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "数据竞态",
+              "en": "data races"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.sanitizer.warpSyncErrors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "warp 同步用错",
+              "en": "warp sync errors"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.launch.kernels",
+            "op": "lte",
+            "value": 60,
+            "label": {
+              "zh": "提交到设备的次数（逐个提交是 240）",
+              "en": "submissions to the device (240 one at a time)"
+            },
+            "unit": "launch",
+            "dimension": "latency"
+          },
+          {
+            "metric": "gpu.launch.blocks",
+            "op": "gte",
+            "value": 240,
+            "label": {
+              "zh": "block 总数 —— 省的是提交不是计算，这个数不能降",
+              "en": "blocks launched: submissions are saved, not work, so this must not drop"
+            },
+            "unit": "block",
+            "dimension": "correctness"
+          }
+        ],
+        "focus": [
+          "latency",
+          "correctness"
+        ],
+        "primer": {
+          "zh": "解码的处境很特别：每一步只算一个 token，计算量极小，而要起的 kernel 不少，真实的一层 Transformer 有几十个，80 层就是上千个。真卡上每次提交有几微秒的固定开销，于是提交本身成了瓶颈，GPU 大部分时间在等下一个 kernel 被交上来。\n\nCUDA Graph 把一串 launch 录下来，之后一次性提交。省下来的纯粹是提交开销，kernel 该干的活一点没少，block 数、FMA 数全都不变。这也解释了它为什么对预填充几乎没用：一次算几千个 token 时每个 kernel 本来就跑很久，几微秒可以忽略。CUDA Graph 是解码专属的优化。\n\n用起来有一个硬约束：图录下来的是**捕获那一刻的实参值**。指针是稳定的地址，重放没问题；而按值传的标量录下来就定死了。所以真实引擎会把所有随步数变化的量都做成显存里的值，让 kernel 从指针读，序列长度、批里每条序列的状态，全都如此。\n\n还有一个后果值得留意：图是按形状固定的。批大小变了、序列长度跨过某个桶了，就得换一张图。于是引擎预先为若干个批大小各捕获一张，运行时挑最接近的、把多余的位置填成 padding。你看到连续批处理的批大小往往是几个固定档位而不是任意数，原因就在这里。",
+          "en": "Decoding is peculiar: each step computes a single token, almost no work, across quite a few kernels. A real Transformer layer has dozens, and eighty layers means thousands. On real hardware each submission costs a few microseconds of fixed overhead, so submission becomes the bottleneck and the GPU spends most of its time waiting for more work.\n\nCUDA Graphs record a run of launches and submit them in one go. What is saved is purely the submission overhead: the kernels do the same work, the same blocks, the same FMAs. That also explains why graphs do almost nothing for prefill, where each kernel already runs a long time and microseconds are noise. Graphs are a decode-side optimisation.\n\nThere is one hard constraint. A graph records the argument values **at capture time**. Pointers are stable addresses so replay is fine, but a scalar passed by value is frozen. Real engines therefore make every step-varying quantity device-resident and have kernels read it through a pointer: sequence lengths, per-sequence state in the batch, all of it.\n\nOne more consequence is worth noticing: graphs are fixed by shape. Change the batch size, or cross a sequence-length bucket, and you need a different graph. So engines capture one per batch size ahead of time and pick the nearest at runtime, padding the unused slots. That is why continuous batching tends to use a handful of fixed batch sizes rather than arbitrary ones."
+        }
       }
     ]
   },

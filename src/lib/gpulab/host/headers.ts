@@ -90,6 +90,29 @@ int cudaMemcpy(void* dst, const void* src, int bytes, int kind);
 int cudaMemset(void* devicePtr, int value, int bytes);
 int cudaDeviceSynchronize(void);
 
+/* ---- CUDA Graph ----
+ *
+ * 把一串 launch 录下来，之后一次重放。省下来的是**提交开销** ——
+ * kernel 该干的活一点没少。解码那种"每步计算量很小、kernel 又很多"的
+ * 场景里，提交开销本身就是瓶颈。
+ *
+ * ⚠️ 录下来的是**捕获那一刻的实参值**。指针是稳定的地址，重放没问题；
+ * 而按值传的标量录下来就定死了，之后再变也不会生效。
+ * 真实引擎的解法是把会变的量放进显存、让 kernel 从指针读。
+ *
+ * 出参写成 &变量（和 cudaMalloc 一个路子）。
+ */
+#define cudaStreamCaptureModeGlobal       0
+#define cudaStreamCaptureModeThreadLocal  1
+#define cudaStreamCaptureModeRelaxed      2
+
+int cudaStreamBeginCapture(int stream, int mode);
+int cudaStreamEndCapture(int stream, int* graph);
+int cudaGraphInstantiate(int* graphExec, int graph, int flags);
+int cudaGraphLaunch(int graphExec, int stream);
+int cudaGraphDestroy(int graph);
+int cudaGraphExecDestroy(int graphExec);
+
 #endif
 `;
 

@@ -150,6 +150,14 @@ export class GpuDevice {
   }
 
   launch(kernel: CompiledKernel | ExecutableKernel, config: LaunchConfig, args: KernelArg[]): void {
+    this.counters.kernelLaunches += 1;
+    this.launchInner(kernel, config, args);
+  }
+
+  /** 真正跑一遍，不动提交计数 —— graph 重放要绕开那一次自增 */
+  private launchInner(
+    kernel: CompiledKernel | ExecutableKernel, config: LaunchConfig, args: KernelArg[]
+  ): void {
     const threadsPerBlock = config.block.x * config.block.y * config.block.z;
     this.lastStatic = staticMetricsOf(this.device, kernel, threadsPerBlock);
     const result = launchKernel(kernel, config, args, {
@@ -213,6 +221,21 @@ export class GpuDevice {
           truncated += report.truncated;
         } else {
           this.launch(kernel, { grid, block }, args);
+        }
+      },
+      // graph 重放：kernel 该跑的一个不少，但**提交只算一次**
+      replay: (nodes) => {
+        this.counters.kernelLaunches += 1;
+        for (const node of nodes) {
+          if (node.kind === 'copy') {
+            environment.copy(node.dst, node.src, node.bytes, node.copyKind);
+            continue;
+          }
+          const kernel = kernels.get(node.name);
+          if (!kernel) {
+            throw new HostRuntimeError(`graph 里的 kernel \`${node.name}\` 找不到了`);
+          }
+          this.launchInner(kernel, { grid: node.grid, block: node.block }, node.args);
         }
       },
       write: (text) => { output.push(text); },

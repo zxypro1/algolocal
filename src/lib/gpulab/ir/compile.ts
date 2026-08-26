@@ -209,6 +209,13 @@ const HOST_FNS: Record<string, { fn: HostFn; arity: number; scalar: 'int' | 'voi
   lab_buffer: { fn: 'lab_buffer', arity: 1, scalar: 'int' },
   lab_buffer_len: { fn: 'lab_buffer_len', arity: 1, scalar: 'int' },
 
+  cudaStreamBeginCapture: { fn: 'cudaStreamBeginCapture', arity: 2, scalar: 'int' },
+  cudaStreamEndCapture: { fn: 'cudaStreamEndCapture', arity: 2, scalar: 'int' },
+  cudaGraphInstantiate: { fn: 'cudaGraphInstantiate', arity: 3, scalar: 'int' },
+  cudaGraphLaunch: { fn: 'cudaGraphLaunch', arity: 2, scalar: 'int' },
+  cudaGraphDestroy: { fn: 'cudaGraphDestroy', arity: 1, scalar: 'int' },
+  cudaGraphExecDestroy: { fn: 'cudaGraphExecDestroy', arity: 1, scalar: 'int' },
+
   vec_new: { fn: 'vec_new', arity: 0, scalar: 'int' },
   vec_push: { fn: 'vec_push', arity: 2, scalar: 'void' },
   vec_pop: { fn: 'vec_pop', arity: 1, scalar: 'int' },
@@ -236,11 +243,32 @@ const HOST_FNS: Record<string, { fn: HostFn; arity: number; scalar: 'int' | 'voi
  *
  * 取值与 `cuda_fp8.h` 里那两个枚举一致。
  */
+/**
+ * 哪些宿主函数带**出参**，以及出参在第几个位置。
+ *
+ * C 里返回句柄的惯例是 `f(&handle, ...)`，真 CUDA 的
+ * `cudaMalloc` / `cudaStreamEndCapture` / `cudaGraphInstantiate` 都是这样。
+ * 这个子集里标量住在寄存器里、没有地址，所以在语法层面认这个模式，
+ * 把结果直接写回那个变量。**保留真签名是有意的** —— 学员在真卡上
+ * 敲的就是这几行。
+ */
+const HOST_OUT_PARAM: Record<string, { at: number; hint: string }> = {
+  // 提示按函数各写各的：学员在 cudaMalloc 上真正会敲的是 `(void**)&p`，
+  // 报错里说成泛泛的「&变量」会让他以为要去掉那个 cast
+  cudaMalloc: { at: 0, hint: '(void**)&指针变量' },
+  cudaStreamEndCapture: { at: 1, hint: '&变量' },
+  cudaGraphInstantiate: { at: 0, hint: '&变量' },
+};
+
 const DEVICE_CONSTANTS: Record<string, number> = {
   __NV_NOSAT: 0,
   __NV_SATFINITE: 1,
   __NV_E4M3: 0,
   __NV_E5M2: 1,
+  /** cudaStreamCaptureMode */
+  cudaStreamCaptureModeGlobal: 0,
+  cudaStreamCaptureModeThreadLocal: 1,
+  cudaStreamCaptureModeRelaxed: 2,
 };
 
 /** `cudaMemcpyKind` 的四个取值，和真头文件里的顺序一致 */
@@ -1459,29 +1487,39 @@ class Compiler {
         `\`${node.callee}\` 是宿主侧的函数，kernel 里调用不了`);
     }
 
-    // cudaMalloc 的第一个参数是「指针的地址」。这个子集里标量住在寄存器里、
-    // 没有地址，所以在语法层面认这个模式，把结果直接写回那个指针变量。
-    // 保留真签名是有意的：学员在真卡上敲的就是这一行。
-    if (node.callee === 'cudaMalloc') {
-      if (node.args.length !== 2) this.fail(line, column, 'cudaMalloc 要两个参数：(void**)&指针, 字节数');
-      const target = unwrapCast(node.args[0]);
+    // 带出参的那几个：`f(&handle, ...)`。见 HOST_OUT_PARAM 的注释。
+    const outParam = HOST_OUT_PARAM[node.callee];
+    if (outParam !== undefined) {
+      const outAt = outParam.at;
+      const spec = node.callee === 'cudaMalloc'
+        ? { fn: 'cudaMalloc' as const, arity: 2 }
+        : HOST_FNS[node.callee];
+      if (node.args.length !== spec.arity) {
+        this.fail(line, column,
+          `\`${node.callee}\` 要 ${spec.arity} 个参数，给了 ${node.args.length} 个`);
+      }
+      const target = unwrapCast(node.args[outAt]);
       if (target.kind !== 'addressOf' || target.target.kind !== 'name') {
         this.fail(line, column,
-          'cudaMalloc 的第一个参数要写成 `(void**)&指针变量` —— 这个子集只认这一种写法');
+          `\`${node.callee}\` 的第 ${outAt + 1} 个参数要写成 \`${outParam.hint}\` —— `
+          + '这个子集只认这一种写法');
       }
       const binding = this.lookup(target.target.name);
-      if (!binding || binding.where !== 'reg' || !isPointer(binding.type)) {
-        this.fail(line, column,
-          `\`${target.target.name}\` 不是一个已经声明的指针变量`);
+      if (!binding || binding.where !== 'reg') {
+        this.fail(line, column, `\`${target.target.name}\` 不是一个已经声明的变量`);
       }
-      const bytes = this.convert(this.expr(node.args[1]), { kind: 'scalar', scalar: 'int' }, line);
-      const status = this.alloc();
+      if (node.callee === 'cudaMalloc' && !isPointer(binding.type)) {
+        this.fail(line, column, `\`${target.target.name}\` 不是指针 —— cudaMalloc 要写成 (void**)&指针`);
+      }
+      const rest = node.args
+        .filter((_, index) => index !== outAt)
+        .map((arg) => this.convert(this.expr(arg), { kind: 'scalar', scalar: 'int' }, line).reg);
       this.emit(
-        { op: 'hostcall', dst: binding.reg, fn: 'cudaMalloc', args: [bytes.reg], line },
+        { op: 'hostcall', dst: binding.reg, fn: node.callee as HostFn, args: rest, line },
         line
       );
-      this.emit({ op: 'const', dst: status, value: 0, ty: 'i32' }, line);
-      return { reg: status, type: { kind: 'scalar', scalar: 'int' } };
+      // 真 API 返回的是 cudaError_t，成功是 0
+      return { reg: this.constant(0, 'i32', line), type: { kind: 'scalar', scalar: 'int' } };
     }
 
     if (node.callee === 'printf') {

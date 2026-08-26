@@ -17,6 +17,11 @@ import type { Dim3 } from '../vm/vm';
 import { HOST } from '../ir/program';
 import { ContainerStore, HostRuntimeError } from './containers';
 
+/** 重放时交给设备的一步 */
+export type GraphReplayNode =
+  | { kind: 'launch'; name: string; grid: Dim3; block: Dim3; args: number[]; line: number }
+  | { kind: 'copy'; dst: number; src: number; bytes: number; copyKind: number };
+
 export interface HostEnvironment {
   /** 分配设备显存，返回字节地址 */
   cudaMalloc(bytes: number): number;
@@ -26,6 +31,13 @@ export interface HostEnvironment {
   memset(address: number, value: number, bytes: number): void;
   /** 起一个 kernel，同步执行完 */
   launch(name: string, grid: Dim3, block: Dim3, args: number[], line: number): void;
+  /**
+   * 重放一整张 graph。
+   *
+   * 和逐个 `launch` 的区别只有一处，但那正是 CUDA Graph 的全部意义：
+   * **提交开销只算一次**。kernel 该干的活一点没少。
+   */
+  replay(nodes: GraphReplayNode[]): void;
   /** 收集标准输出 */
   write(text: string): void;
   /**
@@ -38,9 +50,41 @@ export interface HostEnvironment {
   buffer(index: number): { address: number; length: number };
 }
 
+/** 一次录下来的操作：起 kernel，或者一次拷贝 */
+type GraphNode = LaunchNode | CopyNode;
+
+interface CopyNode {
+  kind: 'copy';
+  dst: number;
+  src: number;
+  bytes: number;
+  copyKind: number;
+}
+
+interface LaunchNode {
+  kind: 'launch';
+  name: string;
+  grid: Dim3;
+  block: Dim3;
+  /**
+   * **录的是捕获那一刻的实参值。**
+   *
+   * 这正是 CUDA Graph 最容易踩的地方：指针是稳定的地址，重放没问题；
+   * 而按值传的标量（比如 `len`）录下来就定死了，之后再变也不会生效。
+   * 真实引擎的解法是把会变的量放进显存、让 kernel 从指针读 ——
+   * 第 20 关考的就是这件事。
+   */
+  args: number[];
+  line: number;
+}
+
 /** 一个宿主程序跑起来需要的全部状态 */
 export class HostRuntime implements HostServices {
   private readonly containers = new ContainerStore();
+  /** 正在捕获时，launch record 到这里而不是执行 */
+  private capturing: GraphNode[] | null = null;
+  private readonly graphs: GraphNode[][] = [];
+  private readonly execs: GraphNode[][] = [];
 
   constructor(
     private readonly env: HostEnvironment,
@@ -60,6 +104,11 @@ export class HostRuntime implements HostServices {
   }
 
   launch(name: string, grid: Dim3, block: Dim3, args: number[], line: number): void {
+    if (this.capturing) {
+      // 捕获期间**不执行**，只录下来 —— 和真 CUDA 一样
+      this.capturing.push({ kind: 'launch', name, grid, block, args: args.slice(), line });
+      return;
+    }
     this.env.launch(name, grid, block, args, line);
   }
 
@@ -73,6 +122,15 @@ export class HostRuntime implements HostServices {
         this.env.cudaFree(args[0] | 0);
         return 0;
       case HOST.cudaMemcpy:
+        if (this.capturing) {
+          // 拷贝也要进 graph。**不录的话它会在捕获那一刻就执行**，
+          // 之后每次重放都少做一步 —— 而程序照跑，结果静静地错。
+          this.capturing.push({
+            kind: 'copy',
+            dst: args[0] | 0, src: args[1] | 0, bytes: args[2] | 0, copyKind: args[3] | 0,
+          });
+          return 0;
+        }
         this.env.copy(args[0] | 0, args[1] | 0, args[2] | 0, args[3] | 0);
         return 0;
       case HOST.cudaMemset:
@@ -82,6 +140,43 @@ export class HostRuntime implements HostServices {
         return this.env.buffer(args[0] | 0).address;
       case HOST.lab_buffer_len:
         return this.env.buffer(args[0] | 0).length;
+
+      /* ---- CUDA Graph ---- */
+      case HOST.cudaStreamBeginCapture:
+        if (this.capturing) throw new HostRuntimeError('已经在捕获中了，不能嵌套');
+        this.capturing = [];
+        return 0;
+      case HOST.cudaStreamEndCapture: {
+        if (!this.capturing) throw new HostRuntimeError('没有在捕获，cudaStreamEndCapture 无从结束');
+        this.graphs.push(this.capturing);
+        this.capturing = null;
+        return this.graphs.length;
+      }
+      case HOST.cudaGraphInstantiate: {
+        const graph = this.graphs[(args[0] | 0) - 1];
+        if (!graph) throw new HostRuntimeError(`没有编号 ${args[0]} 的 graph`);
+        this.execs.push(graph);
+        return this.execs.length;
+      }
+      case HOST.cudaGraphLaunch: {
+        const exec = this.execs[(args[0] | 0) - 1];
+        if (!exec) {
+          throw new HostRuntimeError(
+            (args[0] | 0) === 0
+              ? 'graphExec 句柄是 0 —— 变量还没被 cudaGraphInstantiate 填上'
+              : `没有编号 ${args[0]} 的 graphExec`
+          );
+        }
+        this.env.replay(exec.map((node) => (
+          node.kind === 'launch' ? { ...node, args: node.args.slice() } : { ...node }
+        )));
+        return 0;
+      }
+      case HOST.cudaGraphDestroy:
+      case HOST.cudaGraphExecDestroy:
+        // 和 cudaFree 一样：句柄不回收。峰值计量要的是"一共开过多少"，
+        // 能回收就量不出差别了。写出来仍然是对的习惯。
+        return 0;
 
       case HOST.cudaDeviceSynchronize:
         // 我们的 launch 是同步的，所以这里没有实际工作。**保留它不是装样子**：
