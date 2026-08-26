@@ -1551,6 +1551,38 @@ const primers = {
         + 'CuTe DSL, because Blackwell\'s TMA and TMEM need tile-level control that Triton does not expose.'
       )
     ),
+    'kv-cache': t(
+      p(
+        '自回归解码是一个一个 token 往外吐的：算出第 n 个，把它接回输入，再算第 n+1 个。'
+        + '每一步都要对**前面所有位置**做注意力，也就是说每一步都需要那些位置的 k 与 v。',
+        '最直白的写法是每一步重新算一遍。这在数学上没有任何问题，'
+        + '同样的输入配同样的权重，投影出来当然是同一个 k。'
+        + '问题在于代价：第 n 步要投影 n 个位置，跑完 N 步就是 N 平方 / 2 次投影。',
+        '而自回归有一个关键性质救了这件事：**已经生成过的位置，它的 k 和 v 永远不会再变。**'
+        + '因果注意力只让每个位置看它自己和它前面的，所以后面新增的 token 影响不到前面。'
+        + '既然不会变，算一次存起来就行，这就是 KV cache。',
+        '它把每一步的投影量从 O(n) 降到 O(1)，代价是显存。而这个代价相当可观：'
+        + '一个 70B 模型在 fp16 下大约是每个 token 每层 320KB，80 层加起来 2.5MB，'
+        + '一条 4K 上下文的序列光 KV cache 就要 10GB。'
+        + '从这里开始，推理引擎的工程几乎全在跟这块显存较劲。'
+      ),
+      p(
+        'Autoregressive decoding emits one token at a time: compute the nth, feed it back, compute '
+        + 'the n+1th. Every step attends over **all previous positions**, so every step needs the k '
+        + 'and v of those positions.',
+        'The most literal implementation recomputes them each step. Mathematically nothing is wrong '
+        + 'with that: the same input and the same weights obviously project to the same k. The '
+        + 'problem is the cost. Step n projects n positions, so N steps cost N squared over two.',
+        'One property of autoregression rescues this: **once a position has been generated, its k '
+        + 'and v never change.** Causal attention lets each position see only itself and what came '
+        + 'before, so later tokens cannot affect earlier ones. If they never change, compute them '
+        + 'once and keep them. That is the KV cache.',
+        'It takes the projection work per step from O(n) to O(1), paid for in memory, and the '
+        + 'payment is steep: roughly 320KB per token per layer for a 70B model in fp16, 2.5MB '
+        + 'across 80 layers, so a single 4K-context sequence needs 10GB of cache. From here on, '
+        + 'almost all inference engineering is a fight over that memory.'
+      )
+    ),
   },
 
   'intranet-k8s': {
