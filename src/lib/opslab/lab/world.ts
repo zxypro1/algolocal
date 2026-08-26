@@ -22,6 +22,7 @@ import { createOpensslCommand } from './openssl';
 import { materializePki } from './pki';
 import { GitNetwork, createGitCommand, parseCommit, readTree, seedRepository } from '../git';
 import { createIstioctlCommand } from '../mesh';
+import { createVeleroCommand } from '../backup';
 import { SignatureStore, createCosignCommand } from '../admission';
 import { OpenBao, createBaoCommand } from '../secrets';
 import { createPromtoolCommand } from '../observability';
@@ -355,6 +356,13 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     },
   }));
 
+  machine.install('velero', createVeleroCommand({
+    registry: cluster.registry,
+    scheme: cluster.scheme,
+    // 建完对象立刻 get 是常见用法，让世界先跑一小会儿
+    settle: () => { void cluster.advanceBy(5_000); },
+  }));
+
   machine.install('istioctl', createIstioctlCommand({
     view: () => cluster.istioView(),
     namespace: () => (machine.vfs.exists(DEFAULT_KUBECONFIG_PATH)
@@ -436,6 +444,23 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     }
   });
   await cluster.settle();
+
+  /**
+   * 盘上开局就有的数据。
+   *
+   * 要等 settle 之后才能写：PVC 得先绑到一块 PV 上，我们才知道字节该往哪儿放。
+   * 找不到对应的盘就直接报错 —— 悄悄不写的话，题目会变成「恢复出空盘也算对」。
+   */
+  for (const [key, content] of Object.entries({ ...(spec.volumes ?? {}), ...(stage.volumes ?? {}) })) {
+    const [namespace, name] = key.split('/');
+    const claims = cluster.scheme.get({ group: '', version: 'v1', resource: 'persistentvolumeclaims' });
+    const claim = claims && cluster.registry.get(claims, namespace, name);
+    const volumeName = claim && ((claim.spec ?? {}) as { volumeName?: string }).volumeName;
+    if (!volumeName) {
+      throw new Error(`世界里的 PVC ${key} 没有绑上盘，写不进初始数据`);
+    }
+    cluster.volumes.write(volumeName, content);
+  }
 
   const world: OpsWorld = {
     cluster,

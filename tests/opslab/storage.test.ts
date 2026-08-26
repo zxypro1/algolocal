@@ -271,6 +271,34 @@ describe('数据的生命周期', () => {
   });
 });
 
+describe('删命名空间', () => {
+  /**
+   * 一条命令带走整个环境。
+   *
+   * `kubectl delete namespace` 会把里面的东西全部删掉，包括 PVC ——
+   * 而回收策略是 Delete 的话，盘和数据也跟着走。第 21 关的灾难就是这一条。
+   */
+  it('命名空间没了，里面的 PVC 和盘上的数据一起没', async () => {
+    const w = await build([CSI_DRIVER, CLASS, claim(), pod()]);
+    await createExecHandler(w.cluster)(
+      { namespace: 'shop', pod: 'ledger', command: ['sh', '-c', 'echo gone > /data/x'], stdin: false, tty: false },
+      ''
+    );
+    const volumeName = (pvcOf(w).spec as any).volumeName;
+    expect(w.cluster.volumes.read(volumeName)).toEqual({ x: 'gone\n' });
+
+    w.cluster.registry.delete(
+      w.cluster.scheme.mustGet({ group: '', version: 'v1', resource: 'namespaces' }), undefined, 'shop'
+    );
+    await w.cluster.advanceBy(30_000);
+
+    expect(w.cluster.registry.list(w.cluster.scheme.mustGet(PVCS), { namespace: 'shop' }).items)
+      .toHaveLength(0);
+    expect(pvsOf(w)).toHaveLength(0);
+    expect(w.cluster.volumes.read(volumeName)).toEqual({});
+  });
+});
+
 describe('调度', () => {
   it('PVC 没绑上，Pod 就不调度，而且说得出原因', async () => {
     const w = await build([CLASS, claim(), pod()]);

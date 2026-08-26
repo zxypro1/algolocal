@@ -13,3 +13,10 @@ export {
 } from './resources';
 export { SnapshotController } from './snapshots';
 export type { SnapshotOptions } from './snapshots';
+export {
+  BACKUPS, RESTORES, BACKUPSTORAGELOCATIONS, VELERO_RESOURCES, VELERO_LABEL,
+  CSI_CLASS_LABEL, EXCLUDE_LABEL, BackupStore, VeleroController,
+} from './velero';
+export type { StoredBackup, VeleroOptions } from './velero';
+export { createVeleroCommand } from './velerocli';
+export type { VeleroCliOptions } from './velerocli';

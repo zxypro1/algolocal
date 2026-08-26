@@ -20,6 +20,7 @@ import { PERSISTENTVOLUMECLAIMS } from '../storage/resources';
 import {
   CONFIGMAPS,
   DEPLOYMENTS,
+  NAMESPACES,
   ENDPOINTS,
   matchesSelector,
   NODES,
@@ -1281,4 +1282,58 @@ function describeProbe(probe: Probe | undefined): string {
     return `dial tcp: connect: connection refused (port ${probe.tcpSocket.port})`;
   }
   return 'command failed';
+}
+
+/* ------------------------------------------------------------------ */
+/* 命名空间回收                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 删掉一个命名空间，里面的东西**全部**跟着没。
+ *
+ * 这是 `kubectl delete namespace` 最需要被亲身经历一次的性质：一条命令、
+ * 一个词的差别，带走的是整个环境 —— 包括 PVC，也就包括数据（回收策略
+ * 是 Delete 的话）。所以第 21 关的灾难就是这一条命令。
+ *
+ * 真集群里这个过程有中间态：命名空间先进 `Terminating`，控制器逐个删完
+ * 内容再摘掉 finalizer。这里简化成一步 —— 卡在 Terminating 的命名空间
+ * 是另一个话题（某个 APIService 挂了导致 discovery 失败），不在这一关。
+ */
+export class NamespaceController extends Controller {
+  private namespaces: Informer;
+  private known = new Set<string>();
+
+  constructor(context: ControllerContext) {
+    super(context, 'namespace');
+    this.namespaces = this.track(new Informer(this.registry, NAMESPACES));
+    this.namespaces.onChange((key) => this.queue.add(key));
+  }
+
+  protected reconcile(key: string): void {
+    const { name } = splitKey(key);
+    try {
+      this.registry.get(NAMESPACES, undefined, name);
+      this.known.add(name);
+      return;
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+    }
+    // 没了：把里面的东西清干净
+    if (!this.known.delete(name)) return;
+    this.purge(name);
+  }
+
+  private purge(namespace: string): void {
+    for (const definition of this.context.scheme.list()) {
+      if (!definition.namespaced) continue;
+      for (const object of this.registry.list(definition, { namespace }).items) {
+        try {
+          this.registry.delete(definition, namespace, object.metadata.name!);
+        } catch (error) {
+          // 属主先被删掉时，级联已经把它带走了
+          if (!isNotFound(error)) throw error;
+        }
+      }
+    }
+  }
 }

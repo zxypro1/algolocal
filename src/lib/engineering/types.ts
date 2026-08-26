@@ -341,6 +341,15 @@ export interface OpsWorldSpec {
   endpoints?: string[];
   /** 开局就存在的集群对象 */
   objects?: Record<string, unknown>[];
+  /**
+   * 盘上开局就有的数据。
+   *
+   * key 是 PVC 的 `命名空间/名字`，value 是**卷内的相对路径**到内容。
+   * 之所以不能写在 objects 里：这些字节根本不在 apiserver 上，它们在存储
+   * 后端。而「已经在跑的库里有数据」是备份这类题目的前提 —— 没有数据，
+   * 「恢复成功」和「恢复出一块空盘」看起来一模一样。
+   */
+  volumes?: Record<string, Record<string, string>>;
 }
 
 /** 内网 PKI 的初态 */
@@ -398,6 +407,13 @@ export interface OpsStageSpec {
   referenceCommands?: string[];
   /** 参考解顺带写下的文件（比如学员要自己写的 manifest） */
   referenceFiles?: Record<string, string>;
+  /**
+   * 盘上开局就有的数据。
+   *
+   * 和 `OpsWorldSpec.volumes` 同一个形状，只是作用在这一关：
+   * key 是 PVC 的 `命名空间/名字`，value 是卷内相对路径到内容。
+   */
+  volumes?: Record<string, Record<string, string>>;
 }
 
 export type WorkspaceSpec = CodeWorkspaceSpec | OpsWorkspaceSpec;

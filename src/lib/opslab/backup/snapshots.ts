@@ -74,6 +74,17 @@ export class SnapshotController extends Controller {
     if (status.readyToUse) return;
 
     const spec = (snapshot.spec ?? {}) as any;
+
+    /**
+     * 预置快照（pre-provisioned）。
+     *
+     * 另一条路：content 已经在存储上了，VolumeSnapshot 只是把它认领回来。
+     * 恢复走的就是这条 —— 备份留下的那张 content 还在，但它的主人
+     * （原来那个命名空间里的 VolumeSnapshot）早就跟着命名空间一起没了。
+     */
+    const preprovisioned = spec.source?.volumeSnapshotContentName;
+    if (preprovisioned) return this.adopt(snapshot, preprovisioned);
+
     const claimName = spec.source?.persistentVolumeClaimName;
     if (!claimName) {
       return this.fail(snapshot, 'Snapshot source must be a PersistentVolumeClaim');
@@ -150,6 +161,42 @@ export class SnapshotController extends Controller {
         boundVolumeSnapshotContentName: contentName,
         creationTime: now,
         restoreSize,
+      });
+    });
+  }
+
+  /** 认领一张已经在存储上的 content */
+  private async adopt(snapshot: KubeObject, contentName: string): Promise<void> {
+    const namespace = snapshot.metadata.namespace;
+    const name = snapshot.metadata.name!;
+    let content: KubeObject;
+    try {
+      content = this.registry.get(VOLUMESNAPSHOTCONTENTS, undefined, contentName);
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+      return this.fail(snapshot, `VolumeSnapshotContent "${contentName}" not found`);
+    }
+
+    await ignoreConflict(() => {
+      const latest = this.registry.get(VOLUMESNAPSHOTCONTENTS, undefined, contentName);
+      const spec = (latest.spec ?? {}) as any;
+      // content 上的 ref 指回新的这张快照，否则两边对不上，谁也不认谁
+      this.registry.update(VOLUMESNAPSHOTCONTENTS, undefined, contentName, {
+        ...latest,
+        spec: {
+          ...spec,
+          volumeSnapshotRef: {
+            apiVersion: 'snapshot.storage.k8s.io/v1', kind: 'VolumeSnapshot',
+            name, namespace, uid: snapshot.metadata.uid,
+          },
+        },
+      });
+      updateStatusIfChanged(this.registry, VOLUMESNAPSHOTS, namespace, name, {
+        readyToUse: true,
+        boundVolumeSnapshotContentName: contentName,
+        creationTime: ((content.status ?? {}) as any).creationTime
+          ?? new Date(this.context.now()).toISOString(),
+        restoreSize: ((content.status ?? {}) as any).restoreSize,
       });
     });
   }

@@ -43,6 +43,11 @@ const REPORTS_IMAGE_BAD = 'harbor.corp.internal/team/reports:2.3.0';
 const ROLLOUTS_IMAGE = 'quay.io/argoproj/argo-rollouts:v1.8.3';
 // 门户的一个坏版本：进程活着、探针照过，六成请求 500
 const PORTAL_IMAGE_BAD = 'harbor.corp.internal/team/portal:1.6.0';
+const CSI_IMAGE = 'registry.k8s.io/sig-storage/csi-provisioner:v5.1.0';
+const SNAPSHOT_IMAGE = 'registry.k8s.io/sig-storage/snapshot-controller:v8.2.0';
+const VELERO_IMAGE = 'velero/velero:v1.16.1';
+// 对账库。数据在盘上，不在镜像里 —— 这一关整关都建立在这个区别上。
+const LEDGERDB_IMAGE = 'harbor.corp.internal/team/ledgerdb:14.2';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -149,7 +154,7 @@ const WORLD = {
   namespaces: [
     'default', 'kube-system', 'payments', 'analytics',
     'envoy-gateway-system', 'ingress-nginx', 'cert-manager', 'argocd', 'istio-system',
-    'kyverno', 'external-secrets', 'monitoring',
+    'kyverno', 'external-secrets', 'monitoring', 'velero',
   ],
   images: {
     [PORTAL_IMAGE]: {
@@ -196,6 +201,13 @@ const WORLD = {
     [ESO_IMAGE]: { pullMs: 400, startupMs: 600, readyAfterMs: 300, listens: [8080] },
     [PROMETHEUS_IMAGE]: { pullMs: 600, startupMs: 900, readyAfterMs: 400, listens: [9090] },
     [ROLLOUTS_IMAGE]: { pullMs: 400, startupMs: 600, readyAfterMs: 300 },
+    [CSI_IMAGE]: { pullMs: 300, startupMs: 400, readyAfterMs: 200 },
+    [SNAPSHOT_IMAGE]: { pullMs: 300, startupMs: 400, readyAfterMs: 200 },
+    [VELERO_IMAGE]: { pullMs: 700, startupMs: 900, readyAfterMs: 400 },
+    [LEDGERDB_IMAGE]: {
+      pullMs: 800, startupMs: 1200, readyAfterMs: 600,
+      listens: [5432], memoryUsage: '512Mi', handlesSigterm: true,
+    },
     // 门户的下一个版本，好的那个
     [PORTAL_IMAGE_NEXT]: {
       pullMs: 400, startupMs: 600, readyAfterMs: 300,
@@ -6649,6 +6661,410 @@ const stage20 = {
   ),
 };
 
+/* ------------------------------------------------------------------ */
+/* 第 21 关：灾难恢复                                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 存储那一套。
+ *
+ * 三个东西分属三个组件：CSI 驱动造盘、snapshot-controller 拍快照、
+ * StorageClass 说怎么造。快照类是有的 —— 只是没打让 Velero 认得的标签，
+ * 这一关的核心失效就藏在这一行里。
+ */
+const STORAGE_PLATFORM = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: {
+      name: 'csi-provisioner', namespace: 'kube-system',
+      labels: { 'app.kubernetes.io/name': 'csi-driver' },
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'csi-driver' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'csi-driver' } },
+        spec: { containers: [{ name: 'provisioner', image: CSI_IMAGE }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: {
+      name: 'snapshot-controller', namespace: 'kube-system',
+      labels: { 'app.kubernetes.io/name': 'snapshot-controller' },
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'snapshot-controller' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'snapshot-controller' } },
+        spec: { containers: [{ name: 'controller', image: SNAPSHOT_IMAGE }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'storage.k8s.io/v1', kind: 'StorageClass',
+    metadata: {
+      name: 'standard',
+      annotations: { 'storageclass.kubernetes.io/is-default-class': 'true' },
+    },
+    provisioner: 'csi.corp.internal',
+    reclaimPolicy: 'Delete',
+    volumeBindingMode: 'Immediate',
+  },
+  {
+    apiVersion: 'snapshot.storage.k8s.io/v1', kind: 'VolumeSnapshotClass',
+    metadata: { name: 'csi-standard' },
+    driver: 'csi.corp.internal',
+    deletionPolicy: 'Delete',
+  },
+];
+
+/** Velero 和它的桶。装是装上了，没人配过备份。 */
+const VELERO_PLATFORM = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: {
+      name: 'velero', namespace: 'velero',
+      labels: { 'app.kubernetes.io/name': 'velero' },
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'velero' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'velero' } },
+        spec: { containers: [{ name: 'velero', image: VELERO_IMAGE }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'velero.io/v1', kind: 'BackupStorageLocation',
+    metadata: { name: 'default', namespace: 'velero' },
+    spec: {
+      provider: 'aws',
+      default: true,
+      objectStorage: { bucket: 'corp-backups' },
+      config: { region: 'internal', s3Url: 'http://minio.storage.svc:9000' },
+    },
+  },
+];
+
+/** 对账库。它的数据在盘上，不在镜像里。 */
+const LEDGERDB_WORKLOAD = [
+  {
+    apiVersion: 'v1', kind: 'PersistentVolumeClaim',
+    metadata: { name: 'ledger-data', namespace: 'payments' },
+    spec: {
+      accessModes: ['ReadWriteOnce'],
+      resources: { requests: { storage: '20Gi' } },
+    },
+  },
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: 'ledgerdb', namespace: 'payments' },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { app: 'ledgerdb' } },
+      template: {
+        metadata: { labels: { app: 'ledgerdb' } },
+        spec: {
+          containers: [{
+            name: 'db', image: LEDGERDB_IMAGE,
+            ports: [{ containerPort: 5432 }],
+            volumeMounts: [{ name: 'data', mountPath: '/var/lib/ledger' }],
+          }],
+          volumes: [{ name: 'data', persistentVolumeClaim: { claimName: 'ledger-data' } }],
+        },
+      },
+    },
+  },
+  {
+    apiVersion: 'v1', kind: 'Service',
+    metadata: { name: 'ledgerdb', namespace: 'payments' },
+    spec: { selector: { app: 'ledgerdb' }, ports: [{ port: 5432, targetPort: 5432 }] },
+  },
+];
+
+/** 库里已经有的数据。恢复出来必须一字不差。 */
+const LEDGER_ROWS = [
+  'date,id,amount',
+  '2026-08-01,pay-100317,42.00',
+  '2026-08-02,pay-100318,128.50',
+  '2026-08-03,pay-100319,7.25',
+  '',
+].join('\n');
+
+const BACKUP_STARTER = code`
+  # 备份还没配过。
+  #
+  # 这里需要一个 Backup 对象，把 payments 整个命名空间备下来。
+  # 光把对象备下来是不够的 —— 想清楚盘上的字节靠什么进备份。
+`;
+
+const BACKUP_REFERENCE = code`
+  apiVersion: velero.io/v1
+  kind: Backup
+  metadata:
+    name: payments-daily
+    namespace: velero
+  spec:
+    includedNamespaces:
+    - payments
+    storageLocation: default
+    # 不写 snapshotVolumes 就是「要拍快照」。但拍不拍得成，取决于有没有一个
+    # 打了 velero.io/csi-volumesnapshot-class 标签的 VolumeSnapshotClass。
+    ttl: 720h
+`;
+
+const stage21 = {
+  id: 'disaster-recovery',
+  title: t('把删掉的东西连数据一起找回来', 'Get It Back, Data and All'),
+  goal: t(
+    code`
+      对账库 \`ledgerdb\` 的数据在一块 20Gi 的盘上。集群装了 Velero，
+      也配好了桶 —— 但从来没有人跑过一次备份，更没有人恢复过。
+
+      「我们有备份」和「我们能恢复」是两句话。这一关要把后一句变成真的。
+
+      要做三件事：
+
+      1. 让 Velero 备份**连卷数据一起**备走；
+      2. 把 payments 整个命名空间备下来；
+      3. 做一次恢复演练，恢复到**另一个命名空间**，证明这份备份真的能用。
+
+      做完之后判定会真的删掉 payments 命名空间，再从你的备份把它恢复回来。
+
+      ## 通关标准
+
+      1. 备份是 \`Completed\`，而且 \`volumeSnapshotsCompleted\` 大于 0；
+      2. 有一次恢复演练，落在别的命名空间里，且演练出来的数据是对的；
+      3. \`kubectl delete namespace payments\` 之后，从这份备份能把库和数据
+         一起恢复回来，一行不差。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl get volumesnapshotclass
+      kubectl label volumesnapshotclass <name> <key>=<value>
+      kubectl apply -f /root/infra/backup.yaml
+      velero backup get
+      velero backup describe <name>
+      velero restore create <name> --from-backup <backup> --namespace-mappings a:b
+      velero restore get
+      kubectl get pvc,volumesnapshot -n payments
+      \`\`\`
+    `,
+    code`
+      The ledger database \`ledgerdb\` keeps its data on a 20Gi volume. The cluster has
+      Velero installed and a bucket configured, but nobody has ever run a backup, let
+      alone restored one.
+
+      "We have backups" and "we can restore" are two different sentences. This stage is
+      about making the second one true.
+
+      Three things to do:
+
+      1. make Velero back up the **volume data**, not just the objects;
+      2. back up the whole payments namespace;
+      3. run a restore drill into **another namespace** to prove the backup works.
+
+      When you are done, the grader really does delete the payments namespace and
+      restores it from your backup.
+
+      ## Done when
+
+      1. the backup is \`Completed\` and \`volumeSnapshotsCompleted\` is above zero;
+      2. a restore drill exists, landing in a different namespace, with correct data;
+      3. after \`kubectl delete namespace payments\`, your backup brings the database
+         and every row back.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl get volumesnapshotclass
+      kubectl label volumesnapshotclass <name> <key>=<value>
+      kubectl apply -f /root/infra/backup.yaml
+      velero backup get
+      velero backup describe <name>
+      velero restore create <name> --from-backup <backup> --namespace-mappings a:b
+      velero restore get
+      kubectl get pvc,volumesnapshot -n payments
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('备份里有卷数据', 'The backup contains volume data'),
+    t('恢复演练做过', 'A restore drill has been run'),
+    t('删了也回得来', 'Deleted and brought back'),
+  ],
+  hints: [
+    t(
+      'Velero 挑卷快照类靠的是一个标签：\`velero.io/csi-volumesnapshot-class: "true"\`。没有任何一个快照类打这个标签时，备份**不报错** —— 它照样 Completed，只是 warnings 加一，卷数据一个字节都没进去。\`velero backup describe\` 里那两行 Attempted / Completed 就是拿来看这个的。',
+      'Velero picks a snapshot class by a label: `velero.io/csi-volumesnapshot-class: "true"`. When no class carries it the backup does **not** fail. It still says Completed, just with one more warning, and not a byte of volume data goes in. Those Attempted / Completed lines in `velero backup describe` are exactly what to read.'
+    ),
+    t(
+      '恢复演练不要在生产命名空间上做。Velero 默认**跳过**已经存在的对象，所以往原地恢复多半是「跑完了，什么都没变」—— 而你会以为验证过了。用 \`--namespace-mappings\` 恢复到一个新命名空间。',
+      'Do not drill in the production namespace. Velero **skips** resources that already exist, so restoring in place usually means "it ran and nothing changed", and you walk away thinking you verified something. Restore into a fresh namespace with `--namespace-mappings`.'
+    ),
+    t(
+      '恢复出来的 PVC 是不是有数据，看不出来 —— Bound 就是 Bound。要证明，只能进去读一行：\`kubectl exec\` 进 Pod \`cat\` 一下。',
+      'You cannot tell whether a restored PVC has data by looking at it: Bound is Bound. The only proof is reading a row, so `kubectl exec` into the pod and `cat` the file.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '把「备份任务是绿的」当成「数据备下来了」。没有可用的卷快照类时，Velero 照样报 Completed。这类失效只会在恢复那天暴露，而那天恰好是最不能出错的一天。判据要看 \`volumeSnapshotsCompleted\`，不是 \`phase\`。',
+      'Treating "the backup job is green" as "the data is backed up". With no usable volume snapshot class Velero still reports Completed. This failure only surfaces on the day you restore, which is exactly the day it must not. Check `volumeSnapshotsCompleted`, not `phase`.'
+    ),
+    t(
+      '原地恢复。Velero 默认跳过已经存在的对象，恢复完 phase 是 PartiallyFailed，而集群一点没变 —— 很容易读成「恢复成功，只是有点小问题」。',
+      'Restoring in place. Velero skips resources that already exist, the restore ends PartiallyFailed, and nothing in the cluster changed. That reads a lot like "restored, with minor issues".'
+    ),
+    t(
+      '以为删掉命名空间只是删掉一堆对象。它会一起带走 PVC，而回收策略是 \`Delete\` 的话，盘和盘上的字节跟着一起消失，apiserver 里再也查不到它存在过。',
+      'Assuming deleting a namespace only deletes some objects. It takes the PVCs with it, and with a `Delete` reclaim policy the volume and every byte on it go too, with no record left in the apiserver that they ever existed.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      CNI_CILIUM,
+      ...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...TLS_PLATFORM,
+      ...ROLLOUTS_PLATFORM, ...MONITORING_CARRIED,
+      ...PORTAL_ROLLOUT, PORTAL_ROUTE,
+      ...STORAGE_PLATFORM, ...VELERO_PLATFORM, ...LEDGERDB_WORKLOAD,
+    ],
+    volumes: { 'payments/ledger-data': { 'ledger.csv': LEDGER_ROWS } },
+    files: { '/root/infra/backup.yaml': BACKUP_STARTER },
+    referenceFiles: { '/root/infra/backup.yaml': BACKUP_REFERENCE },
+    referenceCommands: [
+      'kubectl label volumesnapshotclass csi-standard velero.io/csi-volumesnapshot-class=true',
+      'kubectl apply -f /root/infra/backup.yaml',
+      'velero backup get',
+      'velero restore create drill --from-backup payments-daily --namespace-mappings payments:payments-drill',
+    ],
+  },
+  specs: [
+    spec('disaster-recovery.spec.ts', code`
+      import { advance, get, list, sh } from '@ops/lab';
+
+      const COMPLETED = () => list('Backup', { namespace: 'velero' })
+        .filter((backup) => (backup.status || {}).phase === 'Completed');
+
+      const rowsIn = async (namespace) => {
+        const pod = list('Pod', { namespace })
+          .filter((item) => (item.metadata.labels || {}).app === 'ledgerdb')
+          .filter((item) => item.status.phase === 'Running')[0];
+        if (!pod) return '';
+        const result = await sh(
+          'kubectl exec ' + pod.metadata.name + ' -n ' + namespace
+          + ' -- cat /var/lib/ledger/ledger.csv'
+        );
+        return result.stdout;
+      };
+
+      describe('灾难恢复', () => {
+        it('卷快照类是 Velero 认得的', () => {
+          const classes = list('VolumeSnapshotClass');
+          expect(classes.length).toBeGreaterThan(0);
+          const usable = classes.filter(
+            (item) => (item.metadata.labels || {})['velero.io/csi-volumesnapshot-class'] === 'true'
+          );
+          expect(usable.length).toBeGreaterThan(0);
+        });
+
+        it('备份完成了，而且卷数据在里面', () => {
+          const backups = COMPLETED();
+          expect(backups.length).toBeGreaterThan(0);
+          const backup = backups[0];
+          // Completed 只说明任务跑完了。数据在不在，看这一行。
+          expect(backup.status.volumeSnapshotsCompleted).toBeGreaterThan(0);
+          expect(backup.status.warnings || 0).toBe(0);
+          expect((backup.spec.includedNamespaces || []).includes('payments')).toBe(true);
+        });
+
+        it('恢复演练做过，而且不是在生产上做的', async () => {
+          const drills = list('Restore', { namespace: 'velero' }).filter((restore) => {
+            const mapping = (restore.spec || {}).namespaceMapping || {};
+            return Object.keys(mapping).length > 0 && mapping.payments !== 'payments';
+          });
+          expect(drills.length).toBeGreaterThan(0);
+
+          const target = drills[0].spec.namespaceMapping.payments;
+          expect(drills[0].status.phase).toBe('Completed');
+
+          await advance(120000);
+          const rows = await rowsIn(target);
+          expect(rows).toContain('pay-100317');
+          expect(rows).toContain('pay-100319');
+        });
+
+        it('真出事了也回得来：整个命名空间删掉，数据照样一行不差', async () => {
+          const name = COMPLETED()[0].metadata.name;
+
+          await sh('kubectl delete namespace payments');
+          await advance(60000);
+          expect(list('PersistentVolumeClaim', { namespace: 'payments' }).length).toBe(0);
+          expect(list('Deployment', { namespace: 'payments' }).length).toBe(0);
+
+          await sh('velero restore create rescue --from-backup ' + name);
+          await advance(600000);
+
+          const claim = get('PersistentVolumeClaim', 'ledger-data', 'payments');
+          expect(claim.status.phase).toBe('Bound');
+          expect(get('Deployment', 'ledgerdb', 'payments')).toBeTruthy();
+
+          const rows = await rowsIn('payments');
+          expect(rows).toContain('pay-100317');
+          expect(rows).toContain('pay-100318');
+          expect(rows).toContain('pay-100319');
+        });
+      });
+    `),
+  ],
+  focus: ['resilience'],
+  extension: t(
+    code`
+      备份这件事上，绝大多数团队真正缺的不是备份，是**恢复**。备份任务天天绿，
+      没有人试过从它恢复；等到需要的那天才发现里面只有对象图没有数据，
+      或者恢复流程要三个人商量两小时。所以「多久备份一次」远不如
+      「多久演练一次恢复」重要，后者才是真正被验证过的那个数字。
+
+      演练一定要恢复到一个新的地方。Velero 默认跳过已经存在的对象，
+      往原地恢复的结果往往是「跑完了，什么都没变」—— 你验证了个寂寞，
+      还得到一份虚假的信心。用 \`--namespace-mappings\` 恢复到一个临时命名空间，
+      读一行数据出来对一下，然后把临时命名空间删掉。
+
+      还有一层是**备份的边界**。这一关备的是一个命名空间，
+      但恢复一个真实系统往往还需要命名空间之外的东西：CRD、集群角色、
+      StorageClass、Secret 里那把只存在于集群里的密钥。
+      备份策略里最该问的一句话是：如果整个集群没了，
+      光靠这个桶里的东西，能不能从零把服务拉起来。
+    `,
+    code`
+      What most teams are missing is not backups, it is **restores**. The backup job is
+      green every day and nobody has ever restored from it, so the day it matters is the
+      day you learn it holds objects but no data, or that the procedure takes three
+      people and two hours to agree on. How often you back up matters far less than how
+      often you rehearse a restore, because only the second number has been verified.
+
+      Always drill into a new place. Velero skips resources that already exist, so an
+      in-place restore usually means "it ran and nothing changed": you verified nothing
+      and walked away with false confidence. Restore into a temporary namespace with
+      \`--namespace-mappings\`, read a row of real data out of it, then delete the
+      temporary namespace.
+
+      There is also the question of **what the backup's edge is**. This stage backs up a
+      namespace, but restoring a real system usually needs things outside it: CRDs,
+      cluster roles, StorageClasses, the key that only ever existed inside a Secret in
+      that cluster. The question worth asking of any backup strategy is whether, with
+      the whole cluster gone, the contents of that bucket alone are enough to bring the
+      service back from nothing.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -6695,5 +7111,6 @@ module.exports = {
     stage1, stage2, stage3, stage4, stage5, stage6,
     stage7, stage8, stage9, stage10, stage11, stage12,
     stage13, stage14, stage15, stage16, stage17, stage18, stage19, stage20,
+    stage21,
   ],
 };

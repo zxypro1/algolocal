@@ -5621,7 +5621,8 @@
           "istio-system",
           "kyverno",
           "external-secrets",
-          "monitoring"
+          "monitoring",
+          "velero"
         ],
         "images": {
           "harbor.corp.internal/team/portal:1.4.0": {
@@ -5749,6 +5750,31 @@
             "pullMs": 400,
             "startupMs": 600,
             "readyAfterMs": 300
+          },
+          "registry.k8s.io/sig-storage/csi-provisioner:v5.1.0": {
+            "pullMs": 300,
+            "startupMs": 400,
+            "readyAfterMs": 200
+          },
+          "registry.k8s.io/sig-storage/snapshot-controller:v8.2.0": {
+            "pullMs": 300,
+            "startupMs": 400,
+            "readyAfterMs": 200
+          },
+          "velero/velero:v1.16.1": {
+            "pullMs": 700,
+            "startupMs": 900,
+            "readyAfterMs": 400
+          },
+          "harbor.corp.internal/team/ledgerdb:14.2": {
+            "pullMs": 800,
+            "startupMs": 1200,
+            "readyAfterMs": 600,
+            "listens": [
+              5432
+            ],
+            "memoryUsage": "512Mi",
+            "handlesSigterm": true
           },
           "harbor.corp.internal/team/portal:1.5.0": {
             "pullMs": 400,
@@ -12823,6 +12849,771 @@
         "primer": {
           "zh": "Deployment 的滚动更新只回答一个问题：新的 Pod 起来了没有。而「起来了」和「好用」是两回事：一个进程活着、探针全过、日志干净，但大半请求返回 500 的版本，滚动更新会毫不犹豫地把它铺到 100%。`渐进式发布`补的就是这一段：把「什么叫好」写进发布流程本身。\n\n`Argo Rollouts` 用 `Rollout` 替代 Deployment（是替代不是补充，一个工作负载只能由其中之一管）。它多出来的是 `strategy.canary.steps`：一串按顺序执行的步骤。`setWeight` 调整金丝雀占多少副本，`pause` 停一下（带 `duration` 就是等那么久，不带就是无限期等人来 `promote`），`analysis` 起一次分析。控制器用 `status.currentStepIndex` 记着走到第几步，每步做完才往前挪一格。\n\n`AnalysisTemplate` 描述判据：一条 PromQL 加一个 `successCondition`（形如 `result < 0.05`）。任何一条不满足，整个发布`中止`。要特别注意中止的含义，它不是「停在原地」，而是**回到稳定版本**：金丝雀缩到 0，稳定版拉回满副本。这也是自动回滚的实现，不需要人介入。另一个必写的字段是 `initialDelay`：金丝雀刚起来的那几秒计数器还是 0、采样点不够两个，这时候算出来的是稳定版的错误率，看着很好，然后就把坏版本放行了。\n\n判据本身要写成`比例`而不是计数。`sum(rate(errors[5m])) > 0` 会让任何一个 5xx 都毁掉发布，而真实系统永远有零星的 5xx，结果是没有版本发得出去，最后有人把分析这一步删掉。还有一条实践：**金丝雀的判据应该和告警的判据是同一个表达式**，否则会出现「发布时看着没事、上线后告警响」，那说明「什么叫坏」被定义了两遍。\n\n另一半是节点维护。`PodDisruptionBudget` 管的是`自愿中断`，也就是有人主动发起的那些：节点维护、缩容、驱逐。`kubectl drain` 走的是 Pod 的 `eviction` 子资源，会先问 PDB，违反就收到 429 并重试；而 `kubectl delete pod` 走的是普通删除，谁也拦不住。这是两条命令行为不同的根源。PDB 保证的是「不会被人为打空」，不是「永远有 N 个副本」：节点掉电、OOMKill、被抢占都不在它管辖内。还有一个反效果要避开：`minAvailable` 写成和副本数一样大，任何驱逐都会被拒，节点永远维护不了。",
           "en": "A rolling update answers one question: did the new pods start. Starting is not the same as working, and a version whose process is alive, probes pass, and logs are clean while three requests in ten return 500 will be spread to 100% without hesitation. `Progressive delivery` fills that gap by writing \"what good looks like\" into the release process itself.\n\n`Argo Rollouts` replaces a Deployment with a `Rollout` (replaces, not supplements: a workload is managed by one or the other). What it adds is `strategy.canary.steps`, an ordered list. `setWeight` sets how many replicas are canary, `pause` stops (with a `duration` it waits that long, without one it waits indefinitely for a `promote`), and `analysis` runs an evaluation. The controller tracks progress in `status.currentStepIndex`, advancing only when a step completes.\n\nAn `AnalysisTemplate` describes the criterion: a PromQL query plus a `successCondition` such as `result < 0.05`. If any metric fails, the rollout `aborts`. Note what aborting means: not stopping in place but **returning to the stable version**, scaling the canary to zero and stable back to full. That is the automatic rollback, with nobody in the loop. The other field you must write is `initialDelay`: in the first seconds a canary counter is still zero with fewer than two samples, so what you compute is the stable version error rate, which looks great and lets the bad version through.\n\nThe criterion must be a `ratio` rather than a count. `sum(rate(errors[5m])) > 0` fails a release on any single 5xx, real systems always have a few, nothing ever ships, and eventually somebody deletes the analysis step. One more practice: **the canary criterion and the alerting criterion should be the same expression**, or you get \"looked fine during rollout, paged afterwards\", which means \"bad\" was defined twice.\n\nThe other half is node maintenance. A `PodDisruptionBudget` governs `voluntary` disruptions, the ones somebody initiates: maintenance, scale-down, eviction. `kubectl drain` goes through the Pod `eviction` subresource, which consults the PDB and returns 429 with a retry when it would be violated, while `kubectl delete pod` is an ordinary delete that nothing stops. That is why the two commands behave differently. A PDB guarantees nobody drains you to zero, not that N replicas always exist: power loss, OOMKill, and preemption are all outside its remit. And avoid the counterproductive setting where `minAvailable` equals the replica count, because then every eviction is refused and the node can never be maintained."
+        }
+      },
+      {
+        "id": "disaster-recovery",
+        "title": {
+          "zh": "把删掉的东西连数据一起找回来",
+          "en": "Get It Back, Data and All"
+        },
+        "goal": {
+          "zh": "对账库 `ledgerdb` 的数据在一块 20Gi 的盘上。集群装了 Velero，\n也配好了桶 —— 但从来没有人跑过一次备份，更没有人恢复过。\n\n「我们有备份」和「我们能恢复」是两句话。这一关要把后一句变成真的。\n\n要做三件事：\n\n1. 让 Velero 备份**连卷数据一起**备走；\n2. 把 payments 整个命名空间备下来；\n3. 做一次恢复演练，恢复到**另一个命名空间**，证明这份备份真的能用。\n\n做完之后判定会真的删掉 payments 命名空间，再从你的备份把它恢复回来。\n\n## 通关标准\n\n1. 备份是 `Completed`，而且 `volumeSnapshotsCompleted` 大于 0；\n2. 有一次恢复演练，落在别的命名空间里，且演练出来的数据是对的；\n3. `kubectl delete namespace payments` 之后，从这份备份能把库和数据\n   一起恢复回来，一行不差。\n\n## 会用到的命令\n\n```bash\nkubectl get volumesnapshotclass\nkubectl label volumesnapshotclass <name> <key>=<value>\nkubectl apply -f /root/infra/backup.yaml\nvelero backup get\nvelero backup describe <name>\nvelero restore create <name> --from-backup <backup> --namespace-mappings a:b\nvelero restore get\nkubectl get pvc,volumesnapshot -n payments\n```\n",
+          "en": "The ledger database `ledgerdb` keeps its data on a 20Gi volume. The cluster has\nVelero installed and a bucket configured, but nobody has ever run a backup, let\nalone restored one.\n\n\"We have backups\" and \"we can restore\" are two different sentences. This stage is\nabout making the second one true.\n\nThree things to do:\n\n1. make Velero back up the **volume data**, not just the objects;\n2. back up the whole payments namespace;\n3. run a restore drill into **another namespace** to prove the backup works.\n\nWhen you are done, the grader really does delete the payments namespace and\nrestores it from your backup.\n\n## Done when\n\n1. the backup is `Completed` and `volumeSnapshotsCompleted` is above zero;\n2. a restore drill exists, landing in a different namespace, with correct data;\n3. after `kubectl delete namespace payments`, your backup brings the database\n   and every row back.\n\n## Commands you will need\n\n```bash\nkubectl get volumesnapshotclass\nkubectl label volumesnapshotclass <name> <key>=<value>\nkubectl apply -f /root/infra/backup.yaml\nvelero backup get\nvelero backup describe <name>\nvelero restore create <name> --from-backup <backup> --namespace-mappings a:b\nvelero restore get\nkubectl get pvc,volumesnapshot -n payments\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "备份里有卷数据",
+            "en": "The backup contains volume data"
+          },
+          {
+            "zh": "恢复演练做过",
+            "en": "A restore drill has been run"
+          },
+          {
+            "zh": "删了也回得来",
+            "en": "Deleted and brought back"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "Velero 挑卷快照类靠的是一个标签：`velero.io/csi-volumesnapshot-class: \"true\"`。没有任何一个快照类打这个标签时，备份**不报错** —— 它照样 Completed，只是 warnings 加一，卷数据一个字节都没进去。`velero backup describe` 里那两行 Attempted / Completed 就是拿来看这个的。",
+            "en": "Velero picks a snapshot class by a label: `velero.io/csi-volumesnapshot-class: \"true\"`. When no class carries it the backup does **not** fail. It still says Completed, just with one more warning, and not a byte of volume data goes in. Those Attempted / Completed lines in `velero backup describe` are exactly what to read."
+          },
+          {
+            "zh": "恢复演练不要在生产命名空间上做。Velero 默认**跳过**已经存在的对象，所以往原地恢复多半是「跑完了，什么都没变」—— 而你会以为验证过了。用 `--namespace-mappings` 恢复到一个新命名空间。",
+            "en": "Do not drill in the production namespace. Velero **skips** resources that already exist, so restoring in place usually means \"it ran and nothing changed\", and you walk away thinking you verified something. Restore into a fresh namespace with `--namespace-mappings`."
+          },
+          {
+            "zh": "恢复出来的 PVC 是不是有数据，看不出来 —— Bound 就是 Bound。要证明，只能进去读一行：`kubectl exec` 进 Pod `cat` 一下。",
+            "en": "You cannot tell whether a restored PVC has data by looking at it: Bound is Bound. The only proof is reading a row, so `kubectl exec` into the pod and `cat` the file."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "把「备份任务是绿的」当成「数据备下来了」。没有可用的卷快照类时，Velero 照样报 Completed。这类失效只会在恢复那天暴露，而那天恰好是最不能出错的一天。判据要看 `volumeSnapshotsCompleted`，不是 `phase`。",
+            "en": "Treating \"the backup job is green\" as \"the data is backed up\". With no usable volume snapshot class Velero still reports Completed. This failure only surfaces on the day you restore, which is exactly the day it must not. Check `volumeSnapshotsCompleted`, not `phase`."
+          },
+          {
+            "zh": "原地恢复。Velero 默认跳过已经存在的对象，恢复完 phase 是 PartiallyFailed，而集群一点没变 —— 很容易读成「恢复成功，只是有点小问题」。",
+            "en": "Restoring in place. Velero skips resources that already exist, the restore ends PartiallyFailed, and nothing in the cluster changed. That reads a lot like \"restored, with minor issues\"."
+          },
+          {
+            "zh": "以为删掉命名空间只是删掉一堆对象。它会一起带走 PVC，而回收策略是 `Delete` 的话，盘和盘上的字节跟着一起消失，apiserver 里再也查不到它存在过。",
+            "en": "Assuming deleting a namespace only deletes some objects. It takes the PVCs with it, and with a `Delete` reclaim policy the volume and every byte on it go too, with no record left in the apiserver that they ever existed."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "cilium",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cilium"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cilium"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cilium"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "cilium-agent",
+                        "image": "quay.io/cilium/cilium:v1.19.2",
+                        "ports": [
+                          {
+                            "containerPort": 9962
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "Certificate",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "secretName": "portal-tls",
+                "duration": "2160h",
+                "renewBefore": "720h",
+                "commonName": "portal.corp.internal",
+                "dnsNames": [
+                  "portal.corp.internal"
+                ],
+                "issuerRef": {
+                  "name": "corp-ca",
+                  "kind": "ClusterIssuer"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "Gateway",
+              "metadata": {
+                "name": "corp-gw",
+                "namespace": "payments"
+              },
+              "spec": {
+                "gatewayClassName": "envoy-internal",
+                "listeners": [
+                  {
+                    "name": "https",
+                    "port": 443,
+                    "protocol": "HTTPS",
+                    "hostname": "portal.corp.internal",
+                    "tls": {
+                      "mode": "Terminate",
+                      "certificateRefs": [
+                        {
+                          "name": "portal-tls"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "http",
+                    "port": 80,
+                    "protocol": "HTTP",
+                    "hostname": "portal.corp.internal"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "argo-rollouts",
+                "namespace": "argocd",
+                "labels": {
+                  "app.kubernetes.io/name": "argo-rollouts"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "argo-rollouts"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "argo-rollouts"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/argoproj/argo-rollouts:v1.8.3"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "prometheus",
+                "namespace": "monitoring",
+                "labels": {
+                  "app.kubernetes.io/name": "prometheus"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "prometheus"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "prometheus"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "prometheus",
+                        "image": "quay.io/prometheus/prometheus:v3.9.1",
+                        "ports": [
+                          {
+                            "containerPort": 9090
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "monitoring.coreos.com/v1",
+              "kind": "ServiceMonitor",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments",
+                "labels": {
+                  "release": "kube-prom"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "endpoints": [
+                  {
+                    "port": "http"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "Rollout",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 4,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "strategy": {
+                  "canary": {
+                    "steps": [
+                      {
+                        "setWeight": 25
+                      },
+                      {
+                        "setWeight": 100
+                      }
+                    ]
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments",
+                "labels": {
+                  "app": "portal"
+                }
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.corp.internal"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "csi-provisioner",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "csi-driver"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "csi-driver"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "csi-driver"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "provisioner",
+                        "image": "registry.k8s.io/sig-storage/csi-provisioner:v5.1.0"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "snapshot-controller",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "snapshot-controller"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "snapshot-controller"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "snapshot-controller"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/sig-storage/snapshot-controller:v8.2.0"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "storage.k8s.io/v1",
+              "kind": "StorageClass",
+              "metadata": {
+                "name": "standard",
+                "annotations": {
+                  "storageclass.kubernetes.io/is-default-class": "true"
+                }
+              },
+              "provisioner": "csi.corp.internal",
+              "reclaimPolicy": "Delete",
+              "volumeBindingMode": "Immediate"
+            },
+            {
+              "apiVersion": "snapshot.storage.k8s.io/v1",
+              "kind": "VolumeSnapshotClass",
+              "metadata": {
+                "name": "csi-standard"
+              },
+              "driver": "csi.corp.internal",
+              "deletionPolicy": "Delete"
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "velero",
+                "namespace": "velero",
+                "labels": {
+                  "app.kubernetes.io/name": "velero"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "velero"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "velero"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "velero",
+                        "image": "velero/velero:v1.16.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "velero.io/v1",
+              "kind": "BackupStorageLocation",
+              "metadata": {
+                "name": "default",
+                "namespace": "velero"
+              },
+              "spec": {
+                "provider": "aws",
+                "default": true,
+                "objectStorage": {
+                  "bucket": "corp-backups"
+                },
+                "config": {
+                  "region": "internal",
+                  "s3Url": "http://minio.storage.svc:9000"
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "PersistentVolumeClaim",
+              "metadata": {
+                "name": "ledger-data",
+                "namespace": "payments"
+              },
+              "spec": {
+                "accessModes": [
+                  "ReadWriteOnce"
+                ],
+                "resources": {
+                  "requests": {
+                    "storage": "20Gi"
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "ledgerdb",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app": "ledgerdb"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "ledgerdb"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "db",
+                        "image": "harbor.corp.internal/team/ledgerdb:14.2",
+                        "ports": [
+                          {
+                            "containerPort": 5432
+                          }
+                        ],
+                        "volumeMounts": [
+                          {
+                            "name": "data",
+                            "mountPath": "/var/lib/ledger"
+                          }
+                        ]
+                      }
+                    ],
+                    "volumes": [
+                      {
+                        "name": "data",
+                        "persistentVolumeClaim": {
+                          "claimName": "ledger-data"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "ledgerdb",
+                "namespace": "payments"
+              },
+              "spec": {
+                "selector": {
+                  "app": "ledgerdb"
+                },
+                "ports": [
+                  {
+                    "port": 5432,
+                    "targetPort": 5432
+                  }
+                ]
+              }
+            }
+          ],
+          "volumes": {
+            "payments/ledger-data": {
+              "ledger.csv": "date,id,amount\n2026-08-01,pay-100317,42.00\n2026-08-02,pay-100318,128.50\n2026-08-03,pay-100319,7.25\n"
+            }
+          },
+          "files": {
+            "/root/infra/backup.yaml": "# 备份还没配过。\n#\n# 这里需要一个 Backup 对象，把 payments 整个命名空间备下来。\n# 光把对象备下来是不够的 —— 想清楚盘上的字节靠什么进备份。\n"
+          },
+          "referenceFiles": {
+            "/root/infra/backup.yaml": "apiVersion: velero.io/v1\nkind: Backup\nmetadata:\n  name: payments-daily\n  namespace: velero\nspec:\n  includedNamespaces:\n  - payments\n  storageLocation: default\n  # 不写 snapshotVolumes 就是「要拍快照」。但拍不拍得成，取决于有没有一个\n  # 打了 velero.io/csi-volumesnapshot-class 标签的 VolumeSnapshotClass。\n  ttl: 720h\n"
+          },
+          "referenceCommands": [
+            "kubectl label volumesnapshotclass csi-standard velero.io/csi-volumesnapshot-class=true",
+            "kubectl apply -f /root/infra/backup.yaml",
+            "velero backup get",
+            "velero restore create drill --from-backup payments-daily --namespace-mappings payments:payments-drill"
+          ]
+        },
+        "specs": [
+          {
+            "path": "disaster-recovery.spec.ts",
+            "content": "import { advance, get, list, sh } from '@ops/lab';\n\nconst COMPLETED = () => list('Backup', { namespace: 'velero' })\n  .filter((backup) => (backup.status || {}).phase === 'Completed');\n\nconst rowsIn = async (namespace) => {\n  const pod = list('Pod', { namespace })\n    .filter((item) => (item.metadata.labels || {}).app === 'ledgerdb')\n    .filter((item) => item.status.phase === 'Running')[0];\n  if (!pod) return '';\n  const result = await sh(\n    'kubectl exec ' + pod.metadata.name + ' -n ' + namespace\n    + ' -- cat /var/lib/ledger/ledger.csv'\n  );\n  return result.stdout;\n};\n\ndescribe('灾难恢复', () => {\n  it('卷快照类是 Velero 认得的', () => {\n    const classes = list('VolumeSnapshotClass');\n    expect(classes.length).toBeGreaterThan(0);\n    const usable = classes.filter(\n      (item) => (item.metadata.labels || {})['velero.io/csi-volumesnapshot-class'] === 'true'\n    );\n    expect(usable.length).toBeGreaterThan(0);\n  });\n\n  it('备份完成了，而且卷数据在里面', () => {\n    const backups = COMPLETED();\n    expect(backups.length).toBeGreaterThan(0);\n    const backup = backups[0];\n    // Completed 只说明任务跑完了。数据在不在，看这一行。\n    expect(backup.status.volumeSnapshotsCompleted).toBeGreaterThan(0);\n    expect(backup.status.warnings || 0).toBe(0);\n    expect((backup.spec.includedNamespaces || []).includes('payments')).toBe(true);\n  });\n\n  it('恢复演练做过，而且不是在生产上做的', async () => {\n    const drills = list('Restore', { namespace: 'velero' }).filter((restore) => {\n      const mapping = (restore.spec || {}).namespaceMapping || {};\n      return Object.keys(mapping).length > 0 && mapping.payments !== 'payments';\n    });\n    expect(drills.length).toBeGreaterThan(0);\n\n    const target = drills[0].spec.namespaceMapping.payments;\n    expect(drills[0].status.phase).toBe('Completed');\n\n    await advance(120000);\n    const rows = await rowsIn(target);\n    expect(rows).toContain('pay-100317');\n    expect(rows).toContain('pay-100319');\n  });\n\n  it('真出事了也回得来：整个命名空间删掉，数据照样一行不差', async () => {\n    const name = COMPLETED()[0].metadata.name;\n\n    await sh('kubectl delete namespace payments');\n    await advance(60000);\n    expect(list('PersistentVolumeClaim', { namespace: 'payments' }).length).toBe(0);\n    expect(list('Deployment', { namespace: 'payments' }).length).toBe(0);\n\n    await sh('velero restore create rescue --from-backup ' + name);\n    await advance(600000);\n\n    const claim = get('PersistentVolumeClaim', 'ledger-data', 'payments');\n    expect(claim.status.phase).toBe('Bound');\n    expect(get('Deployment', 'ledgerdb', 'payments')).toBeTruthy();\n\n    const rows = await rowsIn('payments');\n    expect(rows).toContain('pay-100317');\n    expect(rows).toContain('pay-100318');\n    expect(rows).toContain('pay-100319');\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "resilience"
+        ],
+        "extension": {
+          "zh": "备份这件事上，绝大多数团队真正缺的不是备份，是**恢复**。备份任务天天绿，\n没有人试过从它恢复；等到需要的那天才发现里面只有对象图没有数据，\n或者恢复流程要三个人商量两小时。所以「多久备份一次」远不如\n「多久演练一次恢复」重要，后者才是真正被验证过的那个数字。\n\n演练一定要恢复到一个新的地方。Velero 默认跳过已经存在的对象，\n往原地恢复的结果往往是「跑完了，什么都没变」—— 你验证了个寂寞，\n还得到一份虚假的信心。用 `--namespace-mappings` 恢复到一个临时命名空间，\n读一行数据出来对一下，然后把临时命名空间删掉。\n\n还有一层是**备份的边界**。这一关备的是一个命名空间，\n但恢复一个真实系统往往还需要命名空间之外的东西：CRD、集群角色、\nStorageClass、Secret 里那把只存在于集群里的密钥。\n备份策略里最该问的一句话是：如果整个集群没了，\n光靠这个桶里的东西，能不能从零把服务拉起来。\n",
+          "en": "What most teams are missing is not backups, it is **restores**. The backup job is\ngreen every day and nobody has ever restored from it, so the day it matters is the\nday you learn it holds objects but no data, or that the procedure takes three\npeople and two hours to agree on. How often you back up matters far less than how\noften you rehearse a restore, because only the second number has been verified.\n\nAlways drill into a new place. Velero skips resources that already exist, so an\nin-place restore usually means \"it ran and nothing changed\": you verified nothing\nand walked away with false confidence. Restore into a temporary namespace with\n`--namespace-mappings`, read a row of real data out of it, then delete the\ntemporary namespace.\n\nThere is also the question of **what the backup's edge is**. This stage backs up a\nnamespace, but restoring a real system usually needs things outside it: CRDs,\ncluster roles, StorageClasses, the key that only ever existed inside a Secret in\nthat cluster. The question worth asking of any backup strategy is whether, with\nthe whole cluster gone, the contents of that bucket alone are enough to bring the\nservice back from nothing.\n"
+        },
+        "primer": {
+          "zh": "接手一个系统之后最该问的一句话不是「有没有备份」，是「上次从备份恢复是什么时候」。这两句差得很远：备份任务天天绿，不代表那个桶里的东西能把服务拉起来。这一关要做的就是把第二句变成真的。\n\nKubernetes 里的数据分两层，这一层的所有困惑都从这儿来。`PersistentVolumeClaim` 是一个**对象**，住在 apiserver 里；盘上的字节不在 apiserver 里，它们在存储后端上。所以把 apiserver 里的对象全导出来，得到的是一份完整的 YAML 和**零字节数据**。恢复出来是一个一模一样的空盘，而 `kubectl get pvc` 看不出空盘和满盘的区别。\n\n要把字节也带上，得靠 `CSI 卷快照`。三个对象：`VolumeSnapshotClass` 说谁来拍、拍完怎么处置，`VolumeSnapshot` 是应用侧的一次请求，`VolumeSnapshotContent` 是存储上真正那张。快照是`时间点`：拍完之后往盘里再写什么都跟它无关。另外要留意拍快照的是 `snapshot-controller` 这个工作负载，它和 CSI 驱动是两个东西，只装驱动的话 VolumeSnapshot 建得出来然后永远不就绪。\n\n`Velero` 把这两件事缝起来：它自己导出对象图放进桶里，卷数据则委托给 CSI 快照。缝的地方有一个标签：`velero.io/csi-volumesnapshot-class: \"true\"`。没有任何快照类打这个标签时，Velero **不报错**，备份照样 `Completed`，只是 warnings 加一，卷数据一个字节都没进去。所以判断一次备份好不好，要看的是 `volumeSnapshotsCompleted` 而不是 `phase`。\n\n恢复这一侧有一条默认行为要记住：Velero **跳过**已经存在的对象。所以往原地恢复的结果通常是「跑完了，phase 是 PartiallyFailed，集群一点没变」，很容易被读成「恢复成功，只是有点小问题」。演练要用 `--namespace-mappings` 恢复到一个新命名空间，进去读一行真数据出来对一下，再把它删掉。\n\n最后是灾难本身。`kubectl delete namespace` 不只是删掉一堆对象，它会一起带走 PVC；回收策略是 `Delete` 的话，盘和盘上的字节跟着消失，apiserver 里再也查不到它存在过。一条命令、一个词的差别，带走的是整个环境，这也正是备份存在的理由。",
+          "en": "The first question to ask about a system you have just inherited is not whether it has backups, it is when somebody last restored from one. Those are far apart: a backup job going green every day says nothing about whether the contents of that bucket can bring the service back. This stage is about making the second sentence true.\n\nData in Kubernetes lives on two levels, and every confusion here comes from that split. A `PersistentVolumeClaim` is an **object** in the apiserver; the bytes on the volume are not, they live on the storage backend. So exporting every object from the apiserver gives you a complete set of YAML and **zero bytes of data**. What comes back is an identical empty disk, and `kubectl get pvc` shows no difference between an empty one and a full one.\n\nCarrying the bytes as well takes `CSI volume snapshots`. Three objects: a `VolumeSnapshotClass` says who takes them and what happens afterwards, a `VolumeSnapshot` is the request from the application side, and a `VolumeSnapshotContent` is the real snapshot on the storage system. A snapshot is a `point in time`: whatever is written to the volume afterwards is not in it. Note also that snapshots are taken by the `snapshot-controller` workload, which is separate from the CSI driver: install only the driver and a VolumeSnapshot will be created and then never become ready.\n\n`Velero` stitches the two together: it exports the object graph into the bucket itself and delegates volume data to CSI snapshots. The seam is a label, `velero.io/csi-volumesnapshot-class: \"true\"`. When no snapshot class carries it, Velero does **not** fail. The backup still reports `Completed`, just with one more warning, and not a byte of volume data goes in. So the health of a backup is read from `volumeSnapshotsCompleted`, not from `phase`.\n\nOn the restore side there is one default worth memorising: Velero **skips** resources that already exist. Restoring in place therefore usually means \"it ran, phase is PartiallyFailed, and nothing in the cluster changed\", which reads a lot like \"restored, with minor issues\". Drill with `--namespace-mappings` into a fresh namespace, read a row of real data out of it, and delete it afterwards.\n\nFinally the disaster itself. `kubectl delete namespace` does not just remove a pile of objects, it takes the PVCs with it; with a `Delete` reclaim policy the volume and every byte on it go too, leaving no record in the apiserver that they ever existed. One command, one word of difference, and an entire environment is gone, which is the whole reason backups exist."
         }
       }
     ]

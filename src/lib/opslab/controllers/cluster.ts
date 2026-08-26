@@ -38,11 +38,14 @@ import { DISRUPTION_RESOURCES, PdbController, evictionVerdict } from '../disrupt
 import {
   STORAGE_RESOURCES, StorageController, VolumeStore, createDefaultStorageClassDefaulter,
 } from '../storage';
-import { SNAPSHOT_RESOURCES, SnapshotController } from '../backup';
+import {
+  BackupStore, SNAPSHOT_RESOURCES, SnapshotController, VELERO_RESOURCES, VeleroController,
+} from '../backup';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
   EndpointsController,
+  NamespaceController,
   ImageSpec,
   KubeletController,
   NodePressureController,
@@ -150,6 +153,14 @@ export class Cluster {
    */
   readonly volumes = new VolumeStore();
 
+  /**
+   * 备份桶。
+   *
+   * 同理，也不在 apiserver 里：集群整个没了，桶还在；反过来桶没了而
+   * Backup 对象还在，`kubectl get backup` 照样显示 Completed。
+   */
+  readonly backups = new BackupStore();
+
   /** 监控。世界没配 metrics 就是 undefined。 */
   prometheus?: PrometheusController;
   /** 由外面装上（createOpsWorld 会接一个 Pod 里的 shell 进来） */
@@ -171,7 +182,7 @@ export class Cluster {
       ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES, ...ARGOCD_RESOURCES,
       ...MESH_RESOURCES, ...RBAC_RESOURCES, ...KYVERNO_RESOURCES, ...ESO_RESOURCES,
       ...OBSERVABILITY_RESOURCES, ...DISRUPTION_RESOURCES, ...ROLLOUT_RESOURCES,
-      ...STORAGE_RESOURCES, ...SNAPSHOT_RESOURCES,
+      ...STORAGE_RESOURCES, ...SNAPSHOT_RESOURCES, ...VELERO_RESOURCES,
       ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
@@ -631,6 +642,8 @@ export class Cluster {
       // 每个节点一份：CNI 的 agent、日志采集都是这个形状
       new DaemonSetController(context),
       new EndpointsController(context),
+      // 删掉一个命名空间，里面的东西全部跟着没 —— 包括 PVC，也就包括数据
+      new NamespaceController(context),
       // PDB 的状态。`kubectl get pdb` 里 ALLOWED DISRUPTIONS 那一列就是它写的。
       new PdbController(context),
       /**
@@ -640,6 +653,8 @@ export class Cluster {
       new StorageController(context, { volumes: this.volumes }),
       // 快照：又一个工作负载。装了 CSI 驱动不等于装了它。
       new SnapshotController(context, { volumes: this.volumes }),
+      // 备份。Backup 对象在集群里，备份内容在桶里 —— 所以 store 不在 registry 上。
+      new VeleroController(context, { store: this.backups }),
       // 入口：控制器自己是集群里的一个工作负载，卸载掉 Gateway 就不再被 program
       new GatewayController(context),
       // 内网 PKI：同样是集群里的一个工作负载，卸载掉就不再签发

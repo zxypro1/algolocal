@@ -1344,6 +1344,25 @@ const primers = {
       )
     ),
 
+    'disaster-recovery': t(
+      p(
+        '接手一个系统之后最该问的一句话不是「有没有备份」，是「上次从备份恢复是什么时候」。这两句差得很远：备份任务天天绿，不代表那个桶里的东西能把服务拉起来。这一关要做的就是把第二句变成真的。',
+        'Kubernetes 里的数据分两层，这一层的所有困惑都从这儿来。`PersistentVolumeClaim` 是一个**对象**，住在 apiserver 里；盘上的字节不在 apiserver 里，它们在存储后端上。所以把 apiserver 里的对象全导出来，得到的是一份完整的 YAML 和**零字节数据**。恢复出来是一个一模一样的空盘，而 `kubectl get pvc` 看不出空盘和满盘的区别。',
+        '要把字节也带上，得靠 `CSI 卷快照`。三个对象：`VolumeSnapshotClass` 说谁来拍、拍完怎么处置，`VolumeSnapshot` 是应用侧的一次请求，`VolumeSnapshotContent` 是存储上真正那张。快照是`时间点`：拍完之后往盘里再写什么都跟它无关。另外要留意拍快照的是 `snapshot-controller` 这个工作负载，它和 CSI 驱动是两个东西，只装驱动的话 VolumeSnapshot 建得出来然后永远不就绪。',
+        '`Velero` 把这两件事缝起来：它自己导出对象图放进桶里，卷数据则委托给 CSI 快照。缝的地方有一个标签：`velero.io/csi-volumesnapshot-class: "true"`。没有任何快照类打这个标签时，Velero **不报错**，备份照样 `Completed`，只是 warnings 加一，卷数据一个字节都没进去。所以判断一次备份好不好，要看的是 `volumeSnapshotsCompleted` 而不是 `phase`。',
+        '恢复这一侧有一条默认行为要记住：Velero **跳过**已经存在的对象。所以往原地恢复的结果通常是「跑完了，phase 是 PartiallyFailed，集群一点没变」，很容易被读成「恢复成功，只是有点小问题」。演练要用 `--namespace-mappings` 恢复到一个新命名空间，进去读一行真数据出来对一下，再把它删掉。',
+        '最后是灾难本身。`kubectl delete namespace` 不只是删掉一堆对象，它会一起带走 PVC；回收策略是 `Delete` 的话，盘和盘上的字节跟着消失，apiserver 里再也查不到它存在过。一条命令、一个词的差别，带走的是整个环境，这也正是备份存在的理由。'
+      ),
+      p(
+        'The first question to ask about a system you have just inherited is not whether it has backups, it is when somebody last restored from one. Those are far apart: a backup job going green every day says nothing about whether the contents of that bucket can bring the service back. This stage is about making the second sentence true.',
+        'Data in Kubernetes lives on two levels, and every confusion here comes from that split. A `PersistentVolumeClaim` is an **object** in the apiserver; the bytes on the volume are not, they live on the storage backend. So exporting every object from the apiserver gives you a complete set of YAML and **zero bytes of data**. What comes back is an identical empty disk, and `kubectl get pvc` shows no difference between an empty one and a full one.',
+        'Carrying the bytes as well takes `CSI volume snapshots`. Three objects: a `VolumeSnapshotClass` says who takes them and what happens afterwards, a `VolumeSnapshot` is the request from the application side, and a `VolumeSnapshotContent` is the real snapshot on the storage system. A snapshot is a `point in time`: whatever is written to the volume afterwards is not in it. Note also that snapshots are taken by the `snapshot-controller` workload, which is separate from the CSI driver: install only the driver and a VolumeSnapshot will be created and then never become ready.',
+        '`Velero` stitches the two together: it exports the object graph into the bucket itself and delegates volume data to CSI snapshots. The seam is a label, `velero.io/csi-volumesnapshot-class: "true"`. When no snapshot class carries it, Velero does **not** fail. The backup still reports `Completed`, just with one more warning, and not a byte of volume data goes in. So the health of a backup is read from `volumeSnapshotsCompleted`, not from `phase`.',
+        'On the restore side there is one default worth memorising: Velero **skips** resources that already exist. Restoring in place therefore usually means "it ran, phase is PartiallyFailed, and nothing in the cluster changed", which reads a lot like "restored, with minor issues". Drill with `--namespace-mappings` into a fresh namespace, read a row of real data out of it, and delete it afterwards.',
+        'Finally the disaster itself. `kubectl delete namespace` does not just remove a pile of objects, it takes the PVCs with it; with a `Delete` reclaim policy the volume and every byte on it go too, leaving no record in the apiserver that they ever existed. One command, one word of difference, and an entire environment is gone, which is the whole reason backups exist.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',
