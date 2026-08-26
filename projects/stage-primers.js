@@ -1325,6 +1325,73 @@ const primers = {
         + 'with vectorised access and swizzling, but the underlying idea is exactly these two stages combined.'
       )
     ),
+    'double-buffering': t(
+      p(
+        '分块 GEMM 的每一轮里有两个屏障，它们防的是不同的事：'
+        + '第一个保证「大家都搬完了才开始算」，第二个保证「大家都算完了才开始覆盖」。'
+        + '第二个之所以存在，只是因为下一轮要复用同一块共享内存。',
+        '`双缓冲`把这个理由拿掉：开两套 buffer 轮流用。'
+        + '算第 t 块的时候往另一套里搬第 t+1 块，两件事碰不到一起，一轮就只需要一个屏障。'
+        + '这个手法在流水线设计里叫 `ping-pong`，从 CPU 的双缓冲画面到 GPU 的 tile 预取都是它。',
+        '代价是共享内存翻倍。共享内存是每 SM 固定的资源，'
+        + '吃得多了能同时驻留的 block 就少了，占用率会掉。'
+        + '所以双缓冲不是无脑赢，要看少掉的屏障值不值那些占用率。',
+        '真硬件上还能更进一步。Ampere 起有 `cp.async`：搬运指令发出去之后**不阻塞线程**，'
+        + '也不占用寄存器，到真要用数据时再等。这样双缓冲才真正变成流水线，'
+        + '而不只是省一个屏障。Hopper 又加了 TMA，一条指令搬一整块多维 tile。'
+      ),
+      p(
+        'Each round of a tiled GEMM has two barriers guarding different things: the first ensures '
+        + 'everyone finished staging before anyone computes, the second ensures everyone finished '
+        + 'computing before anyone overwrites. The second exists only because the next round reuses the '
+        + 'same shared tile.',
+        '`Double buffering` removes that reason by keeping two sets of tiles and alternating. While '
+        + 'computing on tile t, stage tile t+1 into the other set; the two never collide and one barrier '
+        + 'per round suffices. The technique is called `ping-pong` in pipeline design and appears '
+        + 'everywhere from CPU double-buffered graphics to GPU tile prefetch.',
+        'The cost is twice the shared memory. Shared memory is a fixed per-SM resource, so using more of '
+        + 'it means fewer resident blocks and lower occupancy. Double buffering is therefore not a free '
+        + 'win: the barriers saved have to be worth the occupancy given up.',
+        'Real hardware goes further. From Ampere, `cp.async` issues a staging instruction that **does not '
+        + 'block the thread** and does not occupy registers; you wait only when the data is actually '
+        + 'needed. Only then does double buffering become a true pipeline rather than one fewer barrier. '
+        + 'Hopper adds TMA, moving a whole multidimensional tile with a single instruction.'
+      )
+    ),
+    'tensor-core': t(
+      p(
+        '到目前为止每一次乘加都走 `FMA` 流水线，H100 上一个 SM 每周期 128 次。'
+        + 'GPU 上还有一类专门为矩阵乘造的单元叫 `tensor core`，同样一个 SM 每周期能做 1024 次乘加，'
+        + '八倍。深度学习这几年的算力增长，绝大部分来自这里而不是通用流水线。',
+        'tensor core 的接口是 `wmma`，全称 warp matrix multiply-accumulate。'
+        + '关键词是 **warp**：它不是一个线程的指令，而是**整个 warp 协作**完成一个 16×16×16 的矩阵乘。'
+        + '数据装在叫 `fragment` 的对象里，它是不透明的，哪个 lane 拿了哪几个元素，'
+        + '标准里就是未定义的，你不需要也不应该关心。',
+        '典型配方是**输入 half、累加 float**。精度损失只发生在输入端（half 只有 10 位尾数），'
+        + '而累加链条仍然在 fp32 上，所以几百项累加下来也不会垮。'
+        + '这个不对称是有意设计的：矩阵乘的误差主要来自累加而不是单次乘法。',
+        '再往后，Hopper 的 `wgmma` 与 Blackwell 的 `tcgen05` 把 MMA 变成了**异步**的：'
+        + '发起之后线程可以接着干别的。于是高性能 kernel 开始做 `warp 专业化`，'
+        + '一部分 warp 专门搬数据、另一部分专门算。FlashAttention-4 就是这么写的。'
+      ),
+      p(
+        'Every multiply-add so far has gone through the `FMA` pipeline, 128 per SM per cycle on an H100. '
+        + 'GPUs also carry units built purely for matrix multiplication, `tensor cores`, doing 1024 '
+        + 'multiply-accumulates per SM per cycle. Most of the compute growth in deep learning over recent '
+        + 'years came from these rather than from the general pipeline.',
+        'The interface is `wmma`, warp matrix multiply-accumulate. The key word is **warp**: this is not a '
+        + 'per-thread instruction but an **entire warp cooperating** on one 16×16×16 matmul. The data '
+        + 'lives in `fragment` objects, which are opaque. Which lane holds which elements is undefined by '
+        + 'the standard, and you neither need nor should care.',
+        'The standard recipe is **half inputs, float accumulation**. Precision is lost only at the inputs '
+        + '(half has ten mantissa bits) while the accumulation chain stays in fp32, so hundreds of terms '
+        + 'still hold up. The asymmetry is deliberate: error in a matmul comes mostly from accumulation '
+        + 'rather than from individual products.',
+        'Beyond this, Hopper\'s `wgmma` and Blackwell\'s `tcgen05` make MMA **asynchronous**: once issued, '
+        + 'the thread carries on with other work. High-performance kernels then adopt `warp specialisation`, '
+        + 'dedicating some warps to moving data and others to computing. FlashAttention-4 is written that way.'
+      )
+    ),
   },
 
   'intranet-k8s': {
