@@ -26,6 +26,8 @@ import {
   PERSISTENTVOLUMECLAIMS, PERSISTENTVOLUMES, STORAGECLASSES,
 } from './resources';
 import type { VolumeStore } from './volumes';
+// 只引资源定义，不引控制器 —— 从快照恢复是存储这一侧的事
+import { VOLUMESNAPSHOTS } from '../backup/resources';
 
 export interface StorageOptions {
   volumes: VolumeStore;
@@ -200,6 +202,30 @@ export class StorageController extends Controller {
   private async provision(claim: KubeObject, storageClass: KubeObject): Promise<void> {
     const spec = (claim.spec ?? {}) as any;
     const name = `pvc-${claim.metadata.uid}`;
+
+    /**
+     * 从快照恢复。
+     *
+     * `dataSource` 指到一张 VolumeSnapshot 上，供给出来的盘带着那一刻的字节。
+     * 快照还没就绪就先不造 —— 造了就是一块空盘，而空盘和「恢复成功」
+     * 在 `kubectl get pvc` 里长得一模一样。
+     */
+    let seed: Record<string, string> | undefined;
+    const source = spec.dataSource ?? spec.dataSourceRef;
+    if (source?.kind === 'VolumeSnapshot') {
+      let snapshot: KubeObject;
+      try {
+        snapshot = this.registry.get(VOLUMESNAPSHOTS, claim.metadata.namespace, source.name);
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+        return this.pending(claim, `failed to get snapshot ${source.name}: not found`);
+      }
+      const snapshotStatus = (snapshot.status ?? {}) as any;
+      if (!snapshotStatus.readyToUse || !snapshotStatus.boundVolumeSnapshotContentName) {
+        return this.pending(claim, `snapshot ${source.name} is not yet ready to use`);
+      }
+      seed = this.options.volumes.read(snapshotStatus.boundVolumeSnapshotContentName);
+    }
     const body: KubeObject = {
       apiVersion: 'v1', kind: 'PersistentVolume',
       metadata: {
@@ -222,8 +248,10 @@ export class StorageController extends Controller {
     } catch {
       created = this.registry.get(PERSISTENTVOLUMES, undefined, name);
     }
-    // 新盘是空的。这一句在这里，是为了让「盘存在」和「盘上有数据」分成两件事。
-    if (!this.options.volumes.has(name)) this.options.volumes.write(name, {});
+    // 新盘是空的，除非它是从快照恢复出来的。
+    // 「盘存在」和「盘上有数据」是两件事，这一句是那条缝。
+    if (seed) this.options.volumes.write(name, seed);
+    else if (!this.options.volumes.has(name)) this.options.volumes.write(name, {});
     this.context.recordEvent({
       object: claim, type: 'Normal', reason: 'ProvisioningSucceeded',
       message: `Successfully provisioned volume ${name}`,

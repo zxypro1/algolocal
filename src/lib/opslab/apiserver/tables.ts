@@ -285,6 +285,76 @@ export const TABLE_PRINTERS: Record<string, TablePrinter> = {
       ];
     },
   },
+  volumesnapshots: {
+    columns: [
+      NAME_COLUMN,
+      col('Readytouse', 'Whether the snapshot is ready to be used to restore a volume.'),
+      col('Sourcepvc', 'The PVC this snapshot was taken from.'),
+      col('Sourcesnapshotcontent', 'The pre-provisioned content this snapshot binds to.'),
+      col('Restoresize', 'The size of a volume restored from this snapshot.'),
+      col('Snapshotclass', 'The VolumeSnapshotClass used.'),
+      col('Snapshotcontent', 'The bound VolumeSnapshotContent.'),
+      col('Creationtime', 'The time the snapshot was taken on the storage system.'),
+      AGE_COLUMN,
+    ],
+    cells: (object, age) => {
+      const spec = (object.spec ?? {}) as any;
+      const status = (object.status ?? {}) as any;
+      return [
+        object.metadata.name,
+        String(Boolean(status.readyToUse)),
+        spec.source?.persistentVolumeClaimName ?? '',
+        spec.source?.volumeSnapshotContentName ?? '',
+        status.restoreSize ?? '',
+        spec.volumeSnapshotClassName ?? '',
+        status.boundVolumeSnapshotContentName ?? '',
+        status.creationTime ?? '',
+        age,
+      ];
+    },
+  },
+  volumesnapshotcontents: {
+    columns: [
+      NAME_COLUMN,
+      col('Readytouse', 'Whether the snapshot is ready to be used.'),
+      col('Restoresize', 'The size of a volume restored from this snapshot.'),
+      col('Deletionpolicy', 'What happens to the snapshot when its VolumeSnapshot goes away.'),
+      col('Driver', 'The CSI driver that took the snapshot.'),
+      col('Volumesnapshotclass', 'The VolumeSnapshotClass used.'),
+      col('Volumesnapshot', 'The VolumeSnapshot this content is bound to.'),
+      col('Volumesnapshotnamespace', 'The namespace of the bound VolumeSnapshot.'),
+      AGE_COLUMN,
+    ],
+    cells: (object, age) => {
+      const spec = (object.spec ?? {}) as any;
+      const status = (object.status ?? {}) as any;
+      return [
+        object.metadata.name,
+        String(Boolean(status.readyToUse)),
+        status.restoreSize ?? '',
+        spec.deletionPolicy ?? 'Delete',
+        spec.driver ?? '',
+        spec.volumeSnapshotClassName ?? '',
+        spec.volumeSnapshotRef?.name ?? '',
+        spec.volumeSnapshotRef?.namespace ?? '',
+        age,
+      ];
+    },
+  },
+  volumesnapshotclasses: {
+    columns: [
+      NAME_COLUMN,
+      col('Driver', 'The CSI driver that takes snapshots for this class.'),
+      col('Deletionpolicy', 'What happens to snapshots of this class when released.'),
+      AGE_COLUMN,
+    ],
+    cells: (object, age) => [
+      object.metadata.name,
+      (object as any).driver ?? '',
+      (object as any).deletionPolicy ?? 'Delete',
+      age,
+    ],
+  },
   poddisruptionbudgets: {
     columns: [
       NAME_COLUMN,

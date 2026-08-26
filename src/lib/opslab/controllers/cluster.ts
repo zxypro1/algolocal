@@ -38,6 +38,7 @@ import { DISRUPTION_RESOURCES, PdbController, evictionVerdict } from '../disrupt
 import {
   STORAGE_RESOURCES, StorageController, VolumeStore, createDefaultStorageClassDefaulter,
 } from '../storage';
+import { SNAPSHOT_RESOURCES, SnapshotController } from '../backup';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
@@ -170,7 +171,7 @@ export class Cluster {
       ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES, ...ARGOCD_RESOURCES,
       ...MESH_RESOURCES, ...RBAC_RESOURCES, ...KYVERNO_RESOURCES, ...ESO_RESOURCES,
       ...OBSERVABILITY_RESOURCES, ...DISRUPTION_RESOURCES, ...ROLLOUT_RESOURCES,
-      ...STORAGE_RESOURCES,
+      ...STORAGE_RESOURCES, ...SNAPSHOT_RESOURCES,
       ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
@@ -637,6 +638,8 @@ export class Cluster {
        * **动态供给**要看 CSI 驱动这个工作负载在不在（见 StorageController）。
        */
       new StorageController(context, { volumes: this.volumes }),
+      // 快照：又一个工作负载。装了 CSI 驱动不等于装了它。
+      new SnapshotController(context, { volumes: this.volumes }),
       // 入口：控制器自己是集群里的一个工作负载，卸载掉 Gateway 就不再被 program
       new GatewayController(context),
       // 内网 PKI：同样是集群里的一个工作负载，卸载掉就不再签发
