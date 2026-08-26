@@ -137,6 +137,19 @@ class Warp {
   active: number;
   readonly present: number;
   stack: MaskFrame[] = [];
+  /**
+   * 已经 return 掉的 lane。
+   *
+   * `if (i >= n) return;` 是 CUDA 里最常见的一句话，而它天生是发散的：
+   * 尾块里有的 lane 该退出，有的还要接着算。`ret` 如果直接把整个 warp
+   * 标记成结束，那些还没算完的 lane 就被一起带走了 —— 只有当 n 恰好是
+   * 块大小的整数倍时才碰巧不出错。
+   *
+   * 所以 return 掉的 lane 记在这里，之后每一次恢复掩码都把它们排除掉。
+   * 退出是**永久**的，这一点和 break 不同（break 只在当前循环内有效），
+   * 所以一条掩码就够，不需要按层保存。
+   */
+  exited = 0;
   atBarrier = false;
   done = false;
   readonly regs: Float64Array;
@@ -164,6 +177,35 @@ export interface RunOptions {
    * 也和现实里的用法一致（平时不挂，要查的时候单独跑一遍）。
    */
   raceDetector?: RaceDetector;
+  /**
+   * 宿主服务：CUDA runtime、printf、容器、起 kernel。
+   *
+   * **只有跑宿主程序时才给。** 设备侧的 kernel 里根本编不出 hostcall
+   * 与 launch 这两条指令（编译器在 `ctx.host` 关着时就拦下了），
+   * 所以这个字段为空对 kernel 执行是完全无害的。
+   */
+  host?: HostServices;
+  /**
+   * 用调用方给的这块内存当 local 空间。
+   *
+   * 宿主程序要用：`cudaMemcpy(..., cudaMemcpyHostToDevice)` 里的
+   * 「主机端指针」就是 local 空间的地址，运行时那一层得能读到它。
+   * 不给就照常自己开一块（kernel 都走这条路）。
+   */
+  localMemory?: LinearMemory;
+}
+
+/**
+ * 宿主程序要用的平台能力。
+ *
+ * 由 `src/lib/gpulab/host/runtime.ts` 实现 —— VM 只管把指令翻译成调用，
+ * 具体怎么分配显存、容器存在哪，是运行时那一层的事。
+ */
+export interface HostServices {
+  /** 一次运行时调用；返回值写回 dst 寄存器 */
+  call(fn: number, args: number[], line: number): number;
+  /** `kernel<<<grid, block>>>(args)` */
+  launch(name: string, grid: Dim3, block: Dim3, args: number[], line: number): void;
 }
 
 const DEFAULT_MAX_WARP_INSTS = 200_000_000;
@@ -187,6 +229,8 @@ class Executor {
   private readonly addresses = new Int32Array(WARP_SIZE);
   /** shuffle 要先把源值快照下来 —— dst 和 src 可能是同一个寄存器 */
   private readonly shflScratch = new Float64Array(WARP_SIZE);
+  /** 宿主调用的实参缓冲，复用同一个数组 */
+  private readonly hostArgs: number[] = [];
   /** wmma 把整个 warp 的碎片拼成 16×16 用的暂存 */
   private readonly tileA = new Float64Array(256);
   private readonly tileB = new Float64Array(256);
@@ -223,9 +267,17 @@ class Executor {
     }
     this.warpsPerBlock = Math.ceil(this.blockThreads / WARP_SIZE);
     // local memory 是线程私有的，一个 block 一份就够 —— 我们一次只跑一个 block
-    this.local = new LinearMemory(
-      Math.max(4, this.localBytesPerThread * this.blockThreads), 'local'
-    );
+    const localBytes = Math.max(4, this.localBytesPerThread * this.blockThreads);
+    if (options.localMemory) {
+      if (options.localMemory.capacity < localBytes) {
+        throw new KernelError(
+          `主机端要 ${localBytes} 字节局部内存，给的只有 ${options.localMemory.capacity} 字节`, 0
+        );
+      }
+      this.local = options.localMemory;
+    } else {
+      this.local = new LinearMemory(localBytes, 'local');
+    }
     if (args.length !== kernel.params.length) {
       throw new KernelError(
         `${kernel.name} 需要 ${kernel.params.length} 个参数，给了 ${args.length} 个`, 0
@@ -328,6 +380,7 @@ class Executor {
     const block = this.config.block;
     const grid = this.config.grid;
     const argValues = this.argValues;
+    const hostArgs = this.hostArgs;
     const counters = this.counters;
     const detector = this.options.raceDetector;
     const warpBase = warp.index * WARP_SIZE;
@@ -607,7 +660,7 @@ class Executor {
           case OP.SWAP: {
             const frame = warp.stack[warp.stack.length - 1];
             if (!frame) throw new KernelError('内部错误：swap 时重汇聚栈是空的', lines[pc]);
-            warp.active = frame.otherwise;
+            warp.active = frame.otherwise & ~warp.exited;
             frame.otherwise = 0;
             pc = warp.active === 0 ? code[at + 1] : pc + 1;
             break;
@@ -616,7 +669,7 @@ class Executor {
           case OP.POP: {
             const frame = warp.stack.pop();
             if (!frame) throw new KernelError('内部错误：pop 时重汇聚栈是空的', lines[pc]);
-            warp.active = frame.origin;
+            warp.active = frame.origin & ~warp.exited;
             pc += 1;
             break;
           }
@@ -634,8 +687,8 @@ class Executor {
               if (regs[cond + lane] !== 0) taken |= 1 << lane;
             }
             if (taken !== 0 && taken !== active) divergent += 1;
-            warp.active = taken;
-            pc = taken === 0 ? code[at + 2] : pc + 1;
+            warp.active = taken & ~warp.exited;
+            pc = warp.active === 0 ? code[at + 2] : pc + 1;
             break;
           }
 
@@ -699,6 +752,57 @@ class Executor {
             if (fn === FN.fmaf) instFma += lanes;
             // 超越函数走 SFU，吞吐只有 FMA 的 1/8
             else if (SFU_FNS[fn]) instSfu += lanes;
+            pc += 1;
+            break;
+          }
+
+          /**
+           * 宿主运行时调用。
+           *
+           * 宿主程序只有一个 lane 在跑，所以这里只看 lane 0；
+           * 如果哪天设备侧真的编出了这条指令，那是个 bug，明确炸出来
+           * 比悄悄按 lane 0 算要好。
+           */
+          case OP.HOSTCALL: {
+            const services = this.options.host;
+            if (!services) {
+              throw new KernelError('这段代码用到了宿主运行时，但当前不是宿主程序', lines[pc]);
+            }
+            if (active !== 1) {
+              throw new KernelError('宿主运行时调用只能在单个线程上发生', lines[pc]);
+            }
+            const dst = code[at + 1] * WARP_SIZE;
+            const fn = code[at + 2];
+            const argc = code[at + 3];
+            hostArgs.length = 0;
+            for (let i = 0; i < argc; i += 1) hostArgs.push(regs[code[at + 4 + i] * WARP_SIZE]);
+            regs[dst] = services.call(fn, hostArgs, lines[pc]);
+            instBookkeeping += lanes;
+            pc += 1;
+            break;
+          }
+
+          case OP.LAUNCH: {
+            const services = this.options.host;
+            if (!services) {
+              throw new KernelError('这段代码起了 kernel，但当前不是宿主程序', lines[pc]);
+            }
+            const site = this.kernel.launches?.[code[at + 1]];
+            if (!site) throw new KernelError('起 kernel 的现场丢了', lines[pc]);
+            const grid = {
+              x: regs[site.grid[0] * WARP_SIZE] | 0,
+              y: regs[site.grid[1] * WARP_SIZE] | 0,
+              z: regs[site.grid[2] * WARP_SIZE] | 0,
+            };
+            const block = {
+              x: regs[site.block[0] * WARP_SIZE] | 0,
+              y: regs[site.block[1] * WARP_SIZE] | 0,
+              z: regs[site.block[2] * WARP_SIZE] | 0,
+            };
+            hostArgs.length = 0;
+            for (const reg of site.args) hostArgs.push(regs[reg * WARP_SIZE]);
+            services.launch(site.kernel, grid, block, hostArgs.slice(), lines[pc]);
+            instBookkeeping += lanes;
             pc += 1;
             break;
           }
@@ -1002,6 +1106,15 @@ class Executor {
           }
 
           case OP.RET:
+            // 只有 active 的 lane 退出。栈上还有帧（说明这是分支里的
+            // `return`）而且还有 lane 没退出时，接着往下跑 —— 那些 lane
+            // 到不了这条指令，它们的活还没干完。
+            warp.exited |= active;
+            warp.active = 0;
+            if (warp.exited !== warp.present && warp.stack.length > 0) {
+              pc += 1;
+              break;
+            }
             warp.done = true;
             counters.warpInsts += warpInsts; counters.laneInsts += laneInsts;
             counters.instFma += instFma; counters.instLdSt += instLdSt;

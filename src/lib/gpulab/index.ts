@@ -4,7 +4,9 @@
  * 设计见 design/gpulab.md。这一层是给关卡与判定用的门面：
  * 一段 CUDA 源码进去，跑完之后的内存与指标出来。
  */
-import { compileKernel } from './ir/compile';
+import { compileHost, compileKernel } from './ir/compile';
+import { HostRuntime, type HostEnvironment } from './host/runtime';
+import { HostRuntimeError } from './host/containers';
 import { encode, type ExecutableKernel } from './ir/program';
 import type { CompiledKernel } from './ir/types';
 import { lowerTranslationUnit } from './cuda/lower';
@@ -14,7 +16,7 @@ import { H100, computeOccupancy, type DeviceSpec } from './device';
 import { estimateTiming, roofline, type RooflinePoint, type TimingResult } from './timing';
 import { LinearMemory } from './vm/memory';
 import { RaceDetector, formatRaceReports, type SanitizerReport } from './vm/sanitizer';
-import { emptyCounters, launchKernel, type Dim3, type GpuCounters, type LaunchConfig, type KernelArg } from './vm/vm';
+import { dim3, emptyCounters, launchKernel, type Dim3, type GpuCounters, type LaunchConfig, type KernelArg } from './vm/vm';
 
 export { CudaSyntaxError, parseCuda, resetCudaParser } from './cuda/parser';
 export { CudaCompileError } from './cuda/lower';
@@ -33,20 +35,48 @@ export type { CompiledKernel } from './ir/types';
 export { encode } from './ir/program';
 export type { ExecutableKernel } from './ir/program';
 export type { Dim3, LaunchConfig, KernelArg, GpuCounters } from './vm/vm';
+export { HostRuntimeError } from './host/containers';
+export { formatPrintf } from './host/runtime';
 
-/** 编译一份源码，返回里面所有的 kernel */
-export async function compileSource(
+/** 宿主程序跑完的结果 */
+export interface HostRunResult {
+  stdout: string;
+}
+
+/**
+ * 编译一份源码。
+ *
+ * 一份源码里可以有 kernel、可以有 `int main()`，也可以两者都有 ——
+ * 后半程那几关（KV cache、分页 KV、引擎组装、调度器）主要的逻辑就写在
+ * 宿主侧，`main` 负责分配显存、管块表、按调度决定这一步起哪些 kernel。
+ */
+export interface CompiledProgram {
+  kernels: Map<string, ExecutableKernel>;
+  /** 有 `int main()` 才有；只有一组 kernel 的源码这里是 null */
+  host: ExecutableKernel | null;
+}
+
+export async function compileProgram(
   source: string,
   options?: CudaParserOptions
-): Promise<Map<string, ExecutableKernel>> {
+): Promise<CompiledProgram> {
   const root = await parseCuda(source, options);
   const unit = lowerTranslationUnit(root);
   const kernels = new Map<string, ExecutableKernel>();
   for (const kernel of unit.kernels) {
     // 编码只做一次 —— 一关会 launch 很多次，每次重编是白费的
-    kernels.set(kernel.name, encode(compileKernel(kernel)));
+    kernels.set(kernel.name, encode(compileKernel(kernel, unit.functions)));
   }
-  return kernels;
+  const host = unit.main ? encode(compileHost(unit.main, unit.functions)) : null;
+  return { kernels, host };
+}
+
+/** 只要 kernel 的那条老路 —— 大多数关卡与用例走这条 */
+export async function compileSource(
+  source: string,
+  options?: CudaParserOptions
+): Promise<Map<string, ExecutableKernel>> {
+  return (await compileProgram(source, options)).kernels;
 }
 
 export interface DeviceOptions {
@@ -128,6 +158,85 @@ export class GpuDevice {
       maxWarpInsts: this.maxWarpInsts,
     });
     accumulate(this.counters, result.counters);
+  }
+
+  /**
+   * 跑一个宿主程序的 `main`。
+   *
+   * 宿主代码在 VM 里就是 grid 1 / block 1 的一个线程，**用的是另一台
+   * 执行器实例**，它自己的指令数与访存不会算进 `gpu.*` 指标里 ——
+   * 门槛量的是 GPU 干了多少活，宿主侧的 for 循环不该混进去。
+   * 它起的每一个 kernel 才走正常的 `launch`，正常计量。
+   */
+  runHost(
+    host: ExecutableKernel,
+    kernels: Map<string, ExecutableKernel>,
+    buffers: Array<{ address: number; length: number }> = [],
+    options: { racecheck?: boolean } = {}
+  ): HostRunResult {
+    const output: string[] = [];
+    const races: SanitizerReport['races'] = [];
+    let truncated = 0;
+    // 宿主的局部内存要能被 cudaMemcpy 读写，所以在外面开、传进去
+    const hostLocal = new LinearMemory(
+      Math.max(4, host.localBytes), 'local'
+    );
+
+    const environment: HostEnvironment = {
+      cudaMalloc: (bytes) => this.malloc(bytes),
+      // 我们的分配器是一路向前的游标，没有真正的回收。**故意如此**：
+      // 显存峰值那个门槛量的就是「一共要过多少显存」，能回收就量不出
+      // 分页 KV 相对于朴素预分配的差别了。cudaFree 仍然要写 ——
+      // 不写在真卡上是泄漏，关卡的用例会检查配对。
+      cudaFree: () => {},
+      copy: (dst, src, bytes, kind) => {
+        const from = kind === 1 || kind === 0 ? hostLocal : this.memory;
+        const to = kind === 2 || kind === 0 ? hostLocal : this.memory;
+        copyBytes(to, dst, from, src, bytes);
+      },
+      memset: (address, value, bytes) => {
+        new Uint8Array(this.memory.bytes, address, bytes).fill(value & 0xff);
+      },
+      launch: (name, grid, block, args, line) => {
+        const kernel = kernels.get(name);
+        if (!kernel) {
+          throw new HostRuntimeError(
+            `第 ${line} 行：找不到 kernel \`${name}\` —— 编出来的有：${[...kernels.keys()].join(', ')}`
+          );
+        }
+        // 开着 racecheck 时，宿主程序里起的**每一个** kernel 都要查。
+        // 报告是累加的：一个引擎的一步会起好几个 kernel，
+        // 只留最后一个的报告等于漏掉前面所有的竞态。
+        if (options.racecheck) {
+          const report = this.launchWithRacecheck(kernel, { grid, block }, args);
+          races.push(...report.races);
+          truncated += report.truncated;
+        } else {
+          this.launch(kernel, { grid, block }, args);
+        }
+      },
+      write: (text) => { output.push(text); },
+      buffer: (index) => {
+        const found = buffers[index];
+        if (!found) {
+          throw new HostRuntimeError(
+            `没有第 ${index} 号缓冲区 —— 这一关声明了 ${buffers.length} 个（编号从 0 开始）`
+          );
+        }
+        return found;
+      },
+    };
+
+    const runtime = new HostRuntime(environment, host.strings ?? []);
+    launchKernel(host, { grid: dim3(1), block: dim3(1) }, [], {
+      memory: this.memory,
+      sharedCapacity: this.sharedCapacity,
+      maxWarpInsts: this.maxWarpInsts,
+      host: runtime,
+      localMemory: hostLocal,
+    });
+    if (options.racecheck) this.lastSanitizer = { races, truncated };
+    return { stdout: output.join('') };
   }
 
   /**
@@ -265,3 +374,21 @@ function accumulate(total: GpuCounters, delta: GpuCounters): void {
 }
 
 export type { Dim3 as GpuDim3 };
+
+/**
+ * 在两个地址空间之间搬字节。
+ *
+ * 按 4 字节搬 —— 我们的两个空间都是 4 字节对齐分配的，
+ * 而按字节搬会让一次 cudaMemcpy 慢上好几倍。
+ */
+function copyBytes(
+  to: LinearMemory, dst: number, from: LinearMemory, src: number, bytes: number
+): void {
+  if (bytes < 0) throw new HostRuntimeError(`cudaMemcpy 的字节数是负的：${bytes}`);
+  if (dst + bytes > to.capacity || src + bytes > from.capacity) {
+    throw new HostRuntimeError(
+      `cudaMemcpy 越界：搬 ${bytes} 字节，源在 ${src}、目标在 ${dst}`
+    );
+  }
+  new Uint8Array(to.bytes, dst, bytes).set(new Uint8Array(from.bytes, src, bytes));
+}

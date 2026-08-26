@@ -104,6 +104,21 @@ export type Inst =
   | { op: 'bar'; line: number }
   | { op: 'call'; dst: number; fn: BuiltinFn; args: number[]; ty: IrType }
   /**
+   * 宿主侧的运行时调用：CUDA runtime、printf、容器。
+   *
+   * 它们不是 GPU 指令，**由平台实现**，所以走一条统一的出口指令派发到
+   * 宿主服务上，而不是各自造一条 IR。`dst` 拿返回值（没有返回值的写进
+   * 一个丢弃寄存器）。
+   */
+  | { op: 'hostcall'; dst: number; fn: HostFn; args: number[]; line: number }
+  /**
+   * `kernel<<<grid, block>>>(args)`
+   *
+   * 参数个数不定（grid 3 个 + block 3 个 + 实参若干），塞不进定长记录，
+   * 所以指令里只存一个下标，真正的内容在 `CompiledHost.launches` 里。
+   */
+  | { op: 'launch'; site: number; line: number }
+  /**
    * warp 内交换：`dst` 拿到 `src` 在另一个 lane 上的值。
    * `mask` 是参与线程掩码（真 API 的第一个参数），`width` 把 warp 切成段。
    */
@@ -145,6 +160,34 @@ export interface KernelParam {
   elementBytes: number;
 }
 
+/**
+ * 宿主侧能调用的平台函数。
+ *
+ * 分三类：CUDA runtime、标准输出、容器。
+ * **容器是平台实现的，不是学员用 C 写的** —— 这个子集没有 struct，
+ * 拿 `vec`/`map`/`ring` 的句柄去用，比先教一遍怎么用裸指针搓动态数组
+ * 更贴近真实工程（真实工程里这些是标准库或框架给的）。
+ */
+export type HostFn =
+  | 'cudaMalloc' | 'cudaFree' | 'cudaMemcpy' | 'cudaMemset' | 'cudaDeviceSynchronize'
+  | 'printf'
+  | 'lab_buffer' | 'lab_buffer_len'
+  | 'vec_new' | 'vec_push' | 'vec_pop' | 'vec_get' | 'vec_set' | 'vec_len' | 'vec_clear'
+  | 'map_new' | 'map_set' | 'map_get' | 'map_has' | 'map_del' | 'map_len'
+  | 'ring_new' | 'ring_push' | 'ring_pop' | 'ring_peek' | 'ring_len';
+
+/** 一个 `<<<>>>` 起 kernel 的现场 */
+export interface LaunchSite {
+  kernel: string;
+  /** 1~3 个寄存器，缺的按 1 补 */
+  grid: number[];
+  block: number[];
+  /** 实参寄存器；指针参数里装的是地址 */
+  args: number[];
+  /** 每个实参是不是指针 —— 运行时要按这个决定怎么解释 */
+  line: number;
+}
+
 export interface CompiledKernel {
   name: string;
   insts: Inst[];
@@ -170,4 +213,18 @@ export interface CompiledKernel {
   registersPerThread: number;
   /** 指令下标 → 源码行号，报错与剖析要用 */
   lines: number[];
+  /** printf 的格式串常量池 */
+  strings?: string[];
+  /** `<<<>>>` 现场表，只有宿主程序有 */
+  launches?: LaunchSite[];
 }
+
+/**
+ * 一个宿主程序。
+ *
+ * 形状故意和 `CompiledKernel` 一样 —— 它就是用同一台 VM 跑的，
+ * 只是 grid 与 block 都是 1，于是只有一个 lane 活着。
+ * 这样重收敛栈、访存计量、float 语义全部原样复用，
+ * 不用为宿主再养一台解释器（两台解释器迟早会在语义上分家）。
+ */
+export type CompiledHost = CompiledKernel;

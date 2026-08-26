@@ -152,7 +152,14 @@ export type Expr =
   | { kind: 'call'; callee: string; args: Expr[]; span: SourceSpan }
   | { kind: 'assign'; target: Expr; op: BinaryOp | null; value: Expr; span: SourceSpan }
   /** `++i` / `i++`；`postfix` 决定表达式的值是旧的还是新的 */
-  | { kind: 'incdec'; target: Expr; delta: 1 | -1; postfix: boolean; span: SourceSpan };
+  | { kind: 'incdec'; target: Expr; delta: 1 | -1; postfix: boolean; span: SourceSpan }
+  /**
+   * 字符串字面量。
+   *
+   * 只有一个用处：`printf` 的格式串。子集里没有 `char*`，也没有字符串运算 ——
+   * 它编译成一个常量池下标，别处用到会明确报错。
+   */
+  | { kind: 'strLit'; value: string; span: SourceSpan };
 
 /* ------------------------------------------------------------------ */
 /* 语句                                                                */
@@ -175,7 +182,30 @@ export type Stmt =
   | { kind: 'for'; init?: Stmt; cond?: Expr; step?: Expr; body: Stmt; span: SourceSpan }
   | { kind: 'while'; cond: Expr; body: Stmt; span: SourceSpan }
   | { kind: 'return'; value?: Expr; span: SourceSpan }
-  | { kind: 'syncthreads'; span: SourceSpan };
+  | { kind: 'syncthreads'; span: SourceSpan }
+  /**
+   * `break`
+   *
+   * **只在宿主代码里支持。** 掩码栈机器上让一部分 lane 提前跳出循环，
+   * 需要一条贯穿整个循环的「已退出」掩码；宿主代码只有一个 lane，
+   * 静态地把开着的掩码帧弹掉再跳就是对的。理由写在 compile.ts 的
+   * `unwindTo` 上。
+   */
+  | { kind: 'break'; span: SourceSpan }
+  /**
+   * `kernel<<<grid, block>>>(args)`
+   *
+   * 只有宿主代码能起 kernel。grid 与 block 可以是整数，也可以是
+   * `dim3(x, y, z)`。
+   */
+  | {
+      kind: 'launch';
+      kernel: string;
+      grid: Expr[];
+      block: Expr[];
+      args: Expr[];
+      span: SourceSpan;
+    };
 
 /* ------------------------------------------------------------------ */
 /* 顶层                                                                */
@@ -194,6 +224,36 @@ export interface KernelDecl {
   span: SourceSpan;
 }
 
+/**
+ * 函数扮演的角色。
+ *
+ * `kernel` 是 `__global__`，由宿主用 `<<<>>>` 起。
+ * `device` 是 `__device__`，只能被 kernel 调用。
+ * `host` 是不带限定符的普通函数，`main` 就是其中一个。
+ */
+export type FunctionRole = 'kernel' | 'device' | 'host';
+
+/**
+ * 一个自己写的函数。
+ *
+ * **编译时会被整个内联到调用点**，所以没有调用栈、没有帧指针，
+ * 也不支持递归。真卡上 nvcc 对 `__device__` 函数做的就是这件事
+ * （GPU 上的函数调用代价高到没人用），宿主侧则是我们的模拟细节：
+ * 语义一模一样，只是省掉了一整套帧机制。
+ */
+export interface FuncDecl {
+  name: string;
+  role: FunctionRole;
+  params: Param[];
+  returnType: CudaType;
+  body: Stmt;
+  span: SourceSpan;
+}
+
 export interface TranslationUnit {
   kernels: KernelDecl[];
+  /** 非 kernel 的函数，按名字查，内联用 */
+  functions: Map<string, FuncDecl>;
+  /** 有没有 `int main()` —— 有就是一个宿主程序，没有就只是一组 kernel */
+  main: FuncDecl | null;
 }
