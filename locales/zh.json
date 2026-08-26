@@ -624,6 +624,38 @@
       "note": "录的是整轮验收。每一步都带所属文件，跨文件调用时视图会跟着切过去。"
     }
   },
+  "opslab": {
+    "chat": {
+      "tab": "AI 助手",
+      "title": "现场助手",
+      "empty": "我看得到你终端里最近敲了什么、集群里哪些东西不正常、以及上一次验收没过的是哪条。卡住了就问，我给你下一条该敲的命令 —— 命令由你自己敲，我不碰这个集群。",
+      "placeholder": "问一个关于当前这一关的问题…（Enter 发送，Shift+Enter 换行）",
+      "prompts": {
+        "lastError": "上一条命令为什么报错？",
+        "whyFailing": "验收没过的那条在检查什么？",
+        "whereToLook": "现在该从哪儿查起？",
+        "explainStage": "这一关到底要我做什么？"
+      }
+    },
+    "review": {
+      "title": "AI 复盘",
+      "subtitle": "评的是你怎么操作的，不是验收过没过",
+      "request": "让 AI 复盘",
+      "running": "复盘中…",
+      "empty": "跑完一关（或者卡住了）之后来这里。AI 会顺着你敲过的命令看一遍：排查路径合不合理、集群现在是不是真的对了、有没有为了通关走了在生产上不能走的捷径。",
+      "issues": "值得改的地方",
+      "strengths": "做得好的地方",
+      "nextSteps": "下一步",
+      "noWorld": "集群还没起来，先等终端就绪再复盘。",
+      "dimensions": {
+        "diagnosis": "排查路径",
+        "outcome": "结果正确性",
+        "safety": "操作安全",
+        "efficiency": "效率",
+        "understanding": "机制理解"
+      }
+    }
+  },
   "editor": {
     "toggleWrap": "自动换行",
     "toggleMinimap": "缩略图",

@@ -55,6 +55,8 @@ export interface OpsWorkspaceState {
   prompt: string;
   /** 从头再来 */
   reboot(): void;
+  /** 重置过几次。世界被推倒重来之后，挂在旧世界上的结论（比如 AI 复盘）就该作废 */
+  generation: number;
   /** 拓扑图要不要展开 ReplicaSet */
   showReplicaSets: boolean;
   setShowReplicaSets(value: boolean): void;
@@ -193,6 +195,7 @@ export function useOpsWorkspace(options: UseOpsWorkspaceOptions): OpsWorkspaceSt
     writeFile,
     prompt: world?.machine.prompt() ?? '$ ',
     reboot: () => setGeneration((value) => value + 1),
+    generation,
     showReplicaSets,
     setShowReplicaSets,
     namespace,
