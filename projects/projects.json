@@ -5619,7 +5619,8 @@
           "cert-manager",
           "argocd",
           "istio-system",
-          "kyverno"
+          "kyverno",
+          "external-secrets"
         ],
         "images": {
           "harbor.corp.internal/team/portal:1.4.0": {
@@ -5724,6 +5725,14 @@
             "readyAfterMs": 300,
             "listens": [
               9443
+            ]
+          },
+          "ghcr.io/external-secrets/external-secrets:v0.21.0": {
+            "pullMs": 400,
+            "startupMs": 600,
+            "readyAfterMs": 300,
+            "listens": [
+              8080
             ]
           },
           "docker.io/library/redis:7.4": {
@@ -5868,6 +5877,27 @@
             "groups": [
               "system:serviceaccounts"
             ]
+          }
+        },
+        "secretStore": {
+          "address": "https://openbao.corp.internal:8200",
+          "data": {
+            "kv/payments/db": {
+              "username": "payments_app",
+              "password": "Ph4i-Quee0oh",
+              "host": "pg.corp.internal"
+            }
+          },
+          "policies": {
+            "payments-read": {
+              "kv/payments/*": [
+                "read",
+                "list"
+              ]
+            }
+          },
+          "tokens": {
+            "bao-root-token": "root"
           }
         },
         "gitRepositories": [
@@ -11133,6 +11163,506 @@
         "primer": {
           "zh": "`准入`是对象写进 etcd 之前的最后一道关。它和鉴权回答的问题不同：鉴权看「谁在做什么」，准入看**对象本身长什么样**：特权容器、没写 limits、镜像没签名，都是在这一层被拦下来的。这一层分两块：Kubernetes 内置的插件，和以 webhook 形式接进来的外部组件。\n\n`PSA`（Pod Security Admission）是内置的那块，2025 年起替代了被删掉的 PodSecurityPolicy。它只有三档预置标准：`privileged` 什么都不管，`baseline` 挡住已知的提权途径（特权容器、hostPath、host 命名空间、额外 capability），`restricted` 再加上强化要求（非 root、丢掉所有 capability、seccomp、禁止提权）。开关是命名空间上的标签，三种模式各自独立：`enforce` 拦下来，`audit` 记日志，`warn` 回一条警告。只打 `warn` 而以为拦住了，是这一层最常见的误会。另一件要记住的：**PSA 只看 Pod**，违规的 Deployment 照样 apply 得进去，然后一个 Pod 都起不来，原因在 ReplicaSet 的事件里。\n\n`Kyverno` 是外部那块，管的是 PSA 表达不了的公司自定义规矩：必须有 owner 标签、镜像只能来自内网仓库、名字要符合约定。规则写在 `ClusterPolicy` 里，`validate.pattern` 是它自己那套结构匹配（`?*` 表示要有值，`!` 表示不能等于，`|` 是或），`validate.cel` 直接写 CEL 表达式。它是集群里的一个工作负载：停掉它，所有策略立刻失效，而 `kubectl get cpol` 照样看得见。能交给 PSA 的规则不要在这里重写一遍：上游发现新的提权途径时，PSA 会跟着升级，你的规则不会。\n\n供应链那条靠 `cosign`。要点是它签的是镜像的 **digest** 而不是 tag：换个 tag 指向同一个 digest，签名依然有效；tag 不变而 digest 变了，签名立刻失效。准入时由 Kyverno 的 `verifyImages` 拿公钥验。但这条保证的边界要说清楚：它只证明「这坨字节被某把私钥认过」，不证明镜像里没有漏洞，也不证明签它的人有资格签。所以密钥归属、轮转、以及 SBOM 与来源证明是配套的，只做验签的话，安全性就等于「有人签过」这四个字。",
           "en": "`Admission` is the last gate before an object reaches etcd. It answers a different question from authorization: authorization looks at who is doing what, while admission looks at **what the object contains**: a privileged container, missing limits, an unsigned image. The layer splits in two: plugins built into Kubernetes, and external components wired in as webhooks.\n\n`PSA` (Pod Security Admission) is the built-in half, replacing the removed PodSecurityPolicy. It offers exactly three preset levels: `privileged` checks nothing, `baseline` blocks known escalation paths (privileged containers, hostPath, host namespaces, extra capabilities), and `restricted` adds hardening (non-root, drop all capabilities, seccomp, no privilege escalation). The switch is a namespace label, and the three modes are independent: `enforce` blocks, `audit` records, `warn` returns a warning. Labelling only `warn` and believing it blocks is the classic mistake here. Also remember that **PSA only inspects Pods**: a violating Deployment applies cleanly and then yields no pods, with the reason sitting in the ReplicaSet events.\n\n`Kyverno` is the external half, covering what PSA cannot express: an owner label must exist, images must come from the internal registry, names must follow a convention. Rules live in a `ClusterPolicy`; `validate.pattern` is its own structural matching (`?*` requires a value, `!` negates, `|` is or) and `validate.cel` takes CEL expressions directly. It runs as a workload in the cluster, so stopping it disables every policy while `kubectl get cpol` still lists them. Do not reimplement PSA rules here: when upstream learns of a new escalation path, PSA follows on upgrade and your copy does not.\n\nThe supply-chain rule uses `cosign`. The key fact is that it signs the image **digest**, not the tag: retagging the same digest keeps the signature valid, while pushing new content under the same tag invalidates it immediately. At admission time Kyverno `verifyImages` checks it with the public key. Be clear about the boundary of that guarantee: it proves these bytes were vouched for by some private key, not that the image is free of vulnerabilities nor that the signer was entitled to sign. Key custody, rotation, SBOMs, and build provenance go with it; signature checking alone guarantees only that somebody signed."
+        }
+      },
+      {
+        "id": "external-secrets",
+        "title": {
+          "zh": "把密钥搬出集群",
+          "en": "Move the Secrets Out of the Cluster"
+        },
+        "goal": {
+          "zh": "安全评审第四条：数据库口令不该以任何形式存在于集群和 Git 仓库里。\n现状是前任手工建了一个 Secret `db-credentials`，门户从它取值 ——\n而那份 YAML 就躺在平台仓库里。**Kubernetes 的 Secret 只是 base64，\n不是加密**，谁能 `get secret` 谁就看得到明文。\n\n内网有一台 OpenBao（`https://openbao.corp.internal:8200`），口令已经放在\n`kv/payments/db` 下面了，读它的策略 `payments-read` 也写好了。\nExternal Secrets Operator 装好了。缺的是把这条路打通。\n\n运维手上的 root 令牌是 `bao-root-token`。\n\n## 通关标准\n\n1. `db-credentials` 由 ESO 同步出来，值和 OpenBao 里的一致；\n2. 门户照常跑着，能从这个 Secret 取到口令；\n3. ESO 用 **Kubernetes 认证**去 OpenBao 换令牌，不是拿一把静态令牌\n   （那把令牌本身又是一个要保管的密钥）；\n4. 有人在 OpenBao 里轮转了口令之后，集群里会自己跟上；\n5. 集群里不再有手工维护的那份明文。\n\n## 会用到的命令\n\n```bash\nexport BAO_ADDR=https://openbao.corp.internal:8200\nexport BAO_TOKEN=bao-root-token\nbao kv get kv/payments/db\nbao auth enable kubernetes\nbao write auth/kubernetes/role/payments \\\n  bound_service_account_names=eso \\\n  bound_service_account_namespaces=payments \\\n  policies=payments-read\nkubectl apply -f /root/infra/eso.yaml\nkubectl describe externalsecret db-credentials -n payments\n```\n",
+          "en": "Fourth item from the security review: the database password must not exist in\nthe cluster or in Git in any form. Today your predecessor hand-created a Secret\ncalled `db-credentials` that the portal reads from, and that YAML sits in the\nplatform repository. **A Kubernetes Secret is base64, not encryption**: anyone\nwho can `get secret` reads the plaintext.\n\nThe intranet runs an OpenBao at `https://openbao.corp.internal:8200`. The\npassword already lives under `kv/payments/db` and a `payments-read` policy\nexists. External Secrets Operator is installed. What is missing is the wiring.\n\nThe operator root token is `bao-root-token`.\n\n## Done when\n\n1. `db-credentials` is produced by ESO and matches what OpenBao holds;\n2. the portal still runs and still reads the password from that Secret;\n3. ESO authenticates to OpenBao with **Kubernetes auth**, not a static token\n   (a static token is itself one more secret to look after);\n4. rotating the password in OpenBao propagates into the cluster on its own;\n5. no hand-maintained plaintext copy is left in the cluster.\n\n## Commands you will need\n\n```bash\nexport BAO_ADDR=https://openbao.corp.internal:8200\nexport BAO_TOKEN=bao-root-token\nbao kv get kv/payments/db\nbao auth enable kubernetes\nbao write auth/kubernetes/role/payments \\\n  bound_service_account_names=eso \\\n  bound_service_account_namespaces=payments \\\n  policies=payments-read\nkubectl apply -f /root/infra/eso.yaml\nkubectl describe externalsecret db-credentials -n payments\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "Secret 由 ESO 同步，不是手工建的",
+            "en": "The Secret is synced by ESO, not hand-made"
+          },
+          {
+            "zh": "认证用 ServiceAccount，不是静态令牌",
+            "en": "Authentication uses a ServiceAccount, not a static token"
+          },
+          {
+            "zh": "外部轮转之后集群自己跟上",
+            "en": "Rotation outside propagates in on its own"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "KV v2 有一处容易绊人：挂载路径和读写路径不是一回事。引擎挂在 `kv/` 上，`bao kv get kv/payments/db` 实际读的是 `kv/data/payments/db`。SecretStore 里 `path: kv` 指的是挂载路径，`remoteRef.key` 里就不要再带 `kv/` 了。",
+            "en": "KV v2 trips people on paths: the mount path and the read path differ. With the engine mounted at `kv/`, `bao kv get kv/payments/db` actually reads `kv/data/payments/db`. In a SecretStore, `path: kv` is the mount, so `remoteRef.key` should not repeat `kv/`."
+          },
+          {
+            "zh": "Kubernetes 认证要两步：先 `bao auth enable kubernetes` 打开这个方法，再写一个角色说明「哪些 ServiceAccount 能登录、登录后拿哪个策略」。三个参数缺一不可，最容易漏的是命名空间那个。",
+            "en": "Kubernetes auth takes two steps: `bao auth enable kubernetes` turns the method on, then a role states which ServiceAccounts may log in and which policy they receive. All three parameters are required, and the namespaces one is the usual omission."
+          },
+          {
+            "zh": "ESO 同步出来的 Secret 归控制器管。手改它没有意义 —— 下一轮同步会盖回去。同理，删掉 ExternalSecret，那份投影也跟着走。",
+            "en": "The Secret ESO produces belongs to the controller. Editing it by hand is pointless because the next sync overwrites it, and deleting the ExternalSecret takes the projection with it."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "用静态令牌图省事：把 root 令牌塞进一个 Secret，让 SecretStore 从那儿读。这样一来集群里存的是一把**能读所有密钥的**令牌 —— 比原来那个只泄露一个口令的 Secret 更糟。判定检查 SecretStore 用的是哪种认证。",
+            "en": "Reaching for a static token: putting the root token in a Secret and pointing the SecretStore at it. Now the cluster stores a credential that reads **every** secret, which is worse than the single leaked password you started with. The grader checks which auth method the SecretStore uses."
+          },
+          {
+            "zh": "以为 Secret 是加密的。它只是 base64，`kubectl get secret -o yaml` 加一句 `base64 -d` 就是明文。集群里的 Secret 唯一的保护是 RBAC —— 这也是为什么第 16 关那些角色不能给出 Secret 的读权限。",
+            "en": "Believing a Secret is encrypted. It is base64, and `kubectl get secret -o yaml` piped through `base64 -d` prints the plaintext. RBAC is the only protection a Secret has in the cluster, which is why the roles in the RBAC stage must not grant Secret reads."
+          },
+          {
+            "zh": "把 `refreshInterval` 当成实时。轮转之后集群里不会立刻变，要等下一轮同步。真出事要立刻生效时，得主动触发一次（改一下 ExternalSecret 让它重新 reconcile），别干等。",
+            "en": "Treating `refreshInterval` as realtime. After rotation the cluster lags until the next sync. When an incident needs it now, force a reconcile (touch the ExternalSecret) instead of waiting."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "cilium",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cilium"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cilium"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cilium"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "cilium-agent",
+                        "image": "quay.io/cilium/cilium:v1.19.2",
+                        "ports": [
+                          {
+                            "containerPort": 9962
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "Certificate",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "secretName": "portal-tls",
+                "duration": "2160h",
+                "renewBefore": "720h",
+                "commonName": "portal.corp.internal",
+                "dnsNames": [
+                  "portal.corp.internal"
+                ],
+                "issuerRef": {
+                  "name": "corp-ca",
+                  "kind": "ClusterIssuer"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "Gateway",
+              "metadata": {
+                "name": "corp-gw",
+                "namespace": "payments"
+              },
+              "spec": {
+                "gatewayClassName": "envoy-internal",
+                "listeners": [
+                  {
+                    "name": "https",
+                    "port": 443,
+                    "protocol": "HTTPS",
+                    "hostname": "portal.corp.internal",
+                    "tls": {
+                      "mode": "Terminate",
+                      "certificateRefs": [
+                        {
+                          "name": "portal-tls"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "http",
+                    "port": 80,
+                    "protocol": "HTTP",
+                    "hostname": "portal.corp.internal"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "ServiceAccount",
+              "metadata": {
+                "name": "eso",
+                "namespace": "payments"
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "external-secrets",
+                "namespace": "external-secrets",
+                "labels": {
+                  "app.kubernetes.io/name": "external-secrets"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "external-secrets"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "external-secrets"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "ghcr.io/external-secrets/external-secrets:v0.21.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Secret",
+              "metadata": {
+                "name": "db-credentials",
+                "namespace": "payments"
+              },
+              "type": "Opaque",
+              "data": {
+                "username": "cGF5bWVudHNfYXBw",
+                "password": "UGg0aS1RdWVlMG9o"
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ],
+                        "env": [
+                          {
+                            "name": "DB_USER",
+                            "valueFrom": {
+                              "secretKeyRef": {
+                                "name": "db-credentials",
+                                "key": "username"
+                              }
+                            }
+                          },
+                          {
+                            "name": "DB_PASSWORD",
+                            "valueFrom": {
+                              "secretKeyRef": {
+                                "name": "db-credentials",
+                                "key": "password"
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.corp.internal"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "files": {
+            "/root/infra/eso.yaml": "# 目标：让 db-credentials 由 ESO 从 OpenBao 同步出来，\n# 而不是有人手工创建、再提交进 Git。\n#\n# 口令在 kv/payments/db 下面，策略 payments-read 已经写好了。\n# Kubernetes 认证还没开。\n"
+          },
+          "referenceFiles": {
+            "/root/infra/eso.yaml": "apiVersion: external-secrets.io/v1\nkind: SecretStore\nmetadata:\n  name: openbao\n  namespace: payments\nspec:\n  provider:\n    vault:\n      server: https://openbao.corp.internal:8200\n      path: kv\n      auth:\n        kubernetes:\n          role: payments\n          serviceAccountRef:\n            name: eso\n---\napiVersion: external-secrets.io/v1\nkind: ExternalSecret\nmetadata:\n  name: db-credentials\n  namespace: payments\nspec:\n  refreshInterval: 1m\n  secretStoreRef:\n    name: openbao\n    kind: SecretStore\n  target:\n    name: db-credentials\n  data:\n  - secretKey: username\n    remoteRef:\n      key: payments/db\n      property: username\n  - secretKey: password\n    remoteRef:\n      key: payments/db\n      property: password\n"
+          },
+          "referenceCommands": [
+            "BAO_ADDR=https://openbao.corp.internal:8200 BAO_TOKEN=bao-root-token bao auth enable kubernetes",
+            "BAO_ADDR=https://openbao.corp.internal:8200 BAO_TOKEN=bao-root-token bao write auth/kubernetes/role/payments bound_service_account_names=eso bound_service_account_namespaces=payments policies=payments-read",
+            "kubectl delete secret db-credentials -n payments",
+            "kubectl apply -f /root/infra/eso.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "external-secrets.spec.ts",
+            "content": "import { advance, get, list, sh } from '@ops/lab';\n\ndescribe('把密钥搬出集群', () => {\n  it('Secret 由 ESO 同步出来', () => {\n    const external = get('ExternalSecret', 'db-credentials', 'payments');\n    expect(external).toBeTruthy();\n    const ready = external.status.conditions.find((entry) => entry.type === 'Ready');\n    expect(ready.status).toBe('True');\n\n    const secret = get('Secret', 'db-credentials', 'payments');\n    expect(secret).toBeTruthy();\n    const owner = (secret.metadata.ownerReferences || [])[0];\n    expect(owner.kind).toBe('ExternalSecret');\n  });\n\n  it('值和 OpenBao 里的一致', async () => {\n    const result = await sh(\n      'kubectl get secret db-credentials -n payments'\n      + \" -o jsonpath='{.data.password}' | base64 -d\"\n    );\n    expect(result.stdout.trim()).toBe('Ph4i-Quee0oh');\n  });\n\n  it('门户照常跑着', () => {\n    const deployment = get('Deployment', 'portal', 'payments');\n    expect(deployment.status.readyReplicas).toBe(2);\n  });\n\n  it('认证用的是 ServiceAccount，不是静态令牌', () => {\n    const stores = list('SecretStore', { namespace: 'payments' });\n    expect(stores.length).toBeGreaterThan(0);\n    for (const store of stores) {\n      const auth = store.spec.provider.vault.auth || {};\n      expect(auth.kubernetes).toBeTruthy();\n      expect(auth.tokenSecretRef).toBeFalsy();\n    }\n  });\n\n  it('集群里没有另一份手工维护的明文', () => {\n    const managed = list('Secret', { namespace: 'payments' })\n      .filter((secret) => (secret.data || {}).password !== undefined)\n      .filter((secret) => !(secret.metadata.ownerReferences || [])\n        .some((owner) => owner.kind === 'ExternalSecret'));\n    expect(managed).toEqual([]);\n  });\n\n  it('OpenBao 里轮转之后，集群自己跟上', async () => {\n    await sh(\n      'BAO_ADDR=https://openbao.corp.internal:8200 BAO_TOKEN=bao-root-token'\n      + ' bao kv put kv/payments/db username=payments_app password=R0tated-N0w host=pg.corp.internal'\n    );\n    // 等一轮同步。ESO 是按 refreshInterval 拉的，不是实时的。\n    await advance(120000);\n    const result = await sh(\n      'kubectl get secret db-credentials -n payments'\n      + \" -o jsonpath='{.data.password}' | base64 -d\"\n    );\n    expect(result.stdout.trim()).toBe('R0tated-N0w');\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "maintainability"
+        ],
+        "extension": {
+          "zh": "这一关解决的是 GitOps 与密钥管理的矛盾：**仓库要能被所有人读，密钥不能**。\nExternal Secrets 的答案是让仓库里只放「去哪儿取」的说明，取到的东西\n由控制器写进集群，谁都不用把明文提交上去。\n\n要清楚它**没有**解决什么：同步出来的 Secret 在集群里仍然是 base64。\n能 `get secret` 的人照样看得到明文。所以这一层必须和 RBAC 叠着用 ——\n密钥搬出集群解决的是「不要泄露在 Git 里」，不是「集群里也看不到」。\n再往上一层是 etcd 静态加密（EncryptionConfiguration），那管的是磁盘被\n拷走的场景。三层各管一段，缺一不可。\n\n认证方式的选择比工具选择更重要。静态令牌是个死循环：为了保护密钥，\n你先得保护一把能读所有密钥的令牌。Kubernetes 认证跳出了这个循环 ——\n身份由集群签发、短期有效、绑定到具体的 ServiceAccount，泄露一份\nPod 的 token 也只能拿到那个 SA 的权限。云上的 IRSA / Workload Identity\n是同一个思路的不同实现。\n",
+          "en": "This stage resolves the tension between GitOps and secret management:\n**the repository must be readable by everyone, and secrets must not be.**\nExternal Secrets answers it by keeping only \"where to fetch it from\" in Git,\nwith the controller writing the fetched value into the cluster, so nobody ever\ncommits plaintext.\n\nBe clear about what it does **not** solve: the synced Secret is still base64\ninside the cluster, and anyone who can `get secret` still reads it. So this\nlayer stacks with RBAC. Moving secrets out of the cluster addresses \"do not leak\nthem through Git\", not \"nobody in the cluster can see them\". One layer further up\nis etcd encryption at rest (EncryptionConfiguration), which addresses a stolen\ndisk. Three layers, each covering a different exposure.\n\nChoosing the authentication method matters more than choosing the tool. A static\ntoken is circular: to protect your secrets you first have to protect a token that\nreads all of them. Kubernetes auth breaks the circle, because identity is issued\nby the cluster, short lived, and bound to a specific ServiceAccount, so a leaked\npod token buys only that ServiceAccount permissions. IRSA and Workload Identity\nin the clouds are the same idea with different plumbing.\n"
+        },
+        "primer": {
+          "zh": "先说清楚一件常被误解的事：Kubernetes 的 `Secret` **不是加密的**，它只是 base64。`kubectl get secret -o yaml` 拿到的值，接一句 `base64 -d` 就是明文。Secret 在集群里唯一的保护是 RBAC，也就是「谁有权 get 它」。所以把口令写进 Secret 并不算「保护」了它，只是换了个地方放。\n\n更麻烦的是 GitOps 带来的矛盾：仓库要能被所有人读，密钥不能。把 Secret 的 YAML 提交进 Git，等于把明文分发给每一个有仓库权限的人，而且留在历史里删不掉。`External Secrets Operator` 的答案是让仓库里只放「去哪儿取」的说明：`SecretStore` 说去哪个密钥库、用什么身份，`ExternalSecret` 说取哪几个键、放进哪个 Secret。真值由控制器在集群里生成，谁都不用提交明文。\n\n外部密钥库这里用 `OpenBao`（Vault 改协议之后 fork 出来的开源版本）。它的 KV v2 引擎有一处容易绊人：挂载路径和读写路径不是一回事，引擎挂在 `kv/` 上时，`bao kv get kv/payments/db` 实际读的是 `kv/data/payments/db`。SecretStore 里的 `path` 指的是挂载路径，`remoteRef.key` 里就不要再重复写它。另外 KV v2 保留版本历史，读到的默认是最新一版。\n\n认证方式的选择比工具选择更要紧。用静态令牌是个死循环：为了保护密钥，你得先保护一把能读所有密钥的令牌，而那把令牌只能存在集群里的另一个 Secret 里。`Kubernetes 认证`跳出了这个循环：身份由集群自己签发、短期有效、绑定到具体的 ServiceAccount，泄露一个 Pod 的 token 也只拿得到那个 SA 的权限。云上的 IRSA 与 Workload Identity 是同一思路的不同实现。最后记住 ESO 同步出来的 Secret 归控制器管：手改会被下一轮同步盖回去，`refreshInterval` 决定这一轮有多久。",
+          "en": "Start with a common misconception: a Kubernetes `Secret` is **not encrypted**, it is base64. Take the value from `kubectl get secret -o yaml`, pipe it through `base64 -d`, and there is the plaintext. The only protection a Secret has inside the cluster is RBAC, meaning who may get it. Putting a password into a Secret does not protect it, it relocates it.\n\nGitOps sharpens the problem: the repository must be readable by everyone and secrets must not be. Committing Secret YAML distributes plaintext to everyone with repository access and leaves it in history where deleting does not help. The `External Secrets Operator` answers by keeping only the instructions in Git: a `SecretStore` says which vault and which identity, an `ExternalSecret` says which keys to fetch into which Secret. The controller materialises the real values in the cluster and nobody commits plaintext.\n\nThe external store here is `OpenBao`, the open-source fork created after Vault changed its licence. Its KV v2 engine trips people on paths: the mount path and the read path differ, so with the engine at `kv/`, `bao kv get kv/payments/db` actually reads `kv/data/payments/db`. In a SecretStore the `path` field is the mount, so `remoteRef.key` should not repeat it. KV v2 also keeps version history, and a read returns the latest version by default.\n\nChoosing the authentication method matters more than choosing the tool. A static token is circular: protecting your secrets requires protecting a token that reads all of them, and that token can only live in another Secret in the cluster. `Kubernetes auth` breaks the circle, because identity is issued by the cluster, short lived, and bound to a specific ServiceAccount, so a leaked pod token buys only that ServiceAccount permissions. IRSA and Workload Identity are the same idea in the clouds. Finally, the Secret ESO produces belongs to the controller: hand edits are overwritten on the next sync, and `refreshInterval` decides how long that takes."
         }
       }
     ]

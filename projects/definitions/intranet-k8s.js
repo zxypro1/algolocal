@@ -36,6 +36,7 @@ const ZTUNNEL_IMAGE = 'docker.io/istio/ztunnel:1.28.1';
 const KYVERNO_IMAGE = 'ghcr.io/kyverno/kyverno:v1.16.0';
 // 一个从公网直接拿来的镜像，没人签过
 const UNSIGNED_IMAGE = 'docker.io/library/redis:7.4';
+const ESO_IMAGE = 'ghcr.io/external-secrets/external-secrets:v0.21.0';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -142,7 +143,7 @@ const WORLD = {
   namespaces: [
     'default', 'kube-system', 'payments', 'analytics',
     'envoy-gateway-system', 'ingress-nginx', 'cert-manager', 'argocd', 'istio-system',
-    'kyverno',
+    'kyverno', 'external-secrets',
   ],
   images: {
     [PORTAL_IMAGE]: {
@@ -185,6 +186,7 @@ const WORLD = {
     [ISTIOD_IMAGE]: { pullMs: 600, startupMs: 900, readyAfterMs: 400, listens: [15012] },
     [ZTUNNEL_IMAGE]: { pullMs: 400, startupMs: 500, readyAfterMs: 200, listens: [15008] },
     [KYVERNO_IMAGE]: { pullMs: 500, startupMs: 700, readyAfterMs: 300, listens: [9443] },
+    [ESO_IMAGE]: { pullMs: 400, startupMs: 600, readyAfterMs: 300, listens: [8080] },
     [UNSIGNED_IMAGE]: { pullMs: 300, startupMs: 400, readyAfterMs: 200, listens: [6379] },
     // 会话存储
     [SESSIONS_IMAGE]: {
@@ -249,6 +251,27 @@ const WORLD = {
     'oidc-liu': { username: 'oidc:liu@corp.internal', groups: ['oidc:developers'] },
     'oidc-chen': { username: 'oidc:chen@corp.internal', groups: ['oidc:sre'] },
     'ci-token': { username: 'system:serviceaccount:argocd:deployer', groups: ['system:serviceaccounts'] },
+  },
+  /**
+   * 内网的密钥库。
+   *
+   * 真正的密钥住在这儿 —— 不在集群里，也不在 Git 仓库里。
+   * 平台组已经把数据库口令放进去了，Kubernetes 认证还没开。
+   */
+  secretStore: {
+    address: 'https://openbao.corp.internal:8200',
+    data: {
+      'kv/payments/db': {
+        username: 'payments_app',
+        password: 'Ph4i-Quee0oh',
+        host: 'pg.corp.internal',
+      },
+    },
+    policies: {
+      'payments-read': { 'kv/payments/*': ['read', 'list'] },
+    },
+    // 平台组给运维发的 root 令牌。Kubernetes 认证还没开。
+    tokens: { 'bao-root-token': 'root' },
   },
   // 内网的 Git 服务。平台仓库是「本来就在」的东西，第 11 关往后都从它来。
   gitRepositories: [
@@ -5486,6 +5509,356 @@ const stage17 = {
   ),
 };
 
+
+/* ------------------------------------------------------------------ */
+/* 第 18 关                                                            */
+/* ------------------------------------------------------------------ */
+
+const ESO_PLATFORM = [
+  { apiVersion: 'v1', kind: 'ServiceAccount', metadata: { name: 'eso', namespace: 'payments' } },
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: {
+      name: 'external-secrets', namespace: 'external-secrets',
+      labels: { 'app.kubernetes.io/name': 'external-secrets' },
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'external-secrets' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'external-secrets' } },
+        spec: { containers: [{ name: 'controller', image: ESO_IMAGE, ports: [{ containerPort: 8080 }] }] },
+      },
+    },
+  },
+];
+
+/** 前任把口令直接写进了 Secret，还提交进了 Git */
+const HARDCODED_SECRET = {
+  apiVersion: 'v1', kind: 'Secret',
+  metadata: { name: 'db-credentials', namespace: 'payments' },
+  type: 'Opaque',
+  data: {
+    username: 'cGF5bWVudHNfYXBw',
+    // Ph4i-Quee0oh，base64 不是加密
+    password: 'UGg0aS1RdWVlMG9o',
+  },
+};
+
+/** 门户从这个 Secret 里拿数据库口令 */
+const PORTAL_WITH_DB = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: 'portal', namespace: 'payments' },
+    spec: {
+      replicas: 2,
+      selector: { matchLabels: { app: 'portal' } },
+      template: {
+        metadata: { labels: { app: 'portal' } },
+        spec: {
+          containers: [{
+            name: 'web', image: PORTAL_IMAGE, ports: [{ containerPort: 8080 }],
+            env: [
+              { name: 'DB_USER', valueFrom: { secretKeyRef: { name: 'db-credentials', key: 'username' } } },
+              { name: 'DB_PASSWORD', valueFrom: { secretKeyRef: { name: 'db-credentials', key: 'password' } } },
+            ],
+          }],
+        },
+      },
+    },
+  },
+  {
+    apiVersion: 'v1', kind: 'Service',
+    metadata: { name: 'portal', namespace: 'payments' },
+    spec: { clusterIP: '10.96.1.10', selector: { app: 'portal' }, ports: [{ port: 80, targetPort: 8080 }] },
+  },
+];
+
+const ESO_STARTER = code`
+  # 目标：让 db-credentials 由 ESO 从 OpenBao 同步出来，
+  # 而不是有人手工创建、再提交进 Git。
+  #
+  # 口令在 kv/payments/db 下面，策略 payments-read 已经写好了。
+  # Kubernetes 认证还没开。
+`;
+
+const ESO_REFERENCE = code`
+  apiVersion: external-secrets.io/v1
+  kind: SecretStore
+  metadata:
+    name: openbao
+    namespace: payments
+  spec:
+    provider:
+      vault:
+        server: https://openbao.corp.internal:8200
+        path: kv
+        auth:
+          kubernetes:
+            role: payments
+            serviceAccountRef:
+              name: eso
+  ---
+  apiVersion: external-secrets.io/v1
+  kind: ExternalSecret
+  metadata:
+    name: db-credentials
+    namespace: payments
+  spec:
+    refreshInterval: 1m
+    secretStoreRef:
+      name: openbao
+      kind: SecretStore
+    target:
+      name: db-credentials
+    data:
+    - secretKey: username
+      remoteRef:
+        key: payments/db
+        property: username
+    - secretKey: password
+      remoteRef:
+        key: payments/db
+        property: password
+`;
+
+const stage18 = {
+  id: 'external-secrets',
+  title: t('把密钥搬出集群', 'Move the Secrets Out of the Cluster'),
+  goal: t(
+    code`
+      安全评审第四条：数据库口令不该以任何形式存在于集群和 Git 仓库里。
+      现状是前任手工建了一个 Secret \`db-credentials\`，门户从它取值 ——
+      而那份 YAML 就躺在平台仓库里。**Kubernetes 的 Secret 只是 base64，
+      不是加密**，谁能 \`get secret\` 谁就看得到明文。
+
+      内网有一台 OpenBao（\`https://openbao.corp.internal:8200\`），口令已经放在
+      \`kv/payments/db\` 下面了，读它的策略 \`payments-read\` 也写好了。
+      External Secrets Operator 装好了。缺的是把这条路打通。
+
+      运维手上的 root 令牌是 \`bao-root-token\`。
+
+      ## 通关标准
+
+      1. \`db-credentials\` 由 ESO 同步出来，值和 OpenBao 里的一致；
+      2. 门户照常跑着，能从这个 Secret 取到口令；
+      3. ESO 用 **Kubernetes 认证**去 OpenBao 换令牌，不是拿一把静态令牌
+         （那把令牌本身又是一个要保管的密钥）；
+      4. 有人在 OpenBao 里轮转了口令之后，集群里会自己跟上；
+      5. 集群里不再有手工维护的那份明文。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      export BAO_ADDR=https://openbao.corp.internal:8200
+      export BAO_TOKEN=bao-root-token
+      bao kv get kv/payments/db
+      bao auth enable kubernetes
+      bao write auth/kubernetes/role/payments \\
+        bound_service_account_names=eso \\
+        bound_service_account_namespaces=payments \\
+        policies=payments-read
+      kubectl apply -f /root/infra/eso.yaml
+      kubectl describe externalsecret db-credentials -n payments
+      \`\`\`
+    `,
+    code`
+      Fourth item from the security review: the database password must not exist in
+      the cluster or in Git in any form. Today your predecessor hand-created a Secret
+      called \`db-credentials\` that the portal reads from, and that YAML sits in the
+      platform repository. **A Kubernetes Secret is base64, not encryption**: anyone
+      who can \`get secret\` reads the plaintext.
+
+      The intranet runs an OpenBao at \`https://openbao.corp.internal:8200\`. The
+      password already lives under \`kv/payments/db\` and a \`payments-read\` policy
+      exists. External Secrets Operator is installed. What is missing is the wiring.
+
+      The operator root token is \`bao-root-token\`.
+
+      ## Done when
+
+      1. \`db-credentials\` is produced by ESO and matches what OpenBao holds;
+      2. the portal still runs and still reads the password from that Secret;
+      3. ESO authenticates to OpenBao with **Kubernetes auth**, not a static token
+         (a static token is itself one more secret to look after);
+      4. rotating the password in OpenBao propagates into the cluster on its own;
+      5. no hand-maintained plaintext copy is left in the cluster.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      export BAO_ADDR=https://openbao.corp.internal:8200
+      export BAO_TOKEN=bao-root-token
+      bao kv get kv/payments/db
+      bao auth enable kubernetes
+      bao write auth/kubernetes/role/payments \\
+        bound_service_account_names=eso \\
+        bound_service_account_namespaces=payments \\
+        policies=payments-read
+      kubectl apply -f /root/infra/eso.yaml
+      kubectl describe externalsecret db-credentials -n payments
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('Secret 由 ESO 同步，不是手工建的', 'The Secret is synced by ESO, not hand-made'),
+    t('认证用 ServiceAccount，不是静态令牌', 'Authentication uses a ServiceAccount, not a static token'),
+    t('外部轮转之后集群自己跟上', 'Rotation outside propagates in on its own'),
+  ],
+  hints: [
+    t(
+      'KV v2 有一处容易绊人：挂载路径和读写路径不是一回事。引擎挂在 \`kv/\` 上，\`bao kv get kv/payments/db\` 实际读的是 \`kv/data/payments/db\`。SecretStore 里 \`path: kv\` 指的是挂载路径，\`remoteRef.key\` 里就不要再带 \`kv/\` 了。',
+      'KV v2 trips people on paths: the mount path and the read path differ. With the engine mounted at `kv/`, `bao kv get kv/payments/db` actually reads `kv/data/payments/db`. In a SecretStore, `path: kv` is the mount, so `remoteRef.key` should not repeat `kv/`.'
+    ),
+    t(
+      'Kubernetes 认证要两步：先 \`bao auth enable kubernetes\` 打开这个方法，再写一个角色说明「哪些 ServiceAccount 能登录、登录后拿哪个策略」。三个参数缺一不可，最容易漏的是命名空间那个。',
+      'Kubernetes auth takes two steps: `bao auth enable kubernetes` turns the method on, then a role states which ServiceAccounts may log in and which policy they receive. All three parameters are required, and the namespaces one is the usual omission.'
+    ),
+    t(
+      'ESO 同步出来的 Secret 归控制器管。手改它没有意义 —— 下一轮同步会盖回去。同理，删掉 ExternalSecret，那份投影也跟着走。',
+      'The Secret ESO produces belongs to the controller. Editing it by hand is pointless because the next sync overwrites it, and deleting the ExternalSecret takes the projection with it.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '用静态令牌图省事：把 root 令牌塞进一个 Secret，让 SecretStore 从那儿读。这样一来集群里存的是一把**能读所有密钥的**令牌 —— 比原来那个只泄露一个口令的 Secret 更糟。判定检查 SecretStore 用的是哪种认证。',
+      'Reaching for a static token: putting the root token in a Secret and pointing the SecretStore at it. Now the cluster stores a credential that reads **every** secret, which is worse than the single leaked password you started with. The grader checks which auth method the SecretStore uses.'
+    ),
+    t(
+      '以为 Secret 是加密的。它只是 base64，\`kubectl get secret -o yaml\` 加一句 \`base64 -d\` 就是明文。集群里的 Secret 唯一的保护是 RBAC —— 这也是为什么第 16 关那些角色不能给出 Secret 的读权限。',
+      'Believing a Secret is encrypted. It is base64, and `kubectl get secret -o yaml` piped through `base64 -d` prints the plaintext. RBAC is the only protection a Secret has in the cluster, which is why the roles in the RBAC stage must not grant Secret reads.'
+    ),
+    t(
+      '把 \`refreshInterval\` 当成实时。轮转之后集群里不会立刻变，要等下一轮同步。真出事要立刻生效时，得主动触发一次（改一下 ExternalSecret 让它重新 reconcile），别干等。',
+      'Treating `refreshInterval` as realtime. After rotation the cluster lags until the next sync. When an incident needs it now, force a reconcile (touch the ExternalSecret) instead of waiting.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      CNI_CILIUM,
+      ...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...TLS_PLATFORM, ...ESO_PLATFORM,
+      HARDCODED_SECRET, ...PORTAL_WITH_DB, PORTAL_ROUTE,
+    ],
+    files: { '/root/infra/eso.yaml': ESO_STARTER },
+    referenceFiles: { '/root/infra/eso.yaml': ESO_REFERENCE },
+    referenceCommands: [
+      'BAO_ADDR=https://openbao.corp.internal:8200 BAO_TOKEN=bao-root-token bao auth enable kubernetes',
+      'BAO_ADDR=https://openbao.corp.internal:8200 BAO_TOKEN=bao-root-token bao write'
+        + ' auth/kubernetes/role/payments bound_service_account_names=eso'
+        + ' bound_service_account_namespaces=payments policies=payments-read',
+      // 先把手工那份删掉，ESO 才好把自己那份建出来
+      'kubectl delete secret db-credentials -n payments',
+      'kubectl apply -f /root/infra/eso.yaml',
+    ],
+  },
+  specs: [
+    spec('external-secrets.spec.ts', code`
+      import { advance, get, list, sh } from '@ops/lab';
+
+      describe('把密钥搬出集群', () => {
+        it('Secret 由 ESO 同步出来', () => {
+          const external = get('ExternalSecret', 'db-credentials', 'payments');
+          expect(external).toBeTruthy();
+          const ready = external.status.conditions.find((entry) => entry.type === 'Ready');
+          expect(ready.status).toBe('True');
+
+          const secret = get('Secret', 'db-credentials', 'payments');
+          expect(secret).toBeTruthy();
+          const owner = (secret.metadata.ownerReferences || [])[0];
+          expect(owner.kind).toBe('ExternalSecret');
+        });
+
+        it('值和 OpenBao 里的一致', async () => {
+          const result = await sh(
+            'kubectl get secret db-credentials -n payments'
+            + " -o jsonpath='{.data.password}' | base64 -d"
+          );
+          expect(result.stdout.trim()).toBe('Ph4i-Quee0oh');
+        });
+
+        it('门户照常跑着', () => {
+          const deployment = get('Deployment', 'portal', 'payments');
+          expect(deployment.status.readyReplicas).toBe(2);
+        });
+
+        it('认证用的是 ServiceAccount，不是静态令牌', () => {
+          const stores = list('SecretStore', { namespace: 'payments' });
+          expect(stores.length).toBeGreaterThan(0);
+          for (const store of stores) {
+            const auth = store.spec.provider.vault.auth || {};
+            expect(auth.kubernetes).toBeTruthy();
+            expect(auth.tokenSecretRef).toBeFalsy();
+          }
+        });
+
+        it('集群里没有另一份手工维护的明文', () => {
+          const managed = list('Secret', { namespace: 'payments' })
+            .filter((secret) => (secret.data || {}).password !== undefined)
+            .filter((secret) => !(secret.metadata.ownerReferences || [])
+              .some((owner) => owner.kind === 'ExternalSecret'));
+          expect(managed).toEqual([]);
+        });
+
+        it('OpenBao 里轮转之后，集群自己跟上', async () => {
+          await sh(
+            'BAO_ADDR=https://openbao.corp.internal:8200 BAO_TOKEN=bao-root-token'
+            + ' bao kv put kv/payments/db username=payments_app password=R0tated-N0w host=pg.corp.internal'
+          );
+          // 等一轮同步。ESO 是按 refreshInterval 拉的，不是实时的。
+          await advance(120000);
+          const result = await sh(
+            'kubectl get secret db-credentials -n payments'
+            + " -o jsonpath='{.data.password}' | base64 -d"
+          );
+          expect(result.stdout.trim()).toBe('R0tated-N0w');
+        });
+      });
+    `),
+  ],
+  focus: ['correctness', 'maintainability'],
+  extension: t(
+    code`
+      这一关解决的是 GitOps 与密钥管理的矛盾：**仓库要能被所有人读，密钥不能**。
+      External Secrets 的答案是让仓库里只放「去哪儿取」的说明，取到的东西
+      由控制器写进集群，谁都不用把明文提交上去。
+
+      要清楚它**没有**解决什么：同步出来的 Secret 在集群里仍然是 base64。
+      能 \`get secret\` 的人照样看得到明文。所以这一层必须和 RBAC 叠着用 ——
+      密钥搬出集群解决的是「不要泄露在 Git 里」，不是「集群里也看不到」。
+      再往上一层是 etcd 静态加密（EncryptionConfiguration），那管的是磁盘被
+      拷走的场景。三层各管一段，缺一不可。
+
+      认证方式的选择比工具选择更重要。静态令牌是个死循环：为了保护密钥，
+      你先得保护一把能读所有密钥的令牌。Kubernetes 认证跳出了这个循环 ——
+      身份由集群签发、短期有效、绑定到具体的 ServiceAccount，泄露一份
+      Pod 的 token 也只能拿到那个 SA 的权限。云上的 IRSA / Workload Identity
+      是同一个思路的不同实现。
+    `,
+    code`
+      This stage resolves the tension between GitOps and secret management:
+      **the repository must be readable by everyone, and secrets must not be.**
+      External Secrets answers it by keeping only "where to fetch it from" in Git,
+      with the controller writing the fetched value into the cluster, so nobody ever
+      commits plaintext.
+
+      Be clear about what it does **not** solve: the synced Secret is still base64
+      inside the cluster, and anyone who can \`get secret\` still reads it. So this
+      layer stacks with RBAC. Moving secrets out of the cluster addresses "do not leak
+      them through Git", not "nobody in the cluster can see them". One layer further up
+      is etcd encryption at rest (EncryptionConfiguration), which addresses a stolen
+      disk. Three layers, each covering a different exposure.
+
+      Choosing the authentication method matters more than choosing the tool. A static
+      token is circular: to protect your secrets you first have to protect a token that
+      reads all of them. Kubernetes auth breaks the circle, because identity is issued
+      by the cluster, short lived, and bound to a specific ServiceAccount, so a leaked
+      pod token buys only that ServiceAccount permissions. IRSA and Workload Identity
+      in the clouds are the same idea with different plumbing.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -5531,6 +5904,6 @@ module.exports = {
   stages: [
     stage1, stage2, stage3, stage4, stage5, stage6,
     stage7, stage8, stage9, stage10, stage11, stage12,
-    stage13, stage14, stage15, stage16, stage17,
+    stage13, stage14, stage15, stage16, stage17, stage18,
   ],
 };
