@@ -87,6 +87,25 @@ const nextConfig = {
       ];
     }
 
+    /**
+     * xterm 走它的 UMD 产物，不要 ESM 那份。
+     *
+     * `@xterm/xterm` 的 `lib/xterm.mjs` 是 esbuild 出来的，里面有
+     * `var X = class Name extends Error {...}` 这种「带名字的类表达式」。
+     * Next 13.5 的 SWC 压缩器处理这个形状时会把 extends 的基类**换成 null**，
+     * 于是 `new Terminal()` 抛 `Super constructor null of anonymous class
+     * is not a constructor` —— 整个终端起不来。
+     *
+     * dev 不压缩所以看不出来，只有正式包会炸：v0.16.0 就是这么发出去的。
+     * UMD 那份（`lib/xterm.js`）是 webpack 打的，代码形状不同，压缩器不会踩到。
+     *
+     * scripts/check-bundle.js 会在每次构建后扫一遍产物，这个坑再出现就直接构建失败。
+     */
+    config.resolve.alias = {
+      ...(config.resolve.alias || {}),
+      '@xterm/xterm$': require.resolve('@xterm/xterm/lib/xterm.js'),
+    };
+
     return config;
   },
   // Transpile packages that need it

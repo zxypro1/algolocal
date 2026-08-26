@@ -45,6 +45,7 @@
     "dev": "next dev",
     "predev": "node scripts/copy-lab-assets.js",
     "build": "next build",
+    "postbuild": "node scripts/check-bundle.js",
     "prebuild": "node scripts/copy-lab-assets.js",
     "start": "next start",
     "deploy-local": "npm run build && npm start",

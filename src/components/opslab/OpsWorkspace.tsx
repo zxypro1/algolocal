@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import {
   ActionIcon, Alert, AppShell, Badge, Button, Code, Group, Loader,
-  Paper, ScrollArea, SegmentedControl, Select, Stack, Switch, Tabs, Text, Tooltip,
+  ScrollArea, Select, Stack, Switch, Tabs, Text, Tooltip,
 } from '@mantine/core';
 import {
   IconAlertTriangle, IconDeviceDesktop, IconFileCode, IconPlayerPlay,
@@ -24,6 +24,7 @@ import MarkdownRenderer from '../MarkdownRenderer';
 import ErrorBoundary from '../ErrorBoundary';
 import { RunReportPanel } from '../engineering/ResultPanels';
 import ChangeStream from './ChangeStream';
+import WorkbenchSplit from './WorkbenchSplit';
 import MachineFiles from './MachineFiles';
 import { useOpsWorkspace } from '../../hooks/useOpsWorkspace';
 import { emptyMetrics, runOpsStage } from '../../lib/opslab/lab';
@@ -47,6 +48,11 @@ const BANNER = [
   '  `kubectl get nodes` 起步；拓扑图上点一下会把只读命令插进来。',
   '',
 ].join('\r\n');
+
+/** 右侧那一组 tab，以及记住选择用的键 */
+const RIGHT_TABS = ['terminal', 'ide', 'topology', 'changes', 'packets'];
+const RIGHT_TAB_KEY = 'opslab.rightTab.v1';
+const SPLIT_KEY = 'opslab.split.v1';
 
 export default function OpsWorkspace({ session, registerClearResults }: OpsWorkspaceProps) {
   const { t } = useTranslation();
@@ -79,7 +85,24 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
   const [activePath, setActivePath] = useState('');
   const [report, setReport] = useState<StageRunReport | null>(null);
   const [running, setRunning] = useState(false);
-  const [rightTab, setRightTab] = useState<string>('topology');
+  /**
+   * 右侧那一组 tab 选在哪儿。
+   *
+   * 记住它，是因为学员在一关里来回切「敲命令 → 看拓扑 → 改 YAML」，
+   * 每次进新一关都被扔回默认页很烦。挂载后再读，避免 hydration 不一致。
+   */
+  const [rightTab, setRightTab] = useState<string>('terminal');
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(RIGHT_TAB_KEY);
+      if (saved && RIGHT_TABS.includes(saved)) setRightTab(saved);
+    } catch { /* 隐私模式下读不到，用默认值 */ }
+  }, []);
+  const selectRightTab = useCallback((value: string | null) => {
+    if (!value) return;
+    setRightTab(value);
+    try { window.localStorage.setItem(RIGHT_TAB_KEY, value); } catch { /* noop */ }
+  }, []);
   /**
    * 包路径选中的那一跳对应的拓扑节点。
    *
@@ -250,12 +273,18 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
             })}
           </Group>
 
-        <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-          {/* 任务 */}
-          <Paper
-            withBorder={false}
-            style={{ width: 340, flexShrink: 0, borderRight: '1px solid var(--app-border)', display: 'flex', flexDirection: 'column' }}
-          >
+        {/**
+          * 左边任务、右边一组 tab。
+          *
+          * 之前是「左任务 + 右上 IDE + 右上拓扑 + 右下终端」四块写死的格子：
+          * 终端只有 38% 高，拓扑固定 42% 宽，谁都拖不动、也收不起来。
+          * 现在终端、IDE、拓扑并列成 tab —— 同一时刻只看一样东西，
+          * 每样都占满整个右栏，而不是四块互相挤。
+          */}
+        <WorkbenchSplit
+          storageKey={SPLIT_KEY}
+          collapseLabel="展开任务栏"
+          left={(
             <Tabs defaultValue="goal" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
               <Tabs.List>
                 <Tabs.Tab value="goal" fz="xs">任务</Tabs.Tab>
@@ -290,59 +319,32 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                 </ScrollArea>
               </Tabs.Panel>
             </Tabs>
-          </Paper>
+          )}
+          right={(
+            <Tabs
+              value={rightTab}
+              onChange={selectRightTab}
+              style={{ display: 'flex', flexDirection: 'column', height: '100%' }}
+            >
+              <Group
+                gap="xs"
+                justify="space-between"
+                wrap="nowrap"
+                style={{ borderBottom: '1px solid var(--app-border)', flexShrink: 0 }}
+              >
+                <Tabs.List style={{ border: 'none', flexWrap: 'nowrap' }}>
+                  <Tabs.Tab value="terminal" fz="xs" leftSection={<IconDeviceDesktop size={13} />}>
+                    终端{ops.history.length > 0 ? ` · ${ops.history.length}` : ''}
+                  </Tabs.Tab>
+                  <Tabs.Tab value="ide" fz="xs" leftSection={<IconFileCode size={13} />}>IDE</Tabs.Tab>
+                  <Tabs.Tab value="topology" fz="xs" leftSection={<IconSitemap size={13} />}>拓扑</Tabs.Tab>
+                  <Tabs.Tab value="changes" fz="xs" leftSection={<IconTimeline size={13} />}>事件与变更</Tabs.Tab>
+                  <Tabs.Tab value="packets" fz="xs" leftSection={<IconRoute size={13} />}>包路径</Tabs.Tab>
+                </Tabs.List>
 
-          {/* 右侧：上面是 IDE 与拓扑，下面是终端 */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-            <div style={{ flex: 1, display: 'flex', minHeight: 0, borderBottom: '1px solid var(--app-border)' }}>
-              {/* IDE */}
-              <div style={{ flex: 1, display: 'flex', minWidth: 0, borderRight: '1px solid var(--app-border)' }}>
-                <div style={{ width: 180, flexShrink: 0, borderRight: '1px solid var(--app-border)', display: 'flex', flexDirection: 'column' }}>
-                  <Group gap={6} px="sm" py={6} style={{ borderBottom: '1px solid var(--app-border)' }}>
-                    <IconFileCode size={13} />
-                    <Text size="xs" fw={600}>机器磁盘</Text>
-                  </Group>
-                  <MachineFiles files={machineFiles} activePath={activePath} onSelect={setActivePath} />
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  {activePath ? (
-                    <Editor
-                      height="100%"
-                      path={activePath}
-                      language={languageOf(activePath)}
-                      value={machineFiles[activePath] ?? ''}
-                      theme={colorScheme === 'dark' ? 'vs-dark' : 'light'}
-                      onChange={handleEditorChange}
-                      options={{
-                        minimap: { enabled: false },
-                        fontSize: 13,
-                        tabSize: 2,
-                        scrollBeyondLastLine: false,
-                        automaticLayout: true,
-                      }}
-                    />
-                  ) : (
-                    <Stack align="center" justify="center" h="100%">
-                      <Text size="xs" c="dimmed">左边选一个文件</Text>
-                    </Stack>
-                  )}
-                </div>
-              </div>
-
-              {/* 拓扑 / 变更流 */}
-              <div style={{ width: '42%', minWidth: 320, display: 'flex', flexDirection: 'column' }}>
-                <Group gap="xs" px="sm" py={4} justify="space-between" style={{ borderBottom: '1px solid var(--app-border)' }}>
-                  <SegmentedControl
-                    size="xs"
-                    value={rightTab}
-                    onChange={setRightTab}
-                    data={[
-                      { value: 'topology', label: <Group gap={4} wrap="nowrap"><IconSitemap size={12} />拓扑</Group> },
-                      { value: 'changes', label: <Group gap={4} wrap="nowrap"><IconTimeline size={12} />事件与变更</Group> },
-                      { value: 'packets', label: <Group gap={4} wrap="nowrap"><IconRoute size={12} />包路径</Group> },
-                    ]}
-                  />
-                  <Group gap="xs">
+                {/* 只跟集群视图有关的控件。切到终端或者 IDE 的时候它们没有意义，就别占地方。 */}
+                {(rightTab === 'topology' || rightTab === 'changes' || rightTab === 'packets') && (
+                  <Group gap="xs" wrap="nowrap" pr="sm">
                     {rightTab === 'topology' && (
                       <Switch
                         size="xs"
@@ -360,31 +362,14 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                       comboboxProps={{ withinPortal: true }}
                     />
                   </Group>
-                </Group>
-                <div style={{ flex: 1, minHeight: 0 }}>
-                  <ErrorBoundary fallback={renderPanelError}>
-                    {rightTab === 'topology' && (
-                      <TopologyView graph={ops.topology} onInspect={handleInspect} highlight={highlight} />
-                    )}
-                    {rightTab === 'changes' && (
-                      <ChangeStream changes={ops.changes} events={ops.events} />
-                    )}
-                    {rightTab === 'packets' && (
-                      <PacketPathPanel paths={ops.packetPaths} onHighlight={setHighlight} />
-                    )}
-                  </ErrorBoundary>
-                </div>
-              </div>
-            </div>
-
-            {/* 终端 */}
-            <div style={{ height: '38%', minHeight: 180, display: 'flex', flexDirection: 'column' }}>
-              <Group gap={6} px="sm" py={4} style={{ borderBottom: '1px solid var(--app-border)' }}>
-                <IconDeviceDesktop size={13} />
-                <Text size="xs" fw={600}>终端</Text>
-                <Text size="xs" c="dimmed">{ops.history.length} 条命令</Text>
+                )}
               </Group>
-              <div style={{ flex: 1, minHeight: 0 }}>
+
+              {/**
+                * 面板全部保持挂载（Mantine 默认如此），只是切走的时候 display:none。
+                * 终端的 scrollback 和 Monaco 的编辑状态都不能因为切个 tab 就没了。
+                */}
+              <Tabs.Panel value="terminal" style={{ flex: 1, minHeight: 0 }}>
                 {ops.status === 'booting' && (
                   <Stack align="center" justify="center" h="100%" gap="xs">
                     <Loader size="sm" />
@@ -410,10 +395,63 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                     registerInsert={registerInsert}
                   />
                 )}
-              </div>
-            </div>
-          </div>
-        </div>
+              </Tabs.Panel>
+
+              <Tabs.Panel value="ide" style={{ flex: 1, minHeight: 0 }}>
+                <div style={{ display: 'flex', height: '100%', minWidth: 0 }}>
+                  <div style={{ width: 180, flexShrink: 0, borderRight: '1px solid var(--app-border)', display: 'flex', flexDirection: 'column' }}>
+                    <Group gap={6} px="sm" py={6} style={{ borderBottom: '1px solid var(--app-border)' }}>
+                      <IconFileCode size={13} />
+                      <Text size="xs" fw={600}>机器磁盘</Text>
+                    </Group>
+                    <MachineFiles files={machineFiles} activePath={activePath} onSelect={setActivePath} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {activePath ? (
+                      <Editor
+                        height="100%"
+                        path={activePath}
+                        language={languageOf(activePath)}
+                        value={machineFiles[activePath] ?? ''}
+                        theme={colorScheme === 'dark' ? 'vs-dark' : 'light'}
+                        onChange={handleEditorChange}
+                        options={{
+                          minimap: { enabled: false },
+                          fontSize: 13,
+                          tabSize: 2,
+                          scrollBeyondLastLine: false,
+                          automaticLayout: true,
+                        }}
+                      />
+                    ) : (
+                      <Stack align="center" justify="center" h="100%">
+                        <Text size="xs" c="dimmed">左边选一个文件</Text>
+                      </Stack>
+                    )}
+                  </div>
+                </div>
+              </Tabs.Panel>
+
+              <Tabs.Panel value="topology" style={{ flex: 1, minHeight: 0 }}>
+                <ErrorBoundary fallback={renderPanelError}>
+                  <TopologyView graph={ops.topology} onInspect={handleInspect} highlight={highlight} />
+                </ErrorBoundary>
+              </Tabs.Panel>
+
+              <Tabs.Panel value="changes" style={{ flex: 1, minHeight: 0 }}>
+                <ErrorBoundary fallback={renderPanelError}>
+                  <ChangeStream changes={ops.changes} events={ops.events} />
+                </ErrorBoundary>
+              </Tabs.Panel>
+
+              <Tabs.Panel value="packets" style={{ flex: 1, minHeight: 0 }}>
+                <ErrorBoundary fallback={renderPanelError}>
+                  <PacketPathPanel paths={ops.packetPaths} onHighlight={setHighlight} />
+                </ErrorBoundary>
+              </Tabs.Panel>
+            </Tabs>
+          )}
+        />
         </div>
       </AppShell.Main>
     </AppShell>

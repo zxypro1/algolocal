@@ -7,10 +7,10 @@
  * 交互只有两种：看，和点一下把对应的只读命令插进终端。拖拽改状态是不做的 ——
  * 真集群里没有「把 Pod 拖到另一台机器上」这个动作，做了就是在教错的东西。
  */
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   Background, Controls, Handle, MiniMap, Position, ReactFlow, useEdgesState, useNodesState,
-  type Edge, type Node, type NodeProps,
+  type Edge, type Node, type NodeProps, type ReactFlowInstance,
 } from '@xyflow/react';
 import { Group, Stack, Text } from '@mantine/core';
 import type { TopologyGraph, TopologyStatus } from '../../lib/opslab/lab';
@@ -123,6 +123,32 @@ export default function TopologyView({ graph, onInspect, highlight }: TopologyVi
   useEffect(() => { setNodes(initialNodes); }, [initialNodes, setNodes]);
   useEffect(() => { setEdges(initialEdges); }, [initialEdges, setEdges]);
 
+  /**
+   * 从隐藏的 tab 里露出来之后要重新 fitView。
+   *
+   * 这张图和终端、IDE 是同一组 tab，切走的时候整块是 display:none。
+   * ReactFlow 的 `fitView` 只在初始化时算一次，而它初始化的那一刻容器是 0×0 ——
+   * 于是切回来看到的是一张几乎空白的画布，只有左上角露出半个节点。
+   * 尺寸从 0 变成正常值会触发 ResizeObserver，在那一下补一次 fitView。
+   */
+  const containerRef = useRef<HTMLDivElement>(null);
+  const flowRef = useRef<ReactFlowInstance | null>(null);
+  const onInit = useCallback((instance: ReactFlowInstance) => { flowRef.current = instance; }, []);
+
+  useEffect(() => {
+    const host = containerRef.current;
+    if (!host) return undefined;
+    let wasVisible = host.getBoundingClientRect().width > 0;
+    const observer = new ResizeObserver(() => {
+      const visible = host.getBoundingClientRect().width > 0;
+      // 只在「从看不见到看得见」这一下补，不然每次拖分隔条都会把用户的平移缩放重置掉
+      if (visible && !wasVisible) flowRef.current?.fitView();
+      wasVisible = visible;
+    });
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
+
   if (graph.nodes.length === 0) {
     return (
       <Stack align="center" justify="center" h="100%" gap={4}>
@@ -133,12 +159,13 @@ export default function TopologyView({ graph, onInspect, highlight }: TopologyVi
   }
 
   return (
-    <div style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div ref={containerRef} style={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column' }}>
       <div style={{ flex: 1, minHeight: 0 }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
+        onInit={onInit}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={(_, node) => {

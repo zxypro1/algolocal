@@ -78,16 +78,57 @@ export default function OpsTerminal({ prompt, onCommand, banner, registerInsert 
       term.loadAddon(fit);
       term.open(hostRef.current);
       termRef.current = term;
-      fit.fit();
 
-      resizeObserver = new ResizeObserver(() => {
-        // 容器还没完成布局时 fit 会抛，忽略即可
-        try { fit.fit(); } catch { /* noop */ }
-      });
+      /**
+       * 有尺寸了再 fit。
+       *
+       * 容器宽度为 0 的时候（首帧还没布局完、或者它待在一个隐藏的 tab 里）
+       * fit 会算出一两列，于是提示符被压成每行两个字符 —— v0.16.0 里就是这个样子。
+       * 这两种情况都会在拿到尺寸后触发 ResizeObserver，等那一下就行。
+       */
+      const fitIfSized = () => {
+        const host = hostRef.current;
+        const active = termRef.current;
+        if (!host || !active) return false;
+        const { width, height } = host.getBoundingClientRect();
+        if (width < 80 || height < 40) return false;
+        try {
+          // 算出来跟现在一样就别 resize：fit 会改元素尺寸，而这个函数正是
+          // ResizeObserver 调的 —— 白 resize 一次就多绕一圈，浏览器会刷
+          // 「ResizeObserver loop completed with undelivered notifications」
+          const proposed = fit.proposeDimensions();
+          if (!proposed?.cols || !proposed?.rows) return false;
+          if (proposed.cols === active.cols && proposed.rows === active.rows) return true;
+          fit.fit();
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      resizeObserver = new ResizeObserver(() => { fitIfSized(); });
       resizeObserver.observe(hostRef.current);
 
-      if (banner) term.write(banner);
-      writePrompt(term);
+      // 开场白也要等宽度定下来再写，否则它按错误的列宽折行，之后再 fit 也回不去
+      const openingScreen = () => {
+        if (banner) term!.write(banner);
+        writePrompt(term!);
+      };
+      if (fitIfSized()) {
+        openingScreen();
+      } else {
+        let frames = 0;
+        const wait = () => {
+          if (disposed || !termRef.current) return;
+          if (fitIfSized() || frames > 120) {
+            openingScreen();
+            return;
+          }
+          frames += 1;
+          requestAnimationFrame(wait);
+        };
+        requestAnimationFrame(wait);
+      }
 
       term.onData(async (data) => {
         const active = term;
