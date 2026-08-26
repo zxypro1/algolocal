@@ -25,6 +25,7 @@ import type { CompiledKernel } from '../ir/types';
 import {
   addF32, divF32, expF32, fastDivF32, fastExpF32, fastLogF32, floatToInt, floatToUint,
   fmaF32, logF32, maxF32, minF32, mulF32, powF32, rsqrtF32, sqrtF32, subF32, tanhF32, toHalf,
+  FP8_E4M3, FP8_E5M2, fp8ToStorage, storageToFp8,
 } from './float';
 import {
   LinearMemory, MemoryFault, SECTOR_BYTES, WARP_SIZE,
@@ -744,6 +745,17 @@ class Executor {
                 case FN.abs: out = Math.abs(x | 0) | 0; break;
                 case FN.__popc: out = popcount(x | 0); break;
                 case FN.__clz: out = (x | 0) === 0 ? 32 : Math.clz32(x >>> 0); break;
+                // fp8：签名是 (值, 饱和模式, 格式)，**格式是第三个参数**。
+                // 读成第二个的话 __NV_SATFINITE（= 1）会被当成 E5M2，
+                // 于是每一次「E4M3 量化」其实都跑成了 E5M2。
+                case FN.__nv_cvt_float_to_fp8:
+                  out = fp8ToStorage(x, z === 1 ? FP8_E5M2 : FP8_E4M3, y === 1);
+                  break;
+                case FN.__nv_cvt_fp8_to_halfraw:
+                  // 真 API 的返回类型就是 half。fp8 的每个值 fp16 都装得下，
+                  // 所以这一道舍入不改值，但类型语义得对。
+                  out = toHalf(storageToFp8(x | 0, y === 1 ? FP8_E5M2 : FP8_E4M3));
+                  break;
                 // __ffs 是 1 起算的最低置位位号，0 表示没有置位
                 default: out = (x | 0) === 0 ? 0 : 32 - Math.clz32(((x | 0) & -(x | 0)) >>> 0); break;
               }

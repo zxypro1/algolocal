@@ -98,6 +98,7 @@ export const FN = {
   __expf: 10, __logf: 11, __fdividef: 12,
   min: 13, max: 14, abs: 15,
   __popc: 16, __clz: 17, __ffs: 18,
+  __nv_cvt_float_to_fp8: 19, __nv_cvt_fp8_to_halfraw: 20,
 } as const;
 
 /**

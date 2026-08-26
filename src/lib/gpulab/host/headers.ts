@@ -93,9 +93,43 @@ int cudaDeviceSynchronize(void);
 #endif
 `;
 
+export const CUDA_FP8_H = `/* cuda_fp8.h -- fp8 转换
+ *
+ * 名字、参数、枚举取值都和真 CUDA 一致。
+ *
+ * **一处刻意的偏差**：真 API 的 __nv_cvt_fp8_to_halfraw 返回 __half_raw
+ * （一个结构体，取值要写 .x），这个子集没有 struct，所以直接返回 half。
+ * 语义没有区别，写法上少一次 .x。
+ *
+ * 另外：fp8 在这里没有独立的存储类型。真 CUDA 有 __nv_fp8_storage_t
+ * （一个 unsigned char）与 __nv_fp8x4_e4m3（一个 32 位、装 4 个）。
+ * 这个子集的显存按 4 字节寻址，所以照真实 kernel 的做法来：
+ * 自己把 4 个 8 位存储移位拼进一个 int，读的时候再拆开。
+ * 量化省下来的显存因此是真的省下来了，ncu 上量得出来。
+ */
+#ifndef CUDA_FP8_H
+#define CUDA_FP8_H
+
+/* __nv_saturation_t */
+#define __NV_NOSAT      0
+#define __NV_SATFINITE  1   /* 溢出夹到最大有限值，推理里的默认 */
+
+/* __nv_fp8_interpretation_t */
+#define __NV_E4M3  0   /* 4 位指数 3 位尾数，最大 448，没有 inf。权重与激活用它 */
+#define __NV_E5M2  1   /* 5 位指数 2 位尾数，最大 57344，有 inf。梯度用它 */
+
+/* float -> fp8 的 8 位存储（0..255） */
+int  __nv_cvt_float_to_fp8(float x, int saturate, int interpretation);
+/* fp8 存储 -> half */
+half __nv_cvt_fp8_to_halfraw(int storage, int interpretation);
+
+#endif
+`;
+
 /** 挂进机器磁盘的那几个头文件 */
 export const HOST_HEADERS: Record<string, string> = {
   '/root/containers.h': CONTAINERS_H,
   '/root/engine.h': ENGINE_H,
   '/root/cuda_runtime.h': CUDA_RUNTIME_H,
+  '/root/cuda_fp8.h': CUDA_FP8_H,
 };
