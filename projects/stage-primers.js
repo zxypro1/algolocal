@@ -1233,6 +1233,98 @@ const primers = {
         + 'The real evidence is local-memory traffic: anything above zero means something fell out of registers.'
       )
     ),
+    'naive-gemm': t(
+      p(
+        '矩阵乘法 `C = A × B` 是 LLM 里绝大部分算力的去处：每一层的投影、前馈网络、'
+        + '注意力里的两次矩阵乘，全是它。所以 GPU 编程的大半功夫都花在把 GEMM 写快上。',
+        '最直白的写法是每个线程负责 C 的一个元素，沿 k 维做一遍点积。'
+        + '这样写一定是对的，但它有个致命的比例问题：算一个输出要读 2n 个数、做 n 次乘加，'
+        + '也就是**每搬两个字节才做一次乘加**。',
+        '衡量这件事的指标叫`算术强度`：每从显存搬一个字节，做了多少次浮点运算。'
+        + '朴素 GEMM 的算术强度是 0.5。而 H100 的算力与带宽之比在几十 FLOP/byte，'
+        + '差了两个数量级，这种 kernel 的时间全花在等数据上，算力完全闲置。',
+        '`roofline` 图把这件事画成一张两段的屋顶：左边一段斜坡是带宽限制，'
+        + '右边一段平台是算力限制，交界处叫拐点。优化一个 kernel 的第一步，'
+        + '就是先看清它落在斜坡上还是平台上，因为这决定了该往哪个方向使劲。'
+      ),
+      p(
+        'Matrix multiplication `C = A × B` is where nearly all the FLOPs in an LLM go: every projection, '
+        + 'every feed-forward layer, both matmuls inside attention. Most of GPU programming effort goes '
+        + 'into making GEMM fast.',
+        'The direct version gives each thread one element of C and one dot product along k. It is '
+        + 'certainly correct, but the ratio is fatal: each output reads 2n values and performs n '
+        + 'multiply-adds, meaning **one multiply-add per two bytes moved**.',
+        'The metric for this is `arithmetic intensity`: floating-point operations per byte fetched from '
+        + 'memory. Naive GEMM sits at 0.5, while the compute-to-bandwidth ratio of an H100 is in the tens '
+        + 'of FLOP/byte. Two orders of magnitude apart: such a kernel spends all its time waiting for data '
+        + 'while the arithmetic units idle.',
+        'A `roofline` chart draws this as a two-segment roof, a bandwidth-limited slope on the left and a '
+        + 'compute-limited plateau on the right, meeting at the ridge point. The first step in optimising '
+        + 'any kernel is seeing which segment it lands on, because that decides where the effort should go.'
+      )
+    ),
+    'tiled-gemm': t(
+      p(
+        '朴素 GEMM 的浪费在于**同一份数据被反复从显存读回来**。A 的每一行被 n 个线程各读一遍，'
+        + 'B 的每一列也是。128×128 的矩阵一共 128KB，却读了 8MB。',
+        '`分块`的思路是：既然一个 block 里的线程要用的数据高度重叠，就先把那一块搬进共享内存，'
+        + '再让所有线程从共享内存取。把 A 与 B 各切成 16×16 的小块，'
+        + '外层循环沿 k 维一块一块推进，每块搬一次、用 16 次。DRAM 读量因此降到原来的 1/16 附近。',
+        '流程是四步一轮：搬一块、同步、算这一块、再同步。'
+        + '**两个屏障都不能少**，而且它们防的是不同的事：'
+        + '第一个保证「所有人都搬完了才开始算」，第二个保证「所有人都算完了才开始覆盖」。'
+        + '少了第二个，跑得快的线程会在别人还没读完时就把共享内存写掉。',
+        '分块之后瓶颈会**换个地方**而不是消失：DRAM 不再紧张了，'
+        + '但每做一次乘加仍然要从共享内存读两个数，于是共享内存的带宽成了新的限制。'
+        + '这是优化的常态：解开一个瓶颈，下一个就浮出来。'
+      ),
+      p(
+        'The waste in naive GEMM is that **the same data is fetched from memory over and over**. Each row '
+        + 'of A is read by n threads, and so is each column of B. A 128×128 matrix is 128KB, yet 8MB gets read.',
+        '`Tiling` starts from the observation that threads in one block need heavily overlapping data. '
+        + 'Stage that data in shared memory first and let every thread read it from there. Cut A and B into '
+        + '16×16 tiles, step the outer loop along k one tile at a time, fetch each tile once and use it '
+        + 'sixteen times. DRAM traffic drops by roughly a factor of sixteen.',
+        'Each round has four steps: stage a tile, synchronise, accumulate, synchronise again. '
+        + '**Neither barrier is optional and they prevent different things**: the first guarantees everyone '
+        + 'finished writing before anyone reads, the second guarantees everyone finished reading before '
+        + 'anyone overwrites. Without the second, a fast thread clobbers the tile mid-read.',
+        'After tiling the bottleneck **moves rather than disappears**. DRAM is no longer tight, but every '
+        + 'multiply-add still reads two values out of shared memory, so shared-memory bandwidth becomes the '
+        + 'new limit. That is normal: relieve one bottleneck and the next surfaces.'
+      )
+    ),
+    'register-tiling': t(
+      p(
+        '分块把数据从显存搬进了共享内存，但读写比还是 2:1：每做一次乘加读两个数。'
+        + '再往上一层的办法是让**一个线程算多个输出**，这样读进来的值能被复用更多次。',
+        '让每个线程算 4×4 = 16 个输出：从共享内存读 4 个 A 的值和 4 个 B 的值（一共 8 次读），'
+        + '就能做 16 次乘加。读写比从 2:1 变成 1:2，好了四倍。'
+        + '这 16 个累加器全程待在寄存器里，寄存器的带宽比共享内存又高一个数量级。',
+        '这里要用上第 6 关那条规则：**线程私有的数组只有在下标全是编译期常量时才待在寄存器里**。'
+        + '写成 `float acc[4][4]` 再用循环变量索引，整个数组会落到 local memory，'
+        + '性能不升反降。所以真实的 GEMM kernel 里这些累加器往往是手写展开的标量。',
+        '这一层叫 thread tile，加上前面的 threadblock tile，'
+        + '就是 CUTLASS 那套「分块层次」的雏形。真实的库还会在中间加一层 warp tile，'
+        + '并用向量化访存与 swizzle 进一步压榨，但基本思路就是这两关的组合。'
+      ),
+      p(
+        'Tiling moved data from device memory into shared memory, but the ratio is still 2:1, two reads '
+        + 'per multiply-add. The next level up is to give **one thread several outputs** so each loaded '
+        + 'value is reused more times.',
+        'Let each thread compute 4×4 = 16 outputs: read 4 values of A and 4 of B, eight reads in total, '
+        + 'then perform 16 multiply-adds. The ratio goes from 2:1 to 1:2, four times better. Those 16 '
+        + 'accumulators stay in registers throughout, and register bandwidth is another order of magnitude '
+        + 'above shared memory.',
+        'This is where the stage-6 rule bites: **a thread-private array stays in registers only while every '
+        + 'subscript is a compile-time constant**. Declaring `float acc[4][4]` and indexing it with a loop '
+        + 'variable sends the whole thing to local memory and performance goes backwards. Real GEMM kernels '
+        + 'therefore write these accumulators as hand-unrolled scalars.',
+        'This layer is called the thread tile, and together with the threadblock tile it forms the seed of '
+        + 'the CUTLASS tiling hierarchy. Production libraries add a warp tile in between and squeeze further '
+        + 'with vectorised access and swizzling, but the underlying idea is exactly these two stages combined.'
+      )
+    ),
   },
 
   'intranet-k8s': {
