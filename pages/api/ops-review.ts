@@ -13,14 +13,14 @@ import { OPS_DIMENSION_KEYS } from '../../src/lib/engineering/types';
 import type { OpsReview } from '../../src/lib/engineering/types';
 
 /*
- * 上下文已经在客户端压成定长摘要了（src/lib/opslab/lab/aicontext.ts），复盘比对话
- * 多带一整条排查路径，量级仍在几十 KB。上限和其它 AI 路由保持一致的 8mb ——
- * 工程评审当年就是撞在 Next 默认的 1mb 上，一个中等项目直接 413。
+ * 请求体上限，理由同 ops-chat：上下文是客户端压出来的定长摘要，复盘比对话多带
+ * 一整条排查路径，实测也就几十 KB。2mb 是十倍余量，不用照抄工程评审那个 8mb ——
+ * 那个数是为「整个工作区」留的。responseLimit 关掉是因为回答是流式的。
  */
 export const config = {
   api: {
     responseLimit: false,
-    bodyParser: { sizeLimit: '8mb' },
+    bodyParser: { sizeLimit: '2mb' },
   },
 };
 
@@ -130,7 +130,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (!context || typeof context !== 'object') {
       return res.status(400).json({ error: 'Ops context is required' });
     }
-    if (!context.snapshot) {
+    // 查到字段一级：只判 snapshot 存在的话，一个 {} 会在排版时抛出去变成 500
+    const snapshot = context.snapshot as Partial<typeof context.snapshot> | undefined;
+    if (!snapshot || !Array.isArray(snapshot.problems) || !Array.isArray(snapshot.commands)) {
       return res.status(400).json({ error: 'A cluster snapshot is required to review an ops stage' });
     }
 

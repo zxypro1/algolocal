@@ -204,7 +204,7 @@ describe('排版给模型的上下文', () => {
       commands: Array.from({ length: 500 }, (_, i) => ({
         command: `c-${i}`, code: 0, output: 'q'.repeat(5000),
       })),
-      files: [], omitted: { objects: 0, namespaces: 0, commands: 0 },
+      files: [], omitted: { objects: 0, problems: 0, namespaces: 0, commands: 0, files: 0 },
     };
     const text = buildOpsContext({ snapshot }, 'zh');
     expect(text.length).toBeLessThan(41_000);
@@ -264,7 +264,7 @@ describe('复盘的上下文', () => {
       commands: Array.from({ length: 500 }, (_, i) => ({
         command: `c-${i}`, code: 0, output: 'q'.repeat(5000),
       })),
-      files: [], omitted: { objects: 0, namespaces: 0, commands: 0 },
+      files: [], omitted: { objects: 0, problems: 0, namespaces: 0, commands: 0, files: 0 },
     };
     const chat = buildOpsContext({ snapshot }, 'zh');
     const review = buildOpsContext({ snapshot }, 'zh', REVIEW_MAX_CHARS);
@@ -272,5 +272,130 @@ describe('复盘的上下文', () => {
     expect(review.length).toBeGreaterThan(chat.length);
     expect(review.length).toBeLessThan(REVIEW_MAX_CHARS + 100);
     expect(review).toContain('上下文过长');
+  });
+});
+
+/**
+ * 自审时抓出来的一组：快照把「不健康」报成了「健康」。
+ *
+ * 这比少给信息严重得多 —— 少给了模型至少知道自己看不全，报错了它会信心十足地
+ * 让学员去别处找。四个来源：describe() 对不认识的类型一律返回 ok；pending 不算
+ * 异常所以整个对象消失；被上限砍掉的异常对象被算进「省略的健康对象」；名额按
+ * 遍历顺序先到先得，学员正在问的那个反而挤不进去。
+ */
+describe('快照不能把不健康的说成健康的', () => {
+  it('describe() 不认识的类型，按通用的 condition / phase 判', async () => {
+    const world = await build({
+      namespaces: ['default'],
+      objects: [
+        {
+          apiVersion: 'v1', kind: 'PersistentVolumeClaim',
+          metadata: { name: 'data', namespace: 'default' },
+          spec: { storageClassName: 'nope' },
+          status: { phase: 'Pending' },
+        },
+        {
+          apiVersion: 'gateway.networking.k8s.io/v1', kind: 'Gateway',
+          metadata: { name: 'edge', namespace: 'default' },
+          spec: {},
+          status: { conditions: [{ type: 'Programmed', status: 'False', reason: 'NoListener' }] },
+        },
+      ] as never,
+    });
+    const snapshot = buildOpsSnapshot(world, { namespace: 'default' });
+
+    const pvc = snapshot.problems.find((item) => item.kind === 'PersistentVolumeClaim');
+    const gateway = snapshot.problems.find((item) => item.kind === 'Gateway');
+    expect(pvc?.status).toBe('pending');
+    expect(gateway?.status).toBe('error');
+    // detail 也不能再是干巴巴的类型名
+    expect(gateway?.detail).toContain('NoListener');
+  });
+
+  it('卡在 Pending 的裸 Pod 不能整个消失', async () => {
+    const world = await build({
+      namespaces: ['default'],
+      objects: [{
+        apiVersion: 'v1', kind: 'Pod',
+        metadata: { name: 'stuck', namespace: 'default' },
+        spec: { nodeSelector: { disk: 'nvme' }, containers: [{ name: 'app', image: APP_IMAGE }] },
+      }] as never,
+    });
+    const snapshot = buildOpsSnapshot(world, { namespace: 'default' });
+
+    expect(snapshot.problems.some((item) => item.name === 'stuck')).toBe(true);
+    expect(buildOpsContext({ snapshot }, 'zh')).toContain('stuck');
+  });
+
+  it('被砍掉的异常对象单独报，不混进「省略的健康对象」', async () => {
+    const world = await build(bigWorld(12, 10));
+    const snapshot = buildOpsSnapshot(world, { namespace: 'team-0' });
+    expect(snapshot.omitted.problems).toBeGreaterThan(0);
+
+    const text = buildOpsContext({ snapshot }, 'zh');
+    expect(text).toContain(`还有 ${snapshot.omitted.problems} 个状态不正常的对象没列出来`);
+    expect(text).toContain('不是全的');
+    // 健康那句报的数不许把异常的算进去
+    expect(text).toContain(`省略了 ${snapshot.omitted.objects} 个健康对象`);
+    expect(snapshot.omitted.objects).toBeLessThan(snapshot.omitted.problems + snapshot.omitted.objects);
+  });
+
+  it('异常名额先给当前命名空间，别处的噪音挤不掉学员正在问的那个', async () => {
+    const objects: unknown[] = [];
+    // 别处一堆坏的，数量足够占满 25 个名额
+    for (let i = 0; i < 40; i += 1) {
+      objects.push({
+        apiVersion: 'v1', kind: 'Pod',
+        metadata: { name: `noise-${i}`, namespace: 'kube-system' },
+        spec: { containers: [{ name: 'c', image: BAD_IMAGE }] },
+      });
+    }
+    objects.push({
+      apiVersion: 'v1', kind: 'Pod',
+      metadata: { name: 'portal', namespace: 'payments' },
+      spec: { containers: [{ name: 'c', image: BAD_IMAGE }] },
+    });
+    const world = await build({ namespaces: ['default', 'kube-system', 'payments'], objects: objects as never });
+
+    const snapshot = buildOpsSnapshot(world, { namespace: 'payments' });
+    expect(snapshot.problems).toHaveLength(25);
+    expect(snapshot.problems.some((item) => item.name === 'portal')).toBe(true);
+    // 而且排在最前面 —— 模型注意力最好的位置
+    expect(snapshot.problems[0].namespace).toBe('payments');
+  });
+});
+
+describe('文件挑选', () => {
+  it('.git 内部和 node_modules 不占预算，裁掉了几个要报出来', async () => {
+    const world = await build(bigWorld(1, 1));
+    const files: Record<string, string> = {
+      '/root/.git/objects/aa/bbccdd': 'x'.repeat(9000),
+      '/root/node_modules/foo/index.js': 'y'.repeat(9000),
+      '/root/infra/app.yaml': 'kind: Deployment',
+    };
+    const snapshot = buildOpsSnapshot(world, { files });
+
+    expect(snapshot.files.map((file) => file.path)).toEqual(['/root/infra/app.yaml']);
+    expect(snapshot.omitted.files).toBe(2);
+    expect(buildOpsContext({ snapshot }, 'zh')).toContain('另有 2 个文件没带上');
+  });
+
+  it('学员在改的 yaml 排在点文件前面，别被 .kube/config 吃掉预算', async () => {
+    const world = await build(bigWorld(1, 1));
+    const files: Record<string, string> = {
+      '/root/.bashrc': 'a'.repeat(6000),
+      '/root/.kube/config': 'b'.repeat(6000),
+      '/root/infra/app.yaml': 'kind: Deployment',
+    };
+    const snapshot = buildOpsSnapshot(world, { files });
+    expect(snapshot.files[0].path).toBe('/root/infra/app.yaml');
+  });
+});
+
+describe('排版是最后一站，请求体是外面来的', () => {
+  it('缺字段的 snapshot 不该抛，顶多是那块没内容', () => {
+    const broken = { namespace: 'default' } as never;
+    expect(() => buildOpsContext({ snapshot: broken }, 'zh')).not.toThrow();
+    expect(buildOpsContext({ snapshot: broken }, 'zh')).toContain('状态不正常的对象：没有');
   });
 });

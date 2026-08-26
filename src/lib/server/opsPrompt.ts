@@ -54,7 +54,23 @@ export function buildOpsContext(
 ): string {
   const zh = language === 'zh';
   const sections: string[] = [];
-  const snapshot = context.snapshot;
+  /**
+   * 排版之前先把形状补齐。
+   *
+   * 这个函数是路由的最后一站，而请求体是外面来的 —— 一个缺了 problems 的
+   * snapshot 不该让路由 500，它顶多是「这块没内容」。
+   */
+  const raw = context.snapshot;
+  const snapshot: OpsSnapshot | undefined = raw && {
+    ...raw,
+    nodes: raw.nodes ?? [],
+    workloads: raw.workloads ?? [],
+    problems: raw.problems ?? [],
+    events: raw.events ?? [],
+    commands: raw.commands ?? [],
+    files: raw.files ?? [],
+    omitted: { ...{ objects: 0, problems: 0, namespaces: 0, commands: 0, files: 0 }, ...(raw.omitted ?? {}) },
+  };
 
   sections.push(
     [
@@ -102,6 +118,20 @@ export function buildOpsContext(
 
     if (snapshot.problems.length) {
       lines.push('', zh ? '### 状态不正常的对象' : '### Objects not healthy', ...snapshot.problems.map(objectLine));
+      /**
+       * 超上限被砍掉的异常对象必须单独说。
+       *
+       * 这一行以前和「省略了 N 个健康对象」混在一起报 —— 于是问题列表被砍了
+       * 一半，模型收到的却是「其余都是健康的」。宁可让它知道自己看不全，
+       * 也不能让它以为看全了。
+       */
+      if (snapshot.omitted.problems > 0) {
+        lines.push(zh
+          ? `（还有 ${snapshot.omitted.problems} 个状态不正常的对象没列出来 —— 这个列表**不是全的**，`
+            + `让用户敲 kubectl get -A 自己看。）`
+          : `(${snapshot.omitted.problems} more unhealthy objects were not listed — this list is NOT complete. `
+            + `Ask the user to run kubectl get -A.)`);
+      }
     } else {
       lines.push('', zh ? '### 状态不正常的对象：没有' : '### Objects not healthy: none');
     }
@@ -137,12 +167,16 @@ export function buildOpsContext(
   }
 
   if (snapshot?.files.length) {
-    sections.push(
-      [
-        zh ? '## 机器磁盘上打开的文件' : '## Files open on the jump host',
-        ...snapshot.files.map((file) => `### ${file.path}\n\`\`\`yaml\n${file.content}\n\`\`\``),
-      ].join('\n')
-    );
+    const lines = [
+      zh ? '## 跳板机磁盘上的文件' : '## Files on the jump host',
+      ...snapshot.files.map((file) => `### ${file.path}\n\`\`\`yaml\n${file.content}\n\`\`\``),
+    ];
+    if (snapshot.omitted.files > 0) {
+      lines.push(zh
+        ? `（另有 ${snapshot.omitted.files} 个文件没带上。需要哪个就让用户 cat 出来贴给你。）`
+        : `(${snapshot.omitted.files} more files were not included. Ask the user to cat the one you need.)`);
+    }
+    sections.push(lines.join('\n'));
   }
 
   const report = context.report;

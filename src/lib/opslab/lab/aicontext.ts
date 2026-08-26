@@ -18,8 +18,14 @@ import type { StageRunReport } from '../../engineering/types';
 import { describe as describeObject } from './view';
 import type { OpsWorld } from './world';
 
-/** 最多带几个命名空间的常规对象（异常对象不受这个限制） */
-const MAX_NAMESPACES = 8;
+/**
+ * 最多带几个命名空间的常规对象（异常对象不受这个限制）。
+ *
+ * 得盖得住整个工程：intranet-k8s 有 15 个命名空间，之前这里是 8，按字母序
+ * 砍掉的正好是 istio-system、monitoring、velero 这些**关卡本身要讲的**那几个。
+ * 真正约束体积的是 MAX_WORKLOADS，这个数放宽不会把请求体撑起来。
+ */
+const MAX_NAMESPACES = 24;
 /** 常规工作负载最多带多少条 */
 const MAX_WORKLOADS = 40;
 /** 异常对象最多带多少条 */
@@ -51,6 +57,12 @@ const MAX_FILE_CHARS = 4000;
 const MAX_FILES_TOTAL = 10000;
 /** 失败用例最多带几条 */
 const MAX_FAILING_CASES = 6;
+/** 节点最多带多少个（自动伸缩那几关能把节点数拉起来） */
+const MAX_NODES = 20;
+/** 单条命令本身截到多少字符：粘一段 PEM 进终端也不该整段发出去 */
+const MAX_COMMAND_TEXT = 300;
+/** 单条失败用例的报错截到多少字符 */
+const MAX_CASE_ERROR = 800;
 
 /** 这些类型是「工作负载」，值得逐个列出来 */
 const WORKLOAD_KINDS = new Set([
@@ -89,7 +101,7 @@ export interface SnapshotCommand {
 }
 
 export interface OpsSnapshot {
-  /** kubeconfig 的 current-context 指着哪个命名空间 */
+  /** 学员正在看的那个命名空间（拓扑上那个下拉框选的，未必等于 kubeconfig 里的） */
   namespace: string;
   nodes: SnapshotObject[];
   workloads: SnapshotObject[];
@@ -98,8 +110,14 @@ export interface OpsSnapshot {
   events: SnapshotEvent[];
   commands: SnapshotCommand[];
   files: Array<{ path: string; content: string }>;
-  /** 被裁掉了多少东西，让模型知道自己看到的不是全部 */
-  omitted: { objects: number; namespaces: number; commands: number };
+  /**
+   * 被裁掉了多少东西，让模型知道自己看到的不是全部。
+   *
+   * `objects` 和 `problems` 必须分开报：前者是「健康、故意不列」，后者是
+   * 「不健康、但超出上限被砍了」。混在一起报成「省略了 N 个健康对象」，
+   * 等于跟模型撒谎说问题列表是全的。
+   */
+  omitted: { objects: number; problems: number; namespaces: number; commands: number; files: number };
 }
 
 function truncate(text: string, limit: number): string {
@@ -125,7 +143,7 @@ function toSnapshot(object: KubeObject): SnapshotObject {
 }
 
 export interface OpsSnapshotOptions {
-  /** IDE 里打开的、以及这一关自带的文件 */
+  /** 跳板机磁盘上的文件（整块盘，下面会挑和裁） */
   files?: Record<string, string>;
   /** 终端历史 */
   history?: CommandRecord[];
@@ -159,7 +177,11 @@ export function buildOpsSnapshot(world: OpsWorld, options: OpsSnapshotOptions = 
   const allNamespaces = cluster.registry
     .list(cluster.scheme.mustGet({ group: '', version: 'v1', resource: 'namespaces' })).items
     .map((item) => item.metadata.name!)
-    .sort((a, b) => (a === namespace ? -1 : b === namespace ? 1 : a < b ? -1 : 1));
+    .sort((a, b) => {
+      if (a === namespace) return b === namespace ? 0 : -1;
+      if (b === namespace) return 1;
+      return a === b ? 0 : a < b ? -1 : 1;
+    });
   const detailed = new Set(allNamespaces.slice(0, MAX_NAMESPACES));
 
   for (const definition of cluster.scheme.list()) {
@@ -174,10 +196,15 @@ export function buildOpsSnapshot(world: OpsWorld, options: OpsSnapshotOptions = 
         continue;
       }
 
-      const unhealthy = summary.status === 'error' || summary.status === 'warn';
-      if (unhealthy) {
-        if (problems.length < MAX_PROBLEMS) problems.push(summary);
-        else omittedObjects += 1;
+      /**
+       * 不是 ok 就算异常 —— pending 也要算。
+       *
+       * 之前只收 error 和 warn，于是一个卡在 Pending 的裸 Pod（ops 关卡里
+       * 最常见的症状）会一路掉到下面的 else 里被当成「健康对象」省掉，
+       * 模型收到的是「状态不正常的对象：没有」。
+       */
+      if (summary.status !== 'ok') {
+        problems.push(summary);
         continue;
       }
 
@@ -195,6 +222,21 @@ export function buildOpsSnapshot(world: OpsWorld, options: OpsSnapshotOptions = 
     }
   }
 
+  /**
+   * 异常对象先排序再砍，不能按遍历顺序先到先得。
+   *
+   * 注册表的遍历顺序是按资源类型来的，Pod 排在 Deployment 前面 —— 先到先得
+   * 的话，别处命名空间的一堆 Pod 能把 25 个名额占满，而学员正在问的那个
+   * 对象根本进不了请求。排序键：先当前命名空间，再按坏的程度。
+   */
+  const severity: Record<string, number> = { error: 0, warn: 1, pending: 2, ok: 3 };
+  problems.sort((a, b) => {
+    const mine = (item: SnapshotObject) => (item.namespace === namespace ? 0 : 1);
+    return mine(a) - mine(b) || severity[a.status] - severity[b.status];
+  });
+  const omittedProblems = Math.max(0, problems.length - MAX_PROBLEMS);
+  problems.length = Math.min(problems.length, MAX_PROBLEMS);
+
   const eventDefinition = cluster.scheme.get({ group: '', version: 'v1', resource: 'events' });
   if (eventDefinition) {
     const all = cluster.registry.list(eventDefinition).items;
@@ -203,7 +245,11 @@ export function buildOpsSnapshot(world: OpsWorld, options: OpsSnapshotOptions = 
       const warn = (item: KubeObject) => ((item as Record<string, unknown>).type === 'Warning' ? 0 : 1);
       const byType = warn(a) - warn(b);
       if (byType !== 0) return byType;
-      return (b.metadata.creationTimestamp ?? '') < (a.metadata.creationTimestamp ?? '') ? -1 : 1;
+      // 并列时必须返回 0：模拟时钟会让一批事件共用同一个时间戳，
+      // 恒返回 1 的比较器在这种情况下顺序是未定义的
+      const left = a.metadata.creationTimestamp ?? '';
+      const right = b.metadata.creationTimestamp ?? '';
+      return left === right ? 0 : left < right ? 1 : -1;
     });
     for (const event of sorted.slice(0, MAX_EVENTS)) {
       const raw = event as unknown as Record<string, any>;
@@ -220,32 +266,55 @@ export function buildOpsSnapshot(world: OpsWorld, options: OpsSnapshotOptions = 
   const history = options.history ?? [];
   const recent = history.slice(-limits.commands);
   const commands: SnapshotCommand[] = recent.map((record) => ({
-    command: record.command,
+    // 命令本身也截：往终端里粘一段 PEM 或者 base64 的 secret 是真会发生的
+    command: truncate(record.command, MAX_COMMAND_TEXT),
     code: record.code,
     output: outputOf(record, limits.commandOutput),
   }));
 
+  /**
+   * 文件。收到的是**整块磁盘**，不是「IDE 里打开的那几个」。
+   *
+   * 所以顺序很要紧：磁盘是按路径排序的，照单全收的话预算会被排在最前面的
+   * 点文件吃掉（`/root/.kube/config` 永远第一个），而学员正在改的
+   * `/root/infra/*.yaml` 反倒挤不进去；`git clone` 之后 `.git/objects/**`
+   * 更是能塞满整个预算。所以先把这类噪音排掉，再按「像不像学员在编辑的东西」
+   * 排序。裁掉了几个也要报出来，别让模型以为它看到的是全部。
+   */
+  const NOISE = /(^|\/)\.git\/|(^|\/)node_modules\/|\.(lock|log)$/;
+  const INTERESTING = /\.(ya?ml|json|conf|md|sh|toml|ini)$/;
+  const candidates = Object.entries(options.files ?? {})
+    .filter(([path]) => !NOISE.test(path))
+    .sort(([a], [b]) => {
+      const rank = (path: string) => (INTERESTING.test(path) ? 0 : 1);
+      return rank(a) - rank(b) || (a === b ? 0 : a < b ? -1 : 1);
+    });
+
   let filesBudget = MAX_FILES_TOTAL;
   const files: Array<{ path: string; content: string }> = [];
-  for (const [path, content] of Object.entries(options.files ?? {})) {
-    if (filesBudget <= 0) break;
+  let omittedFiles = 0;
+  for (const [path, content] of candidates) {
+    if (filesBudget <= 0) { omittedFiles += 1; continue; }
     const body = truncate(content, Math.min(MAX_FILE_CHARS, filesBudget));
     filesBudget -= body.length;
     files.push({ path, content: body });
   }
+  omittedFiles += Object.keys(options.files ?? {}).length - candidates.length;
 
   return {
     namespace,
-    nodes,
+    nodes: nodes.slice(0, MAX_NODES),
     workloads,
     problems,
     events,
     commands,
     files,
     omitted: {
-      objects: omittedObjects,
+      objects: omittedObjects + Math.max(0, nodes.length - MAX_NODES),
+      problems: omittedProblems,
       namespaces: Math.max(0, allNamespaces.length - detailed.size),
       commands: Math.max(0, history.length - recent.length),
+      files: omittedFiles,
     },
   };
 }
@@ -260,8 +329,12 @@ export function summarizeReport(report: StageRunReport | null): OpsReportSummary
     failing: report.cases
       .filter((item) => !item.passed)
       .slice(0, MAX_FAILING_CASES)
-      .map((item) => ({ name: [item.suite, item.name].filter(Boolean).join(' > '), error: item.error ?? '' })),
-    error: report.error,
+      .map((item) => ({
+        name: [item.suite, item.name].filter(Boolean).join(' > '),
+        // 断言在命令输出上的用例，报错里会带着整段输出
+        error: truncate(item.error ?? '', MAX_CASE_ERROR),
+      })),
+    error: report.error ? truncate(report.error, MAX_CASE_ERROR) : undefined,
   };
 }
 

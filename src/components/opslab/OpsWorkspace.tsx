@@ -121,6 +121,16 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
   }, [registerClearResults]);
 
   /**
+   * 复盘的结论只对「这一关的这个世界」成立。
+   *
+   * OpsWorkspace 换关卡时不重挂（关卡在 session 里），复盘的结果又是它自己的
+   * 局部状态 —— 不管的话，学员翻到下一关，看到的还是上一关的评分和问题列表，
+   * 而且被当成这一关的。「重置世界」同理：结论挂在一个已经不存在的世界上。
+   * 用 key 把这两件事一起解决。
+   */
+  const reviewKey = `${stage?.id ?? 'none'}:${ops.generation}`;
+
+  /**
    * 自测入口，只在开发构建里挂。
    *
    * 终端的输入走的是真键盘事件（xterm 自己解析），自动化环境很难可靠地
@@ -337,6 +347,7 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                 <ScrollArea h="100%" type="auto" p="sm">
                   <ErrorBoundary fallback={renderPanelError}>
                     <OpsReview
+                      key={reviewKey}
                       projectTitle={project.title}
                       projectSummary={project.summary}
                       stageTitle={stage.title}

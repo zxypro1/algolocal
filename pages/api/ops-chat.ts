@@ -12,15 +12,16 @@ import { buildOpsContext, OpsContext } from '../../src/lib/server/opsPrompt';
 /*
  * 请求体上限。
  *
- * ops 的上下文已经在客户端压成定长摘要了（src/lib/opslab/lab/aicontext.ts），
- * 正常一条请求几十 KB。这里仍然把上限抬到 8mb，和工程对话保持一致 ——
- * 工程对话当年就是撞在 Next 默认的 1mb 上，一个中等项目直接 413。
+ * 不照抄工程对话那个 8mb：那边发的是整个工作区，大小由项目决定，所以撞过
+ * Next 默认的 1mb（一个中等项目直接 413）。这边不一样 —— 上下文在客户端就被
+ * 压成了定长摘要（src/lib/opslab/lab/aicontext.ts），实测几十 KB，测试盯着
+ * 200KB 这条线。给到 2mb 是十倍余量，再往上只是白开一个更大的解析面。
  * responseLimit 关掉是因为回答是流式的。
  */
 export const config = {
   api: {
     responseLimit: false,
-    bodyParser: { sizeLimit: '8mb' },
+    bodyParser: { sizeLimit: '2mb' },
   },
 };
 

@@ -210,6 +210,30 @@ export function describe(object: KubeObject): { detail: string; status: Topology
           : phase === 'Failed' ? 'error' : 'pending',
       };
     }
+    /** DaemonSet 没有 replicas：它的「期望」是能调度到几个节点上 */
+    case 'DaemonSet': {
+      const ready = Number(status.numberReady ?? 0);
+      const desired = Number(status.desiredNumberScheduled ?? 0);
+      return {
+        detail: `${ready}/${desired}`,
+        status: desired === 0 ? 'pending' : ready === desired ? 'ok' : ready === 0 ? 'error' : 'warn',
+      };
+    }
+    case 'MachineDeployment': {
+      const ready = Number(status.readyReplicas ?? 0);
+      const desired = Number(spec.replicas ?? 0);
+      return {
+        detail: `${ready}/${desired}`,
+        status: desired === 0 ? 'pending' : ready === desired ? 'ok' : ready === 0 ? 'error' : 'warn',
+      };
+    }
+    case 'Job': {
+      const succeeded = Number(status.succeeded ?? 0);
+      const failed = Number(status.failed ?? 0);
+      const wanted = Number(spec.completions ?? 1);
+      if (failed > 0) return { detail: `${succeeded}/${wanted}，失败 ${failed}`, status: 'error' };
+      return { detail: `${succeeded}/${wanted}`, status: succeeded >= wanted ? 'ok' : 'pending' };
+    }
     case 'Service': {
       const type = String(spec.type ?? 'ClusterIP');
       return { detail: type, status: 'ok' };
@@ -224,8 +248,49 @@ export function describe(object: KubeObject): { detail: string; status: Topology
       };
     }
     default:
-      return { detail: object.kind, status: 'ok' };
+      return describeGeneric(object, status);
   }
+}
+
+/**
+ * 没写进上面 switch 的类型，按 Kubernetes 的通用写法读。
+ *
+ * 这里原来直接 `return { status: 'ok' }` —— 于是 PVC、Ingress、Gateway、
+ * Certificate、ServiceMonitor 这些类型**坏成什么样都是绿的**，拓扑图上看不出来，
+ * 喂给模型的快照还会明说「状态不正常的对象：没有」。助手于是信心十足地
+ * 让学员去别处找，而问题就在那个被判成健康的对象上。
+ *
+ * 「好没好」在 Kubernetes 里就两种写法：一个 True/False 的 condition，
+ * 或者一个 phase。照着这两种读，读不出来才退回 ok。
+ */
+const HEALTHY_CONDITIONS = new Set([
+  'Ready', 'Available', 'Accepted', 'Programmed', 'Established', 'Synced', 'Approved', 'Bound',
+]);
+const HEALTHY_PHASES = new Set(['Bound', 'Active', 'Available', 'Succeeded', 'Running', 'Completed']);
+const BROKEN_PHASES = new Set(['Failed', 'Lost']);
+
+function describeGeneric(object: KubeObject, status: Record<string, unknown>) {
+  const conditions = (status.conditions ?? []) as Array<{ type?: string; status?: string; reason?: string }>;
+  const known = conditions.filter((item) => item.type && HEALTHY_CONDITIONS.has(item.type));
+
+  const bad = known.find((item) => item.status !== 'True');
+  if (bad) {
+    return {
+      detail: `${bad.type}=${bad.status ?? 'Unknown'}${bad.reason ? `（${bad.reason}）` : ''}`,
+      // False 是明确的「不行」，Unknown 是「还不知道」
+      status: (bad.status === 'False' ? 'error' : 'pending') as TopologyStatus,
+    };
+  }
+
+  const phase = status.phase ? String(status.phase) : '';
+  if (phase) {
+    if (BROKEN_PHASES.has(phase)) return { detail: phase, status: 'error' as TopologyStatus };
+    return { detail: phase, status: (HEALTHY_PHASES.has(phase) ? 'ok' : 'pending') as TopologyStatus };
+  }
+
+  if (known.length) return { detail: `${known[0].type}=True`, status: 'ok' as TopologyStatus };
+  // 真的没有状态可读（ConfigMap、Secret、NetworkPolicy 这些本来就没有）
+  return { detail: object.kind, status: 'ok' as TopologyStatus };
 }
 
 /** 点一下拓扑上的节点，往终端里插这条命令 —— 只读检查，不改状态 */
