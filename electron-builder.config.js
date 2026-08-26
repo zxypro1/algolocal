@@ -47,6 +47,13 @@ module.exports = {
     'styles/**/*',
     '.next/**/*',
     'public/**/*',
+    // public/opslab 是构建产物的落脚点，不是源码目录。这里改成白名单：
+    // 通配符会把别人工作区里遗留的旧产物一起打进包 —— 早先那个 120MB 的
+    // kubectl.wasm（spike 时期的单 CLI 版本，代码里已经零引用）就是这么混进去的。
+    '!public/opslab/*.wasm',
+    'public/opslab/opslab-cli.wasm',
+    'public/opslab/web-tree-sitter.wasm',
+    'public/opslab/tree-sitter-bash.wasm',
     'problems/**/*',
     'projects/**/*',
     'locales/**/*',
@@ -114,10 +121,13 @@ module.exports = {
     // 需要直接文件访问的资源
     'public/problems.json',
     'public/projects.json',
-    // opslab 的 WebAssembly 制品（真 kubectl 等）必须解包：
+    // opslab 的 WebAssembly 制品（真 kubectl 与 helm）必须解包：
     // 一百多 MB 的文件留在 asar 里，WebAssembly.compileStreaming 读不到真实文件，
     // 只能整份读进内存再编译，启动慢一倍、峰值内存也翻倍。
-    'public/opslab/*.wasm',
+    // 同样逐个列名，理由见上面 files 里那段。
+    'public/opslab/opslab-cli.wasm',
+    'public/opslab/web-tree-sitter.wasm',
+    'public/opslab/tree-sitter-bash.wasm',
     'public/icon.png',
     'public/favicon.ico'
   ],

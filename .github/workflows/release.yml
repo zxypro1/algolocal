@@ -32,11 +32,63 @@ jobs:
         with:
           myToken: ${{ secrets.GITHUB_TOKEN }}
 
+  # 构建 opslab 的多合一 CLI（真 kubectl + helm，编译成 WebAssembly）
+  #
+  # 产物约 136MB，不进仓库（见 .gitignore），所以必须在 CI 里现编 ——
+  # 少了它，安装包里 /opslab/opslab-cli.wasm 会 404，整个 ops 工作台一条命令都跑不了。
+  #
+  # 只编一次给四个平台共用：产物是 GOOS=js GOARCH=wasm 交叉编译出来的，
+  # 跟 runner 的操作系统无关，所以在三种 runner 上各编一遍纯属浪费。
+  build-wasm:
+    name: Build opslab WASM
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 脚本生成的 go.mod 要求 go 1.26；1.27 是本地验证过能复现产物的那个版本
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          # 构建脚本是现生成 go.mod 的，仓库里没有 go.sum，开缓存只会报警告
+          cache: false
+
+      - name: Build opslab CLI WASM
+        run: bash scripts/build-opslab-wasm.sh
+
+      # 产物没出来就当场失败，别让后面四个 job 白跑一遍再发一个坏包
+      - name: Verify build output
+        run: |
+          ls -l public/opslab/
+          test -s public/opslab/opslab-cli.wasm
+          test -s public/opslab/wasm_exec.js
+          SIZE=$(stat -c%s public/opslab/opslab-cli.wasm)
+          echo "opslab-cli.wasm: $SIZE bytes"
+          # 正常在 130MB 上下；小于 50MB 基本可以断定链接阶段出了问题
+          if [ "$SIZE" -lt 50000000 ]; then
+            echo "::error::opslab-cli.wasm is only $SIZE bytes — build looks truncated."
+            exit 1
+          fi
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opslab-wasm
+          # 两个文件的公共前缀是 public/opslab，所以 artifact 里就是这两个文件名，
+          # 下载时 path: public/opslab 正好落回原位
+          path: |
+            public/opslab/opslab-cli.wasm
+            public/opslab/wasm_exec.js
+          if-no-files-found: error
+          retention-days: 1
+
   # 构建 macOS 版本
   build-macos:
     name: Build macOS
     runs-on: macos-latest
-    needs: changelog
+    needs: [changelog, build-wasm]
     strategy:
       matrix:
         arch: [x64, arm64]
@@ -57,6 +109,21 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # build-wasm 编好的多合一 CLI。落回 public/opslab/，electron-builder 才打得进包。
+      - name: Download opslab WASM
+        uses: actions/download-artifact@v4
+        with:
+          name: opslab-wasm
+          path: public/opslab
+
+      # 路径错一格就是一个功能全灭的包，所以这里当场验，而不是等发出去才发现
+      - name: Verify opslab WASM is in place
+        shell: bash
+        run: |
+          ls -l public/opslab/
+          test -s public/opslab/opslab-cli.wasm
+          test -s public/opslab/wasm_exec.js
 
       - name: Generate icons
         run: npm run icons:generate
@@ -174,7 +241,7 @@ jobs:
   build-windows:
     name: Build Windows
     runs-on: windows-latest
-    needs: changelog
+    needs: [changelog, build-wasm]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -187,6 +254,21 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # build-wasm 编好的多合一 CLI。落回 public/opslab/，electron-builder 才打得进包。
+      - name: Download opslab WASM
+        uses: actions/download-artifact@v4
+        with:
+          name: opslab-wasm
+          path: public/opslab
+
+      # 路径错一格就是一个功能全灭的包，所以这里当场验，而不是等发出去才发现
+      - name: Verify opslab WASM is in place
+        shell: bash
+        run: |
+          ls -l public/opslab/
+          test -s public/opslab/opslab-cli.wasm
+          test -s public/opslab/wasm_exec.js
 
       - name: Generate icons
         run: npm run icons:generate
@@ -212,7 +294,7 @@ jobs:
   build-linux:
     name: Build Linux
     runs-on: ubuntu-latest
-    needs: changelog
+    needs: [changelog, build-wasm]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -225,6 +307,21 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # build-wasm 编好的多合一 CLI。落回 public/opslab/，electron-builder 才打得进包。
+      - name: Download opslab WASM
+        uses: actions/download-artifact@v4
+        with:
+          name: opslab-wasm
+          path: public/opslab
+
+      # 路径错一格就是一个功能全灭的包，所以这里当场验，而不是等发出去才发现
+      - name: Verify opslab WASM is in place
+        shell: bash
+        run: |
+          ls -l public/opslab/
+          test -s public/opslab/opslab-cli.wasm
+          test -s public/opslab/wasm_exec.js
 
       - name: Generate icons
         run: npm run icons:generate
