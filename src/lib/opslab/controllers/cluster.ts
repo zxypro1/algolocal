@@ -35,6 +35,9 @@ import {
 } from '../observability';
 import { ROLLOUT_RESOURCES, RolloutController } from '../rollouts';
 import { DISRUPTION_RESOURCES, PdbController, evictionVerdict } from '../disruption';
+import {
+  STORAGE_RESOURCES, StorageController, VolumeStore, createDefaultStorageClassDefaulter,
+} from '../storage';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
@@ -138,6 +141,14 @@ export class Cluster {
   /** 网络：DNS、Service 转发、NetworkPolicy 判定，全都读 apiserver 里的对象 */
   readonly network: Network;
 
+  /**
+   * 卷上的字节。
+   *
+   * 不放在 apiserver 里，因为它本来就不在那儿 —— PV 只是一条元数据记录，
+   * 数据在存储后端上。这个区别是「备份了对象图，恢复出来是空盘」的根。
+   */
+  readonly volumes = new VolumeStore();
+
   /** 监控。世界没配 metrics 就是 undefined。 */
   prometheus?: PrometheusController;
   /** 由外面装上（createOpsWorld 会接一个 Pod 里的 shell 进来） */
@@ -159,6 +170,7 @@ export class Cluster {
       ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES, ...ARGOCD_RESOURCES,
       ...MESH_RESOURCES, ...RBAC_RESOURCES, ...KYVERNO_RESOURCES, ...ESO_RESOURCES,
       ...OBSERVABILITY_RESOURCES, ...DISRUPTION_RESOURCES, ...ROLLOUT_RESOURCES,
+      ...STORAGE_RESOURCES,
       ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
@@ -227,6 +239,11 @@ export class Cluster {
     // 这样 `kubectl expose` 之后紧跟 `kubectl get svc`，IP 已经在那儿了
     this.registry.addDefaulter(createServiceIpDefaulter({
       registry: this.registry, scheme: this.scheme, cidr: options.serviceCidr,
+    }));
+
+    // 同理：PVC 的 storageClassName 由 apiserver 补默认值，不是控制器事后写的
+    this.registry.addDefaulter(createDefaultStorageClassDefaulter({
+      registry: this.registry, scheme: this.scheme,
     }));
 
     /**
@@ -615,6 +632,11 @@ export class Cluster {
       new EndpointsController(context),
       // PDB 的状态。`kubectl get pdb` 里 ALLOWED DISRUPTIONS 那一列就是它写的。
       new PdbController(context),
+      /**
+       * 绑定与回收。静态绑定是控制面自带的，所以这个控制器无条件跑；
+       * **动态供给**要看 CSI 驱动这个工作负载在不在（见 StorageController）。
+       */
+      new StorageController(context, { volumes: this.volumes }),
       // 入口：控制器自己是集群里的一个工作负载，卸载掉 Gateway 就不再被 program
       new GatewayController(context),
       // 内网 PKI：同样是集群里的一个工作负载，卸载掉就不再签发
