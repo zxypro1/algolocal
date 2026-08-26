@@ -5745,6 +5745,46 @@
               9090
             ]
           },
+          "quay.io/argoproj/argo-rollouts:v1.8.3": {
+            "pullMs": 400,
+            "startupMs": 600,
+            "readyAfterMs": 300
+          },
+          "harbor.corp.internal/team/portal:1.5.0": {
+            "pullMs": 400,
+            "startupMs": 600,
+            "readyAfterMs": 300,
+            "listens": [
+              8080
+            ],
+            "routes": {
+              "/": 200,
+              "/healthz": 200,
+              "/readyz": 200
+            },
+            "memoryUsage": "180Mi",
+            "handlesSigterm": true,
+            "runAsUser": 10001,
+            "requestsPerSecond": 40
+          },
+          "harbor.corp.internal/team/portal:1.6.0": {
+            "pullMs": 400,
+            "startupMs": 600,
+            "readyAfterMs": 300,
+            "listens": [
+              8080
+            ],
+            "routes": {
+              "/": 200,
+              "/healthz": 200,
+              "/readyz": 200
+            },
+            "memoryUsage": "180Mi",
+            "handlesSigterm": true,
+            "runAsUser": 10001,
+            "requestsPerSecond": 40,
+            "errorRatio": 0.6
+          },
           "harbor.corp.internal/team/reports:2.3.0": {
             "pullMs": 500,
             "startupMs": 800,
@@ -12255,6 +12295,534 @@
         "primer": {
           "zh": "`Prometheus` 是**拉**模型：它按配置找到一批目标，每隔一段时间（默认 15 秒）去每个目标的 `/metrics` 上采一次。数据模型很小：一条`序列`由指标名加一组标签唯一确定，值按时间点存。这个模型带来两个直接后果：两次采样之间发生的事看不见（只活十秒的 Pod 可能一个点都没有），以及目标挂掉之后它此前的指标还会在图上停留一个回看窗口（默认五分钟）才消失。\n\n在 Kubernetes 里，采集配置写成 `ServiceMonitor`：按标签选中一批 Service，去它们后面的 Pod 上拉。这里有个**两层选择器**的坑：Prometheus 实例自己有一个 `serviceMonitorSelector`，先由它选中 ServiceMonitor，再由 ServiceMonitor 的 `selector` 选中 Service。少配任何一层的结果都是一条指标都采不到，而两个对象看起来都完全正常。`up` 这个指标是 Prometheus 自己合成的，不来自目标，它是判断「采不采得到」的第一手依据。\n\n`PromQL` 里最要紧的区分是 `counter` 与 `gauge`。counter 只增不减（请求总数、错误总数），直接看它的值没有意义，要用 `rate(x[5m])` 求每秒增量；gauge 可以上下浮动（内存、队列长度），直接看瞬时值。错误率是**两个 rate 相除**：`sum(rate(errors[5m])) by (job) / sum(rate(total[5m])) by (job)`。两侧必须聚合到同一组标签上，否则配不上，表达式返回空，而返回空的告警永远不会触发，也不会报错。另外比较运算符是`过滤`不是求布尔值：`up == 0` 返回的是那些确实为 0 的序列。\n\n告警规则写在 `PrometheusRule` 里，`expr` 加 `for`。`for` 的意思是「条件持续成立这么久才真的告警」，中间处于 `pending`；条件一旦不成立就整条清掉，所以抖动不会累积。两条实践值得记：一是 apiserver 收 PrometheusRule 时**不校验表达式**，写错了照样收下，所以上线前要 `promtool check rules` 加 `promtool query instant` 各跑一遍；二是`告症状不告原因`：「错误率超过 5%」用户感受得到，「某个 Pod 内存高」不一定有影响，按原因告警的系统很快就没人看了。",
           "en": "`Prometheus` is a **pull** model: it discovers a set of targets and scrapes `/metrics` on each at a fixed interval, 15 seconds by default. The data model is tiny: a `series` is identified by a metric name plus a set of labels, with values stored per timestamp. Two consequences follow directly. Anything happening between scrapes is invisible, so a pod that lived ten seconds may contribute no samples at all. And after a target dies, its earlier metrics linger for one lookback window (five minutes by default) before disappearing.\n\nIn Kubernetes the scrape config is a `ServiceMonitor`: select Services by label, scrape the pods behind them. There is a **two-selector** trap here: the Prometheus instance has its own `serviceMonitorSelector` which picks ServiceMonitors, and each ServiceMonitor has a `selector` which picks Services. Missing either layer collects nothing, while both objects look perfectly healthy. The `up` metric is synthesised by Prometheus rather than coming from the target, which makes it the first thing to check when nothing appears.\n\nThe distinction that matters most in `PromQL` is `counter` versus `gauge`. A counter only increases (requests served, errors returned) and its raw value means little; use `rate(x[5m])` for per-second increase. A gauge moves both ways (memory, queue depth) and is read directly. An error rate is **one rate divided by another**: `sum(rate(errors[5m])) by (job) / sum(rate(total[5m])) by (job)`. Both sides must be aggregated to the same label set or they will not match and the expression returns nothing, and an alert whose expression returns nothing never fires and never complains. Note also that comparison operators `filter` rather than produce booleans: `up == 0` returns the series that really are zero.\n\nAlerting rules live in a `PrometheusRule` as an `expr` plus a `for`. The `for` means the condition must hold that long before the alert really fires, staying `pending` meanwhile, and the whole thing clears the moment the condition stops holding, so blips do not accumulate. Two practices worth keeping: the apiserver does **not validate expressions** when accepting a PrometheusRule, so run `promtool check rules` and `promtool query instant` before shipping; and `alert on symptoms, not causes`, because users feel \"error rate above 5%\" while \"this pod uses a lot of memory\" may mean nothing, and cause-based alerting quickly stops being read."
+        }
+      },
+      {
+        "id": "progressive-delivery",
+        "title": {
+          "zh": "让坏版本自己退回去",
+          "en": "Make a Bad Release Roll Itself Back"
+        },
+        "goal": {
+          "zh": "上周那个坏版本是人肉发现的：先有人报「打不开」，再有人去看指标，\n最后手工回滚 —— 中间隔了四十分钟。\n\n门户已经从 Deployment 换成了 `Rollout`，但它现在的策略只是\n「分两步把新版本铺满」，不看任何指标。也就是说坏版本照样能一路铺到 100%。\n\n要做两件事：把**分析**加进发布流程，让坏版本自己退回去；\n以及给门户配一个 `PodDisruptionBudget`，让节点维护不至于把服务打空。\n\n## 通关标准\n\n1. 发一个好版本（`harbor.corp.internal/team/portal:1.5.0`）能走完全流程，最终 Healthy；\n2. 发一个坏版本（`harbor.corp.internal/team/portal:1.6.0`）会在分析那一步被拦下，\n   **自动回到稳定版**，而且稳定版的副本数是满的；\n3. 判据用的是**错误率**（rate 相除），不是裸计数；\n4. 有 PDB，且 `kubectl drain` 一个节点时不会把可用副本打到 3 以下。\n\n## 会用到的命令\n\n```bash\nkubectl apply -f /root/infra/canary.yaml\nkubectl get rollout portal -n payments\nkubectl describe rollout portal -n payments\nkubectl get analysisrun -n payments\nkubectl get pdb -n payments\nkubectl drain node-a1 --ignore-daemonsets --delete-emptydir-data --timeout=60s\n```\n",
+          "en": "Last week's bad release was found by a human: someone reported \"it will not\nload\", someone else looked at the metrics, and someone rolled it back by hand.\nForty minutes in total.\n\nThe portal is already a `Rollout` rather than a Deployment, but its current\nstrategy only spreads the new version in two steps without looking at any\nmetric. A bad version therefore reaches 100% just as happily as a good one.\n\nTwo things to do: add **analysis** to the release process so a bad version rolls\nitself back, and give the portal a `PodDisruptionBudget` so node maintenance\ncannot drain the service to nothing.\n\n## Done when\n\n1. a good release (`harbor.corp.internal/team/portal:1.5.0`) completes and ends Healthy;\n2. a bad release (`harbor.corp.internal/team/portal:1.6.0`) is stopped at the analysis step and\n   **rolls back to the stable version** with a full replica count;\n3. the criterion is an **error rate** (one rate divided by another), not a raw\n   counter;\n4. a PDB exists, and draining a node cannot take available replicas below three.\n\n## Commands you will need\n\n```bash\nkubectl apply -f /root/infra/canary.yaml\nkubectl get rollout portal -n payments\nkubectl describe rollout portal -n payments\nkubectl get analysisrun -n payments\nkubectl get pdb -n payments\nkubectl drain node-a1 --ignore-daemonsets --delete-emptydir-data --timeout=60s\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "好版本走得完",
+            "en": "A good release completes"
+          },
+          {
+            "zh": "坏版本自己退回去",
+            "en": "A bad release rolls itself back"
+          },
+          {
+            "zh": "节点维护打不空服务",
+            "en": "Node maintenance cannot empty the service"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "金丝雀的判据和告警的判据应该是同一个表达式。不然会出现「发布时看着没事、上线后告警响」—— 那说明你在两个地方定义了两套「什么叫坏」。",
+            "en": "The canary criterion and the alerting criterion should be the same expression. Otherwise you get \"looked fine during rollout, paged after\", which means you defined \"bad\" twice, differently."
+          },
+          {
+            "zh": "`initialDelay` 不是可选的。金丝雀刚起来的那几秒，它的计数器还是 0、采样点还不够两个，这时候算出来的是**稳定版的**错误率 —— 看着很好，然后就把坏版本放行了。",
+            "en": "`initialDelay` is not optional. In the first seconds a canary counter is still zero with fewer than two samples, so what you compute is the **stable** version error rate. It looks great, and the bad version sails through."
+          },
+          {
+            "zh": "中止不是「停在原地」，是回到稳定版：金丝雀缩到 0、稳定版拉回满副本。判定会检查回滚之后副本数是满的 —— 停在半路的服务只有一半容量。",
+            "en": "Aborting does not mean stopping in place, it means returning to stable: the canary scales to zero and stable goes back to full. The grader checks the replica count after rollback, because a rollout stopped halfway leaves half the capacity."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "判据写成 `sum(rate(http_requests_total{code=~\"5..\"}[5m])) > 0`。任何一个 5xx 都会让发布失败 —— 而真实系统永远有零星的 5xx，于是没有任何版本发得出去，最后大家把分析这一步删了。判据要用**比例**。",
+            "en": "Writing the criterion as `sum(rate(http_requests_total{code=~\"5..\"}[5m])) > 0`. Any single 5xx fails the release, real systems always have a few, so nothing ever ships and eventually somebody deletes the analysis step. Use a **ratio**."
+          },
+          {
+            "zh": "配了 PDB 就以为副本数不会掉下来。PDB 只管**自愿中断**（维护、缩容、驱逐），管不了节点掉电、OOMKill、被抢占。它保证的是「不会被人为打空」，不是「永远有 N 个」。",
+            "en": "Assuming a PDB keeps the replica count up. It governs **voluntary** disruptions (maintenance, scale-down, eviction) and does nothing about a node losing power, an OOMKill, or preemption. It guarantees nobody drains you to zero, not that N always exist."
+          },
+          {
+            "zh": "`minAvailable` 写成和副本数一样大。这样任何驱逐都会被拒，节点永远维护不了 —— drain 会一直重试到超时。留出至少一个可中断的名额，否则 PDB 从「保护」变成「阻塞」。",
+            "en": "Setting `minAvailable` equal to the replica count. Every eviction is then refused and the node can never be maintained: drain retries until it times out. Leave at least one disruptable slot, or the PDB stops protecting and starts blocking."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "cilium",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cilium"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cilium"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cilium"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "cilium-agent",
+                        "image": "quay.io/cilium/cilium:v1.19.2",
+                        "ports": [
+                          {
+                            "containerPort": 9962
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "Certificate",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "secretName": "portal-tls",
+                "duration": "2160h",
+                "renewBefore": "720h",
+                "commonName": "portal.corp.internal",
+                "dnsNames": [
+                  "portal.corp.internal"
+                ],
+                "issuerRef": {
+                  "name": "corp-ca",
+                  "kind": "ClusterIssuer"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "Gateway",
+              "metadata": {
+                "name": "corp-gw",
+                "namespace": "payments"
+              },
+              "spec": {
+                "gatewayClassName": "envoy-internal",
+                "listeners": [
+                  {
+                    "name": "https",
+                    "port": 443,
+                    "protocol": "HTTPS",
+                    "hostname": "portal.corp.internal",
+                    "tls": {
+                      "mode": "Terminate",
+                      "certificateRefs": [
+                        {
+                          "name": "portal-tls"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "http",
+                    "port": 80,
+                    "protocol": "HTTP",
+                    "hostname": "portal.corp.internal"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "argo-rollouts",
+                "namespace": "argocd",
+                "labels": {
+                  "app.kubernetes.io/name": "argo-rollouts"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "argo-rollouts"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "argo-rollouts"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/argoproj/argo-rollouts:v1.8.3"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "prometheus",
+                "namespace": "monitoring",
+                "labels": {
+                  "app.kubernetes.io/name": "prometheus"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "prometheus"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "prometheus"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "prometheus",
+                        "image": "quay.io/prometheus/prometheus:v3.9.1",
+                        "ports": [
+                          {
+                            "containerPort": 9090
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "monitoring.coreos.com/v1",
+              "kind": "ServiceMonitor",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments",
+                "labels": {
+                  "release": "kube-prom"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "endpoints": [
+                  {
+                    "port": "http"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "Rollout",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 4,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "strategy": {
+                  "canary": {
+                    "steps": [
+                      {
+                        "setWeight": 25
+                      },
+                      {
+                        "setWeight": 100
+                      }
+                    ]
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments",
+                "labels": {
+                  "app": "portal"
+                }
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.corp.internal"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "files": {
+            "/root/infra/canary.yaml": "# 现在这个 Rollout 只会「分两步把新版本铺满」，不看任何指标。\n# 换句话说：坏版本照样能一路铺到 100%。\n#\n# 要加的是：分析这一步，以及它依据的判据。\napiVersion: argoproj.io/v1alpha1\nkind: Rollout\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  replicas: 4\n  selector:\n    matchLabels:\n      app: portal\n  strategy:\n    canary:\n      steps:\n      - setWeight: 25\n      - setWeight: 100\n  template:\n    metadata:\n      labels:\n        app: portal\n    spec:\n      containers:\n      - name: web\n        image: harbor.corp.internal/team/portal:1.4.0\n        ports:\n        - containerPort: 8080\n"
+          },
+          "referenceFiles": {
+            "/root/infra/canary.yaml": "apiVersion: argoproj.io/v1alpha1\nkind: AnalysisTemplate\nmetadata:\n  name: error-rate\n  namespace: payments\nspec:\n  metrics:\n  - name: error-rate\n    # 先等两分钟再量：金丝雀刚起来时采样点还不够两个，算出来的是稳定版的错误率\n    initialDelay: 2m\n    successCondition: result < 0.05\n    provider:\n      prometheus:\n        address: http://prometheus.monitoring.svc:9090\n        query: |\n          sum(rate(http_requests_total{code=~\"5..\"}[5m]))\n          / sum(rate(http_requests_total[5m]))\n---\napiVersion: policy/v1\nkind: PodDisruptionBudget\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  minAvailable: 3\n  selector:\n    matchLabels:\n      app: portal\n---\napiVersion: argoproj.io/v1alpha1\nkind: Rollout\nmetadata:\n  name: portal\n  namespace: payments\nspec:\n  replicas: 4\n  selector:\n    matchLabels:\n      app: portal\n  strategy:\n    canary:\n      steps:\n      - setWeight: 25\n      - analysis:\n          templates:\n          - templateName: error-rate\n      - setWeight: 50\n      - analysis:\n          templates:\n          - templateName: error-rate\n      - setWeight: 100\n  template:\n    metadata:\n      labels:\n        app: portal\n    spec:\n      containers:\n      - name: web\n        image: harbor.corp.internal/team/portal:1.4.0\n        ports:\n        - containerPort: 8080\n"
+          },
+          "referenceCommands": [
+            "kubectl apply -f /root/infra/canary.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "progressive-delivery.spec.ts",
+            "content": "import { advance, get, list, sh } from '@ops/lab';\n\nconst ROLLOUT = () => get('Rollout', 'portal', 'payments');\n\nconst release = async (image) => {\n  await sh(\n    \"kubectl patch rollout portal -n payments --type=json -p \"\n    + \"'[{\\\"op\\\":\\\"replace\\\",\\\"path\\\":\\\"/spec/template/spec/containers/0/image\\\",\"\n    + \"\\\"value\\\":\\\"\" + image + \"\\\"}]'\"\n  );\n  await advance(1200000);\n};\n\ndescribe('渐进式发布', () => {\n  it('判据是错误率，不是裸计数', () => {\n    const templates = list('AnalysisTemplate', { namespace: 'payments' });\n    expect(templates.length).toBeGreaterThan(0);\n    const queries = templates.flatMap((template) => (template.spec.metrics || [])\n      .map((metric) => (metric.provider || {}).prometheus?.query || ''));\n    expect(queries.some((query) => /rate\\(/.test(query) && query.includes('/'))).toBe(true);\n  });\n\n  it('发布流程里有分析这一步', () => {\n    const steps = ROLLOUT().spec.strategy.canary.steps || [];\n    expect(steps.some((step) => step.analysis)).toBe(true);\n  });\n\n  it('好版本走得完', async () => {\n    await release('harbor.corp.internal/team/portal:1.5.0');\n    const status = ROLLOUT().status;\n    expect(status.phase).toBe('Healthy');\n    expect(status.currentPodHash).toBeTruthy();\n\n    const running = list('Pod', { namespace: 'payments' })\n      .filter((pod) => (pod.metadata.labels || {}).app === 'portal')\n      .filter((pod) => pod.status.phase === 'Running');\n    expect(running.length).toBe(4);\n    for (const pod of running) {\n      expect(pod.spec.containers[0].image).toBe('harbor.corp.internal/team/portal:1.5.0');\n    }\n  });\n\n  it('坏版本被拦下并自动回到稳定版', async () => {\n    await release('harbor.corp.internal/team/portal:1.6.0');\n    const status = ROLLOUT().status;\n    expect(status.abort).toBe(true);\n    expect(status.phase).toBe('Degraded');\n\n    const running = list('Pod', { namespace: 'payments' })\n      .filter((pod) => (pod.metadata.labels || {}).app === 'portal')\n      .filter((pod) => pod.status.phase === 'Running');\n    // 回滚之后容量是满的，不是停在半路\n    expect(running.length).toBe(4);\n    for (const pod of running) {\n      expect(pod.spec.containers[0].image).not.toBe('harbor.corp.internal/team/portal:1.6.0');\n    }\n  });\n\n  it('分析的结果查得到，看得出是哪条没过', () => {\n    const runs = list('AnalysisRun', { namespace: 'payments' });\n    const failed = runs.filter((run) => run.status.phase === 'Failed');\n    expect(failed.length).toBeGreaterThan(0);\n    expect(failed[0].status.metricResults[0].value).toBeGreaterThan(0.05);\n  });\n\n  it('PDB 留了可中断的名额，不至于把维护堵死', () => {\n    const pdbs = list('PodDisruptionBudget', { namespace: 'payments' });\n    expect(pdbs.length).toBeGreaterThan(0);\n    const pdb = pdbs[0];\n    expect(pdb.status.disruptionsAllowed).toBeGreaterThan(0);\n    expect(pdb.status.desiredHealthy).toBeGreaterThanOrEqual(3);\n  });\n\n  it('节点维护打不空服务', async () => {\n    const before = list('Pod', { namespace: 'payments' })\n      .filter((pod) => (pod.metadata.labels || {}).app === 'portal').length;\n    expect(before).toBe(4);\n\n    await sh('kubectl drain node-a1 --ignore-daemonsets --force --timeout=30s');\n    await advance(300000);\n\n    const healthy = list('Pod', { namespace: 'payments' })\n      .filter((pod) => (pod.metadata.labels || {}).app === 'portal')\n      .filter((pod) => pod.status.phase === 'Running').length;\n    expect(healthy).toBeGreaterThanOrEqual(3);\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "resilience",
+          "observability"
+        ],
+        "extension": {
+          "zh": "渐进式发布真正改变的是**谁来发现问题**。滚动更新只回答「新的 Pod 起来了\n没有」，而「起来了」和「好用」是两回事 —— 上周那个坏版本探针全过、\n日志干净、Pod 全 Running，只是大半请求返回 500。把判据写进发布流程之后，\n发现问题的是系统而不是用户，而且回滚是自动的。\n\n有一条很容易被忽略：**金丝雀的判据应该和告警的判据是同一个表达式**。\n两边写不一样的话，会出现「发布时看着没事、上线后告警响」，\n或者反过来「发布一直失败但线上其实好好的」。同一个定义只写一遍，\n放在 AnalysisTemplate 里、告警规则里引用同一段 PromQL。\n\nPDB 那一半也值得多说一句。它管的是**自愿中断**，也就是有人主动发起的\n那些：节点维护、缩容、驱逐。节点掉电、OOMKill、被抢占都不在它管辖之内。\n所以 PDB 保证的是「不会被人为打空」，不是「永远有 N 个副本」——\n后者要靠副本数、反亲和、跨可用区分布一起来做。而且 `minAvailable`\n写得太紧会让节点永远维护不了：留不出可中断的名额，drain 就只能重试到\n超时，最后有人一怒之下 `--disable-eviction`，PDB 白配。\n",
+          "en": "What progressive delivery really changes is **who finds the problem**. A rolling\nupdate only answers \"did the new pods start\", and starting is not the same as\nworking: last week's bad version passed every probe, logged nothing unusual, and\nshowed all pods Running while returning 500 to three requests in ten. Once the\ncriterion is part of the release process, the system finds the problem instead of\na user, and the rollback is automatic.\n\nOne thing that is easy to overlook: **the canary criterion and the alerting\ncriterion should be the same expression**. Write them differently and you get\neither \"looked fine during rollout, paged afterwards\" or \"releases keep failing\nwhile production is perfectly healthy\". Define \"bad\" once, and reference the same\nPromQL from the AnalysisTemplate and the alerting rule.\n\nThe PDB half deserves a note too. It governs **voluntary** disruptions, the ones\nsomebody initiates: node maintenance, scale-down, eviction. A node losing power,\nan OOMKill, or preemption are all outside its remit. So a PDB guarantees nobody\ndrains you to zero, not that N replicas always exist; that needs replica counts,\nanti-affinity, and zone spread together. And a `minAvailable` set too tightly\nmakes nodes impossible to maintain: with no disruptable slot, drain retries until\nit times out, and eventually somebody reaches for `--disable-eviction` and the\nPDB may as well not exist.\n"
+        },
+        "primer": {
+          "zh": "Deployment 的滚动更新只回答一个问题：新的 Pod 起来了没有。而「起来了」和「好用」是两回事：一个进程活着、探针全过、日志干净，但大半请求返回 500 的版本，滚动更新会毫不犹豫地把它铺到 100%。`渐进式发布`补的就是这一段：把「什么叫好」写进发布流程本身。\n\n`Argo Rollouts` 用 `Rollout` 替代 Deployment（是替代不是补充，一个工作负载只能由其中之一管）。它多出来的是 `strategy.canary.steps`：一串按顺序执行的步骤。`setWeight` 调整金丝雀占多少副本，`pause` 停一下（带 `duration` 就是等那么久，不带就是无限期等人来 `promote`），`analysis` 起一次分析。控制器用 `status.currentStepIndex` 记着走到第几步，每步做完才往前挪一格。\n\n`AnalysisTemplate` 描述判据：一条 PromQL 加一个 `successCondition`（形如 `result < 0.05`）。任何一条不满足，整个发布`中止`。要特别注意中止的含义，它不是「停在原地」，而是**回到稳定版本**：金丝雀缩到 0，稳定版拉回满副本。这也是自动回滚的实现，不需要人介入。另一个必写的字段是 `initialDelay`：金丝雀刚起来的那几秒计数器还是 0、采样点不够两个，这时候算出来的是稳定版的错误率，看着很好，然后就把坏版本放行了。\n\n判据本身要写成`比例`而不是计数。`sum(rate(errors[5m])) > 0` 会让任何一个 5xx 都毁掉发布，而真实系统永远有零星的 5xx，结果是没有版本发得出去，最后有人把分析这一步删掉。还有一条实践：**金丝雀的判据应该和告警的判据是同一个表达式**，否则会出现「发布时看着没事、上线后告警响」，那说明「什么叫坏」被定义了两遍。\n\n另一半是节点维护。`PodDisruptionBudget` 管的是`自愿中断`，也就是有人主动发起的那些：节点维护、缩容、驱逐。`kubectl drain` 走的是 Pod 的 `eviction` 子资源，会先问 PDB，违反就收到 429 并重试；而 `kubectl delete pod` 走的是普通删除，谁也拦不住。这是两条命令行为不同的根源。PDB 保证的是「不会被人为打空」，不是「永远有 N 个副本」：节点掉电、OOMKill、被抢占都不在它管辖内。还有一个反效果要避开：`minAvailable` 写成和副本数一样大，任何驱逐都会被拒，节点永远维护不了。",
+          "en": "A rolling update answers one question: did the new pods start. Starting is not the same as working, and a version whose process is alive, probes pass, and logs are clean while three requests in ten return 500 will be spread to 100% without hesitation. `Progressive delivery` fills that gap by writing \"what good looks like\" into the release process itself.\n\n`Argo Rollouts` replaces a Deployment with a `Rollout` (replaces, not supplements: a workload is managed by one or the other). What it adds is `strategy.canary.steps`, an ordered list. `setWeight` sets how many replicas are canary, `pause` stops (with a `duration` it waits that long, without one it waits indefinitely for a `promote`), and `analysis` runs an evaluation. The controller tracks progress in `status.currentStepIndex`, advancing only when a step completes.\n\nAn `AnalysisTemplate` describes the criterion: a PromQL query plus a `successCondition` such as `result < 0.05`. If any metric fails, the rollout `aborts`. Note what aborting means: not stopping in place but **returning to the stable version**, scaling the canary to zero and stable back to full. That is the automatic rollback, with nobody in the loop. The other field you must write is `initialDelay`: in the first seconds a canary counter is still zero with fewer than two samples, so what you compute is the stable version error rate, which looks great and lets the bad version through.\n\nThe criterion must be a `ratio` rather than a count. `sum(rate(errors[5m])) > 0` fails a release on any single 5xx, real systems always have a few, nothing ever ships, and eventually somebody deletes the analysis step. One more practice: **the canary criterion and the alerting criterion should be the same expression**, or you get \"looked fine during rollout, paged afterwards\", which means \"bad\" was defined twice.\n\nThe other half is node maintenance. A `PodDisruptionBudget` governs `voluntary` disruptions, the ones somebody initiates: maintenance, scale-down, eviction. `kubectl drain` goes through the Pod `eviction` subresource, which consults the PDB and returns 429 with a retry when it would be violated, while `kubectl delete pod` is an ordinary delete that nothing stops. That is why the two commands behave differently. A PDB guarantees nobody drains you to zero, not that N replicas always exist: power loss, OOMKill, and preemption are all outside its remit. And avoid the counterproductive setting where `minAvailable` equals the replica count, because then every eviction is refused and the node can never be maintained."
         }
       }
     ]

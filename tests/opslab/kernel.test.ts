@@ -77,6 +77,35 @@ describe('虚拟时钟', () => {
     expect(Date.now() - wallStart).toBeLessThan(2000);
   });
 
+  /**
+   * 后台定时器不决定世界要不要往前走，但世界走过去的时候它们必须响。
+   *
+   * 原来 settle 里是 fireUpTo(前台定时器的时刻)，于是时钟从 0 一步跨到
+   * 120 秒，中间八次 15 秒的采集一次都没发生 —— 表现是「Prometheus 在
+   * 暂停期间不采样」，金丝雀分析拿不到两个采样点，判据永远算不出来。
+   */
+  it('推进到前台定时器时，沿途的后台定时器一个都不能少', async () => {
+    const kernel = createKernel();
+    const ticks: number[] = [];
+    kernel.setInterval(() => ticks.push(kernel.now()), 15_000, {
+      background: true,
+      label: 'scrape',
+    });
+
+    let woke = 0;
+    kernel.setTimeout(() => { woke = kernel.now(); }, 120_000, { label: 'pause' });
+
+    await kernel.settle();
+    expect(woke).toBe(120_000);
+    expect(ticks).toEqual([15_000, 30_000, 45_000, 60_000, 75_000, 90_000, 105_000, 120_000]);
+  });
+
+  it('推进的毫秒数必须是有限值，NaN 要当场报错而不是空转', async () => {
+    const kernel = createKernel();
+    expect(() => kernel.clock.advanceBy(Number.NaN)).toThrow(TypeError);
+    expect(() => kernel.clock.advanceTo(Number.POSITIVE_INFINITY)).toThrow(TypeError);
+  });
+
   it('后台定时器不会让世界永远静不下来', async () => {
     const kernel = createKernel();
     let resyncs = 0;

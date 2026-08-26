@@ -139,22 +139,40 @@ export class VirtualClock {
 
   /**
    * 把时钟推到下一个到期时刻，触发该时刻的**全部**定时器。
+   *
+   * `includeBackground: false` 只影响**推到哪儿**，不影响沿途触发谁：
+   * 后台定时器不能决定世界要不要往前走，但世界走过去的时候它们必须响。
+   * 早先这里是 fireUpTo(target)，于是时钟从 30s 一步跨到 150s（一个前台
+   * 的暂停定时器），把中间十次 15s 的采集全跳了 —— 金丝雀分析拿不到两个
+   * 采样点，错误率算出来是稳定版的 0。
+   *
    * @returns 是否真的推进了
    */
   advanceToNext(options: { includeBackground?: boolean } = {}): boolean {
     const target = this.peekNextTime(options);
     if (target === null) return false;
-    this.fireUpTo(target);
+    this.advanceTo(target);
     return true;
   }
 
   /** 把时钟推进 ms，沿途所有定时器都会触发 */
   advanceBy(ms: number): void {
+    if (!Number.isFinite(ms)) {
+      throw new TypeError(`advanceBy 收到的不是一个有限的毫秒数：${ms}`);
+    }
     this.advanceTo(this.time + Math.max(0, Math.floor(ms)));
   }
 
-  /** 把时钟推到某个绝对时刻 */
+  /**
+   * 把时钟推到某个绝对时刻。
+   *
+   * target 必须是有限值：NaN 的话 `next > target` 永远为假，这个循环会
+   * 一直烧下去，而且不报错 —— 表现是整个进程静悄悄地卡住。
+   */
   advanceTo(target: number): void {
+    if (!Number.isFinite(target)) {
+      throw new TypeError(`advanceTo 收到的不是一个有限的时刻：${target}`);
+    }
     let batchesAtSameInstant = 0;
     let lastInstant = this.time;
 

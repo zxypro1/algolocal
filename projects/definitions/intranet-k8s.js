@@ -40,6 +40,9 @@ const ESO_IMAGE = 'ghcr.io/external-secrets/external-secrets:v0.21.0';
 const PROMETHEUS_IMAGE = 'quay.io/prometheus/prometheus:v3.9.1';
 // 报表服务的一个坏版本：五分之一的请求 500
 const REPORTS_IMAGE_BAD = 'harbor.corp.internal/team/reports:2.3.0';
+const ROLLOUTS_IMAGE = 'quay.io/argoproj/argo-rollouts:v1.8.3';
+// 门户的一个坏版本：进程活着、探针照过，六成请求 500
+const PORTAL_IMAGE_BAD = 'harbor.corp.internal/team/portal:1.6.0';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -192,6 +195,23 @@ const WORLD = {
     [KYVERNO_IMAGE]: { pullMs: 500, startupMs: 700, readyAfterMs: 300, listens: [9443] },
     [ESO_IMAGE]: { pullMs: 400, startupMs: 600, readyAfterMs: 300, listens: [8080] },
     [PROMETHEUS_IMAGE]: { pullMs: 600, startupMs: 900, readyAfterMs: 400, listens: [9090] },
+    [ROLLOUTS_IMAGE]: { pullMs: 400, startupMs: 600, readyAfterMs: 300 },
+    // 门户的下一个版本，好的那个
+    [PORTAL_IMAGE_NEXT]: {
+      pullMs: 400, startupMs: 600, readyAfterMs: 300,
+      listens: [8080], routes: { '/': 200, '/healthz': 200, '/readyz': 200 },
+      memoryUsage: '180Mi', handlesSigterm: true, runAsUser: 10001,
+      requestsPerSecond: 40,
+    },
+    [PORTAL_IMAGE_BAD]: {
+      pullMs: 400, startupMs: 600, readyAfterMs: 300,
+      listens: [8080], routes: { '/': 200, '/healthz': 200, '/readyz': 200 },
+      memoryUsage: '180Mi', handlesSigterm: true, runAsUser: 10001,
+      // 坏在这里：探针全过，但六成请求 500。
+      // 注意分析看到的是**混进去之后**的整体错误率：金丝雀只占一小部分流量，
+      // 六成打到分母上摊完只剩不到一成 —— 这就是判据要写得比直觉严的原因。
+      requestsPerSecond: 40, errorRatio: 0.6,
+    },
     [REPORTS_IMAGE_BAD]: {
       pullMs: 500, startupMs: 800, readyAfterMs: 200,
       listens: [9090], routes: { '/healthz': 200, '/metrics': 200 },
@@ -6213,6 +6233,422 @@ const stage19 = {
   ),
 };
 
+
+/* ------------------------------------------------------------------ */
+/* 第 20 关                                                            */
+/* ------------------------------------------------------------------ */
+
+const ROLLOUTS_PLATFORM = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: {
+      name: 'argo-rollouts', namespace: 'argocd',
+      labels: { 'app.kubernetes.io/name': 'argo-rollouts' },
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'argo-rollouts' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'argo-rollouts' } },
+        spec: { containers: [{ name: 'controller', image: ROLLOUTS_IMAGE }] },
+      },
+    },
+  },
+];
+
+/** 第 19 关配好的监控，这一关还要用 —— 金丝雀的判据就是它 */
+const MONITORING_CARRIED = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: {
+      name: 'prometheus', namespace: 'monitoring',
+      labels: { 'app.kubernetes.io/name': 'prometheus' },
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'prometheus' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'prometheus' } },
+        spec: { containers: [{ name: 'prometheus', image: PROMETHEUS_IMAGE, ports: [{ containerPort: 9090 }] }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'monitoring.coreos.com/v1', kind: 'ServiceMonitor',
+    metadata: { name: 'portal', namespace: 'payments', labels: { release: 'kube-prom' } },
+    spec: { selector: { matchLabels: { app: 'portal' } }, endpoints: [{ port: 'http' }] },
+  },
+];
+
+/** 门户已经从 Deployment 换成 Rollout 了，跑的是好版本 */
+const PORTAL_ROLLOUT = [
+  {
+    apiVersion: 'argoproj.io/v1alpha1', kind: 'Rollout',
+    metadata: { name: 'portal', namespace: 'payments' },
+    spec: {
+      replicas: 4,
+      selector: { matchLabels: { app: 'portal' } },
+      strategy: { canary: { steps: [{ setWeight: 25 }, { setWeight: 100 }] } },
+      template: {
+        metadata: { labels: { app: 'portal' } },
+        spec: { containers: [{ name: 'web', image: PORTAL_IMAGE, ports: [{ containerPort: 8080 }] }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'v1', kind: 'Service',
+    metadata: { name: 'portal', namespace: 'payments', labels: { app: 'portal' } },
+    spec: { clusterIP: '10.96.1.10', selector: { app: 'portal' }, ports: [{ port: 80, targetPort: 8080 }] },
+  },
+];
+
+const CANARY_STARTER = code`
+  # 现在这个 Rollout 只会「分两步把新版本铺满」，不看任何指标。
+  # 换句话说：坏版本照样能一路铺到 100%。
+  #
+  # 要加的是：分析这一步，以及它依据的判据。
+  apiVersion: argoproj.io/v1alpha1
+  kind: Rollout
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    replicas: 4
+    selector:
+      matchLabels:
+        app: portal
+    strategy:
+      canary:
+        steps:
+        - setWeight: 25
+        - setWeight: 100
+    template:
+      metadata:
+        labels:
+          app: portal
+      spec:
+        containers:
+        - name: web
+          image: ${PORTAL_IMAGE}
+          ports:
+          - containerPort: 8080
+`;
+
+const CANARY_REFERENCE = code`
+  apiVersion: argoproj.io/v1alpha1
+  kind: AnalysisTemplate
+  metadata:
+    name: error-rate
+    namespace: payments
+  spec:
+    metrics:
+    - name: error-rate
+      # 先等两分钟再量：金丝雀刚起来时采样点还不够两个，算出来的是稳定版的错误率
+      initialDelay: 2m
+      successCondition: result < 0.05
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring.svc:9090
+          query: |
+            sum(rate(http_requests_total{code=~"5.."}[5m]))
+            / sum(rate(http_requests_total[5m]))
+  ---
+  apiVersion: policy/v1
+  kind: PodDisruptionBudget
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    minAvailable: 3
+    selector:
+      matchLabels:
+        app: portal
+  ---
+  apiVersion: argoproj.io/v1alpha1
+  kind: Rollout
+  metadata:
+    name: portal
+    namespace: payments
+  spec:
+    replicas: 4
+    selector:
+      matchLabels:
+        app: portal
+    strategy:
+      canary:
+        steps:
+        - setWeight: 25
+        - analysis:
+            templates:
+            - templateName: error-rate
+        - setWeight: 50
+        - analysis:
+            templates:
+            - templateName: error-rate
+        - setWeight: 100
+    template:
+      metadata:
+        labels:
+          app: portal
+      spec:
+        containers:
+        - name: web
+          image: ${PORTAL_IMAGE}
+          ports:
+          - containerPort: 8080
+`;
+
+const stage20 = {
+  id: 'progressive-delivery',
+  title: t('让坏版本自己退回去', 'Make a Bad Release Roll Itself Back'),
+  goal: t(
+    code`
+      上周那个坏版本是人肉发现的：先有人报「打不开」，再有人去看指标，
+      最后手工回滚 —— 中间隔了四十分钟。
+
+      门户已经从 Deployment 换成了 \`Rollout\`，但它现在的策略只是
+      「分两步把新版本铺满」，不看任何指标。也就是说坏版本照样能一路铺到 100%。
+
+      要做两件事：把**分析**加进发布流程，让坏版本自己退回去；
+      以及给门户配一个 \`PodDisruptionBudget\`，让节点维护不至于把服务打空。
+
+      ## 通关标准
+
+      1. 发一个好版本（\`${PORTAL_IMAGE_NEXT}\`）能走完全流程，最终 Healthy；
+      2. 发一个坏版本（\`${PORTAL_IMAGE_BAD}\`）会在分析那一步被拦下，
+         **自动回到稳定版**，而且稳定版的副本数是满的；
+      3. 判据用的是**错误率**（rate 相除），不是裸计数；
+      4. 有 PDB，且 \`kubectl drain\` 一个节点时不会把可用副本打到 3 以下。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl apply -f /root/infra/canary.yaml
+      kubectl get rollout portal -n payments
+      kubectl describe rollout portal -n payments
+      kubectl get analysisrun -n payments
+      kubectl get pdb -n payments
+      kubectl drain node-a1 --ignore-daemonsets --delete-emptydir-data --timeout=60s
+      \`\`\`
+    `,
+    code`
+      Last week's bad release was found by a human: someone reported "it will not
+      load", someone else looked at the metrics, and someone rolled it back by hand.
+      Forty minutes in total.
+
+      The portal is already a \`Rollout\` rather than a Deployment, but its current
+      strategy only spreads the new version in two steps without looking at any
+      metric. A bad version therefore reaches 100% just as happily as a good one.
+
+      Two things to do: add **analysis** to the release process so a bad version rolls
+      itself back, and give the portal a \`PodDisruptionBudget\` so node maintenance
+      cannot drain the service to nothing.
+
+      ## Done when
+
+      1. a good release (\`${PORTAL_IMAGE_NEXT}\`) completes and ends Healthy;
+      2. a bad release (\`${PORTAL_IMAGE_BAD}\`) is stopped at the analysis step and
+         **rolls back to the stable version** with a full replica count;
+      3. the criterion is an **error rate** (one rate divided by another), not a raw
+         counter;
+      4. a PDB exists, and draining a node cannot take available replicas below three.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl apply -f /root/infra/canary.yaml
+      kubectl get rollout portal -n payments
+      kubectl describe rollout portal -n payments
+      kubectl get analysisrun -n payments
+      kubectl get pdb -n payments
+      kubectl drain node-a1 --ignore-daemonsets --delete-emptydir-data --timeout=60s
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('好版本走得完', 'A good release completes'),
+    t('坏版本自己退回去', 'A bad release rolls itself back'),
+    t('节点维护打不空服务', 'Node maintenance cannot empty the service'),
+  ],
+  hints: [
+    t(
+      '金丝雀的判据和告警的判据应该是同一个表达式。不然会出现「发布时看着没事、上线后告警响」—— 那说明你在两个地方定义了两套「什么叫坏」。',
+      'The canary criterion and the alerting criterion should be the same expression. Otherwise you get "looked fine during rollout, paged after", which means you defined "bad" twice, differently.'
+    ),
+    t(
+      '\`initialDelay\` 不是可选的。金丝雀刚起来的那几秒，它的计数器还是 0、采样点还不够两个，这时候算出来的是**稳定版的**错误率 —— 看着很好，然后就把坏版本放行了。',
+      '`initialDelay` is not optional. In the first seconds a canary counter is still zero with fewer than two samples, so what you compute is the **stable** version error rate. It looks great, and the bad version sails through.'
+    ),
+    t(
+      '中止不是「停在原地」，是回到稳定版：金丝雀缩到 0、稳定版拉回满副本。判定会检查回滚之后副本数是满的 —— 停在半路的服务只有一半容量。',
+      'Aborting does not mean stopping in place, it means returning to stable: the canary scales to zero and stable goes back to full. The grader checks the replica count after rollback, because a rollout stopped halfway leaves half the capacity.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '判据写成 \`sum(rate(http_requests_total{code=~"5.."}[5m])) > 0\`。任何一个 5xx 都会让发布失败 —— 而真实系统永远有零星的 5xx，于是没有任何版本发得出去，最后大家把分析这一步删了。判据要用**比例**。',
+      'Writing the criterion as `sum(rate(http_requests_total{code=~"5.."}[5m])) > 0`. Any single 5xx fails the release, real systems always have a few, so nothing ever ships and eventually somebody deletes the analysis step. Use a **ratio**.'
+    ),
+    t(
+      '配了 PDB 就以为副本数不会掉下来。PDB 只管**自愿中断**（维护、缩容、驱逐），管不了节点掉电、OOMKill、被抢占。它保证的是「不会被人为打空」，不是「永远有 N 个」。',
+      'Assuming a PDB keeps the replica count up. It governs **voluntary** disruptions (maintenance, scale-down, eviction) and does nothing about a node losing power, an OOMKill, or preemption. It guarantees nobody drains you to zero, not that N always exist.'
+    ),
+    t(
+      '\`minAvailable\` 写成和副本数一样大。这样任何驱逐都会被拒，节点永远维护不了 —— drain 会一直重试到超时。留出至少一个可中断的名额，否则 PDB 从「保护」变成「阻塞」。',
+      'Setting `minAvailable` equal to the replica count. Every eviction is then refused and the node can never be maintained: drain retries until it times out. Leave at least one disruptable slot, or the PDB stops protecting and starts blocking.'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      CNI_CILIUM,
+      ...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...TLS_PLATFORM,
+      ...ROLLOUTS_PLATFORM, ...MONITORING_CARRIED,
+      ...PORTAL_ROLLOUT, PORTAL_ROUTE,
+    ],
+    files: { '/root/infra/canary.yaml': CANARY_STARTER },
+    referenceFiles: { '/root/infra/canary.yaml': CANARY_REFERENCE },
+    referenceCommands: [
+      'kubectl apply -f /root/infra/canary.yaml',
+    ],
+  },
+  specs: [
+    spec('progressive-delivery.spec.ts', code`
+      import { advance, get, list, sh } from '@ops/lab';
+
+      const ROLLOUT = () => get('Rollout', 'portal', 'payments');
+
+      const release = async (image) => {
+        await sh(
+          "kubectl patch rollout portal -n payments --type=json -p "
+          + "'[{\\"op\\":\\"replace\\",\\"path\\":\\"/spec/template/spec/containers/0/image\\","
+          + "\\"value\\":\\"" + image + "\\"}]'"
+        );
+        await advance(1200000);
+      };
+
+      describe('渐进式发布', () => {
+        it('判据是错误率，不是裸计数', () => {
+          const templates = list('AnalysisTemplate', { namespace: 'payments' });
+          expect(templates.length).toBeGreaterThan(0);
+          const queries = templates.flatMap((template) => (template.spec.metrics || [])
+            .map((metric) => (metric.provider || {}).prometheus?.query || ''));
+          expect(queries.some((query) => /rate\\(/.test(query) && query.includes('/'))).toBe(true);
+        });
+
+        it('发布流程里有分析这一步', () => {
+          const steps = ROLLOUT().spec.strategy.canary.steps || [];
+          expect(steps.some((step) => step.analysis)).toBe(true);
+        });
+
+        it('好版本走得完', async () => {
+          await release('${PORTAL_IMAGE_NEXT}');
+          const status = ROLLOUT().status;
+          expect(status.phase).toBe('Healthy');
+          expect(status.currentPodHash).toBeTruthy();
+
+          const running = list('Pod', { namespace: 'payments' })
+            .filter((pod) => (pod.metadata.labels || {}).app === 'portal')
+            .filter((pod) => pod.status.phase === 'Running');
+          expect(running.length).toBe(4);
+          for (const pod of running) {
+            expect(pod.spec.containers[0].image).toBe('${PORTAL_IMAGE_NEXT}');
+          }
+        });
+
+        it('坏版本被拦下并自动回到稳定版', async () => {
+          await release('${PORTAL_IMAGE_BAD}');
+          const status = ROLLOUT().status;
+          expect(status.abort).toBe(true);
+          expect(status.phase).toBe('Degraded');
+
+          const running = list('Pod', { namespace: 'payments' })
+            .filter((pod) => (pod.metadata.labels || {}).app === 'portal')
+            .filter((pod) => pod.status.phase === 'Running');
+          // 回滚之后容量是满的，不是停在半路
+          expect(running.length).toBe(4);
+          for (const pod of running) {
+            expect(pod.spec.containers[0].image).not.toBe('${PORTAL_IMAGE_BAD}');
+          }
+        });
+
+        it('分析的结果查得到，看得出是哪条没过', () => {
+          const runs = list('AnalysisRun', { namespace: 'payments' });
+          const failed = runs.filter((run) => run.status.phase === 'Failed');
+          expect(failed.length).toBeGreaterThan(0);
+          expect(failed[0].status.metricResults[0].value).toBeGreaterThan(0.05);
+        });
+
+        it('PDB 留了可中断的名额，不至于把维护堵死', () => {
+          const pdbs = list('PodDisruptionBudget', { namespace: 'payments' });
+          expect(pdbs.length).toBeGreaterThan(0);
+          const pdb = pdbs[0];
+          expect(pdb.status.disruptionsAllowed).toBeGreaterThan(0);
+          expect(pdb.status.desiredHealthy).toBeGreaterThanOrEqual(3);
+        });
+
+        it('节点维护打不空服务', async () => {
+          const before = list('Pod', { namespace: 'payments' })
+            .filter((pod) => (pod.metadata.labels || {}).app === 'portal').length;
+          expect(before).toBe(4);
+
+          await sh('kubectl drain node-a1 --ignore-daemonsets --force --timeout=30s');
+          await advance(300000);
+
+          const healthy = list('Pod', { namespace: 'payments' })
+            .filter((pod) => (pod.metadata.labels || {}).app === 'portal')
+            .filter((pod) => pod.status.phase === 'Running').length;
+          expect(healthy).toBeGreaterThanOrEqual(3);
+        });
+      });
+    `),
+  ],
+  focus: ['resilience', 'observability'],
+  extension: t(
+    code`
+      渐进式发布真正改变的是**谁来发现问题**。滚动更新只回答「新的 Pod 起来了
+      没有」，而「起来了」和「好用」是两回事 —— 上周那个坏版本探针全过、
+      日志干净、Pod 全 Running，只是大半请求返回 500。把判据写进发布流程之后，
+      发现问题的是系统而不是用户，而且回滚是自动的。
+
+      有一条很容易被忽略：**金丝雀的判据应该和告警的判据是同一个表达式**。
+      两边写不一样的话，会出现「发布时看着没事、上线后告警响」，
+      或者反过来「发布一直失败但线上其实好好的」。同一个定义只写一遍，
+      放在 AnalysisTemplate 里、告警规则里引用同一段 PromQL。
+
+      PDB 那一半也值得多说一句。它管的是**自愿中断**，也就是有人主动发起的
+      那些：节点维护、缩容、驱逐。节点掉电、OOMKill、被抢占都不在它管辖之内。
+      所以 PDB 保证的是「不会被人为打空」，不是「永远有 N 个副本」——
+      后者要靠副本数、反亲和、跨可用区分布一起来做。而且 \`minAvailable\`
+      写得太紧会让节点永远维护不了：留不出可中断的名额，drain 就只能重试到
+      超时，最后有人一怒之下 \`--disable-eviction\`，PDB 白配。
+    `,
+    code`
+      What progressive delivery really changes is **who finds the problem**. A rolling
+      update only answers "did the new pods start", and starting is not the same as
+      working: last week's bad version passed every probe, logged nothing unusual, and
+      showed all pods Running while returning 500 to three requests in ten. Once the
+      criterion is part of the release process, the system finds the problem instead of
+      a user, and the rollback is automatic.
+
+      One thing that is easy to overlook: **the canary criterion and the alerting
+      criterion should be the same expression**. Write them differently and you get
+      either "looked fine during rollout, paged afterwards" or "releases keep failing
+      while production is perfectly healthy". Define "bad" once, and reference the same
+      PromQL from the AnalysisTemplate and the alerting rule.
+
+      The PDB half deserves a note too. It governs **voluntary** disruptions, the ones
+      somebody initiates: node maintenance, scale-down, eviction. A node losing power,
+      an OOMKill, or preemption are all outside its remit. So a PDB guarantees nobody
+      drains you to zero, not that N replicas always exist; that needs replica counts,
+      anti-affinity, and zone spread together. And a \`minAvailable\` set too tightly
+      makes nodes impossible to maintain: with no disruptable slot, drain retries until
+      it times out, and eventually somebody reaches for \`--disable-eviction\` and the
+      PDB may as well not exist.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -6258,6 +6694,6 @@ module.exports = {
   stages: [
     stage1, stage2, stage3, stage4, stage5, stage6,
     stage7, stage8, stage9, stage10, stage11, stage12,
-    stage13, stage14, stage15, stage16, stage17, stage18, stage19,
+    stage13, stage14, stage15, stage16, stage17, stage18, stage19, stage20,
   ],
 };
