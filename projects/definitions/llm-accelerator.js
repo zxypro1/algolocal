@@ -4105,6 +4105,374 @@ const STAGE_18 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 19 关：量化                                                       */
+/* ------------------------------------------------------------------ */
+
+const Q_SEQ = 64;
+const Q_DIM = 128;
+/** NVFP4 用的就是 16 —— 这个数字不是随便挑的，见关卡正文 */
+const Q_BLOCK = 16;
+
+/**
+ * 造一份带**离群通道**的 K。
+ *
+ * SmoothQuant 描述的现象：绝大多数激活值在同一个量级，但个别通道
+ * 在**所有 token 上**都大得离谱。这里第 11 与第 68 号通道大约是
+ * 其它通道的十万倍 —— 比论文里报的 100 倍还狠一些，
+ * 好让「正常值被压成 0」这件事在 64×128 这么小的规模上也看得见。
+ */
+function makeQuantData() {
+  let seed = 20260826;
+  const next = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  const values = [];
+  for (let row = 0; row < Q_SEQ; row += 1) {
+    for (let d = 0; d < Q_DIM; d += 1) {
+      if (d === 11) values.push(2600 * (0.8 + 0.4 * next()));
+      else if (d === 68) values.push(-1900 * (0.8 + 0.4 * next()));
+      else values.push((next() - 0.5) * 0.04);
+    }
+  }
+  return values;
+}
+
+const QUANT_VALUES = makeQuantData();
+
+const quantBench = {
+  sources: ['/root/quant.cu'],
+  buffers: [
+    { name: 'K', length: Q_SEQ * Q_DIM, fill: { kind: 'values', values: QUANT_VALUES } },
+    // fp8 打包存储：4 个 8 位存储挤在一个 int 里，所以只有四分之一大
+    { name: 'packed', length: Q_SEQ * (Q_DIM / 4), type: 'int', fill: { kind: 'zeros' } },
+    { name: 'scales', length: Q_SEQ * (Q_DIM / Q_BLOCK), fill: { kind: 'zeros' } },
+    { name: 'restored', length: Q_SEQ * Q_DIM, fill: { kind: 'zeros' } },
+  ],
+  launches: [
+    { kernel: 'quantize', grid: [Q_SEQ], block: [32], args: ['K', 'packed', 'scales', Q_SEQ, Q_DIM] },
+    { kernel: 'dequantize', grid: [Q_SEQ], block: [32], args: ['packed', 'scales', 'restored', Q_SEQ, Q_DIM] },
+  ],
+};
+
+const STAGE_19 = {
+  id: 'quantization',
+  title: t('量化 —— scale 的粒度决定一切', 'Quantisation — granularity of the scale is everything'),
+  goal: t(
+    [
+      'KV cache 是显存大户。把它从 fp32 换成 fp8，显存立刻降到四分之一 ——',
+      '这一步谁都会想到。难的是**怎么不把精度丢光**。',
+      '',
+      'fp8 的 E4M3 格式从 2⁻⁹ 到 448，只有不到 19 个二进制数量级',
+      '（fp32 有 277 个）。所以量化必须先乘一个 **scale** 把数搬进这个范围，',
+      '读回来再除掉。scale 怎么定，就是全部的门道。',
+      '',
+      '`quant.cu` 现在用的是 **per-tensor** scale：整个张量一个 scale，',
+      '取全局最大绝对值算出来。问题出在真实的激活值上 ——',
+      '**个别通道会比其它通道大几个数量级**。',
+      '这份 K 里第 11 与第 68 号通道就是这样的离群通道。',
+      '',
+      '于是 scale 被离群值绑架，正常值缩得比 E4M3 的最小次正规数还小，',
+      '**直接量化成 0**。跑一下就能看到：三分之一的正常值没了。',
+      '',
+      '把 scale 改成**按通道分块**：每 16 个通道一个 scale。',
+      '离群通道被关进它自己那一块，剩下 7 块不受影响。',
+      '',
+      '```bash',
+      'nvcc -o bench quant.cu && ncu ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 被压成 0 的正常值 ≤ 10%（per-tensor 是 34.3%）',
+      '- `scales` 里真的有 `seq × dim/16` 个 scale，不是只填了一个',
+      '- 打包存储仍然是四分之一大小（不许偷偷用 fp32 存）',
+    ].join('\n'),
+    [
+      'The KV cache is the memory hog. Moving it from fp32 to fp8 cuts memory to a quarter, which',
+      'everyone thinks of. The hard part is **not throwing away the accuracy**.',
+      '',
+      'fp8 E4M3 spans 2⁻⁹ to 448, under 19 binary orders of magnitude (fp32 has 277). So',
+      'quantisation must first multiply by a **scale** to move values into that range and divide it',
+      'back out on read. How you choose that scale is the whole game.',
+      '',
+      '`quant.cu` currently uses a **per-tensor** scale: one scale for the whole tensor, from the',
+      'global maximum absolute value. Real activations break this, because **a few channels are',
+      'orders of magnitude larger than the rest**. Channels 11 and 68 of this K are such outliers.',
+      '',
+      'The scale is then hostage to the outlier, normal values shrink below E4M3\'s smallest',
+      'subnormal and **quantise straight to zero**. Run it and see: a third of the normal values',
+      'are gone.',
+      '',
+      'Change the scale to be **per block of channels**: one scale every 16 channels. The outlier',
+      'channel is confined to its own block and the other 7 are untouched.',
+      '',
+      '```bash',
+      'nvcc -o bench quant.cu && ncu ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- at most 10% of normal values flattened to zero (34.3% per-tensor)',
+      '- `scales` really holds `seq × dim/16` scales, not just one',
+      '- the packed store is still a quarter the size (no sneaking back to fp32)',
+    ].join('\n')
+  ),
+  checklist: [
+    t('每 16 个通道算一个 scale', 'Compute one scale per 16 channels'),
+    t('量化时按元素所在的块取 scale', 'Pick the scale by which block the element falls in'),
+    t('反量化时用同一个 scale 除回去', 'Divide by that same scale when dequantising'),
+  ],
+  hints: [
+    t('第 d 个元素属于第 `d / 16` 块，scale 存在 `scales[row * (dim / 16) + d / 16]`。',
+      'Element d belongs to block `d / 16`, whose scale lives at `scales[row * (dim / 16) + d / 16]`.'),
+    t('打包的时候一个 int 装 4 个元素，这 4 个元素**可能跨块** —— '
+      + '16 能被 4 整除，所以其实不会，但按元素各取各的 scale 更稳当。',
+      'One int packs four elements, which **could** straddle a block boundary. Sixteen is divisible '
+      + 'by four so they never do here, but looking up each element\'s scale separately is safer.'),
+  ],
+  pitfalls: [
+    t('**量化用块 scale、反量化用全局 scale。** 结果会呈现出一种奇怪的分段错误：'
+      + '有的块对、有的块差好几个数量级，看起来像是内存写乱了。',
+      '**Quantising with block scales but dequantising with a global one.** The result looks '
+      + 'strangely piecewise: some blocks correct, others off by orders of magnitude, which reads '
+      + 'like memory corruption rather than a scale bug.'),
+    t('**scale 取成最大值本身而不是 448 / 最大值。** 方向反了，'
+      + '所有值会被缩到 1/2600 而不是放大 —— 一样全归零，但原因完全不同。',
+      '**Setting the scale to the maximum instead of 448 / maximum.** The direction is inverted, '
+      + 'everything shrinks by 1/2600 instead of expanding, and everything zeroes out again for a '
+      + 'completely different reason.'),
+    t('**最大值取到 0 时除零。** 全零的块是存在的，记得夹一个下限。',
+      '**Dividing by a zero maximum.** All-zero blocks happen; clamp the denominator.'),
+  ],
+  extension: t(
+    '这一关的数字有出处。SmoothQuant（arXiv:2211.10438，2022 年 11 月，ICML 2023）'
+    + '给了最直白的算法：设通道 i 的最大值是 mᵢ、整个矩阵的最大值是 m，'
+    + '那么通道 i 实际用得上的量化格点数是 `2⁸ · mᵢ/m`。'
+    + '离群值大 100 倍时，**正常通道在 256 个格点里只剩 2 到 3 个**。'
+    + '\n\n'
+    + '而离群值能大到什么程度？《Massive Activations in Large Language Models》'
+    + '（arXiv:2402.17762，ICML 2024）在 LLaMA2-7B 上量到最大激活值 2622、中位数 0.2，'
+    + '差一万倍；Mixtral-8x7B 是 7100 比 0.3。而这样的值每个 hidden state 里只有 2 到 4 个。'
+    + '\n\n'
+    + '为什么不干脆 per-channel？SmoothQuant 说得很清楚：per-channel 精度够，'
+    + '**但和 INT8 的 GEMM kernel 不兼容** —— scale 必须能在归约维度上提出来。'
+    + '整个 microscaling 硬件路线（NVFP4 每 16 个一个 scale、MXFP4 每 32 个）'
+    + '就是为了在硬件里原生支持这件事。'
+    + '\n\n'
+    + 'NVFP4 与 MXFP4 的差别正好在 scale 上：NVFP4 是 16 个元素一块、scale 用 fp8 E4M3，'
+    + '外面再套一个 per-tensor 的 fp32 scale；MXFP4 是 32 个一块、scale 用 E8M0（只能是 2 的幂）、'
+    + '没有第二级。多出来的那半个 bit 换来的是精度：Llama-3.1-8B 上 W4A4 的 RTN，'
+    + 'NVFP4 恢复到 94.67%，MXFP4 只有 87.83%（arXiv:2509.23202，2026 年 3 月）。'
+    + '\n\n'
+    + '一个反直觉的结论也来自那篇：**NVFP4 那么小的 block 反而让传统的离群值处理失效**。'
+    + 'Hadamard 旋转会把离群值的误差均摊到所有坐标上，'
+    + '而 absmax scaling 在小 block 上本来就保护得很好，旋转反而抹掉了这个保护。',
+    'The numbers here have sources. SmoothQuant (arXiv:2211.10438, November 2022, ICML 2023) gives '
+    + 'the cleanest arithmetic: if channel i has maximum mᵢ and the whole matrix has maximum m, the '
+    + 'effective number of quantisation levels for channel i is `2⁸ · mᵢ/m`. With outliers 100x '
+    + 'larger, **normal channels get 2 to 3 of the 256 levels**.\n\n'
+    + 'How large do outliers get? Massive Activations in Large Language Models (arXiv:2402.17762, '
+    + 'ICML 2024) measured a maximum activation of 2622 against a median of 0.2 in LLaMA2-7B, a '
+    + 'factor of ten thousand; Mixtral-8x7B was 7100 against 0.3. Each hidden state holds only 2 to '
+    + '4 such values.\n\n'
+    + 'Why not simply go per-channel? SmoothQuant is explicit: per-channel is accurate enough **but '
+    + 'incompatible with INT8 GEMM kernels**, because the scale has to factor out along the '
+    + 'reduction dimension. The entire microscaling hardware line (NVFP4 one scale per 16 elements, '
+    + 'MXFP4 per 32) exists to support this natively.\n\n'
+    + 'NVFP4 and MXFP4 differ exactly in the scale: NVFP4 blocks 16 elements with an fp8 E4M3 scale '
+    + 'plus a second per-tensor fp32 scale; MXFP4 blocks 32 with an E8M0 scale (powers of two only) '
+    + 'and no second level. That extra half bit buys accuracy: on Llama-3.1-8B W4A4 with RTN, NVFP4 '
+    + 'recovers 94.67% against MXFP4\'s 87.83% (arXiv:2509.23202, March 2026).\n\n'
+    + 'One counter-intuitive result from the same paper: **NVFP4\'s small blocks actually neutralise '
+    + 'traditional outlier mitigation.** Hadamard rotation spreads the outlier\'s error across all '
+    + 'coordinates, and absmax scaling over a small block already protects them, so the rotation '
+    + 'erases that protection instead of helping.'
+  ),
+  gpu: {
+    files: {
+      '/root/quant.cu': code`
+        #include "cuda_fp8.h"
+
+        // 量化：把 K 打包成 fp8（4 个挤一个 int），同时算出 scale
+        __global__ void quantize(const float* K, int* packed, float* scales, int seq, int dim) {
+          int row = blockIdx.x;
+          int lane = threadIdx.x;
+
+          // TODO: per-tensor —— 整个张量一个 scale。
+          //       离群通道会把它绑架，正常值全被压成 0。
+          //       改成每 ${Q_BLOCK} 个通道一个 scale。
+          if (lane == 0) {
+            float amax = 0.0f;
+            for (int j = 0; j < seq; ++j) {
+              for (int d = 0; d < dim; ++d) amax = fmaxf(amax, fabsf(K[j * dim + d]));
+            }
+            scales[0] = 448.0f / fmaxf(amax, 1e-30f);
+          }
+          __syncwarp(0xffffffff);
+
+          for (int d = lane; d < dim / 4; d += 32) {
+            int base = d * 4;
+            float s = scales[0];
+            int a = __nv_cvt_float_to_fp8(K[row * dim + base + 0] * s, __NV_SATFINITE, __NV_E4M3);
+            int b = __nv_cvt_float_to_fp8(K[row * dim + base + 1] * s, __NV_SATFINITE, __NV_E4M3);
+            int c = __nv_cvt_float_to_fp8(K[row * dim + base + 2] * s, __NV_SATFINITE, __NV_E4M3);
+            int e = __nv_cvt_float_to_fp8(K[row * dim + base + 3] * s, __NV_SATFINITE, __NV_E4M3);
+            packed[row * (dim / 4) + d] = a | (b << 8) | (c << 16) | (e << 24);
+          }
+        }
+
+        // 反量化：拆开 4 个字节，各自除回它的 scale
+        __global__ void dequantize(const int* packed, const float* scales,
+                                   float* out, int seq, int dim) {
+          int row = blockIdx.x;
+          int lane = threadIdx.x;
+
+          for (int d = lane; d < dim / 4; d += 32) {
+            int word = packed[row * (dim / 4) + d];
+            int base = d * 4;
+            for (int t = 0; t < 4; ++t) {
+              float sc = scales[0];
+              int byte = (word >> (t * 8)) & 255;
+              out[row * dim + base + t] = (float)__nv_cvt_fp8_to_halfraw(byte, __NV_E4M3) / sc;
+            }
+          }
+        }
+      `,
+    },
+    bench: quantBench,
+    referenceFiles: {
+      '/root/quant.cu': code`
+        #include "cuda_fp8.h"
+
+        __global__ void quantize(const float* K, int* packed, float* scales, int seq, int dim) {
+          int row = blockIdx.x;
+          int lane = threadIdx.x;
+          int blocks = dim / ${Q_BLOCK};
+
+          // 每 ${Q_BLOCK} 个通道一个 scale：离群通道被关进它自己那一块
+          if (lane == 0) {
+            for (int b = 0; b < blocks; ++b) {
+              float amax = 0.0f;
+              for (int d = 0; d < ${Q_BLOCK}; ++d) {
+                amax = fmaxf(amax, fabsf(K[row * dim + b * ${Q_BLOCK} + d]));
+              }
+              // 夹一个下限：全零的块是存在的
+              scales[row * blocks + b] = 448.0f / fmaxf(amax, 1e-30f);
+            }
+          }
+          __syncwarp(0xffffffff);
+
+          for (int d = lane; d < dim / 4; d += 32) {
+            int base = d * 4;
+            float s0 = scales[row * blocks + (base + 0) / ${Q_BLOCK}];
+            float s1 = scales[row * blocks + (base + 1) / ${Q_BLOCK}];
+            float s2 = scales[row * blocks + (base + 2) / ${Q_BLOCK}];
+            float s3 = scales[row * blocks + (base + 3) / ${Q_BLOCK}];
+            int a = __nv_cvt_float_to_fp8(K[row * dim + base + 0] * s0, __NV_SATFINITE, __NV_E4M3);
+            int b = __nv_cvt_float_to_fp8(K[row * dim + base + 1] * s1, __NV_SATFINITE, __NV_E4M3);
+            int c = __nv_cvt_float_to_fp8(K[row * dim + base + 2] * s2, __NV_SATFINITE, __NV_E4M3);
+            int e = __nv_cvt_float_to_fp8(K[row * dim + base + 3] * s3, __NV_SATFINITE, __NV_E4M3);
+            packed[row * (dim / 4) + d] = a | (b << 8) | (c << 16) | (e << 24);
+          }
+        }
+
+        __global__ void dequantize(const int* packed, const float* scales,
+                                   float* out, int seq, int dim) {
+          int row = blockIdx.x;
+          int lane = threadIdx.x;
+          int blocks = dim / ${Q_BLOCK};
+
+          for (int d = lane; d < dim / 4; d += 32) {
+            int word = packed[row * (dim / 4) + d];
+            int base = d * 4;
+            for (int t = 0; t < 4; ++t) {
+              // 量化用哪个 scale，反量化就得用哪个
+              float sc = scales[row * blocks + (base + t) / ${Q_BLOCK}];
+              int byte = (word >> (t * 8)) & 255;
+              out[row * dim + base + t] = (float)__nv_cvt_fp8_to_halfraw(byte, __NV_E4M3) / sc;
+            }
+          }
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('quant.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const SEQ = ${Q_SEQ};
+      const DIM = ${Q_DIM};
+      const BLOCK = ${Q_BLOCK};
+      /** 离群通道，绝对值上万；别的都在 0.02 量级 */
+      const OUTLIER_CHANNELS = [11, 68];
+
+      function normalIndices(K) {
+        const out = [];
+        for (let row = 0; row < SEQ; row += 1) {
+          for (let d = 0; d < DIM; d += 1) {
+            if (OUTLIER_CHANNELS.indexOf(d) >= 0) continue;
+            if (K[row * DIM + d] !== 0) out.push(row * DIM + d);
+          }
+        }
+        return out;
+      }
+
+      describe('量化', () => {
+        it('**被压成 0 的正常值降到 10% 以下**', async () => {
+          await lab.buildAndRun();
+          const K = lab.buffer('K');
+          const restored = lab.buffer('restored');
+          const indices = normalIndices(K);
+          const zeroed = indices.filter((i) => restored[i] === 0).length;
+          // per-tensor 是 34.3%
+          expect(zeroed / indices.length).toBeLessThanOrEqual(0.1);
+        });
+
+        it('离群通道自己仍然是准的 —— 不能靠牺牲它来换', async () => {
+          await lab.buildAndRun();
+          const K = lab.buffer('K');
+          const restored = lab.buffer('restored');
+          for (const d of OUTLIER_CHANNELS) {
+            for (let row = 0; row < SEQ; row += 8) {
+              const i = row * DIM + d;
+              const rel = Math.abs(restored[i] - K[i]) / Math.abs(K[i]);
+              expect(rel).toBeLessThanOrEqual(0.05);
+            }
+          }
+        });
+
+        it('scales 里真的有 seq × dim/16 个 scale', async () => {
+          await lab.buildAndRun();
+          const scales = lab.buffer('scales');
+          const filled = Array.from(scales).filter((v) => v !== 0).length;
+          expect(filled).toBe(SEQ * (DIM / BLOCK));
+          // 而且不是全都一样 —— 一样就说明还是 per-tensor
+          expect(new Set(Array.from(scales)).size).toBeGreaterThan(2);
+        });
+
+        it('打包存储还是四分之一大小', async () => {
+          await lab.buildAndRun();
+          const packed = lab.bufferInts('packed');
+          expect(packed.length).toBe(SEQ * DIM / 4);
+          // 每个 int 的四个字节都用上了，不是只写了低 8 位
+          const highBitsUsed = Array.from(packed).some((w) => ((w >> 24) & 255) !== 0);
+          expect(highBitsUsed).toBe(true);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.global.sectorsPerRequest', op: 'lte', value: 4.5,
+      zh: '每次访存打到的 32B 扇区数', en: 'sectors per request',
+      unit: 'sector/req', dimension: 'latency',
+    }),
+  ],
+  focus: ['correctness', 'throughput'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -4171,5 +4539,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19],
 };

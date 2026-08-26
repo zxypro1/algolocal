@@ -1625,6 +1625,47 @@ const primers = {
         + 'table grows while indirection dominates, too large and the last block wastes more.'
       )
     ),
+    'quantization': t(
+      p(
+        '量化是拿精度换显存与带宽。把 KV cache 从 fp32 换成 fp8，'
+        + '显存降到四分之一，读它的带宽也降到四分之一 --'
+        + '而解码本来就是访存受限的，所以这一步同时省显存和提吞吐。',
+        '难的不是格式转换，是 scale。fp8 的 E4M3 只覆盖不到 19 个二进制数量级，'
+        + '所以必须先乘一个 scale 把数搬进这个范围。'
+        + 'scale 怎么定，决定了量化是几乎无损还是彻底毁掉。',
+        'SmoothQuant 给了最直白的算法：设通道 i 的最大值是 mi、整个矩阵的最大值是 m，'
+        + '那么通道 i 实际用得上的量化格点数就是 2 的 8 次方乘以 mi 除以 m。'
+        + '真实激活里离群通道能比正常通道大一百倍，于是正常通道在 256 个格点里'
+        + '只剩两三个。而《Massive Activations》在 LLaMA2-7B 上量到的最大激活值是 2622、'
+        + '中位数 0.2，差一万倍，那时候正常值连一个格点都分不到，直接归零。',
+        '解法是把 scale 的粒度做细：每若干个元素一个 scale，'
+        + '离群值被关进它自己那一小块，别的块不受影响。'
+        + '为什么不干脆每个通道一个 scale？因为那和 GEMM kernel 不兼容 --'
+        + 'scale 必须能在归约维度上提出来。'
+        + '整条 microscaling 硬件路线（NVFP4 每 16 个元素一个 scale、MXFP4 每 32 个）'
+        + '就是为了让硬件原生支持这件事。'
+      ),
+      p(
+        'Quantisation trades accuracy for memory and bandwidth. Moving the KV cache from fp32 to '
+        + 'fp8 cuts memory to a quarter and cuts the bandwidth needed to read it by the same factor. '
+        + 'Decoding is memory-bound to begin with, so this saves memory and raises throughput at once.',
+        'The hard part is not the format conversion, it is the scale. fp8 E4M3 covers under 19 '
+        + 'binary orders of magnitude, so values must be multiplied by a scale to land inside that '
+        + 'range. How that scale is chosen decides whether quantisation is nearly lossless or '
+        + 'completely destructive.',
+        'SmoothQuant gives the cleanest arithmetic: if channel i has maximum mi and the whole matrix '
+        + 'has maximum m, the effective number of levels available to channel i is 2 to the 8th '
+        + 'times mi over m. Real activations have outlier channels a hundred times larger than the '
+        + 'rest, leaving normal channels two or three of the 256 levels. Massive Activations '
+        + 'measured a maximum of 2622 against a median of 0.2 in LLaMA2-7B, a factor of ten '
+        + 'thousand, at which point normal values do not get a single level and go straight to zero.',
+        'The fix is finer scale granularity: one scale per small group of elements, so an outlier '
+        + 'is confined to its own group and the rest are untouched. Why not one scale per channel? '
+        + 'Because that is incompatible with GEMM kernels, where the scale has to factor out along '
+        + 'the reduction dimension. The whole microscaling hardware line, NVFP4 with one scale per '
+        + '16 elements and MXFP4 per 32, exists so hardware can do this natively.'
+      )
+    ),
   },
 
   'intranet-k8s': {
