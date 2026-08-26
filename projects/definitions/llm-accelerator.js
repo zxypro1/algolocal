@@ -1816,6 +1816,423 @@ const STAGE_9 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 10 关：双缓冲                                                     */
+/* ------------------------------------------------------------------ */
+
+const TILED_SOURCE = code`
+  __global__ void sgemm(const float* A, const float* B, float* C, int n) {
+    __shared__ float As[16][16];
+    __shared__ float Bs[16][16];
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int row = blockIdx.y * 16 + ty;
+    int col = blockIdx.x * 16 + tx;
+
+    float acc = 0.0f;
+    for (int t = 0; t < n / 16; ++t) {
+      As[ty][tx] = A[row * n + t * 16 + tx];
+      Bs[ty][tx] = B[(t * 16 + ty) * n + col];
+      __syncthreads();
+      for (int k = 0; k < 16; ++k) acc = fmaf(As[ty][k], Bs[k][tx], acc);
+      __syncthreads();
+    }
+    C[row * n + col] = acc;
+  }
+`;
+
+const STAGE_10 = {
+  id: 'double-buffering',
+  title: t('双缓冲 —— 一轮两个屏障砍成一个', 'Double buffering — two barriers per tile down to one'),
+  goal: t(
+    [
+      '分块 GEMM 的每一轮里有**两个** `__syncthreads()`：',
+      '一个在搬完之后（等大家都写完才能读），一个在算完之后（等大家都读完才能覆盖）。',
+      '128 次分块就是 1024 次屏障，每次屏障整个 block 都要停下来对齐。',
+      '',
+      '第二个屏障之所以必要，是因为下一轮要**覆盖同一块**共享内存。',
+      '那就别覆盖它 —— 开**两套** buffer 轮流用：',
+      '算第 t 块的时候，往另一套里搬第 t+1 块。两件事互不干扰，',
+      '于是一轮只需要一个屏障。',
+      '',
+      '```bash',
+      'nvcc -o bench sgemm.cu && ncu ./bench',
+      '```',
+      '',
+      '`Warp State Statistics` 里的 `Barriers` 应该从 1024 掉到 512。',
+      '',
+      '**代价是共享内存翻倍**（2KB 变 4KB）。这是典型的空间换时间：',
+      '共享内存吃得多了，能同时驻留的 block 就少了，所以不是无脑赢 ——',
+      '`ncu` 的 `Occupancy` 分节会告诉你有没有因此被卡住。',
+      '',
+      '**通关标准**',
+      '',
+      '- 结果不变',
+      '- 屏障次数 ≤ 700（单缓冲是 1024）',
+      '- bank 冲突仍然为 0，没有竞态',
+    ].join('\n'),
+    [
+      'Each round of the tiled GEMM has **two** `__syncthreads()` calls: one after staging (everyone',
+      'must finish writing before anyone reads) and one after accumulating (everyone must finish',
+      'reading before anyone overwrites). With 128 tiles that is 1024 barriers, each stopping the',
+      'whole block to line up.',
+      '',
+      'The second barrier exists only because the next round **overwrites the same** shared tile.',
+      'So do not overwrite it. Keep **two** buffers and alternate: while computing on tile t, stage',
+      'tile t+1 into the other one. The two no longer interfere and one barrier per round is enough.',
+      '',
+      '```bash',
+      'nvcc -o bench sgemm.cu && ncu ./bench',
+      '```',
+      '',
+      '`Barriers` under `Warp State Statistics` should drop from 1024 to 512.',
+      '',
+      '**The cost is twice the shared memory** (2KB to 4KB). A classic space-for-time trade: more',
+      'shared memory per block means fewer resident blocks, so it is not a free win. The `Occupancy`',
+      'section of `ncu` tells you whether it started limiting you.',
+      '',
+      '**To pass**',
+      '',
+      '- unchanged results',
+      '- at most 700 barriers (1024 single-buffered)',
+      '- still zero bank conflicts and no races',
+    ].join('\n')
+  ),
+  checklist: [
+    t('把共享内存开成两套', 'Declare two sets of shared tiles'),
+    t('循环外先搬第一块，循环里搬下一块、算当前块',
+      'Stage the first tile before the loop, then stage t+1 while computing t'),
+    t('确认屏障次数减半而结果不变', 'Confirm barriers halved and results unchanged'),
+  ],
+  hints: [
+    t('声明成 `__shared__ float As[2][16][16]`，用 `t % 2` 挑当前那一套。',
+      'Declare `__shared__ float As[2][16][16]` and pick the current set with `t % 2`.'),
+    t('循环体的顺序是：先发起下一块的搬运，再算当前块，最后一个屏障。'
+      + '最后一块在循环外单独算，因为它没有「下一块」要搬。',
+      'The loop body goes: stage the next tile, compute the current one, then one barrier. '
+      + 'Handle the final tile after the loop, since it has no successor to stage.'),
+  ],
+  pitfalls: [
+    t('**先算当前块再搬下一块。** 顺序反了就没有重叠可言 —— 双缓冲的意义正是'
+      + '让搬运和计算在时间上错开，而不只是省一个屏障。',
+      '**Computing the current tile before staging the next.** Reversed, there is nothing to overlap. '
+      + 'The point of double buffering is separating the two in time, not just saving a barrier.'),
+    t('**忘了循环外的第一块与最后一块。** 循环变成 `t < n/16 - 1`，'
+      + '首块要在进循环前搬好，末块要在出循环后算掉。',
+      '**Forgetting the first and last tiles.** The loop becomes `t < n/16 - 1`: stage the first tile '
+      + 'before entering and compute the last one after leaving.'),
+  ],
+  extension: t(
+    '真硬件上还能更进一步：Ampere 起有 `cp.async`（CUDA 里是 `__pipeline_memcpy_async`），'
+    + '它让搬运**不占用寄存器也不阻塞线程** —— 发起之后线程继续算，'
+    + '到需要用的时候再 `__pipeline_wait_prior`。这样双缓冲才真正变成流水线。'
+    + 'Hopper 又加了 TMA（张量内存加速器），一条指令搬一整块多维 tile。'
+    + '我们这里没有建模异步拷贝的时间重叠，所以门槛压在屏障次数上 ——'
+    + '那是这个优化里可以被精确计量的那一半。',
+    'Real hardware goes further. From Ampere there is `cp.async` (`__pipeline_memcpy_async` in CUDA), '
+    + 'which stages data **without occupying registers or blocking the thread**: issue it, keep computing, '
+    + 'and call `__pipeline_wait_prior` when the data is actually needed. Only then does double buffering '
+    + 'become a real pipeline. Hopper adds TMA, moving a whole multidimensional tile with one instruction. '
+    + 'We do not model the timing overlap of async copies here, so the gate rests on the barrier count, '
+    + 'which is the half of this optimisation that can be measured exactly.'
+  ),
+  gpu: {
+    files: { '/root/sgemm.cu': TILED_SOURCE },
+    bench: gemmBench({
+      kernel: 'sgemm', grid: [N7 / 16, N7 / 16], block: [16, 16],
+      args: ['A', 'B', 'C', N7],
+    }),
+    referenceFiles: {
+      '/root/sgemm.cu': code`
+        __global__ void sgemm(const float* A, const float* B, float* C, int n) {
+          // 两套 buffer 轮流用，于是不再需要「等大家读完」那个屏障
+          __shared__ float As[2][16][16];
+          __shared__ float Bs[2][16][16];
+
+          int tx = threadIdx.x;
+          int ty = threadIdx.y;
+          int row = blockIdx.y * 16 + ty;
+          int col = blockIdx.x * 16 + tx;
+
+          float acc = 0.0f;
+
+          // 先把第一块搬进 buffer 0
+          As[0][ty][tx] = A[row * n + tx];
+          Bs[0][ty][tx] = B[ty * n + col];
+          __syncthreads();
+
+          for (int t = 0; t < n / 16 - 1; ++t) {
+            int cur = t % 2;
+            int nxt = (t + 1) % 2;
+
+            // 先发起下一块的搬运，再算当前块 —— 顺序反了就没有重叠
+            As[nxt][ty][tx] = A[row * n + (t + 1) * 16 + tx];
+            Bs[nxt][ty][tx] = B[((t + 1) * 16 + ty) * n + col];
+
+            for (int k = 0; k < 16; ++k) {
+              acc = fmaf(As[cur][ty][k], Bs[cur][k][tx], acc);
+            }
+            __syncthreads();
+          }
+
+          // 最后一块没有「下一块」要搬，单独算掉
+          int last = (n / 16 - 1) % 2;
+          for (int k = 0; k < 16; ++k) {
+            acc = fmaf(As[last][ty][k], Bs[last][k][tx], acc);
+          }
+
+          C[row * n + col] = acc;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('gemm.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const N = ${N7};
+
+      describe('双缓冲 GEMM', () => {
+      ${GEMM_CORRECTNESS}
+        it('屏障次数减半', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().launch.barriers).toBeLessThanOrEqual(700);
+        });
+
+        it('共享内存翻倍了 —— 这是它的代价', async () => {
+          await lab.buildAndRun();
+          const stat = lab.staticMetrics();
+          expect(stat.sharedBytesPerBlock).toBeGreaterThanOrEqual(4096);
+        });
+
+        it('bank 冲突仍然为 0，也没有竞态', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().shared.bankConflicts).toBe(0);
+          const report = await lab.racecheck();
+          expect(report.races.length).toBe(0);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.launch.barriers', op: 'lte', value: 700,
+      zh: '屏障次数（单缓冲是 1024）', en: 'barriers (1024 single-buffered)',
+      dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.shared.bankConflicts', op: 'eq', value: 0,
+      zh: '共享内存 bank 冲突', en: 'shared bank conflicts',
+      dimension: 'latency',
+    }),
+  ],
+  focus: ['latency'],
+};
+
+/* ------------------------------------------------------------------ */
+/* 第 11 关：Tensor Core                                                */
+/* ------------------------------------------------------------------ */
+
+const STAGE_11 = {
+  id: 'tensor-core',
+  title: t('Tensor Core —— 让矩阵乘走专用单元', 'Tensor cores — matmul on dedicated hardware'),
+  goal: t(
+    [
+      '到现在为止每一次乘加都走 FMA 流水线，一个 SM 每周期 128 次。',
+      'GPU 上还有一类专门为矩阵乘造的单元：**tensor core**，',
+      'H100 上一个 SM 每周期能做 1024 次 —— 八倍。',
+      '',
+      '用法是 `wmma`（warp matrix multiply-accumulate）。它是 **warp 级**的：',
+      '一整个 warp 协作算一个 16×16×16 的矩阵乘，数据存在叫 `fragment` 的东西里。',
+      'fragment 是不透明的 —— 你不知道也不需要知道哪个 lane 拿了哪几个元素。',
+      '',
+      '```cuda',
+      'wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> af;',
+      'wmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;',
+      'wmma::fill_fragment(cf, 0.0f);',
+      'wmma::load_matrix_sync(af, A + offset, n);',
+      'wmma::mma_sync(cf, af, bf, cf);',
+      'wmma::store_matrix_sync(C + offset, cf, n, wmma::mem_row_major);',
+      '```',
+      '',
+      '**输入是 half，累加是 float。** 这是 tensor core 的标准配方：',
+      '精度损失只发生在输入端，累加链条仍然在 fp32 上，所以长序列不会垮。',
+      '',
+      '启动配置换成每个 block 一个 warp（32 线程），grid 覆盖 8×8 个 16×16 的 tile。',
+      '',
+      '```bash',
+      'nvcc -o bench sgemm.cu && ncu ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 结果仍然对得上（half 输入，容差放宽到 5e-3）',
+      '- `inst.mma ≥ n³`，`inst.fma = 0`',
+      '- 瓶颈不再是 ALU',
+    ].join('\n'),
+    [
+      'Every multiply-add so far went through the FMA pipeline: 128 per SM per cycle. GPUs also have',
+      'units built specifically for matrix multiplication, **tensor cores**, and an H100 SM does 1024',
+      'of those per cycle. Eight times more.',
+      '',
+      'The interface is `wmma` (warp matrix multiply-accumulate). It is **warp-level**: a whole warp',
+      'cooperates on one 16×16×16 matmul, with the data held in `fragment` objects. A fragment is',
+      'opaque; you neither know nor need to know which lane holds which elements.',
+      '',
+      '```cuda',
+      'wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> af;',
+      'wmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;',
+      'wmma::fill_fragment(cf, 0.0f);',
+      'wmma::load_matrix_sync(af, A + offset, n);',
+      'wmma::mma_sync(cf, af, bf, cf);',
+      'wmma::store_matrix_sync(C + offset, cf, n, wmma::mem_row_major);',
+      '```',
+      '',
+      '**Inputs are half, accumulation is float.** That is the standard tensor-core recipe: precision',
+      'is lost only at the inputs while the accumulation chain stays in fp32, so long sequences hold up.',
+      '',
+      'Switch the launch to one warp per block (32 threads), with the grid covering 8×8 tiles of 16×16.',
+      '',
+      '```bash',
+      'nvcc -o bench sgemm.cu && ncu ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- results still match (half inputs, tolerance relaxed to 5e-3)',
+      '- `inst.mma ≥ n³` and `inst.fma = 0`',
+      '- ALU is no longer the bottleneck',
+    ].join('\n')
+  ),
+  checklist: [
+    t('声明三个 fragment：matrix_a、matrix_b、accumulator',
+      'Declare three fragments: matrix_a, matrix_b and accumulator'),
+    t('沿 k 维循环，每轮 load 两块再 mma 一次',
+      'Loop along k, loading two fragments and issuing one mma each round'),
+    t('用 ncu 确认 FMA 归零、tensor core 起来了',
+      'Confirm with ncu that FMA hit zero and the tensor unit is busy'),
+  ],
+  hints: [
+    t('accumulator 只要 `fill_fragment` 一次，循环里反复 `mma_sync(cf, af, bf, cf)` 就是累加。',
+      'Fill the accumulator once; repeating `mma_sync(cf, af, bf, cf)` in the loop accumulates into it.'),
+    t('A 的第 t 块起点是 `A + blockIdx.y * 16 * n + t * 16`，'
+      + 'B 的是 `B + t * 16 * n + blockIdx.x * 16`，两个 ldm 都是 n。',
+      'Tile t of A starts at `A + blockIdx.y * 16 * n + t * 16` and of B at '
+      + '`B + t * 16 * n + blockIdx.x * 16`; the leading dimension is n for both.'),
+  ],
+  pitfalls: [
+    t('**把 accumulator 声明成 half。** 累加必须在 fp32 上，'
+      + '否则 128 项累加下来误差会滚到不可用 —— 编译期就会拦下。',
+      '**Declaring the accumulator as half.** Accumulation must be fp32 or the error compounds over 128 '
+      + 'terms until the result is useless. The compiler rejects it.'),
+    t('**用 256 个线程的 block 却只写一个 warp 的逻辑。** wmma 是 warp 级原语，'
+      + '一个 block 里有几个 warp 就会算几遍同一个 tile，互相覆盖。',
+      '**Launching 256-thread blocks with single-warp logic.** wmma is a warp-level primitive; every warp '
+      + 'in the block computes the same tile and they overwrite each other.'),
+  ],
+  extension: t(
+    '这一关只把 FMA 换成了 tensor core，算术强度没变 —— 数据还是直接从显存读的。'
+    + '真正的高性能实现会把前面几关的东西全叠上：共享内存分块喂 fragment、双缓冲、'
+    + 'swizzle 消 bank 冲突。CUTLASS 就是这么组织的。'
+    + '再往后，Hopper 的 `wgmma` 与 Blackwell 的 `tcgen05` 把 MMA 变成异步的，'
+    + '于是要 warp 专业化：一部分 warp 专门搬数据，另一部分专门算。'
+    + 'FlashAttention-4 之所以从 Triton 退回 CuTe DSL，就是因为那种 tile 级控制'
+    + 'Triton 的抽象暴露不出来。',
+    'This stage only swaps FMA for tensor cores; arithmetic intensity is unchanged because data still '
+    + 'comes straight from device memory. A real implementation layers everything from the earlier stages '
+    + 'on top: shared-memory tiles feeding the fragments, double buffering, swizzling to kill bank '
+    + 'conflicts. That is how CUTLASS is organised. Beyond that, Hopper\'s `wgmma` and Blackwell\'s '
+    + '`tcgen05` make MMA asynchronous, which forces warp specialisation: some warps only move data while '
+    + 'others only compute. FlashAttention-4 moved from Triton back to CuTe DSL precisely because Triton\'s '
+    + 'abstractions do not expose that level of tile control.'
+  ),
+  gpu: {
+    files: { '/root/sgemm.cu': TILED_SOURCE },
+    bench: gemmBench({
+      kernel: 'sgemm', grid: [N7 / 16, N7 / 16], block: [32],
+      args: ['A', 'B', 'C', N7],
+    }),
+    referenceFiles: {
+      '/root/sgemm.cu': code`
+        // 每个 block 一个 warp，负责一个 16×16 的输出 tile。
+        //
+        // 注意输入类型是 half：精度损失只在输入端，累加仍然在 fp32 上。
+        __global__ void sgemm(const half* A, const half* B, float* C, int n) {
+          wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> af;
+          wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> bf;
+          wmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;
+
+          wmma::fill_fragment(cf, 0.0f);
+
+          for (int t = 0; t < n / 16; ++t) {
+            wmma::load_matrix_sync(af, A + blockIdx.y * 16 * n + t * 16, n);
+            wmma::load_matrix_sync(bf, B + t * 16 * n + blockIdx.x * 16, n);
+            wmma::mma_sync(cf, af, bf, cf);
+          }
+
+          wmma::store_matrix_sync(C + blockIdx.y * 16 * n + blockIdx.x * 16, cf, n,
+                                  wmma::mem_row_major);
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('gemm.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const N = ${N7};
+
+      describe('Tensor Core GEMM', () => {
+        it('结果对得上 —— half 输入所以容差放宽', async () => {
+          await lab.buildAndRun();
+          const A = lab.buffer('A');
+          const B = lab.buffer('B');
+          const C = lab.buffer('C');
+          let worst = 0;
+          for (let row = 0; row < N; row += 7) {
+            for (let col = 0; col < N; col += 7) {
+              let expected = 0;
+              for (let k = 0; k < N; k += 1) expected += A[row * N + k] * B[k * N + col];
+              const actual = C[row * N + col];
+              expect(Number.isFinite(actual)).toBe(true);
+              worst = Math.max(worst, Math.abs(actual - expected) / Math.max(1, Math.abs(expected)));
+            }
+          }
+          // half 只有 10 位尾数，输入端的舍入是主要误差来源
+          expect(worst).toBeLessThanOrEqual(5e-3);
+        });
+
+        it('乘加全部走了 tensor core', async () => {
+          await lab.buildAndRun();
+          const metrics = lab.metrics();
+          expect(metrics.inst.mma).toBeGreaterThanOrEqual(N * N * N);
+          expect(metrics.inst.fma).toBe(0);
+        });
+
+        it('瓶颈不再是 ALU', async () => {
+          await lab.buildAndRun();
+          expect(lab.timing().bottleneck).not.toBe('alu');
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.inst.mma', op: 'gte', value: N7 * N7 * N7,
+      zh: 'tensor core 乘加次数', en: 'tensor-core multiply-accumulates',
+      dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.inst.fma', op: 'eq', value: 0,
+      zh: 'FMA 流水线的乘加次数（换成 tensor core 之后应该归零）',
+      en: 'FMA-pipeline multiply-accumulates (should hit zero)',
+      dimension: 'latency',
+    }),
+  ],
+  focus: ['latency'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -1882,5 +2299,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11],
 };

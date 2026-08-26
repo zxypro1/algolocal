@@ -16433,6 +16433,335 @@
           "zh": "分块把数据从显存搬进了共享内存，但读写比还是 2:1：每做一次乘加读两个数。再往上一层的办法是让**一个线程算多个输出**，这样读进来的值能被复用更多次。\n\n让每个线程算 4×4 = 16 个输出：从共享内存读 4 个 A 的值和 4 个 B 的值（一共 8 次读），就能做 16 次乘加。读写比从 2:1 变成 1:2，好了四倍。这 16 个累加器全程待在寄存器里，寄存器的带宽比共享内存又高一个数量级。\n\n这里要用上第 6 关那条规则：**线程私有的数组只有在下标全是编译期常量时才待在寄存器里**。写成 `float acc[4][4]` 再用循环变量索引，整个数组会落到 local memory，性能不升反降。所以真实的 GEMM kernel 里这些累加器往往是手写展开的标量。\n\n这一层叫 thread tile，加上前面的 threadblock tile，就是 CUTLASS 那套「分块层次」的雏形。真实的库还会在中间加一层 warp tile，并用向量化访存与 swizzle 进一步压榨，但基本思路就是这两关的组合。",
           "en": "Tiling moved data from device memory into shared memory, but the ratio is still 2:1, two reads per multiply-add. The next level up is to give **one thread several outputs** so each loaded value is reused more times.\n\nLet each thread compute 4×4 = 16 outputs: read 4 values of A and 4 of B, eight reads in total, then perform 16 multiply-adds. The ratio goes from 2:1 to 1:2, four times better. Those 16 accumulators stay in registers throughout, and register bandwidth is another order of magnitude above shared memory.\n\nThis is where the stage-6 rule bites: **a thread-private array stays in registers only while every subscript is a compile-time constant**. Declaring `float acc[4][4]` and indexing it with a loop variable sends the whole thing to local memory and performance goes backwards. Real GEMM kernels therefore write these accumulators as hand-unrolled scalars.\n\nThis layer is called the thread tile, and together with the threadblock tile it forms the seed of the CUTLASS tiling hierarchy. Production libraries add a warp tile in between and squeeze further with vectorised access and swizzling, but the underlying idea is exactly these two stages combined."
         }
+      },
+      {
+        "id": "double-buffering",
+        "title": {
+          "zh": "双缓冲 —— 一轮两个屏障砍成一个",
+          "en": "Double buffering — two barriers per tile down to one"
+        },
+        "goal": {
+          "zh": "分块 GEMM 的每一轮里有**两个** `__syncthreads()`：\n一个在搬完之后（等大家都写完才能读），一个在算完之后（等大家都读完才能覆盖）。\n128 次分块就是 1024 次屏障，每次屏障整个 block 都要停下来对齐。\n\n第二个屏障之所以必要，是因为下一轮要**覆盖同一块**共享内存。\n那就别覆盖它 —— 开**两套** buffer 轮流用：\n算第 t 块的时候，往另一套里搬第 t+1 块。两件事互不干扰，\n于是一轮只需要一个屏障。\n\n```bash\nnvcc -o bench sgemm.cu && ncu ./bench\n```\n\n`Warp State Statistics` 里的 `Barriers` 应该从 1024 掉到 512。\n\n**代价是共享内存翻倍**（2KB 变 4KB）。这是典型的空间换时间：\n共享内存吃得多了，能同时驻留的 block 就少了，所以不是无脑赢 ——\n`ncu` 的 `Occupancy` 分节会告诉你有没有因此被卡住。\n\n**通关标准**\n\n- 结果不变\n- 屏障次数 ≤ 700（单缓冲是 1024）\n- bank 冲突仍然为 0，没有竞态",
+          "en": "Each round of the tiled GEMM has **two** `__syncthreads()` calls: one after staging (everyone\nmust finish writing before anyone reads) and one after accumulating (everyone must finish\nreading before anyone overwrites). With 128 tiles that is 1024 barriers, each stopping the\nwhole block to line up.\n\nThe second barrier exists only because the next round **overwrites the same** shared tile.\nSo do not overwrite it. Keep **two** buffers and alternate: while computing on tile t, stage\ntile t+1 into the other one. The two no longer interfere and one barrier per round is enough.\n\n```bash\nnvcc -o bench sgemm.cu && ncu ./bench\n```\n\n`Barriers` under `Warp State Statistics` should drop from 1024 to 512.\n\n**The cost is twice the shared memory** (2KB to 4KB). A classic space-for-time trade: more\nshared memory per block means fewer resident blocks, so it is not a free win. The `Occupancy`\nsection of `ncu` tells you whether it started limiting you.\n\n**To pass**\n\n- unchanged results\n- at most 700 barriers (1024 single-buffered)\n- still zero bank conflicts and no races"
+        },
+        "checklist": [
+          {
+            "zh": "把共享内存开成两套",
+            "en": "Declare two sets of shared tiles"
+          },
+          {
+            "zh": "循环外先搬第一块，循环里搬下一块、算当前块",
+            "en": "Stage the first tile before the loop, then stage t+1 while computing t"
+          },
+          {
+            "zh": "确认屏障次数减半而结果不变",
+            "en": "Confirm barriers halved and results unchanged"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "声明成 `__shared__ float As[2][16][16]`，用 `t % 2` 挑当前那一套。",
+            "en": "Declare `__shared__ float As[2][16][16]` and pick the current set with `t % 2`."
+          },
+          {
+            "zh": "循环体的顺序是：先发起下一块的搬运，再算当前块，最后一个屏障。最后一块在循环外单独算，因为它没有「下一块」要搬。",
+            "en": "The loop body goes: stage the next tile, compute the current one, then one barrier. Handle the final tile after the loop, since it has no successor to stage."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**先算当前块再搬下一块。** 顺序反了就没有重叠可言 —— 双缓冲的意义正是让搬运和计算在时间上错开，而不只是省一个屏障。",
+            "en": "**Computing the current tile before staging the next.** Reversed, there is nothing to overlap. The point of double buffering is separating the two in time, not just saving a barrier."
+          },
+          {
+            "zh": "**忘了循环外的第一块与最后一块。** 循环变成 `t < n/16 - 1`，首块要在进循环前搬好，末块要在出循环后算掉。",
+            "en": "**Forgetting the first and last tiles.** The loop becomes `t < n/16 - 1`: stage the first tile before entering and compute the last one after leaving."
+          }
+        ],
+        "extension": {
+          "zh": "真硬件上还能更进一步：Ampere 起有 `cp.async`（CUDA 里是 `__pipeline_memcpy_async`），它让搬运**不占用寄存器也不阻塞线程** —— 发起之后线程继续算，到需要用的时候再 `__pipeline_wait_prior`。这样双缓冲才真正变成流水线。Hopper 又加了 TMA（张量内存加速器），一条指令搬一整块多维 tile。我们这里没有建模异步拷贝的时间重叠，所以门槛压在屏障次数上 ——那是这个优化里可以被精确计量的那一半。",
+          "en": "Real hardware goes further. From Ampere there is `cp.async` (`__pipeline_memcpy_async` in CUDA), which stages data **without occupying registers or blocking the thread**: issue it, keep computing, and call `__pipeline_wait_prior` when the data is actually needed. Only then does double buffering become a real pipeline. Hopper adds TMA, moving a whole multidimensional tile with one instruction. We do not model the timing overlap of async copies here, so the gate rests on the barrier count, which is the half of this optimisation that can be measured exactly."
+        },
+        "gpu": {
+          "files": {
+            "/root/sgemm.cu": "__global__ void sgemm(const float* A, const float* B, float* C, int n) {\n  __shared__ float As[16][16];\n  __shared__ float Bs[16][16];\n\n  int tx = threadIdx.x;\n  int ty = threadIdx.y;\n  int row = blockIdx.y * 16 + ty;\n  int col = blockIdx.x * 16 + tx;\n\n  float acc = 0.0f;\n  for (int t = 0; t < n / 16; ++t) {\n    As[ty][tx] = A[row * n + t * 16 + tx];\n    Bs[ty][tx] = B[(t * 16 + ty) * n + col];\n    __syncthreads();\n    for (int k = 0; k < 16; ++k) acc = fmaf(As[ty][k], Bs[k][tx], acc);\n    __syncthreads();\n  }\n  C[row * n + col] = acc;\n}\n"
+          },
+          "bench": {
+            "sources": [
+              "/root/sgemm.cu"
+            ],
+            "buffers": [
+              {
+                "name": "A",
+                "length": 16384,
+                "fill": {
+                  "kind": "random",
+                  "seed": 31,
+                  "min": -1,
+                  "max": 1
+                }
+              },
+              {
+                "name": "B",
+                "length": 16384,
+                "fill": {
+                  "kind": "random",
+                  "seed": 37,
+                  "min": -1,
+                  "max": 1
+                }
+              },
+              {
+                "name": "C",
+                "length": 16384,
+                "fill": {
+                  "kind": "zeros"
+                }
+              }
+            ],
+            "launches": [
+              {
+                "kernel": "sgemm",
+                "grid": [
+                  8,
+                  8
+                ],
+                "block": [
+                  16,
+                  16
+                ],
+                "args": [
+                  "A",
+                  "B",
+                  "C",
+                  128
+                ]
+              }
+            ]
+          },
+          "referenceFiles": {
+            "/root/sgemm.cu": "__global__ void sgemm(const float* A, const float* B, float* C, int n) {\n  // 两套 buffer 轮流用，于是不再需要「等大家读完」那个屏障\n  __shared__ float As[2][16][16];\n  __shared__ float Bs[2][16][16];\n\n  int tx = threadIdx.x;\n  int ty = threadIdx.y;\n  int row = blockIdx.y * 16 + ty;\n  int col = blockIdx.x * 16 + tx;\n\n  float acc = 0.0f;\n\n  // 先把第一块搬进 buffer 0\n  As[0][ty][tx] = A[row * n + tx];\n  Bs[0][ty][tx] = B[ty * n + col];\n  __syncthreads();\n\n  for (int t = 0; t < n / 16 - 1; ++t) {\n    int cur = t % 2;\n    int nxt = (t + 1) % 2;\n\n    // 先发起下一块的搬运，再算当前块 —— 顺序反了就没有重叠\n    As[nxt][ty][tx] = A[row * n + (t + 1) * 16 + tx];\n    Bs[nxt][ty][tx] = B[((t + 1) * 16 + ty) * n + col];\n\n    for (int k = 0; k < 16; ++k) {\n      acc = fmaf(As[cur][ty][k], Bs[cur][k][tx], acc);\n    }\n    __syncthreads();\n  }\n\n  // 最后一块没有「下一块」要搬，单独算掉\n  int last = (n / 16 - 1) % 2;\n  for (int k = 0; k < 16; ++k) {\n    acc = fmaf(As[last][ty][k], Bs[last][k][tx], acc);\n  }\n\n  C[row * n + col] = acc;\n}\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "gemm.spec.ts",
+            "content": "      const lab = require('@gpu/lab');\n      const N = 128;\n\n      describe('双缓冲 GEMM', () => {\n      it('结果和 fp64 参考对得上', async () => {\n  await lab.buildAndRun();\n  const A = lab.buffer('A');\n  const B = lab.buffer('B');\n  const C = lab.buffer('C');\n  // 抽样比较：全比一遍要 128^3 次乘加，没必要\n  let worst = 0;\n  for (let row = 0; row < N; row += 7) {\n    for (let col = 0; col < N; col += 7) {\n      let expected = 0;\n      for (let k = 0; k < N; k += 1) expected += A[row * N + k] * B[k * N + col];\n      const actual = C[row * N + col];\n      expect(Number.isFinite(actual)).toBe(true);\n      worst = Math.max(worst, Math.abs(actual - expected) / Math.max(1, Math.abs(expected)));\n    }\n  }\n  // fp32 累加 128 项：8 * sqrt(128) * 2^-23 约等于 1.1e-5\n  expect(worst).toBeLessThanOrEqual(2e-5);\n});\n\n        it('屏障次数减半', async () => {\n          await lab.buildAndRun();\n          expect(lab.metrics().launch.barriers).toBeLessThanOrEqual(700);\n        });\n\n        it('共享内存翻倍了 —— 这是它的代价', async () => {\n          await lab.buildAndRun();\n          const stat = lab.staticMetrics();\n          expect(stat.sharedBytesPerBlock).toBeGreaterThanOrEqual(4096);\n        });\n\n        it('bank 冲突仍然为 0，也没有竞态', async () => {\n          await lab.buildAndRun();\n          expect(lab.metrics().shared.bankConflicts).toBe(0);\n          const report = await lab.racecheck();\n          expect(report.races.length).toBe(0);\n        });\n      });\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "gpu.sanitizer.races",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "数据竞态",
+              "en": "data races"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.sanitizer.warpSyncErrors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "warp 同步用错",
+              "en": "warp sync errors"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.launch.barriers",
+            "op": "lte",
+            "value": 700,
+            "label": {
+              "zh": "屏障次数（单缓冲是 1024）",
+              "en": "barriers (1024 single-buffered)"
+            },
+            "dimension": "latency"
+          },
+          {
+            "metric": "gpu.shared.bankConflicts",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "共享内存 bank 冲突",
+              "en": "shared bank conflicts"
+            },
+            "dimension": "latency"
+          }
+        ],
+        "focus": [
+          "latency"
+        ],
+        "primer": {
+          "zh": "分块 GEMM 的每一轮里有两个屏障，它们防的是不同的事：第一个保证「大家都搬完了才开始算」，第二个保证「大家都算完了才开始覆盖」。第二个之所以存在，只是因为下一轮要复用同一块共享内存。\n\n`双缓冲`把这个理由拿掉：开两套 buffer 轮流用。算第 t 块的时候往另一套里搬第 t+1 块，两件事碰不到一起，一轮就只需要一个屏障。这个手法在流水线设计里叫 `ping-pong`，从 CPU 的双缓冲画面到 GPU 的 tile 预取都是它。\n\n代价是共享内存翻倍。共享内存是每 SM 固定的资源，吃得多了能同时驻留的 block 就少了，占用率会掉。所以双缓冲不是无脑赢，要看少掉的屏障值不值那些占用率。\n\n真硬件上还能更进一步。Ampere 起有 `cp.async`：搬运指令发出去之后**不阻塞线程**，也不占用寄存器，到真要用数据时再等。这样双缓冲才真正变成流水线，而不只是省一个屏障。Hopper 又加了 TMA，一条指令搬一整块多维 tile。",
+          "en": "Each round of a tiled GEMM has two barriers guarding different things: the first ensures everyone finished staging before anyone computes, the second ensures everyone finished computing before anyone overwrites. The second exists only because the next round reuses the same shared tile.\n\n`Double buffering` removes that reason by keeping two sets of tiles and alternating. While computing on tile t, stage tile t+1 into the other set; the two never collide and one barrier per round suffices. The technique is called `ping-pong` in pipeline design and appears everywhere from CPU double-buffered graphics to GPU tile prefetch.\n\nThe cost is twice the shared memory. Shared memory is a fixed per-SM resource, so using more of it means fewer resident blocks and lower occupancy. Double buffering is therefore not a free win: the barriers saved have to be worth the occupancy given up.\n\nReal hardware goes further. From Ampere, `cp.async` issues a staging instruction that **does not block the thread** and does not occupy registers; you wait only when the data is actually needed. Only then does double buffering become a true pipeline rather than one fewer barrier. Hopper adds TMA, moving a whole multidimensional tile with a single instruction."
+        }
+      },
+      {
+        "id": "tensor-core",
+        "title": {
+          "zh": "Tensor Core —— 让矩阵乘走专用单元",
+          "en": "Tensor cores — matmul on dedicated hardware"
+        },
+        "goal": {
+          "zh": "到现在为止每一次乘加都走 FMA 流水线，一个 SM 每周期 128 次。\nGPU 上还有一类专门为矩阵乘造的单元：**tensor core**，\nH100 上一个 SM 每周期能做 1024 次 —— 八倍。\n\n用法是 `wmma`（warp matrix multiply-accumulate）。它是 **warp 级**的：\n一整个 warp 协作算一个 16×16×16 的矩阵乘，数据存在叫 `fragment` 的东西里。\nfragment 是不透明的 —— 你不知道也不需要知道哪个 lane 拿了哪几个元素。\n\n```cuda\nwmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> af;\nwmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;\nwmma::fill_fragment(cf, 0.0f);\nwmma::load_matrix_sync(af, A + offset, n);\nwmma::mma_sync(cf, af, bf, cf);\nwmma::store_matrix_sync(C + offset, cf, n, wmma::mem_row_major);\n```\n\n**输入是 half，累加是 float。** 这是 tensor core 的标准配方：\n精度损失只发生在输入端，累加链条仍然在 fp32 上，所以长序列不会垮。\n\n启动配置换成每个 block 一个 warp（32 线程），grid 覆盖 8×8 个 16×16 的 tile。\n\n```bash\nnvcc -o bench sgemm.cu && ncu ./bench\n```\n\n**通关标准**\n\n- 结果仍然对得上（half 输入，容差放宽到 5e-3）\n- `inst.mma ≥ n³`，`inst.fma = 0`\n- 瓶颈不再是 ALU",
+          "en": "Every multiply-add so far went through the FMA pipeline: 128 per SM per cycle. GPUs also have\nunits built specifically for matrix multiplication, **tensor cores**, and an H100 SM does 1024\nof those per cycle. Eight times more.\n\nThe interface is `wmma` (warp matrix multiply-accumulate). It is **warp-level**: a whole warp\ncooperates on one 16×16×16 matmul, with the data held in `fragment` objects. A fragment is\nopaque; you neither know nor need to know which lane holds which elements.\n\n```cuda\nwmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> af;\nwmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;\nwmma::fill_fragment(cf, 0.0f);\nwmma::load_matrix_sync(af, A + offset, n);\nwmma::mma_sync(cf, af, bf, cf);\nwmma::store_matrix_sync(C + offset, cf, n, wmma::mem_row_major);\n```\n\n**Inputs are half, accumulation is float.** That is the standard tensor-core recipe: precision\nis lost only at the inputs while the accumulation chain stays in fp32, so long sequences hold up.\n\nSwitch the launch to one warp per block (32 threads), with the grid covering 8×8 tiles of 16×16.\n\n```bash\nnvcc -o bench sgemm.cu && ncu ./bench\n```\n\n**To pass**\n\n- results still match (half inputs, tolerance relaxed to 5e-3)\n- `inst.mma ≥ n³` and `inst.fma = 0`\n- ALU is no longer the bottleneck"
+        },
+        "checklist": [
+          {
+            "zh": "声明三个 fragment：matrix_a、matrix_b、accumulator",
+            "en": "Declare three fragments: matrix_a, matrix_b and accumulator"
+          },
+          {
+            "zh": "沿 k 维循环，每轮 load 两块再 mma 一次",
+            "en": "Loop along k, loading two fragments and issuing one mma each round"
+          },
+          {
+            "zh": "用 ncu 确认 FMA 归零、tensor core 起来了",
+            "en": "Confirm with ncu that FMA hit zero and the tensor unit is busy"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "accumulator 只要 `fill_fragment` 一次，循环里反复 `mma_sync(cf, af, bf, cf)` 就是累加。",
+            "en": "Fill the accumulator once; repeating `mma_sync(cf, af, bf, cf)` in the loop accumulates into it."
+          },
+          {
+            "zh": "A 的第 t 块起点是 `A + blockIdx.y * 16 * n + t * 16`，B 的是 `B + t * 16 * n + blockIdx.x * 16`，两个 ldm 都是 n。",
+            "en": "Tile t of A starts at `A + blockIdx.y * 16 * n + t * 16` and of B at `B + t * 16 * n + blockIdx.x * 16`; the leading dimension is n for both."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**把 accumulator 声明成 half。** 累加必须在 fp32 上，否则 128 项累加下来误差会滚到不可用 —— 编译期就会拦下。",
+            "en": "**Declaring the accumulator as half.** Accumulation must be fp32 or the error compounds over 128 terms until the result is useless. The compiler rejects it."
+          },
+          {
+            "zh": "**用 256 个线程的 block 却只写一个 warp 的逻辑。** wmma 是 warp 级原语，一个 block 里有几个 warp 就会算几遍同一个 tile，互相覆盖。",
+            "en": "**Launching 256-thread blocks with single-warp logic.** wmma is a warp-level primitive; every warp in the block computes the same tile and they overwrite each other."
+          }
+        ],
+        "extension": {
+          "zh": "这一关只把 FMA 换成了 tensor core，算术强度没变 —— 数据还是直接从显存读的。真正的高性能实现会把前面几关的东西全叠上：共享内存分块喂 fragment、双缓冲、swizzle 消 bank 冲突。CUTLASS 就是这么组织的。再往后，Hopper 的 `wgmma` 与 Blackwell 的 `tcgen05` 把 MMA 变成异步的，于是要 warp 专业化：一部分 warp 专门搬数据，另一部分专门算。FlashAttention-4 之所以从 Triton 退回 CuTe DSL，就是因为那种 tile 级控制Triton 的抽象暴露不出来。",
+          "en": "This stage only swaps FMA for tensor cores; arithmetic intensity is unchanged because data still comes straight from device memory. A real implementation layers everything from the earlier stages on top: shared-memory tiles feeding the fragments, double buffering, swizzling to kill bank conflicts. That is how CUTLASS is organised. Beyond that, Hopper's `wgmma` and Blackwell's `tcgen05` make MMA asynchronous, which forces warp specialisation: some warps only move data while others only compute. FlashAttention-4 moved from Triton back to CuTe DSL precisely because Triton's abstractions do not expose that level of tile control."
+        },
+        "gpu": {
+          "files": {
+            "/root/sgemm.cu": "__global__ void sgemm(const float* A, const float* B, float* C, int n) {\n  __shared__ float As[16][16];\n  __shared__ float Bs[16][16];\n\n  int tx = threadIdx.x;\n  int ty = threadIdx.y;\n  int row = blockIdx.y * 16 + ty;\n  int col = blockIdx.x * 16 + tx;\n\n  float acc = 0.0f;\n  for (int t = 0; t < n / 16; ++t) {\n    As[ty][tx] = A[row * n + t * 16 + tx];\n    Bs[ty][tx] = B[(t * 16 + ty) * n + col];\n    __syncthreads();\n    for (int k = 0; k < 16; ++k) acc = fmaf(As[ty][k], Bs[k][tx], acc);\n    __syncthreads();\n  }\n  C[row * n + col] = acc;\n}\n"
+          },
+          "bench": {
+            "sources": [
+              "/root/sgemm.cu"
+            ],
+            "buffers": [
+              {
+                "name": "A",
+                "length": 16384,
+                "fill": {
+                  "kind": "random",
+                  "seed": 31,
+                  "min": -1,
+                  "max": 1
+                }
+              },
+              {
+                "name": "B",
+                "length": 16384,
+                "fill": {
+                  "kind": "random",
+                  "seed": 37,
+                  "min": -1,
+                  "max": 1
+                }
+              },
+              {
+                "name": "C",
+                "length": 16384,
+                "fill": {
+                  "kind": "zeros"
+                }
+              }
+            ],
+            "launches": [
+              {
+                "kernel": "sgemm",
+                "grid": [
+                  8,
+                  8
+                ],
+                "block": [
+                  32
+                ],
+                "args": [
+                  "A",
+                  "B",
+                  "C",
+                  128
+                ]
+              }
+            ]
+          },
+          "referenceFiles": {
+            "/root/sgemm.cu": "// 每个 block 一个 warp，负责一个 16×16 的输出 tile。\n//\n// 注意输入类型是 half：精度损失只在输入端，累加仍然在 fp32 上。\n__global__ void sgemm(const half* A, const half* B, float* C, int n) {\n  wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> af;\n  wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> bf;\n  wmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;\n\n  wmma::fill_fragment(cf, 0.0f);\n\n  for (int t = 0; t < n / 16; ++t) {\n    wmma::load_matrix_sync(af, A + blockIdx.y * 16 * n + t * 16, n);\n    wmma::load_matrix_sync(bf, B + t * 16 * n + blockIdx.x * 16, n);\n    wmma::mma_sync(cf, af, bf, cf);\n  }\n\n  wmma::store_matrix_sync(C + blockIdx.y * 16 * n + blockIdx.x * 16, cf, n,\n                          wmma::mem_row_major);\n}\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "gemm.spec.ts",
+            "content": "const lab = require('@gpu/lab');\nconst N = 128;\n\ndescribe('Tensor Core GEMM', () => {\n  it('结果对得上 —— half 输入所以容差放宽', async () => {\n    await lab.buildAndRun();\n    const A = lab.buffer('A');\n    const B = lab.buffer('B');\n    const C = lab.buffer('C');\n    let worst = 0;\n    for (let row = 0; row < N; row += 7) {\n      for (let col = 0; col < N; col += 7) {\n        let expected = 0;\n        for (let k = 0; k < N; k += 1) expected += A[row * N + k] * B[k * N + col];\n        const actual = C[row * N + col];\n        expect(Number.isFinite(actual)).toBe(true);\n        worst = Math.max(worst, Math.abs(actual - expected) / Math.max(1, Math.abs(expected)));\n      }\n    }\n    // half 只有 10 位尾数，输入端的舍入是主要误差来源\n    expect(worst).toBeLessThanOrEqual(5e-3);\n  });\n\n  it('乘加全部走了 tensor core', async () => {\n    await lab.buildAndRun();\n    const metrics = lab.metrics();\n    expect(metrics.inst.mma).toBeGreaterThanOrEqual(N * N * N);\n    expect(metrics.inst.fma).toBe(0);\n  });\n\n  it('瓶颈不再是 ALU', async () => {\n    await lab.buildAndRun();\n    expect(lab.timing().bottleneck).not.toBe('alu');\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "gpu.sanitizer.races",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "数据竞态",
+              "en": "data races"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.sanitizer.warpSyncErrors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "warp 同步用错",
+              "en": "warp sync errors"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.inst.mma",
+            "op": "gte",
+            "value": 2097152,
+            "label": {
+              "zh": "tensor core 乘加次数",
+              "en": "tensor-core multiply-accumulates"
+            },
+            "dimension": "latency"
+          },
+          {
+            "metric": "gpu.inst.fma",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "FMA 流水线的乘加次数（换成 tensor core 之后应该归零）",
+              "en": "FMA-pipeline multiply-accumulates (should hit zero)"
+            },
+            "dimension": "latency"
+          }
+        ],
+        "focus": [
+          "latency"
+        ],
+        "primer": {
+          "zh": "到目前为止每一次乘加都走 `FMA` 流水线，H100 上一个 SM 每周期 128 次。GPU 上还有一类专门为矩阵乘造的单元叫 `tensor core`，同样一个 SM 每周期能做 1024 次乘加，八倍。深度学习这几年的算力增长，绝大部分来自这里而不是通用流水线。\n\ntensor core 的接口是 `wmma`，全称 warp matrix multiply-accumulate。关键词是 **warp**：它不是一个线程的指令，而是**整个 warp 协作**完成一个 16×16×16 的矩阵乘。数据装在叫 `fragment` 的对象里，它是不透明的，哪个 lane 拿了哪几个元素，标准里就是未定义的，你不需要也不应该关心。\n\n典型配方是**输入 half、累加 float**。精度损失只发生在输入端（half 只有 10 位尾数），而累加链条仍然在 fp32 上，所以几百项累加下来也不会垮。这个不对称是有意设计的：矩阵乘的误差主要来自累加而不是单次乘法。\n\n再往后，Hopper 的 `wgmma` 与 Blackwell 的 `tcgen05` 把 MMA 变成了**异步**的：发起之后线程可以接着干别的。于是高性能 kernel 开始做 `warp 专业化`，一部分 warp 专门搬数据、另一部分专门算。FlashAttention-4 就是这么写的。",
+          "en": "Every multiply-add so far has gone through the `FMA` pipeline, 128 per SM per cycle on an H100. GPUs also carry units built purely for matrix multiplication, `tensor cores`, doing 1024 multiply-accumulates per SM per cycle. Most of the compute growth in deep learning over recent years came from these rather than from the general pipeline.\n\nThe interface is `wmma`, warp matrix multiply-accumulate. The key word is **warp**: this is not a per-thread instruction but an **entire warp cooperating** on one 16×16×16 matmul. The data lives in `fragment` objects, which are opaque. Which lane holds which elements is undefined by the standard, and you neither need nor should care.\n\nThe standard recipe is **half inputs, float accumulation**. Precision is lost only at the inputs (half has ten mantissa bits) while the accumulation chain stays in fp32, so hundreds of terms still hold up. The asymmetry is deliberate: error in a matmul comes mostly from accumulation rather than from individual products.\n\nBeyond this, Hopper's `wgmma` and Blackwell's `tcgen05` make MMA **asynchronous**: once issued, the thread carries on with other work. High-performance kernels then adopt `warp specialisation`, dedicating some warps to moving data and others to computing. FlashAttention-4 is written that way."
+        }
       }
     ]
   },
