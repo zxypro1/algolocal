@@ -352,6 +352,66 @@ describeIfBuilt('跳板机 -> Pod -> 集群网络', () => {
     ],
   };
 
+  /**
+   * CRD 那条链子要能整个走通：apply 一个 CRD，discovery 里立刻有它，
+   * 然后就能 apply 这个类型的对象、`kubectl get` 得到，列还是 CRD 上声明的那些。
+   * 中间任何一环断了，学员写的 Operator 就无从谈起。
+   */
+  it('apply 一个 CRD 之后，真 kubectl 立刻认得这个类型', async () => {
+    const world = await createOpsWorld({ world: WORLD as never, runtime: runtime() });
+    const manifest = [
+      'apiVersion: apiextensions.k8s.io/v1',
+      'kind: CustomResourceDefinition',
+      'metadata:',
+      '  name: sites.platform.corp.internal',
+      'spec:',
+      '  group: platform.corp.internal',
+      '  scope: Namespaced',
+      '  names:',
+      '    plural: sites',
+      '    singular: site',
+      '    kind: Site',
+      '    shortNames:',
+      '    - st',
+      '  versions:',
+      '  - name: v1',
+      '    served: true',
+      '    storage: true',
+      '    subresources:',
+      '      status: {}',
+      '    additionalPrinterColumns:',
+      '    - name: Host',
+      '      type: string',
+      '      jsonPath: .spec.host',
+      '',
+    ].join('\n');
+    world.machine.vfs.writeFile('/root/site-crd.yaml', manifest);
+    const applied = await world.run('kubectl apply -f /root/site-crd.yaml');
+    expect(applied.stderr).toBe('');
+    expect(applied.stdout).toContain('customresourcedefinition.apiextensions.k8s.io/sites.platform.corp.internal');
+
+    world.machine.vfs.writeFile('/root/site.yaml', [
+      'apiVersion: platform.corp.internal/v1',
+      'kind: Site',
+      'metadata:',
+      '  name: portal',
+      '  namespace: shop',
+      'spec:',
+      '  host: portal.corp.internal',
+      '',
+    ].join('\n'));
+    const created = await world.run('kubectl apply -f /root/site.yaml');
+    expect(created.stderr).toBe('');
+
+    const listed = await world.run('kubectl get sites -n shop');
+    expect(listed.stdout).toMatch(/NAME\s+HOST\s+AGE/);
+    expect(listed.stdout).toContain('portal.corp.internal');
+
+    // 简称也要认
+    const byShortName = await world.run('kubectl get st -n shop -o name');
+    expect(byShortName.stdout.trim()).toBe('site.platform.corp.internal/portal');
+  });
+
   it('kubectl exec deploy/portal -- curl payments —— 从 Pod 里打得通', async () => {
     const world = await createOpsWorld({ world: WORLD as never, runtime: runtime() });
     const result = await world.run(

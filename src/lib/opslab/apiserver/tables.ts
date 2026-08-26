@@ -641,9 +641,11 @@ export function renderTable(
   resource: string,
   objects: KubeObject[],
   resourceVersion: string,
-  nowEpochMs: number
+  nowEpochMs: number,
+  /** CRD 自带的列。给了就用它，不然退回内置那张表。 */
+  override?: TablePrinter
 ): Table {
-  const printer = printerFor(resource);
+  const printer = override ?? printerFor(resource);
   return {
     kind: 'Table',
     apiVersion: 'meta.k8s.io/v1',
@@ -663,6 +665,49 @@ export function renderTable(
       },
     })),
   };
+}
+
+/**
+ * 按 CRD 的 additionalPrinterColumns 造一个打印器。
+ *
+ * JSONPath 只支持最常见的那一种：`.spec.foo.bar`。真 CRD 里 99% 的列
+ * 就是这个形状，而支持完整 JSONPath 会把这一层变成另一个项目。
+ */
+export function printerFromColumns(
+  columns: Array<{ name: string; jsonPath?: string; type?: string; priority?: number; description?: string }>
+): TablePrinter {
+  const extra = columns.filter((column) => column.jsonPath !== '.metadata.creationTimestamp');
+  return {
+    columns: [
+      NAME_COLUMN,
+      ...extra.map((column) => col(
+        column.name,
+        column.description ?? '',
+        column.priority ?? 0,
+        (column.type as TableColumnDefinition['type']) ?? 'string'
+      )),
+      AGE_COLUMN,
+    ],
+    cells: (object, age) => [
+      object.metadata.name,
+      ...extra.map((column) => {
+        const value = readPath(object, column.jsonPath ?? '');
+        if (value === undefined || value === null) return '<none>';
+        return typeof value === 'object' ? JSON.stringify(value) : String(value);
+      }),
+      age,
+    ],
+  };
+}
+
+function readPath(object: unknown, jsonPath: string): unknown {
+  const parts = jsonPath.replace(/^\$?\.?/, '').split('.').filter(Boolean);
+  let cursor: unknown = object;
+  for (const part of parts) {
+    if (cursor === null || typeof cursor !== 'object') return undefined;
+    cursor = (cursor as Record<string, unknown>)[part];
+  }
+  return cursor;
 }
 
 /** kubectl 想要表格吗 —— 看 Accept 里有没有 `as=Table` */

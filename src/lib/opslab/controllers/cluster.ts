@@ -45,6 +45,7 @@ import {
   AutoscalerController, CAPI_RESOURCES, MachineController, MachineDeploymentController,
   MachineSetController,
 } from '../capi';
+import { CRD_RESOURCES, CrdController } from '../crd';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
@@ -166,6 +167,9 @@ export class Cluster {
    */
   readonly backups = new BackupStore();
 
+  /** CRD 自己声明的表格列。`kubectl get <自定义资源>` 打出来的东西由它决定。 */
+  private readonly crdPrinters = new Map<string, import('../apiserver').TablePrinter>();
+
   /** 监控。世界没配 metrics 就是 undefined。 */
   prometheus?: PrometheusController;
   /** 由外面装上（createOpsWorld 会接一个 Pod 里的 shell 进来） */
@@ -188,6 +192,7 @@ export class Cluster {
       ...MESH_RESOURCES, ...RBAC_RESOURCES, ...KYVERNO_RESOURCES, ...ESO_RESOURCES,
       ...OBSERVABILITY_RESOURCES, ...DISRUPTION_RESOURCES, ...ROLLOUT_RESOURCES,
       ...STORAGE_RESOURCES, ...SNAPSHOT_RESOURCES, ...VELERO_RESOURCES, ...CAPI_RESOURCES,
+      ...CRD_RESOURCES,
       ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
@@ -198,6 +203,8 @@ export class Cluster {
     });
     this.apiServer = createApiServer({
       registry: this.registry, scheme: this.scheme, now,
+      // CRD 上声明的列。内置类型的列写死在 tables.ts 里，自定义类型的由 CRD 说了算。
+      tablePrinter: (resource) => this.crdPrinters.get(resource),
       ...(options.users
         ? {
             authenticate: (token) => {
@@ -671,6 +678,11 @@ export class Cluster {
       new MachineController(context),
       // 弹性。它只认调度器的结论，不认「负载」——「CPU 高了加 Pod」是 HPA 的事。
       new AutoscalerController(context),
+      /**
+       * CRD 的注册。真集群里这是 apiserver 的一部分（apiextensions-apiserver），
+       * 不是能被卸载的工作负载，所以它无条件跑。
+       */
+      new CrdController(context, { scheme: this.scheme, printers: this.crdPrinters }),
       // 入口：控制器自己是集群里的一个工作负载，卸载掉 Gateway 就不再被 program
       new GatewayController(context),
       // 内网 PKI：同样是集群里的一个工作负载，卸载掉就不再签发
