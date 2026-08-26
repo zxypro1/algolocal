@@ -36,6 +36,15 @@ export { encode } from './ir/program';
 export type { ExecutableKernel } from './ir/program';
 export type { Dim3, LaunchConfig, KernelArg, GpuCounters } from './vm/vm';
 export { HostRuntimeError } from './host/containers';
+export { Cluster, ClusterError, DEVICE_SPAN } from './cluster/cluster';
+export type { CommMetrics, ClusterOptions } from './cluster/cluster';
+export { runClusterHost } from './cluster/run';
+export {
+  NVLINK4, NVLINK5, PCIE5, IB_NDR, IB_XDR, SINGLE_NODE_8, TWO_NODE_16,
+  linkBetween, nodeOf, transferSeconds,
+} from './cluster/topology';
+export type { ClusterSpec, LinkSpec, LinkKind } from './cluster/topology';
+export { BUS_FACTOR } from './cluster/nccl';
 export { formatPrintf } from './host/runtime';
 
 /** 宿主程序跑完的结果 */

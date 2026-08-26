@@ -60,6 +60,14 @@ export function gpuMetricTree(world: GpuWorld): Record<string, unknown> {
     /** 显存峰值 —— FlashAttention、KV cache 那几关的门槛读它 */
     memoryPeakBytes: world.gpu.usedBytes,
     /**
+     * 通信计量。集群关卡的主角。
+     *
+     * **全部是结构性的**（字节数、消息数、按链路分），所以可以作门槛 ——
+     * 和模拟耗时不是一回事。`bytesByLink.ib` 尤其要紧：
+     * 张量并行一旦跨了机，它立刻暴增。
+     */
+    ...(world.cluster ? { comm: world.cluster.comm } : {}),
+    /**
      * 算术强度：每从 DRAM 搬一个字节做了多少次浮点运算。
      *
      * **这是结构性计量，可以作门槛** —— 分子是 FMA 与 MMA 的条数、

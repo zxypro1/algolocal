@@ -73,6 +73,11 @@ export const HOST: Record<HostFn, number> = {
   cudaStreamBeginCapture: 40, cudaStreamEndCapture: 41,
   cudaGraphInstantiate: 42, cudaGraphLaunch: 43,
   cudaGraphDestroy: 44, cudaGraphExecDestroy: 45,
+  cudaGetDeviceCount: 50, cudaSetDevice: 51, cudaGetDevice: 52, cudaMemcpyPeer: 53,
+  ncclCommInitAll: 60, ncclCommDestroy: 61,
+  ncclGroupStart: 62, ncclGroupEnd: 63,
+  ncclAllReduce: 64, ncclAllGather: 65, ncclReduceScatter: 66,
+  ncclBroadcast: 67, ncclReduce: 68, ncclSend: 69, ncclRecv: 70,
   vec_new: 10, vec_push: 11, vec_pop: 12, vec_get: 13, vec_set: 14, vec_len: 15, vec_clear: 16,
   map_new: 20, map_set: 21, map_get: 22, map_has: 23, map_del: 24, map_len: 25,
   ring_new: 30, ring_push: 31, ring_pop: 32, ring_peek: 33, ring_len: 34,
@@ -153,6 +158,7 @@ export function encode(kernel: CompiledKernel): ExecutableKernel {
   const code = new Int32Array(count * SLOTS);
   const lines = new Int32Array(count);
   const pool: number[] = [];
+  const hostArgs: number[][] = [];
 
   const constant = (value: number): number => {
     // 常量很多是重复的（下标步长、0、1），去重能让池小一个量级
@@ -279,10 +285,16 @@ export function encode(kernel: CompiledKernel): ExecutableKernel {
         code[at + 1] = inst.dst;
         code[at + 2] = HOST[inst.fn];
         code[at + 3] = inst.args.length;
-        code[at + 4] = inst.args[0] ?? 0;
-        code[at + 5] = inst.args[1] ?? 0;
-        code[at + 6] = inst.args[2] ?? 0;
-        code[at + 7] = inst.args[3] ?? 0;
+        if (inst.args.length > 4) {
+          // 放不下就走边表，at+4 存下标。argc > 4 是它的标志
+          code[at + 4] = hostArgs.length;
+          hostArgs.push(inst.args.slice());
+        } else {
+          code[at + 4] = inst.args[0] ?? 0;
+          code[at + 5] = inst.args[1] ?? 0;
+          code[at + 6] = inst.args[2] ?? 0;
+          code[at + 7] = inst.args[3] ?? 0;
+        }
         break;
       case 'launch':
         code[at] = OP.LAUNCH;
@@ -363,6 +375,7 @@ export function encode(kernel: CompiledKernel): ExecutableKernel {
   return {
     ...kernel,
     program: { code, pool: Float64Array.from(pool), count, lines },
+    ...(hostArgs.length ? { hostArgs } : {}),
     paramTypes: Int32Array.from(kernel.params.map((param) => tyCode(param.ty))),
   };
 }

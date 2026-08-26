@@ -10,6 +10,7 @@
  *  3. **过程指标** —— `metrics()`，也就是门槛读的那棵树。
  */
 import type { GpuMetrics, StaticMetrics } from '../metrics';
+import type { CommMetrics } from '../cluster/cluster';
 import type { RooflinePoint, TimingResult } from '../timing';
 import type { SanitizerReport } from '../vm/sanitizer';
 import type { CommandRecord } from '../../labkit/machine';
@@ -54,6 +55,10 @@ export interface GpuLabApi {
 
   /** 门槛读的那棵指标树 */
   metrics(): GpuMetrics;
+  /** 集群关卡的通信计量。单卡关卡上是 null */
+  comm(): CommMetrics | null;
+  /** 集群里第 index 张卡的指标 */
+  deviceMetrics(index: number): GpuMetrics;
   /** 寄存器 / 共享内存 / 占用率 */
   staticMetrics(): StaticMetrics | null;
   /**
@@ -131,6 +136,18 @@ export function createGpuLabApi(world: GpuWorld): GpuLabApi {
     },
 
     metrics: () => world.gpu.metrics(),
+    comm: () => world.cluster?.comm ?? null,
+    deviceMetrics: (index) => {
+      if (!world.cluster) {
+        if (index !== 0) throw new GpuLabError('这一关只有一张卡');
+        return world.gpu.metrics();
+      }
+      const device = world.cluster.devices[index];
+      if (!device) {
+        throw new GpuLabError(`没有编号 ${index} 的设备 —— 一共 ${world.cluster.count} 张卡`);
+      }
+      return device.metrics();
+    },
     staticMetrics: () => world.gpu.staticMetrics(),
     timing: () => world.gpu.timing(),
     roofline: () => world.gpu.roofline(),
@@ -143,13 +160,17 @@ export function createGpuLabApi(world: GpuWorld): GpuLabApi {
           `没有叫 \`${name}\` 的缓冲区 —— 有的是：${[...world.buffers.keys()].join(', ') || '（还没跑过 ./bench）'}`
         );
       }
-      return world.gpu.copyOut(buffer.address, buffer.length);
+      return world.cluster
+        ? world.cluster.copyOut(buffer.address, buffer.length)
+        : world.gpu.copyOut(buffer.address, buffer.length);
     },
 
     bufferInts(name) {
       const buffer = world.buffers.get(name);
       if (!buffer) throw new GpuLabError(`没有叫 \`${name}\` 的缓冲区`);
-      return world.gpu.copyOutInts(buffer.address, buffer.length);
+      return world.cluster
+        ? world.cluster.copyOutInts(buffer.address, buffer.length)
+        : world.gpu.copyOutInts(buffer.address, buffer.length);
     },
 
     compare(actual, expected) {

@@ -216,6 +216,25 @@ const HOST_FNS: Record<string, { fn: HostFn; arity: number; scalar: 'int' | 'voi
   cudaGraphDestroy: { fn: 'cudaGraphDestroy', arity: 1, scalar: 'int' },
   cudaGraphExecDestroy: { fn: 'cudaGraphExecDestroy', arity: 1, scalar: 'int' },
 
+  cudaGetDeviceCount: { fn: 'cudaGetDeviceCount', arity: 1, scalar: 'int' },
+  cudaSetDevice: { fn: 'cudaSetDevice', arity: 1, scalar: 'int' },
+  cudaGetDevice: { fn: 'cudaGetDevice', arity: 1, scalar: 'int' },
+  cudaMemcpyPeer: { fn: 'cudaMemcpyPeer', arity: 5, scalar: 'int' },
+
+  // NCCL。真 API 的形状：通信子按设备各一个，集合操作在 group 里发起。
+  ncclCommInitAll: { fn: 'ncclCommInitAll', arity: 2, scalar: 'int' },
+  // 下面几个的参数个数与真 nccl.h 一致
+  ncclCommDestroy: { fn: 'ncclCommDestroy', arity: 1, scalar: 'int' },
+  ncclGroupStart: { fn: 'ncclGroupStart', arity: 0, scalar: 'int' },
+  ncclGroupEnd: { fn: 'ncclGroupEnd', arity: 0, scalar: 'int' },
+  ncclAllReduce: { fn: 'ncclAllReduce', arity: 7, scalar: 'int' },
+  ncclAllGather: { fn: 'ncclAllGather', arity: 6, scalar: 'int' },
+  ncclReduceScatter: { fn: 'ncclReduceScatter', arity: 7, scalar: 'int' },
+  ncclBroadcast: { fn: 'ncclBroadcast', arity: 7, scalar: 'int' },
+  ncclReduce: { fn: 'ncclReduce', arity: 8, scalar: 'int' },
+  ncclSend: { fn: 'ncclSend', arity: 5, scalar: 'int' },
+  ncclRecv: { fn: 'ncclRecv', arity: 5, scalar: 'int' },
+
   vec_new: { fn: 'vec_new', arity: 0, scalar: 'int' },
   vec_push: { fn: 'vec_push', arity: 2, scalar: 'void' },
   vec_pop: { fn: 'vec_pop', arity: 1, scalar: 'int' },
@@ -256,6 +275,8 @@ const HOST_OUT_PARAM: Record<string, { at: number; hint: string }> = {
   // 提示按函数各写各的：学员在 cudaMalloc 上真正会敲的是 `(void**)&p`，
   // 报错里说成泛泛的「&变量」会让他以为要去掉那个 cast
   cudaMalloc: { at: 0, hint: '(void**)&指针变量' },
+  cudaGetDeviceCount: { at: 0, hint: '&变量' },
+  cudaGetDevice: { at: 0, hint: '&变量' },
   cudaStreamEndCapture: { at: 1, hint: '&变量' },
   cudaGraphInstantiate: { at: 0, hint: '&变量' },
 };
@@ -269,6 +290,15 @@ const DEVICE_CONSTANTS: Record<string, number> = {
   cudaStreamCaptureModeGlobal: 0,
   cudaStreamCaptureModeThreadLocal: 1,
   cudaStreamCaptureModeRelaxed: 2,
+  /** ncclDataType_t —— 这个子集只用得上 float */
+  ncclFloat: 0,
+  ncclInt: 1,
+  /** ncclRedOp_t */
+  ncclSum: 0,
+  ncclProd: 1,
+  ncclMax: 2,
+  ncclMin: 3,
+  ncclSuccess: 0,
 };
 
 /** `cudaMemcpyKind` 的四个取值，和真头文件里的顺序一致 */

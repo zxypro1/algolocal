@@ -40,6 +40,22 @@ export interface HostEnvironment {
   replay(nodes: GraphReplayNode[]): void;
   /** 收集标准输出 */
   write(text: string): void;
+
+  /* ---- 多卡。单卡的关卡不给这几个，用到就报错 ---- */
+  deviceCount?(): number;
+  /** 往宿主端的 int 数组里写 —— ncclCommInitAll 的出参是这么给的 */
+  writeHostInts?(address: number, values: number[]): void;
+  setDevice?(index: number): void;
+  getDevice?(): number;
+  peerCopy?(dst: number, dstDevice: number, src: number, srcDevice: number, bytes: number): void;
+  /** 一次集合操作。`kind` 是操作名，`ranks` 是每个 rank 的收发缓冲区 */
+  collective?(
+    kind: string,
+    ranks: Array<{ device: number; send: number; recv: number }>,
+    count: number,
+    op: number,
+    root: number
+  ): void;
   /**
    * 关卡在 `BenchSpec.buffers` 里声明的第 index 个缓冲区。
    *
@@ -78,6 +94,17 @@ interface LaunchNode {
   line: number;
 }
 
+/** group 里攒着的一次集合操作 */
+interface PendingCollective {
+  kind: string;
+  send: number;
+  recv: number;
+  count: number;
+  op: number;
+  comm: number;
+  root: number;
+}
+
 /** 一个宿主程序跑起来需要的全部状态 */
 export class HostRuntime implements HostServices {
   private readonly containers = new ContainerStore();
@@ -85,6 +112,15 @@ export class HostRuntime implements HostServices {
   private capturing: GraphNode[] | null = null;
   private readonly graphs: GraphNode[][] = [];
   private readonly execs: GraphNode[][] = [];
+  /**
+   * 正在攒的 group。
+   *
+   * NCCL 的调用是**流序异步**的：单线程管多设备时必须用 group 语义，
+   * 因为每个调用都可能阻塞在等对端上。攒到 `ncclGroupEnd` 一起发，
+   * 死锁才不会发生 —— 这一条是 NVIDIA 文档里明写的。
+   */
+  private group: PendingCollective[] | null = null;
+  private commCount = 0;
 
   constructor(
     private readonly env: HostEnvironment,
@@ -110,6 +146,58 @@ export class HostRuntime implements HostServices {
       return;
     }
     this.env.launch(name, grid, block, args, line);
+  }
+
+  private requireCluster(what: string): HostEnvironment {
+    if (!this.env.deviceCount) {
+      throw new HostRuntimeError(`${what}：这一关只有一张卡，没有集群`);
+    }
+    return this.env;
+  }
+
+  /**
+   * 把一次集合操作攒进 group。
+   *
+   * 不在 group 里的话立刻发 —— 真 NCCL 也允许单卡不用 group，
+   * 但**单线程管多设备时不用 group 会死锁**，所以这里不在 group 里
+   * 而通信子多于一个时明确报错，而不是让它跑出一个看似正常的结果。
+   */
+  private enqueue(
+    kind: string, send: number, recv: number, count: number,
+    op: number, comm: number, root: number
+  ): number {
+    const item: PendingCollective = { kind, send, recv, count, op, comm, root };
+    if (this.group) {
+      this.group.push(item);
+      return 0;
+    }
+    if (this.commCount > 1) {
+      throw new HostRuntimeError(
+        `${kind}：单线程管多张卡时必须把调用放在 ncclGroupStart / ncclGroupEnd 之间 —— `
+        + '每个 NCCL 调用都可能阻塞在等对端上，不成组会死锁'
+      );
+    }
+    this.flushGroup([item]);
+    return 0;
+  }
+
+  private flushGroup(pending: PendingCollective[]): void {
+    if (!pending.length) return;
+    const env = this.requireCluster('NCCL');
+    // 同一种操作、同一批 rank 的调用凑成一次集合操作
+    const byKind = new Map<string, PendingCollective[]>();
+    for (const item of pending) {
+      const key = `${item.kind}:${item.count}:${item.op}:${item.root}`;
+      const list = byKind.get(key);
+      if (list) list.push(item);
+      else byKind.set(key, [item]);
+    }
+    for (const [, list] of byKind) {
+      const ranks = list.map((item) => ({
+        device: item.comm, send: item.send, recv: item.recv,
+      }));
+      env.collective!(list[0].kind, ranks, list[0].count, list[0].op, list[0].root);
+    }
   }
 
   private dispatch(fn: number, args: number[]): number {
@@ -177,6 +265,73 @@ export class HostRuntime implements HostServices {
         // 和 cudaFree 一样：句柄不回收。峰值计量要的是"一共开过多少"，
         // 能回收就量不出差别了。写出来仍然是对的习惯。
         return 0;
+
+      /* ---- 多卡 ---- */
+      case HOST.cudaGetDeviceCount:
+        return this.requireCluster('cudaGetDeviceCount').deviceCount!();
+      case HOST.cudaGetDevice:
+        return this.requireCluster('cudaGetDevice').getDevice!();
+      case HOST.cudaSetDevice:
+        this.requireCluster('cudaSetDevice').setDevice!(args[0] | 0);
+        return 0;
+      case HOST.cudaMemcpyPeer:
+        this.requireCluster('cudaMemcpyPeer').peerCopy!(
+          args[0] | 0, args[1] | 0, args[2] | 0, args[3] | 0, args[4] | 0
+        );
+        return 0;
+
+      /* ---- NCCL ---- */
+      case HOST.ncclCommInitAll: {
+        // comms 是一个 int 数组，第 i 项是设备 i 的通信子。
+        // 这个子集里通信子就是 rank 号加一（0 留给"没初始化"）。
+        const count = args[1] | 0;
+        const env = this.requireCluster('ncclCommInitAll');
+        if (count > env.deviceCount!()) {
+          throw new HostRuntimeError(
+            `要 ${count} 个通信子，但一共只有 ${env.deviceCount!()} 张卡`
+          );
+        }
+        this.commCount = count;
+        // 真 API 是 ncclCommInitAll(comms, ndev, devlist)，把每个设备的
+        // 通信子写进 comms。这个子集里通信子就是 rank 号本身，
+        // devlist 省掉了（设备固定是 0..n-1），这条偏差写在 nccl.h 里。
+        env.writeHostInts!(args[0] | 0, Array.from({ length: count }, (_, i) => i));
+        return 0;
+      }
+      case HOST.ncclCommDestroy:
+        return 0;
+      case HOST.ncclGroupStart:
+        if (this.group) throw new HostRuntimeError('ncclGroupStart 不能嵌套');
+        this.group = [];
+        return 0;
+      case HOST.ncclGroupEnd: {
+        if (!this.group) throw new HostRuntimeError('没有在 group 里，ncclGroupEnd 无从结束');
+        const pending = this.group;
+        this.group = null;
+        this.flushGroup(pending);
+        return 0;
+      }
+      // 参数位置按真 nccl.h：
+      //   AllReduce(send, recv, count, datatype, op, comm, stream)
+      //   AllGather(send, recv, sendcount, datatype, comm, stream)
+      //   ReduceScatter(send, recv, recvcount, datatype, op, comm, stream)
+      //   Broadcast(send, recv, count, datatype, root, comm, stream)
+      //   Reduce(send, recv, count, datatype, op, root, comm, stream)
+      case HOST.ncclAllReduce:
+        return this.enqueue('allreduce', args[0], args[1], args[2] | 0, args[4] | 0, args[5] | 0, -1);
+      case HOST.ncclAllGather:
+        return this.enqueue('allgather', args[0], args[1], args[2] | 0, 0, args[4] | 0, -1);
+      case HOST.ncclReduceScatter:
+        return this.enqueue('reducescatter', args[0], args[1], args[2] | 0, args[4] | 0, args[5] | 0, -1);
+      case HOST.ncclBroadcast:
+        return this.enqueue('broadcast', args[0], args[1], args[2] | 0, 0, args[5] | 0, args[4] | 0);
+      case HOST.ncclReduce:
+        return this.enqueue('reduce', args[0], args[1], args[2] | 0, args[4] | 0, args[6] | 0, args[5] | 0);
+      case HOST.ncclSend:
+      case HOST.ncclRecv:
+        throw new HostRuntimeError(
+          'ncclSend / ncclRecv 还没做 —— 点对点请用 cudaMemcpyPeer'
+        );
 
       case HOST.cudaDeviceSynchronize:
         // 我们的 launch 是同步的，所以这里没有实际工作。**保留它不是装样子**：

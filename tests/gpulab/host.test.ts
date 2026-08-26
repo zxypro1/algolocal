@@ -7,7 +7,7 @@
  * （不支持的东西必须报错，不能悄悄跑错）。
  */
 import {
-  CONTAINERS_H, CUDA_FP8_H, CUDA_RUNTIME_H, ENGINE_H,
+  CLUSTER_H, CONTAINERS_H, CUDA_FP8_H, CUDA_RUNTIME_H, ENGINE_H, NCCL_H,
 } from '../../src/lib/gpulab/host/headers';
 import { GpuDevice, compileProgram, formatPrintf } from '../../src/lib/gpulab';
 
@@ -471,16 +471,20 @@ describe('头文件与编译器的签名是对得上的', () => {
    * 头文件是学员唯一的参考。它写了什么函数，编译器就必须认什么函数 ——
    * 两边分家的话，学员照着头文件写会撞上「暂不支持」，而那是平台的错。
    */
-  const declared = [...`${CONTAINERS_H}\n${ENGINE_H}\n${CUDA_RUNTIME_H}\n${CUDA_FP8_H}`.matchAll(
+  const declared = [...[
+    CONTAINERS_H, ENGINE_H, CUDA_RUNTIME_H, CUDA_FP8_H, NCCL_H, CLUSTER_H,
+  ].join('\n').matchAll(
     /^\s*(?:int|void|float\*|half)\s+(\w+)\s*\(/gm
   )].map((match) => match[1]);
 
   it.each(declared)('头文件里的 %s 编译器认得', async (name) => {
-    // 拿一个明显错误的参数个数去调用：认得的函数会抱怨参数，
-    // 不认得的函数会说「暂不支持」
+    // 拿一个**不可能对**的参数个数去调用：认得的函数会抱怨参数个数，
+    // 不认得的函数会说「暂不支持」。
+    // 9 个是刻意的 —— 这些原型里最长的（ncclReduce）也才 8 个参数，
+    // 用 6 个的话正好撞上 ncclAllGather 的真 arity，那条就不报错了。
     await expect(compileProgram(`
-      int main(void) { ${name}(1, 2, 3, 4, 5, 6); return 0; }
-    `)).rejects.toThrow(/参数|\(void\*\*\)&|格式串/);
+      int main(void) { ${name}(1, 2, 3, 4, 5, 6, 7, 8, 9); return 0; }
+    `)).rejects.toThrow(/参数|\(void\*\*\)&|&变量|格式串/);
   });
 
   it('头文件是只读的 —— 学员改不了接口契约', () => {

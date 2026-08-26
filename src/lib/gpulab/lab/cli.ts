@@ -14,6 +14,7 @@
  */
 import type { CommandHandler, CommandResult } from '../../labkit/machine';
 import { compileProgram } from '../index';
+import { runClusterHost } from '../cluster/run';
 import { CudaCompileError } from '../cuda/lower';
 import { CudaSyntaxError } from '../cuda/parser';
 import { KernelError } from '../vm/vm';
@@ -196,14 +197,19 @@ export async function runBench(
   const preserved = options.racecheck ? world.gpu.snapshotCounters() : null;
 
   // 重新建一台干净的设备：显存内容、分配游标、指标全部归零
-  world.gpu.reset();
+  if (world.cluster) world.cluster.reset();
+  else world.gpu.reset();
   world.buffers.clear();
 
   const seed = world.spec.seed ?? 1;
   for (const buffer of bench.buffers) {
     const data = materialize(buffer, seed);
-    const address = world.gpu.malloc(buffer.length * 4);
-    if (buffer.type === 'int') world.gpu.copyInInts(address, data as Int32Array);
+    // 集群关卡的缓冲区分配在 0 号卡上，地址因此带着设备号
+    const address = world.cluster
+      ? world.cluster.malloc(buffer.length * 4)
+      : world.gpu.malloc(buffer.length * 4);
+    if (world.cluster) world.cluster.copyIn(address, data as Float32Array);
+    else if (buffer.type === 'int') world.gpu.copyInInts(address, data as Int32Array);
     else world.gpu.copyIn(address, data as Float32Array);
     world.buffers.set(buffer.name, {
       address, length: buffer.length, type: buffer.type ?? 'float',
@@ -222,9 +228,11 @@ export async function runBench(
       return { address: found?.address ?? 0, length: found?.length ?? 0 };
     });
     try {
-      const result = world.gpu.runHost(artifact.host, artifact.kernels, ordered, {
-        racecheck: options.racecheck,
-      });
+      const result = world.cluster
+        ? runClusterHost(world.cluster, artifact.host, artifact.kernels, ordered)
+        : world.gpu.runHost(artifact.host, artifact.kernels, ordered, {
+            racecheck: options.racecheck,
+          });
       world.lastRun = { artifact, launches: [], wallClockMs: Date.now() - startedAt };
       if (preserved) world.gpu.restoreCounters(preserved);
       return { stdout: result.stdout, stderr: '', code: 0 };
