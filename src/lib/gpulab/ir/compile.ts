@@ -257,7 +257,7 @@ interface CompilerContext {
  */
 type Frame =
   | { kind: 'mask' }
-  | { kind: 'loop'; breaks: number[] }
+  | { kind: 'loop'; breaks: number[]; continues: number[] }
   | { kind: 'fn'; returns: number[]; result: number; type: CudaType; name: string };
 
 class Compiler {
@@ -1271,16 +1271,17 @@ class Compiler {
         const condAt = this.here();
         const cond = this.expr(node.cond);
         const lcondAt = this.emit({ op: 'lcond', cond: cond.reg, exitPc: -1 }, node.span.line);
-        const frame: Frame = { kind: 'loop', breaks: [] };
+        const frame: Frame = { kind: 'loop', breaks: [], continues: [] };
         this.frames.push(frame);
         this.stmt(node.body);
         this.frames.pop();
+        const backAt = this.here();
         this.emit({ op: 'jmp', target: condAt }, node.span.line);
         const exitAt = this.here();
         this.emit({ op: 'pop' }, node.span.line);
         (this.insts[loopAt] as { exitPc: number }).exitPc = exitAt;
         (this.insts[lcondAt] as { exitPc: number }).exitPc = exitAt;
-        this.patchBreaks(frame, exitAt);
+        this.patchBreaks(frame, exitAt, backAt);
         break;
       }
 
@@ -1294,17 +1295,19 @@ class Compiler {
           const cond = this.expr(node.cond);
           lcondAt = this.emit({ op: 'lcond', cond: cond.reg, exitPc: -1 }, node.span.line);
         }
-        const frame: Frame = { kind: 'loop', breaks: [] };
+        const frame: Frame = { kind: 'loop', breaks: [], continues: [] };
         this.frames.push(frame);
         this.stmt(node.body);
         this.frames.pop();
+        // continue 落在这里：步进表达式的第一条指令
+        const stepAt = this.here();
         if (node.step) this.expr(node.step);
         this.emit({ op: 'jmp', target: condAt }, node.span.line);
         const exitAt = this.here();
         this.emit({ op: 'pop' }, node.span.line);
         (this.insts[loopAt] as { exitPc: number }).exitPc = exitAt;
         if (lcondAt >= 0) (this.insts[lcondAt] as { exitPc: number }).exitPc = exitAt;
-        this.patchBreaks(frame, exitAt);
+        this.patchBreaks(frame, exitAt, stepAt);
         this.popScope();
         break;
       }
@@ -1325,6 +1328,16 @@ class Compiler {
         // pop 负责，所以不在这里弹。
         this.unwindAbove(loop, node.span.line);
         loop.breaks.push(this.emit({ op: 'jmp', target: -1 }, node.span.line));
+        break;
+      }
+
+      case 'continue': {
+        this.requireHost(node.span.line, node.span.column, 'continue');
+        const loop = this.innermostLoop();
+        if (!loop) this.fail(node.span.line, node.span.column, 'continue 不在循环里');
+        // 只弹这个循环之上的掩码帧 —— 循环本身还要接着转
+        this.unwindAbove(loop, node.span.line);
+        loop.continues.push(this.emit({ op: 'jmp', target: -1 }, node.span.line));
         break;
       }
 
@@ -1509,7 +1522,7 @@ class Compiler {
     return null;
   }
 
-  private innermostLoop(): { kind: 'loop'; breaks: number[] } | null {
+  private innermostLoop(): { kind: 'loop'; breaks: number[]; continues: number[] } | null {
     for (let i = this.frames.length - 1; i >= 0; i -= 1) {
       const frame = this.frames[i];
       if (frame.kind === 'loop') return frame;
@@ -1518,8 +1531,14 @@ class Compiler {
     return null;
   }
 
-  private patchBreaks(frame: { kind: 'loop'; breaks: number[] }, exitAt: number): void {
+  private patchBreaks(
+    frame: { kind: 'loop'; breaks: number[]; continues: number[] },
+    exitAt: number, continueAt: number
+  ): void {
     for (const at of frame.breaks) (this.insts[at] as { target: number }).target = exitAt;
+    // continue 跳到「下一轮的入口」：for 是步进表达式，while 是条件。
+    // 跳到条件而漏掉步进的话，`for (i...; ++i) { if (x) continue; }` 会死循环。
+    for (const at of frame.continues) (this.insts[at] as { target: number }).target = continueAt;
   }
 
   private requireHost(line: number, column: number, what: string): void {

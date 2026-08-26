@@ -590,3 +590,86 @@ describe('kernel 里的提前 return', () => {
     `)).rejects.toThrow(/退出掩码/);
   });
 });
+
+describe('continue', () => {
+  it('跳过这一轮的剩下部分', async () => {
+    const { stdout } = await run(`
+      int main(void) {
+        int sum = 0;
+        for (int i = 0; i < 10; ++i) {
+          if (i % 3 == 0) { continue; }
+          sum += i;
+        }
+        printf("%d\\n", sum);
+        return 0;
+      }
+    `);
+    // 0,3,6,9 跳过，剩下 1+2+4+5+7+8 = 27
+    expect(stdout).toBe('27\n');
+  });
+
+  it('**for 的 continue 会跑步进表达式** —— 否则就是死循环', async () => {
+    const { stdout } = await run(`
+      int main(void) {
+        int seen = 0;
+        for (int i = 0; i < 5; ++i) {
+          if (i < 3) { continue; }
+          seen += 1;
+        }
+        printf("%d\\n", seen);
+        return 0;
+      }
+    `);
+    expect(stdout).toBe('2\n');
+  });
+
+  it('while 的 continue 跳回条件', async () => {
+    const { stdout } = await run(`
+      int main(void) {
+        int i = 0;
+        int sum = 0;
+        while (i < 10) {
+          i += 1;
+          if (i % 2 == 0) { continue; }
+          sum += i;
+        }
+        printf("%d\\n", sum);
+        return 0;
+      }
+    `);
+    expect(stdout).toBe('25\n');
+  });
+
+  it('嵌套 if 里的 continue 把掩码弹干净了', async () => {
+    const { stdout } = await run(`
+      int main(void) {
+        int sum = 0;
+        for (int i = 0; i < 8; ++i) {
+          if (i > 1) {
+            if (i % 2 == 0) { continue; }
+          }
+          sum += i;
+        }
+        printf("%d\\n", sum);
+        return 0;
+      }
+    `);
+    // 0,1 都加；之后跳过偶数：3+5+7 = 15，加上 0+1 = 16
+    expect(stdout).toBe('16\n');
+  });
+
+  it('设备侧的 continue 明确报错', async () => {
+    await expect(compileProgram(`
+      __global__ void k(float* out, int n) {
+        for (int i = 0; i < n; ++i) { if (out[i] < 0.0f) { continue; } out[i] = 1.0f; }
+      }
+      int main(void) { return 0; }
+    `)).rejects.toThrow(/退出掩码/);
+  });
+
+  it('循环外的 continue 会说清楚', async () => {
+    await expect(compileProgram(`
+      int main(void) { continue; return 0; }
+    `)).rejects.toThrow(/不在循环里/);
+  });
+});

@@ -1583,6 +1583,48 @@ const primers = {
         + 'almost all inference engineering is a fight over that memory.'
       )
     ),
+    'paged-kv-cache': t(
+      p(
+        '一整片连续的 KV cache，在多条序列一起跑的时候立刻遇到一个问题：'
+        + '你不知道每条序列最后会有多长。于是只能按最坏情况预留，'
+        + '每条序列都按最长上下文划一片，而真实负载的长度差别极大，'
+        + '一条 5 个 token 的请求占着 4096 个位置的地方，浪费掉 99.9%。',
+        '操作系统三十年前就解决过同一个问题：分页。'
+        + '把显存切成固定大小的块，序列需要了才给一块，用完还回去。'
+        + '序列在物理上不再连续，靠一张块表记录「逻辑第 b 块在物理第几块」。'
+        + 'attention kernel 因此要多做一次间接寻址，'
+        + '真实的 vLLM paged attention kernel 收的 block_tables 参数就是这张表。',
+        '效果在 vLLM 的论文里有数字：显存浪费从 60 到 80 个百分点降到 4 以下，'
+        + '同样一张卡能同时装下的序列数翻了好几倍。'
+        + '值得注意的是吞吐的提升主要来自这里，不是来自 kernel 变快 --'
+        + '装得下更多序列，批就更大，GPU 才不至于在解码时闲着。',
+        '分页还顺手带来一件事：块可以共享。几个请求用同一个系统提示词时，'
+        + '那部分的块表可以指向同一批物理块，一份 KV 服务所有请求，'
+        + '再配上写时复制就是前缀缓存。'
+        + '代价和操作系统一样是一次间接寻址，所以块大小是取舍：'
+        + '太小则块表变长、间接开销占比高，太大则最后一块的内部碎片变大。'
+      ),
+      p(
+        'One contiguous KV cache hits a problem the moment several sequences run together: you do '
+        + 'not know how long each will end up. So you reserve for the worst case, a full '
+        + 'max-context slab per sequence. Real workloads vary enormously in length, so a five-token '
+        + 'request holding 4096 positions wastes 99.9% of them.',
+        'Operating systems solved this thirty years ago with paging. Cut memory into fixed-size '
+        + 'blocks, hand one out when a sequence needs it, take it back when it finishes. Sequences '
+        + 'are no longer physically contiguous, so a block table records which physical block holds '
+        + 'logical block b, and the attention kernel does one extra indirection. That table is '
+        + 'exactly the block_tables argument the real vLLM paged attention kernel takes.',
+        'The vLLM paper puts numbers on it: memory waste falls from 60 to 80 percent down to under '
+        + '4, so a single card holds several times as many concurrent sequences. Note where the '
+        + 'throughput comes from: not faster kernels, but bigger batches, because fitting more '
+        + 'sequences is what keeps the GPU from idling during decode.',
+        'Paging brings something else along: blocks can be shared. When requests share a system '
+        + 'prompt, their block tables can point at the same physical blocks, one copy of the KV '
+        + 'serving everyone, and copy-on-write turns that into prefix caching. The cost is the same '
+        + 'one operating systems pay, an indirection, so block size is a trade: too small and the '
+        + 'table grows while indirection dominates, too large and the last block wastes more.'
+      )
+    ),
   },
 
   'intranet-k8s': {

@@ -661,6 +661,9 @@ function lowerStmt(node: TsNode): Stmt {
     case 'break_statement':
       return { kind: 'break', span };
 
+    case 'continue_statement':
+      return { kind: 'continue', span };
+
     case 'while_statement': {
       const cond = conditionOf(node);
       const body = namedChildren(node).find((child) => child.type !== 'condition_clause');

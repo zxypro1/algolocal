@@ -192,6 +192,8 @@ export type Stmt =
    * `unwindTo` 上。
    */
   | { kind: 'break'; span: SourceSpan }
+  /** `continue`，和 break 一样只在宿主代码里支持 */
+  | { kind: 'continue'; span: SourceSpan }
   /**
    * `kernel<<<grid, block>>>(args)`
    *

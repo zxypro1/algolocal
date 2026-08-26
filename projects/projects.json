@@ -17754,6 +17754,145 @@
           "zh": "自回归解码是一个一个 token 往外吐的：算出第 n 个，把它接回输入，再算第 n+1 个。每一步都要对**前面所有位置**做注意力，也就是说每一步都需要那些位置的 k 与 v。\n\n最直白的写法是每一步重新算一遍。这在数学上没有任何问题，同样的输入配同样的权重，投影出来当然是同一个 k。问题在于代价：第 n 步要投影 n 个位置，跑完 N 步就是 N 平方 / 2 次投影。\n\n而自回归有一个关键性质救了这件事：**已经生成过的位置，它的 k 和 v 永远不会再变。**因果注意力只让每个位置看它自己和它前面的，所以后面新增的 token 影响不到前面。既然不会变，算一次存起来就行，这就是 KV cache。\n\n它把每一步的投影量从 O(n) 降到 O(1)，代价是显存。而这个代价相当可观：一个 70B 模型在 fp16 下大约是每个 token 每层 320KB，80 层加起来 2.5MB，一条 4K 上下文的序列光 KV cache 就要 10GB。从这里开始，推理引擎的工程几乎全在跟这块显存较劲。",
           "en": "Autoregressive decoding emits one token at a time: compute the nth, feed it back, compute the n+1th. Every step attends over **all previous positions**, so every step needs the k and v of those positions.\n\nThe most literal implementation recomputes them each step. Mathematically nothing is wrong with that: the same input and the same weights obviously project to the same k. The problem is the cost. Step n projects n positions, so N steps cost N squared over two.\n\nOne property of autoregression rescues this: **once a position has been generated, its k and v never change.** Causal attention lets each position see only itself and what came before, so later tokens cannot affect earlier ones. If they never change, compute them once and keep them. That is the KV cache.\n\nIt takes the projection work per step from O(n) to O(1), paid for in memory, and the payment is steep: roughly 320KB per token per layer for a 70B model in fp16, 2.5MB across 80 layers, so a single 4K-context sequence needs 10GB of cache. From here on, almost all inference engineering is a fight over that memory."
         }
+      },
+      {
+        "id": "paged-kv-cache",
+        "title": {
+          "zh": "分页 KV cache —— 把显存当虚拟内存管",
+          "en": "Paged KV cache — manage memory the way an OS manages pages"
+        },
+        "goal": {
+          "zh": "上一关的 KV cache 是一整片连续显存。放到多条序列一起跑的场景里，\n这个做法立刻出问题：**你不知道每条序列最后会有多长。**\n\n于是只能按最坏情况预留 —— 每条序列都按最长上下文划一片。\n`paged.cu` 现在就是这么干的：6 条序列，每条预留 8 块。\n而实际长度是 90 / 7 / 40 / 5 / 61 / 22 —— 那条 5 个位置的序列\n占着 8 块（128 个位置）的地方，浪费了 96%。\n\n操作系统早就解决过这个问题：**分页**。把显存切成固定大小的块，\n序列需要了才给一块，用完了还回去。序列在物理上不再连续，\n靠一张**块表**记录「逻辑第 b 块在物理第几块」。\n\n`attendPaged` 已经收块表了（真实的 vLLM paged attention kernel 也是这个签名），\n现在的块表只是一张静态的恒等映射。你要做的是：\n\n1. 开一个**固定大小**的块池（这一关给你 12 块），用 `ring` 当空闲块链表\n2. 用 `map` 当块表：`(序列号 * 1024 + 逻辑块号) -> 物理块号`\n3. 序列写到一个新块的第一个位置时，才从空闲链表取一块\n4. **序列结束时把它的块全部还回去** —— 12 块之所以够用，全靠这一步\n\n```bash\nnvcc -o bench paged.cu && ncu ./bench\n```\n\n**通关标准**\n\n- 输出和预留版逐位相同（块表对了，attention 读到的就是同一批 k/v）\n- 显存峰值 ≤ 200 KB（预留版是 435 KB）",
+          "en": "The KV cache in the previous stage was one contiguous slab. Run several sequences together\nand that breaks immediately: **you do not know how long each sequence will end up being.**\n\nSo you reserve for the worst case, a full max-context slab per sequence. That is what\n`paged.cu` does now: 6 sequences, 8 blocks each. The actual lengths are 90 / 7 / 40 / 5 /\n61 / 22, so the 5-position sequence holds 8 blocks (128 positions) and wastes 96% of them.\n\nOperating systems solved this long ago: **paging**. Cut memory into fixed-size blocks, hand\none out when a sequence needs it, take it back when it is done. Sequences are no longer\nphysically contiguous, so a **block table** records which physical block holds logical block b.\n\n`attendPaged` already takes a block table (the real vLLM paged attention kernel has the same\nsignature); right now that table is just a static identity mapping. Your job:\n\n1. allocate a **fixed-size** block pool (12 blocks here) and keep a free list in a `ring`\n2. use a `map` as the block table: `(seq * 1024 + logical block) -> physical block`\n3. take a block from the free list only when a sequence reaches a new block's first position\n4. **return every block when a sequence finishes** — 12 blocks only suffice because of this\n\n```bash\nnvcc -o bench paged.cu && ncu ./bench\n```\n\n**To pass**\n\n- output bit-identical to the reserving version (a correct table reads the same k/v)\n- peak memory at most 200 KB (435 KB reserving)"
+        },
+        "checklist": [
+          {
+            "zh": "用 ring 维护空闲块链表",
+            "en": "Keep a free-block list in a `ring`"
+          },
+          {
+            "zh": "用 map 维护块表，键是「序列号 * 1024 + 逻辑块号」",
+            "en": "Keep the block table in a `map` keyed by `seq * 1024 + logical block`"
+          },
+          {
+            "zh": "每次 attend 之前把这条序列的块表拷到设备上",
+            "en": "Copy this sequence's block table to the device before each attend"
+          },
+          {
+            "zh": "序列结束时把它占的块全部还回空闲链表",
+            "en": "Return every block to the free list when a sequence finishes"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "只有当 `have % BLOCK == 0` 时才需要新块 —— 别的位置落在已有的块里。用 `map_has` 判断更直白。",
+            "en": "A new block is only needed when `have % BLOCK == 0`; every other position falls inside an existing block. Checking with `map_has` reads more directly."
+          },
+          {
+            "zh": "块表是宿主侧的 `map`，而 kernel 要读设备上的数组。每步把这条序列的 `logical + 1` 个块号拷成一个小数组送上去。",
+            "en": "The block table lives in a host-side `map`, but the kernel reads a device array. Each step, copy this sequence's `logical + 1` block numbers into a small array and send it up."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**忘了归还。** 12 块很快就被取空，`ring_pop` 会在空队列上报错。这不是平台在为难你 —— 真实引擎里这一刻就是 OOM。",
+            "en": "**Forgetting to free.** Twelve blocks run out fast and `ring_pop` errors on an empty queue. That is not the platform being difficult: in a real engine this moment is an OOM."
+          },
+          {
+            "zh": "**块表只拷了最后一块。** kernel 要遍历位置 0 到 len-1，所以整张表都得在设备上，不是只有当前这一块。",
+            "en": "**Only uploading the last block.** The kernel walks positions 0 through len-1, so the whole table has to be on the device, not just the current block."
+          },
+          {
+            "zh": "**归还的时候用错了长度。** 序列写到第 61 个位置占了 4 块（ceil(61/16)），按 61/16 = 3 算会漏还一块，慢慢就把池漏空了。",
+            "en": "**Using the wrong count when freeing.** A sequence of 61 positions holds 4 blocks (ceil(61/16)); computing 61/16 = 3 leaks one block per sequence and drains the pool."
+          }
+        ],
+        "extension": {
+          "zh": "这就是 vLLM 那篇论文的核心，也是它名字的由来（PagedAttention）。论文里报的数字是显存浪费从 60~80% 降到 4% 以下，于是同样一张卡能同时装下的序列数翻了好几倍 —— 吞吐的提升主要来自这里，不是来自 kernel 变快了。\n\n分页还顺手带来一件事：**块可以共享**。几个请求用同一个系统提示词时，那部分的块表可以指向同一批物理块，一份 KV 服务所有请求。再配上写时复制，就是前缀缓存。\n\n代价也和操作系统一样：多了一次间接寻址。所以块大小是个取舍 —— 太小则块表变长、间接开销占比高，太大则最后一块的内部碎片变大。vLLM 默认 16，和这一关一样。",
+          "en": "This is the core of the vLLM paper, and where its name comes from (PagedAttention). The paper reports memory waste dropping from 60-80% to under 4%, so a single card holds several times as many concurrent sequences. That is where the throughput came from, not from faster kernels.\n\nPaging brings something else along: **blocks can be shared**. When several requests share a system prompt, that part of their block tables can point at the same physical blocks, one copy of the KV serving every request. Add copy-on-write and you have prefix caching.\n\nThe cost is the same one operating systems pay: an extra indirection. Block size is therefore a trade: too small and the table grows while indirection dominates; too large and the last block of each sequence wastes more. vLLM defaults to 16, the same as this stage."
+        },
+        "gpu": {
+          "files": {
+            "/root/paged.cu": "        #include \"engine.h\"\n        #include \"containers.h\"\n\n        __global__ void project(const float* x, const float* W,\n                        float* q, float* k, float* v, int dim) {\n  int d = threadIdx.x;\n  float aq = 0.0f; float ak = 0.0f; float av = 0.0f;\n  for (int j = 0; j < dim; ++j) {\n    float xv = x[j];\n    aq = fmaf(xv, W[j * dim + d], aq);\n    ak = fmaf(xv, W[dim * dim + j * dim + d], ak);\n    av = fmaf(xv, W[2 * dim * dim + j * dim + d], av);\n  }\n  q[d] = aq; k[d] = ak; v[d] = av;\n}\n\n// 位置 j 不在 j * dim，而在 table 说的那一块里\n__global__ void attendPaged(const float* q, const float* kPool, const float* vPool,\n                            const int* table, float* out,\n                            int len, int blockSize, int dim) {\n  int lane = threadIdx.x;\n  float scale = rsqrtf((float)dim);\n  float m = -3.4e38f; float l = 0.0f; float a0 = 0.0f; float a1 = 0.0f;\n  for (int j = 0; j < len; ++j) {\n    int slot = table[j / blockSize] * blockSize + (j % blockSize);\n    float p = 0.0f;\n    for (int d = lane; d < dim; d += 32) p = fmaf(q[d], kPool[slot * dim + d], p);\n    for (int dd = 16; dd > 0; dd >>= 1) p += __shfl_xor_sync(0xffffffff, p, dd);\n    p = p * scale;\n    float mN = fmaxf(m, p); float c = expf(m - mN); float w = expf(p - mN);\n    l = l * c + w;\n    a0 = a0 * c + w * vPool[slot * dim + lane];\n    a1 = a1 * c + w * vPool[slot * dim + lane + 32];\n    m = mN;\n  }\n  out[lane] = a0 / l; out[lane + 32] = a1 / l;\n}\n\n\n        int main(void) {\n          const int DIM = 64;\n          const int SEQS = 6;\n          const int BLOCK = 16;\n          const int MAXB = 8;\n\n          float* W = lab_buffer(0);\n          float* states = lab_buffer(1);\n          int lens = vec_new();\n          vec_push(lens, 90);\n            vec_push(lens, 7);\n            vec_push(lens, 40);\n            vec_push(lens, 5);\n            vec_push(lens, 61);\n            vec_push(lens, 22);\n\n          // TODO: 现在每条序列预留 MAXB 块，谁也不还。\n          //       改成一个 12 块的池 + 空闲链表 + 块表 + 用完归还。\n          float* kP; float* vP; float* q; float* k; float* v; float* out; int* table;\n          cudaMalloc((void**)&kP, SEQS * MAXB * BLOCK * DIM * 4);\n          cudaMalloc((void**)&vP, SEQS * MAXB * BLOCK * DIM * 4);\n          cudaMalloc((void**)&q, DIM * 4); cudaMalloc((void**)&k, DIM * 4);\n          cudaMalloc((void**)&v, DIM * 4); cudaMalloc((void**)&out, DIM * 4);\n          cudaMalloc((void**)&table, MAXB * 4);\n\n          int len = vec_new();\n          for (int s = 0; s < SEQS; ++s) vec_push(len, 0);\n\n          int host[8];\n          int alive = 1;\n          while (alive == 1) {\n            alive = 0;\n            for (int s = 0; s < SEQS; ++s) {\n              int have = vec_get(len, s);\n              if (have >= vec_get(lens, s)) { continue; }\n              int logical = have / BLOCK;\n              // 静态恒等映射：第 s 条序列的第 b 块永远是物理块 s * MAXB + b\n              int slot = (s * MAXB + logical) * BLOCK + (have % BLOCK);\n\n              float* x = states + s * DIM;\n              project<<<1, DIM>>>(x, W, q, k, v, DIM);\n              cudaMemcpy(kP + slot * DIM, k, DIM * 4, cudaMemcpyDeviceToDevice);\n              cudaMemcpy(vP + slot * DIM, v, DIM * 4, cudaMemcpyDeviceToDevice);\n\n              int nb = logical + 1;\n              for (int b = 0; b < nb; ++b) host[b] = s * MAXB + b;\n              cudaMemcpy(table, host, nb * 4, cudaMemcpyHostToDevice);\n\n              attendPaged<<<1, 32>>>(q, kP, vP, table, out, have + 1, BLOCK, DIM);\n              cudaMemcpy(x, out, DIM * 4, cudaMemcpyDeviceToDevice);\n              vec_set(len, s, have + 1);\n              alive = 1;\n            }\n          }\n          return 0;\n        }\n"
+          },
+          "bench": {
+            "sources": [
+              "/root/paged.cu"
+            ],
+            "buffers": [
+              {
+                "name": "W",
+                "length": 12288,
+                "fill": {
+                  "kind": "random",
+                  "seed": 11,
+                  "min": -0.15,
+                  "max": 0.15
+                }
+              },
+              {
+                "name": "states",
+                "length": 384,
+                "fill": {
+                  "kind": "iota",
+                  "scale": 0.0007,
+                  "offset": 0.05
+                }
+              }
+            ],
+            "launches": []
+          },
+          "referenceFiles": {
+            "/root/paged.cu": "        #include \"engine.h\"\n        #include \"containers.h\"\n\n        __global__ void project(const float* x, const float* W,\n                        float* q, float* k, float* v, int dim) {\n  int d = threadIdx.x;\n  float aq = 0.0f; float ak = 0.0f; float av = 0.0f;\n  for (int j = 0; j < dim; ++j) {\n    float xv = x[j];\n    aq = fmaf(xv, W[j * dim + d], aq);\n    ak = fmaf(xv, W[dim * dim + j * dim + d], ak);\n    av = fmaf(xv, W[2 * dim * dim + j * dim + d], av);\n  }\n  q[d] = aq; k[d] = ak; v[d] = av;\n}\n\n// 位置 j 不在 j * dim，而在 table 说的那一块里\n__global__ void attendPaged(const float* q, const float* kPool, const float* vPool,\n                            const int* table, float* out,\n                            int len, int blockSize, int dim) {\n  int lane = threadIdx.x;\n  float scale = rsqrtf((float)dim);\n  float m = -3.4e38f; float l = 0.0f; float a0 = 0.0f; float a1 = 0.0f;\n  for (int j = 0; j < len; ++j) {\n    int slot = table[j / blockSize] * blockSize + (j % blockSize);\n    float p = 0.0f;\n    for (int d = lane; d < dim; d += 32) p = fmaf(q[d], kPool[slot * dim + d], p);\n    for (int dd = 16; dd > 0; dd >>= 1) p += __shfl_xor_sync(0xffffffff, p, dd);\n    p = p * scale;\n    float mN = fmaxf(m, p); float c = expf(m - mN); float w = expf(p - mN);\n    l = l * c + w;\n    a0 = a0 * c + w * vPool[slot * dim + lane];\n    a1 = a1 * c + w * vPool[slot * dim + lane + 32];\n    m = mN;\n  }\n  out[lane] = a0 / l; out[lane + 32] = a1 / l;\n}\n\n\n        int main(void) {\n          const int DIM = 64;\n          const int SEQS = 6;\n          const int BLOCK = 16;\n          const int POOL = 12;\n          const int MAXB = 8;\n\n          float* W = lab_buffer(0);\n          float* states = lab_buffer(1);\n          int lens = vec_new();\n          vec_push(lens, 90);\n            vec_push(lens, 7);\n            vec_push(lens, 40);\n            vec_push(lens, 5);\n            vec_push(lens, 61);\n            vec_push(lens, 22);\n\n          float* kP; float* vP; float* q; float* k; float* v; float* out; int* table;\n          cudaMalloc((void**)&kP, POOL * BLOCK * DIM * 4);\n          cudaMalloc((void**)&vP, POOL * BLOCK * DIM * 4);\n          cudaMalloc((void**)&q, DIM * 4); cudaMalloc((void**)&k, DIM * 4);\n          cudaMalloc((void**)&v, DIM * 4); cudaMalloc((void**)&out, DIM * 4);\n          cudaMalloc((void**)&table, MAXB * 4);\n\n          // 空闲块链表与块表\n          int freeList = ring_new();\n          for (int b = 0; b < POOL; ++b) ring_push(freeList, b);\n          int blockTable = map_new();\n\n          int len = vec_new();\n          int done = vec_new();\n          for (int s = 0; s < SEQS; ++s) { vec_push(len, 0); vec_push(done, 0); }\n\n          int host[8];\n          int alive = 1;\n          while (alive == 1) {\n            alive = 0;\n            for (int s = 0; s < SEQS; ++s) {\n              if (vec_get(done, s) == 1) { continue; }\n              int have = vec_get(len, s);\n\n              if (have >= vec_get(lens, s)) {\n                // 结束了：把占的块全还回去。用 ceil 而不是整除 ——\n                // 61 个位置占的是 4 块不是 3 块，少还一块就是慢性泄漏\n                int nb = (have + BLOCK - 1) / BLOCK;\n                for (int b = 0; b < nb; ++b) {\n                  ring_push(freeList, map_get(blockTable, s * 1024 + b, 0));\n                  map_del(blockTable, s * 1024 + b);\n                }\n                vec_set(done, s, 1);\n                continue;\n              }\n\n              int logical = have / BLOCK;\n              if (map_has(blockTable, s * 1024 + logical) == 0) {\n                map_set(blockTable, s * 1024 + logical, ring_pop(freeList));\n              }\n              int physical = map_get(blockTable, s * 1024 + logical, -1);\n              int slot = physical * BLOCK + (have % BLOCK);\n\n              float* x = states + s * DIM;\n              project<<<1, DIM>>>(x, W, q, k, v, DIM);\n              cudaMemcpy(kP + slot * DIM, k, DIM * 4, cudaMemcpyDeviceToDevice);\n              cudaMemcpy(vP + slot * DIM, v, DIM * 4, cudaMemcpyDeviceToDevice);\n\n              // 整张表都要在设备上 —— kernel 会遍历位置 0 到 len-1\n              int nb = logical + 1;\n              for (int b = 0; b < nb; ++b) host[b] = map_get(blockTable, s * 1024 + b, -1);\n              cudaMemcpy(table, host, nb * 4, cudaMemcpyHostToDevice);\n\n              attendPaged<<<1, 32>>>(q, kP, vP, table, out, have + 1, BLOCK, DIM);\n              cudaMemcpy(x, out, DIM * 4, cudaMemcpyDeviceToDevice);\n              vec_set(len, s, have + 1);\n              alive = 1;\n            }\n          }\n          return 0;\n        }\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "paged.spec.ts",
+            "content": "const lab = require('@gpu/lab');\nconst GOLDEN = [[0,-0.007809331640601158],[63,-0.0009999065659940243],[64,-0.02667618915438652],[127,0.009406697936356068],[200,-0.09454234689474106],[300,0.0036766950506716967],[383,0.009400105103850365]];\n\ndescribe('分页 KV cache', () => {\n  it('结果和预留版逐位相同 —— 块表对了才读得到同一批 k/v', async () => {\n    await lab.buildAndRun();\n    const states = lab.buffer('states');\n    for (const [index, expected] of GOLDEN) {\n      expect(Math.abs(states[index] - expected)).toBeLessThanOrEqual(1e-9);\n    }\n  });\n\n  it('六条序列全都跑完了', async () => {\n    await lab.buildAndRun();\n    // 每步 project（2 个 warp）加 attend（1 个），一共 225 个位置\n    expect(lab.metrics().launch.blocks).toBe(450);\n  });\n\n  it('**显存峰值降下来了**', async () => {\n    await lab.buildAndRun();\n    expect(lab.peakBytes()).toBeLessThanOrEqual(200 * 1024);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "gpu.sanitizer.races",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "数据竞态",
+              "en": "data races"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.sanitizer.warpSyncErrors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "warp 同步用错",
+              "en": "warp sync errors"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.memoryPeakBytes",
+            "op": "lte",
+            "value": 204800,
+            "label": {
+              "zh": "显存峰值（预留版是 435KB）",
+              "en": "peak device memory (435KB reserving)"
+            },
+            "unit": "byte",
+            "dimension": "throughput"
+          }
+        ],
+        "focus": [
+          "throughput",
+          "correctness"
+        ],
+        "primer": {
+          "zh": "一整片连续的 KV cache，在多条序列一起跑的时候立刻遇到一个问题：你不知道每条序列最后会有多长。于是只能按最坏情况预留，每条序列都按最长上下文划一片，而真实负载的长度差别极大，一条 5 个 token 的请求占着 4096 个位置的地方，浪费掉 99.9%。\n\n操作系统三十年前就解决过同一个问题：分页。把显存切成固定大小的块，序列需要了才给一块，用完还回去。序列在物理上不再连续，靠一张块表记录「逻辑第 b 块在物理第几块」。attention kernel 因此要多做一次间接寻址，真实的 vLLM paged attention kernel 收的 block_tables 参数就是这张表。\n\n效果在 vLLM 的论文里有数字：显存浪费从 60 到 80 个百分点降到 4 以下，同样一张卡能同时装下的序列数翻了好几倍。值得注意的是吞吐的提升主要来自这里，不是来自 kernel 变快 --装得下更多序列，批就更大，GPU 才不至于在解码时闲着。\n\n分页还顺手带来一件事：块可以共享。几个请求用同一个系统提示词时，那部分的块表可以指向同一批物理块，一份 KV 服务所有请求，再配上写时复制就是前缀缓存。代价和操作系统一样是一次间接寻址，所以块大小是取舍：太小则块表变长、间接开销占比高，太大则最后一块的内部碎片变大。",
+          "en": "One contiguous KV cache hits a problem the moment several sequences run together: you do not know how long each will end up. So you reserve for the worst case, a full max-context slab per sequence. Real workloads vary enormously in length, so a five-token request holding 4096 positions wastes 99.9% of them.\n\nOperating systems solved this thirty years ago with paging. Cut memory into fixed-size blocks, hand one out when a sequence needs it, take it back when it finishes. Sequences are no longer physically contiguous, so a block table records which physical block holds logical block b, and the attention kernel does one extra indirection. That table is exactly the block_tables argument the real vLLM paged attention kernel takes.\n\nThe vLLM paper puts numbers on it: memory waste falls from 60 to 80 percent down to under 4, so a single card holds several times as many concurrent sequences. Note where the throughput comes from: not faster kernels, but bigger batches, because fitting more sequences is what keeps the GPU from idling during decode.\n\nPaging brings something else along: blocks can be shared. When requests share a system prompt, their block tables can point at the same physical blocks, one copy of the KV serving everyone, and copy-on-write turns that into prefix caching. The cost is the same one operating systems pay, an indirection, so block size is a trade: too small and the table grows while indirection dominates, too large and the last block wastes more."
+        }
       }
     ]
   },
