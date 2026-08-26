@@ -157,11 +157,22 @@ export class VirtualClock {
 
   /** 把时钟推进 ms，沿途所有定时器都会触发 */
   advanceBy(ms: number): void {
+    if (!Number.isFinite(ms)) {
+      throw new TypeError(`advanceBy 收到的不是一个有限的毫秒数：${ms}`);
+    }
     this.advanceTo(this.time + Math.max(0, Math.floor(ms)));
   }
 
-  /** 把时钟推到某个绝对时刻 */
+  /**
+   * 把时钟推到某个绝对时刻。
+   *
+   * target 必须是有限值：NaN 的话 `next > target` 永远为假，这个循环会
+   * 一直烧下去，而且不报错 —— 表现是整个进程静悄悄地卡住。
+   */
   advanceTo(target: number): void {
+    if (!Number.isFinite(target)) {
+      throw new TypeError(`advanceTo 收到的不是一个有限的时刻：${target}`);
+    }
     let batchesAtSameInstant = 0;
     let lastInstant = this.time;
 

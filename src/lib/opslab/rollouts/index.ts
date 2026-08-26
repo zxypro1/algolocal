@@ -6,5 +6,5 @@
  * 分析失败时**自动回到稳定版本**，不需要人介入。
  */
 export { ROLLOUTS, ANALYSISTEMPLATES, ANALYSISRUNS, ROLLOUT_RESOURCES, ROLLOUTS_LABEL } from './resources';
-export { RolloutController, checkCondition } from './controller';
+export { NO_DATA_GRACE_MS, RolloutController, checkCondition } from './controller';
 export type { AnalysisEvaluator, RolloutsOptions } from './controller';

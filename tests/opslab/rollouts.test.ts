@@ -7,7 +7,7 @@
  * 这一组要钉住的：状态机一步一步走、不带 duration 的 pause 会一直停、
  * 分析失败会中止并回滚、以及中止不是「停在原地」。
  */
-import { checkCondition } from '../../src/lib/opslab/rollouts';
+import { NO_DATA_GRACE_MS, checkCondition } from '../../src/lib/opslab/rollouts';
 import { buildTopology, createOpsWorld } from '../../src/lib/opslab/lab';
 import { SCRAPE_INTERVAL_MS } from '../../src/lib/opslab/observability';
 import type { OpsWorldSpec } from '../../src/lib/engineering/types';
@@ -83,6 +83,19 @@ const TEMPLATE = {
   },
 };
 
+/** 判据引用一个根本不存在的指标：这条查询永远查不到数 */
+const TEMPLATE_NO_DATA = {
+  apiVersion: 'argoproj.io/v1alpha1', kind: 'AnalysisTemplate',
+  metadata: { name: 'no-data', namespace: 'shop' },
+  spec: {
+    metrics: [{
+      name: 'error-rate',
+      successCondition: 'result < 0.05',
+      provider: { prometheus: { query: 'sum(rate(nothing_here_total[5m]))' } },
+    }],
+  },
+};
+
 const MONITOR = {
   apiVersion: 'monitoring.coreos.com/v1', kind: 'ServiceMonitor',
   metadata: { name: 'portal', namespace: 'shop' },
@@ -124,7 +137,7 @@ function spec(objects: unknown[]): OpsWorldSpec {
       [GOOD]: { pullMs: 10, startupMs: 10, readyAfterMs: 10, requestsPerSecond: 20, errorRatio: 0 },
       // 好版本的几个后续 tag。不声明的话拉不到镜像，Pod 起不来，
       // 会被误读成「金丝雀卡住了」
-      ...Object.fromEntries(['1.4.1', '1.4.2', '1.4.3', '1.4.4', '1.4.5'].map((tag) => [
+      ...Object.fromEntries(['1.4.1', '1.4.2', '1.4.3', '1.4.4', '1.4.5', '1.4.6'].map((tag) => [
         `harbor.corp.internal/team/portal:${tag}`,
         { pullMs: 10, startupMs: 10, readyAfterMs: 10, requestsPerSecond: 20, errorRatio: 0 },
       ])),
@@ -276,6 +289,30 @@ describe('金丝雀', () => {
     expect(node!.detail).toContain('Paused');
     // 属主链要接得上：Rollout -> ReplicaSet -> Pod
     expect(graph.edges.some((edge) => edge.from === node!.id && edge.kind === 'owns')).toBe(true);
+  });
+
+  /**
+   * 查不到数不等于通过。
+   *
+   * 一条永远查不到数的判据等于没有判据。先等（指标可能只是还没攒够点），
+   * 等够宽限期还是没有，就明确判失败 —— 静默放行比失败危险得多。
+   */
+  it('查不到数先等，等够宽限期还是没有就判失败', async () => {
+    const steps = [
+      { setWeight: 25 },
+      { analysis: { templates: [{ templateName: 'no-data' }] } },
+      { setWeight: 100 },
+    ];
+    const w = await build([...PLATFORM, SERVICE, MONITOR, TEMPLATE_NO_DATA, rollout(GOOD, steps)]);
+    await updateImage(w, 'harbor.corp.internal/team/portal:1.4.6', 60_000);
+    // 还在宽限期内：既没放行，也没判死
+    expect(statusOf(w).abort).toBeFalsy();
+    expect(statusOf(w).currentStepIndex).toBe(1);
+
+    await w.cluster.advanceBy(NO_DATA_GRACE_MS + 60_000);
+    expect(statusOf(w).abort).toBe(true);
+    const runs = w.cluster.registry.list(w.cluster.scheme.mustGet(RUNS), { namespace: 'shop' }).items;
+    expect(runs.some((run) => (run.status as any)?.phase === 'Failed')).toBe(true);
   });
 
   it('AnalysisTemplate 找不到时按失败处理，不静默放行', async () => {

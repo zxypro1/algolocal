@@ -2,7 +2,7 @@
  * Argo Rollouts 的控制器
  *
  * 金丝雀的核心是一个**状态机**：`status.currentStepIndex` 指向 steps 里的
- * 第几步，每一步做完才往前挪一格。四种步骤：
+ * 第几步，每一步做完才往前挪一格。三种步骤：
  *
  *   setWeight  调整金丝雀的副本占比
  *   pause      停住（带 duration 就是等那么久，不带就是等人来 promote）
@@ -16,9 +16,10 @@ import type { KubeObject } from '../apiserver';
 import {
   Controller, ControllerContext, Informer, isConflict, isNotFound, objectKey, splitKey,
 } from '../controllers/framework';
-import { DEPLOYMENTS, POD_TEMPLATE_HASH, REPLICASETS, templateHash } from '../controllers/resources';
+import {
+  DEPLOYMENTS, POD_TEMPLATE_HASH, PODS, REPLICASETS, templateHash,
+} from '../controllers/resources';
 import { ignoreConflict, isPodReady, updateStatusIfChanged } from '../controllers/workloads';
-import { PODS } from '../controllers/resources';
 import { ANALYSISRUNS, ANALYSISTEMPLATES, ROLLOUTS, ROLLOUTS_LABEL } from './resources';
 import { parseDuration } from '../observability';
 
@@ -27,6 +28,15 @@ export type AnalysisEvaluator = (query: string) => number | undefined;
 
 /** 查不到数最多等这么久，之后按失败算 */
 export const NO_DATA_GRACE_MS = 5 * 60_000;
+
+/**
+ * 查不到数时隔多久再量一次。
+ *
+ * 控制器是事件驱动的，而「Prometheus 又采了一轮」不是任何一个它盯着的对象
+ * 的变化。不排这个定时器的话，分析会停在 Running 上等一个永远不来的事件。
+ * 比采集间隔更快地重试没有意义 —— 那边还没有新的点。
+ */
+const NO_DATA_RETRY_MS = 15_000;
 
 export interface RolloutsOptions {
   evaluate: AnalysisEvaluator;
@@ -39,6 +49,16 @@ export class RolloutController extends Controller {
   private deployments: Informer;
   private templates: Informer;
   private runs: Informer;
+
+  /**
+   * 每个 Rollout 最多挂一条唤醒定时器。
+   *
+   * 不去重的话每次 reconcile 都排一条：而 reconcile 是事件驱动的，
+   * 一条 AnalysisRun 写回去就会再触发一轮 —— 定时器成指数增长，
+   * 到点一起炸开，世界当场卡死。真控制器的 workqueue 也是这个道理，
+   * 同一个 key 排队里只留一份。
+   */
+  private wakeups = new Map<string, number>();
 
   constructor(context: ControllerContext, private readonly options: RolloutsOptions) {
     super(context, 'argo-rollouts');
@@ -54,6 +74,23 @@ export class RolloutController extends Controller {
         for (const rollout of this.rollouts.list()) this.enqueue(objectKey(rollout));
       });
     }
+  }
+
+  /** 排一条「过 ms 之后再看一眼」，同一个 Rollout 只留最新的那条 */
+  private wakeAfter(rollout: KubeObject, ms: number, background: boolean): void {
+    const key = `${rollout.metadata.namespace}/${rollout.metadata.name}`;
+    const pending = this.wakeups.get(key);
+    if (pending !== undefined) this.kernel.clearTimer(pending);
+    this.wakeups.set(key, this.kernel.setTimeout(() => {
+      this.wakeups.delete(key);
+      this.enqueue(key);
+    }, ms, { background, label: `rollout:wake:${rollout.metadata.name}` }));
+  }
+
+  stop(): void {
+    for (const id of this.wakeups.values()) this.kernel.clearTimer(id);
+    this.wakeups.clear();
+    super.stop();
   }
 
   private installed(): boolean {
@@ -197,11 +234,7 @@ export class RolloutController extends Controller {
          * 不排这个定时器的话，Rollout 会一直停在 Paused，
          * 哪怕 duration 早就过了。
          */
-        this.kernel.setTimeout(
-          () => this.enqueue(`${rollout.metadata.namespace}/${rollout.metadata.name}`),
-          remaining,
-          { label: `rollout:pause:${rollout.metadata.name}` }
-        );
+        this.wakeAfter(rollout, remaining, false);
         return;
       }
       await this.writeStatus(rollout, {
@@ -285,11 +318,7 @@ export class RolloutController extends Controller {
       this.upsertRun(rollout, name, 'Running', metrics.map((metric) => ({
         name: metric.name, value: null, phase: 'Pending', condition: metric.successCondition,
       })), startedAt);
-      this.kernel.setTimeout(
-        () => this.enqueue(`${rollout.metadata.namespace}/${rollout.metadata.name}`),
-        delay - waited,
-        { label: `rollout:analysis:${rollout.metadata.name}` }
-      );
+      this.wakeAfter(rollout, delay - waited, false);
       return 'Running';
     }
 
@@ -326,6 +355,8 @@ export class RolloutController extends Controller {
       const first = Date.parse(startedAt);
       if (this.context.now() - first < NO_DATA_GRACE_MS) {
         this.upsertRun(rollout, name, 'Running', measurements, new Date(first).toISOString());
+        // 后台：这条会一直重排下去，算进前台的话世界永远静不下来
+        this.wakeAfter(rollout, NO_DATA_RETRY_MS, true);
         return 'Running';
       }
       this.upsertRun(rollout, name, 'Failed', measurements, new Date(first).toISOString());
