@@ -54,7 +54,21 @@ export interface GpuMetrics {
     divergentBranches: number;
     /** 活跃 lane 占比，0~1。全程不发散就是 1。 */
     activeLaneRatio: number;
+    /** warp 级交换指令（`__shfl_*_sync`）条数 */
+    shuffles: number;
+    /**
+     * warp 同步原语用错的次数。
+     * 恒为 0 的硬门槛 —— 和 sanitizer 那几项一个性质。
+     */
+    syncErrors: number;
   };
+  /**
+   * 原子操作次数（按 lane 算）。
+   *
+   * 第 5 关的门槛读它：`atomics <= gridDim` 逼出 shuffle 规约，
+   * 而不是每个线程都往同一个地址 atomicAdd。
+   */
+  atomics: number;
   inst: {
     /** warp 级指令条数 —— 执行预算看这个 */
     warpExecuted: number;
@@ -95,7 +109,10 @@ export function toMetrics(counters: GpuCounters): GpuMetrics {
       divergentBranches: counters.divergentBranches,
       activeLaneRatio:
         counters.warpInsts === 0 ? 0 : counters.laneInsts / (counters.warpInsts * WARP_SIZE),
+      shuffles: counters.shuffles,
+      syncErrors: counters.warpSyncErrors,
     },
+    atomics: counters.atomics,
     inst: {
       warpExecuted: counters.warpInsts,
       laneExecuted: counters.laneInsts,

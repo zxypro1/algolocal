@@ -66,8 +66,9 @@ describe('CUDA 前端', () => {
   });
 
   it('调用没实现的函数会列出有哪些内建函数可用', async () => {
+    // __ldg 是只读缓存加载，还没做（等缓存模型那一片）
     await expect(compileSource(`
-      __global__ void k(float* a) { a[0] = __shfl_xor_sync(0xffffffff, a[0], 1); }
+      __global__ void k(const float* a, float* out) { out[0] = __ldg(&a[0]); }
     `)).rejects.toThrow(CudaCompileError);
   });
 });

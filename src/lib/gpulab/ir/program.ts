@@ -18,7 +18,10 @@
  * 这一版没有单独隔离出扁平编码本身贡献了多少 —— 它是标准做法，
  * 保留的理由是架构而不是一个测出来的加速比。
  */
-import type { BinKind, BuiltinFn, CompiledKernel, Inst, IrType, Space, SpecialReg, UnKind } from './types';
+import type {
+  AtomKind, BinKind, BuiltinFn, CompiledKernel, Inst, IrType,
+  ShflMode, Space, SpecialReg, UnKind,
+} from './types';
 
 /** 每条指令占几个 int32 槽。取 2 的幂，`pc * SLOTS` 才能编译成移位。 */
 export const SLOTS = 8;
@@ -43,6 +46,17 @@ export const OP = {
   BAR: 16,
   CALL: 17,
   RET: 18,
+  SHFL: 19,
+  BALLOT: 20,
+  ACTIVEMASK: 21,
+  SYNCWARP: 22,
+  ATOM: 23,
+} as const;
+
+export const SHFL = { idx: 0, up: 1, down: 2, xor: 3 } as const;
+
+export const ATOM = {
+  add: 0, sub: 1, exch: 2, min: 3, max: 4, cas: 5, and: 6, or: 7, xor: 8,
 } as const;
 
 export const TY = { F32: 0, I32: 1, U32: 2 } as const;
@@ -61,6 +75,7 @@ export const FN = {
   expf: 6, logf: 7, tanhf: 8, powf: 9,
   __expf: 10, __logf: 11, __fdividef: 12,
   min: 13, max: 14, abs: 15,
+  __popc: 16, __clz: 17, __ffs: 18,
 } as const;
 
 export const SREG = {
@@ -212,6 +227,39 @@ export function encode(kernel: CompiledKernel): ExecutableKernel {
         code[at + 4] = inst.args[0] ?? 0;
         code[at + 5] = inst.args[1] ?? 0;
         code[at + 6] = inst.args[2] ?? 0;
+        break;
+      case 'shfl':
+        code[at] = OP.SHFL;
+        code[at + 1] = inst.dst;
+        code[at + 2] = inst.src;
+        code[at + 3] = inst.lane;
+        code[at + 4] = inst.mask;
+        code[at + 5] = SHFL[inst.mode as ShflMode];
+        code[at + 6] = inst.width;
+        break;
+      case 'ballot':
+        code[at] = OP.BALLOT;
+        code[at + 1] = inst.dst;
+        code[at + 2] = inst.pred;
+        code[at + 3] = inst.mask;
+        break;
+      case 'activemask':
+        code[at] = OP.ACTIVEMASK;
+        code[at + 1] = inst.dst;
+        break;
+      case 'syncwarp':
+        code[at] = OP.SYNCWARP;
+        code[at + 1] = inst.mask;
+        break;
+      case 'atom':
+        code[at] = OP.ATOM;
+        code[at + 1] = inst.dst;
+        code[at + 2] = inst.addr;
+        code[at + 3] = inst.value;
+        code[at + 4] = ATOM[inst.kind as AtomKind];
+        code[at + 5] = inst.space === 'global' ? SPACE.GLOBAL : SPACE.SHARED;
+        code[at + 6] = tyCode(inst.ty);
+        code[at + 7] = inst.compare;
         break;
       case 'ret':
         code[at] = OP.RET;
