@@ -48,6 +48,10 @@ const SNAPSHOT_IMAGE = 'registry.k8s.io/sig-storage/snapshot-controller:v8.2.0';
 const VELERO_IMAGE = 'velero/velero:v1.16.1';
 // 对账库。数据在盘上，不在镜像里 —— 这一关整关都建立在这个区别上。
 const LEDGERDB_IMAGE = 'harbor.corp.internal/team/ledgerdb:14.2';
+const CAPI_IMAGE = 'registry.k8s.io/cluster-api/cluster-api-controller:v1.9.4';
+const AUTOSCALER_IMAGE = 'registry.k8s.io/autoscaling/cluster-autoscaler:v1.32.0';
+// 月末结算：一批算得很重的活，跑完就散
+const SETTLEMENT_IMAGE = 'harbor.corp.internal/team/settlement:2.1';
 
 /**
  * 跳板机上那份 kubeconfig。
@@ -154,7 +158,7 @@ const WORLD = {
   namespaces: [
     'default', 'kube-system', 'payments', 'analytics',
     'envoy-gateway-system', 'ingress-nginx', 'cert-manager', 'argocd', 'istio-system',
-    'kyverno', 'external-secrets', 'monitoring', 'velero',
+    'kyverno', 'external-secrets', 'monitoring', 'velero', 'capi-system',
   ],
   images: {
     [PORTAL_IMAGE]: {
@@ -204,6 +208,9 @@ const WORLD = {
     [CSI_IMAGE]: { pullMs: 300, startupMs: 400, readyAfterMs: 200 },
     [SNAPSHOT_IMAGE]: { pullMs: 300, startupMs: 400, readyAfterMs: 200 },
     [VELERO_IMAGE]: { pullMs: 700, startupMs: 900, readyAfterMs: 400 },
+    [CAPI_IMAGE]: { pullMs: 400, startupMs: 600, readyAfterMs: 300 },
+    [AUTOSCALER_IMAGE]: { pullMs: 400, startupMs: 600, readyAfterMs: 300 },
+    [SETTLEMENT_IMAGE]: { pullMs: 300, startupMs: 500, readyAfterMs: 200, memoryUsage: '256Mi' },
     [LEDGERDB_IMAGE]: {
       pullMs: 800, startupMs: 1200, readyAfterMs: 600,
       listens: [5432], memoryUsage: '512Mi', handlesSigterm: true,
@@ -7065,6 +7072,341 @@ const stage21 = {
   ),
 };
 
+/* ------------------------------------------------------------------ */
+/* 第 22 关：弹性                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 机器那一套。
+ *
+ * Cluster API 装了，机器组也建了，但 MachineDeployment 上**没有 min/max 注解** ——
+ * 伸缩器因此看都不看它。这是「伸缩器装了但不工作」最常见的原因。
+ */
+const CAPACITY_PLATFORM = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: {
+      name: 'capi-controller-manager', namespace: 'capi-system',
+      labels: { 'app.kubernetes.io/name': 'cluster-api' },
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'cluster-api' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'cluster-api' } },
+        spec: { containers: [{ name: 'manager', image: CAPI_IMAGE }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: {
+      name: 'cluster-autoscaler', namespace: 'capi-system',
+      labels: { 'app.kubernetes.io/name': 'cluster-autoscaler' },
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { 'app.kubernetes.io/name': 'cluster-autoscaler' } },
+      template: {
+        metadata: { labels: { 'app.kubernetes.io/name': 'cluster-autoscaler' } },
+        spec: { containers: [{ name: 'autoscaler', image: AUTOSCALER_IMAGE }] },
+      },
+    },
+  },
+  {
+    apiVersion: 'infrastructure.cluster.x-k8s.io/v1beta1', kind: 'VSphereMachineTemplate',
+    metadata: { name: 'worker-8c', namespace: 'capi-system' },
+    spec: { template: { spec: { numCPUs: 8, memoryMiB: 16384, diskGiB: 120 } } },
+  },
+  {
+    apiVersion: 'cluster.x-k8s.io/v1beta1', kind: 'MachineDeployment',
+    metadata: { name: 'workers', namespace: 'capi-system' },
+    spec: {
+      clusterName: 'corp',
+      replicas: 1,
+      selector: { matchLabels: { pool: 'workers' } },
+      template: {
+        metadata: { labels: { pool: 'workers' } },
+        spec: {
+          clusterName: 'corp',
+          version: 'v1.36.0',
+          infrastructureRef: {
+            apiVersion: 'infrastructure.cluster.x-k8s.io/v1beta1',
+            kind: 'VSphereMachineTemplate', name: 'worker-8c',
+          },
+        },
+      },
+    },
+  },
+];
+
+/**
+ * 月末结算。
+ *
+ * 六个算得很重的分片，外加一个协调器 —— 协调器的 CPU 请求写成了 32 核，
+ * 而池子里最大的机器是 8 核。它会永远 Pending，而伸缩器一台机器都不会加：
+ * 加了也装不下。这不是伸缩器坏了，是它算出来「加了没用」。
+ */
+const SETTLEMENT_WORKLOAD = [
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: 'settlement', namespace: 'payments' },
+    spec: {
+      replicas: 6,
+      selector: { matchLabels: { app: 'settlement' } },
+      template: {
+        metadata: { labels: { app: 'settlement' } },
+        spec: {
+          containers: [{
+            name: 'shard', image: SETTLEMENT_IMAGE,
+            resources: { requests: { cpu: '3', memory: '256Mi' } },
+          }],
+        },
+      },
+    },
+  },
+  {
+    apiVersion: 'apps/v1', kind: 'Deployment',
+    metadata: { name: 'settlement-reconciler', namespace: 'payments' },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { app: 'settlement-reconciler' } },
+      template: {
+        metadata: { labels: { app: 'settlement-reconciler' } },
+        spec: {
+          containers: [{
+            name: 'reconciler', image: SETTLEMENT_IMAGE,
+            // 有人把 32 核当成了「给它多一点」。池子里最大的机器就是 8 核。
+            resources: { requests: { cpu: '32', memory: '256Mi' } },
+          }],
+        },
+      },
+    },
+  },
+];
+
+const stage22 = {
+  id: 'elastic-capacity',
+  title: t('让机器按需出现，也按需消失', 'Capacity That Comes and Goes'),
+  goal: t(
+    code`
+      月末结算今天要跑。六个分片，每个要 3 核；集群里手工装的那三台各 4 核，
+      装不下。运维的做法一直是提前一天手工加机器，跑完再手工删掉 ——
+      有一次忘了删，多花了两个月的钱。
+
+      集群里已经有 Cluster API 和 cluster-autoscaler，机器组 \`workers\` 也建好了，
+      但从来没生效过：伸缩器**看都不看**它。
+
+      还有一件事：那个协调器 \`settlement-reconciler\` 一直 Pending，
+      而伸缩器一台机器都不给它加。先搞清楚为什么，再让它跑起来。
+
+      ## 通关标准
+
+      1. 机器组 \`workers\` 归伸缩器管，而且有上限（无上限的弹性是账单事故）；
+      2. 结算的六个分片全部 Running，扩出来的机器是 Cluster API 造的；
+      3. 协调器也跑起来了；
+      4. 活干完之后机器要还回去 —— 判定会删掉结算负载并等一段时间，
+         机器组要缩回下限。
+
+      ## 会用到的命令
+
+      \`\`\`bash
+      kubectl get machinedeployment,machine -n capi-system
+      kubectl get nodes
+      kubectl describe pod -n payments <pod>
+      kubectl annotate machinedeployment workers -n capi-system <key>=<value>
+      kubectl set resources deployment <name> -n payments --requests=cpu=<n>
+      \`\`\`
+    `,
+    code`
+      Month-end settlement runs today. Six shards, three cores each; the three
+      hand-installed nodes have four cores apiece and cannot take them. Ops has always
+      added machines by hand the day before and removed them afterwards, except for the
+      time somebody forgot and the bill ran for two extra months.
+
+      The cluster already has Cluster API and cluster-autoscaler, and the \`workers\`
+      node group exists, but it has never done anything: the autoscaler does not even
+      look at it.
+
+      There is one more thing. The \`settlement-reconciler\` pod stays Pending and the
+      autoscaler adds nothing for it. Work out why before you make it run.
+
+      ## Done when
+
+      1. the \`workers\` group is managed by the autoscaler and has an upper bound
+         (elasticity without a ceiling is a billing incident);
+      2. all six settlement shards are Running on machines created by Cluster API;
+      3. the reconciler runs too;
+      4. the capacity goes away afterwards: the grader deletes the settlement workloads,
+         waits, and expects the group back at its lower bound.
+
+      ## Commands you will need
+
+      \`\`\`bash
+      kubectl get machinedeployment,machine -n capi-system
+      kubectl get nodes
+      kubectl describe pod -n payments <pod>
+      kubectl annotate machinedeployment workers -n capi-system <key>=<value>
+      kubectl set resources deployment <name> -n payments --requests=cpu=<n>
+      \`\`\`
+    `
+  ),
+  checklist: [
+    t('机器组归伸缩器管', 'The node group is managed'),
+    t('结算跑得完', 'Settlement completes'),
+    t('机器会还回去', 'Capacity is returned'),
+  ],
+  hints: [
+    t(
+      '伸缩器怎么知道哪些机器组归它管？靠 MachineDeployment 上的两个注解：\`cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size\` 和 \`...-max-size\`。没打注解的机器组它看都不看 —— 这就是「装了但不工作」。',
+      'How does the autoscaler know which node groups are its business? Two annotations on the MachineDeployment: `cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size` and `...-max-size`. A group without them is invisible to it, which is exactly what "installed but does nothing" looks like.'
+    ),
+    t(
+      '协调器的问题不在伸缩器上。伸缩器每次都会问一句「加一台这种机器，这个 Pod 能落上去吗」—— 请求 32 核而池子里最大的机器是 8 核，答案是不能，所以它一台都不加。`kubectl describe pod` 里那条 NotTriggerScaleUp 事件写着原因。',
+      'The reconciler problem is not in the autoscaler. It asks one question every time: would this pod fit on a new machine of this shape? Requesting 32 cores when the biggest machine is 8 means no, so it adds nothing. The reason is in the NotTriggerScaleUp event on the pod.'
+    ),
+    t(
+      '缩容不是立刻发生的。一台机器要「闲得够久」才会被回收（默认十分钟），这是为了避免抖一下就还机器、下一批活来了又得等装机。判定会自己把时间推过去。',
+      'Scale-down is not immediate. A machine must be idle for long enough (ten minutes by default) before it is reclaimed, so that a brief lull does not cost you a full provisioning wait when the next batch arrives. The grader advances time for you.'
+    ),
+  ],
+  pitfalls: [
+    t(
+      '以为伸缩器会看「CPU 使用率」。它不看负载，只看**调度器的结论**：有 Pod 调度不上就加机器，没有就不加。CPU 用满而 Pod 都调度得上，它一台都不会加 —— 那是 HPA 的活。',
+      'Expecting the autoscaler to watch CPU usage. It does not look at load at all, only at the scheduler verdict: pods that cannot be scheduled mean add machines, nothing else does. A cluster pegged at 100% CPU with everything scheduled gets no new machines, because that is HPA territory.'
+    ),
+    t(
+      '上限设成一个很大的数「以防万一」。一个写错的副本数或者一段死循环的重试，能在一夜之间把机器开到上限 —— 上限就是这类事故的最后一道闸。',
+      'Setting the maximum to something huge "just in case". A wrong replica count or a retry loop can run the group to the ceiling overnight, and the ceiling is the last thing standing between that and the invoice.'
+    ),
+    t(
+      '给关键负载加 \`cluster-autoscaler.kubernetes.io/safe-to-evict: "false"\`，然后忘了。这个注解会把它所在的整台机器**永远**钉住，缩容再也发生不了。「为什么半夜三点还有十台空机器」十次有八次是它。',
+      'Annotating something important with `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` and forgetting. That annotation pins the entire machine it lands on, permanently, and scale-down never happens again. It is the usual answer to "why are ten empty machines still running at 3am".'
+    ),
+  ],
+  ops: {
+    setupCommands: [...PREVIOUS_STAGES],
+    objects: [
+      CNI_CILIUM,
+      ...GATEWAY_PLATFORM, ...CERT_MANAGER_PLATFORM, ...TLS_PLATFORM,
+      ...ROLLOUTS_PLATFORM, ...MONITORING_CARRIED,
+      ...PORTAL_ROLLOUT, PORTAL_ROUTE,
+      ...CAPACITY_PLATFORM, ...SETTLEMENT_WORKLOAD,
+    ],
+    referenceCommands: [
+      'kubectl annotate machinedeployment workers -n capi-system'
+        + ' cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size=1'
+        + ' cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size=6',
+      'kubectl set resources deployment settlement-reconciler -n payments --requests=cpu=4',
+    ],
+  },
+  specs: [
+    spec('elastic-capacity.spec.ts', code`
+      import { advance, get, list, sh } from '@ops/lab';
+
+      const MIN = 'cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size';
+      const MAX = 'cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size';
+      const POOL = () => get('MachineDeployment', 'workers', 'capi-system');
+
+      const runningIn = (namespace, app) => list('Pod', { namespace })
+        .filter((pod) => (pod.metadata.labels || {}).app === app)
+        .filter((pod) => pod.status.phase === 'Running');
+
+      describe('弹性', () => {
+        it('机器组归伸缩器管，而且有上限', () => {
+          const annotations = POOL().metadata.annotations || {};
+          const min = Number(annotations[MIN]);
+          const max = Number(annotations[MAX]);
+          expect(Number.isFinite(min)).toBe(true);
+          expect(Number.isFinite(max)).toBe(true);
+          expect(max).toBeGreaterThan(min);
+        });
+
+        it('结算的六个分片都跑起来了', () => {
+          expect(runningIn('payments', 'settlement').length).toBe(6);
+        });
+
+        it('多出来的机器是 Cluster API 造的，不是手工加的', () => {
+          const machines = list('Machine', { namespace: 'capi-system' });
+          expect(machines.length).toBeGreaterThan(1);
+
+          const nodeNames = machines
+            .map((machine) => (machine.status.nodeRef || {}).name)
+            .filter(Boolean);
+          const shards = runningIn('payments', 'settlement');
+          // 分片确实落在新机器上，而不是全挤在原来那三台上
+          expect(shards.some((pod) => nodeNames.includes(pod.spec.nodeName))).toBe(true);
+
+          const max = Number(POOL().metadata.annotations[MAX]);
+          expect(POOL().spec.replicas).toBeLessThanOrEqual(max);
+        });
+
+        it('那个要 32 核的协调器也跑起来了', () => {
+          expect(runningIn('payments', 'settlement-reconciler').length).toBe(1);
+        });
+
+        it('活干完了机器要还回去', async () => {
+          const peak = POOL().spec.replicas;
+          expect(peak).toBeGreaterThan(1);
+
+          await sh('kubectl delete deployment settlement settlement-reconciler -n payments');
+          await advance(60000);
+          // 刚闲下来不缩：抖一下就还机器，下一批活来了又得等装机
+          expect(POOL().spec.replicas).toBe(peak);
+
+          await advance(900000);
+          const min = Number(POOL().metadata.annotations[MIN]);
+          expect(POOL().spec.replicas).toBe(min);
+          expect(list('Machine', { namespace: 'capi-system' }).length).toBe(min);
+        });
+      });
+    `),
+  ],
+  focus: ['resilience', 'operations'],
+  extension: t(
+    code`
+      弹性伸缩最容易被误解的一点是**它不看负载**。cluster-autoscaler 只认调度器的
+      结论：有 Pod 调度不上就加机器，没有就不加。一个 CPU 跑满但所有 Pod 都调度
+      得上的集群，它一台机器都不会加 —— 那是 HPA 的事。两个东西经常被混着说成
+      「自动扩容」，但它们工作在完全不同的层：HPA 加的是副本，伸缩器加的是机器，
+      而且伸缩器是被 HPA 加出来的那些 Pod 触发的。
+
+      第二点是**扩容有代价而缩容有风险**。扩容的代价是时间：装机几分钟，
+      这几分钟里请求是排队的，所以真要扛突发流量得靠预留容量，不能指望伸缩器。
+      缩容的风险是打断：机器上的 Pod 要挪走，挪的过程中就是有一段服务能力
+      的缺口 —— 这也是为什么缩容要等「闲够十分钟」，以及为什么 PDB 在这里
+      同样管用。
+
+      第三点是**上限就是闸**。弹性系统最贵的故障不是不扩容，是扩容失控：
+      一个写错的副本数、一段死循环的重试、一个刷不出来的镜像导致 Pod 一直
+      Pending，都能让机器一台台加下去。上限不是「性能调优参数」，
+      它和 ResourceQuota、LimitRange 一样，是防止一个错误变成一场事故的东西。
+    `,
+    code`
+      The most misunderstood thing about the cluster autoscaler is that **it does not
+      watch load**. It reads one signal: the scheduler's verdict. Pods that cannot be
+      scheduled mean add machines; anything else means do nothing. A cluster pegged at
+      100% CPU with everything scheduled gets no new machines, because that is HPA
+      territory. The two are often lumped together as "autoscaling" while working at
+      completely different layers: HPA adds replicas, the autoscaler adds machines, and
+      it is the pods HPA created that trigger it.
+
+      The second thing is that **scaling up costs time and scaling down carries risk**.
+      Provisioning takes minutes, and requests queue during those minutes, so real burst
+      traffic is absorbed by headroom you kept, not by the autoscaler. Scaling down
+      moves pods off a machine, and that movement is a real gap in capacity, which is
+      why a node must be idle for ten minutes first and why PDBs matter here too.
+
+      The third is that **the ceiling is the brake**. The expensive failure in an elastic
+      system is not failing to scale up, it is scaling without end: a wrong replica
+      count, a retry loop, an image that never pulls leaving pods Pending forever, each
+      one can walk the group up machine by machine. The maximum is not a tuning
+      parameter. Like ResourceQuota and LimitRange, it is there so one mistake does not
+      become an incident.
+    `
+  ),
+};
+
 module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
@@ -7111,6 +7453,6 @@ module.exports = {
     stage1, stage2, stage3, stage4, stage5, stage6,
     stage7, stage8, stage9, stage10, stage11, stage12,
     stage13, stage14, stage15, stage16, stage17, stage18, stage19, stage20,
-    stage21,
+    stage21, stage22,
   ],
 };

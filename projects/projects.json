@@ -5622,7 +5622,8 @@
           "kyverno",
           "external-secrets",
           "monitoring",
-          "velero"
+          "velero",
+          "capi-system"
         ],
         "images": {
           "harbor.corp.internal/team/portal:1.4.0": {
@@ -5765,6 +5766,22 @@
             "pullMs": 700,
             "startupMs": 900,
             "readyAfterMs": 400
+          },
+          "registry.k8s.io/cluster-api/cluster-api-controller:v1.9.4": {
+            "pullMs": 400,
+            "startupMs": 600,
+            "readyAfterMs": 300
+          },
+          "registry.k8s.io/autoscaling/cluster-autoscaler:v1.32.0": {
+            "pullMs": 400,
+            "startupMs": 600,
+            "readyAfterMs": 300
+          },
+          "harbor.corp.internal/team/settlement:2.1": {
+            "pullMs": 300,
+            "startupMs": 500,
+            "readyAfterMs": 200,
+            "memoryUsage": "256Mi"
           },
           "harbor.corp.internal/team/ledgerdb:14.2": {
             "pullMs": 800,
@@ -13614,6 +13631,721 @@
         "primer": {
           "zh": "接手一个系统之后最该问的一句话不是「有没有备份」，是「上次从备份恢复是什么时候」。这两句差得很远：备份任务天天绿，不代表那个桶里的东西能把服务拉起来。这一关要做的就是把第二句变成真的。\n\nKubernetes 里的数据分两层，这一层的所有困惑都从这儿来。`PersistentVolumeClaim` 是一个**对象**，住在 apiserver 里；盘上的字节不在 apiserver 里，它们在存储后端上。所以把 apiserver 里的对象全导出来，得到的是一份完整的 YAML 和**零字节数据**。恢复出来是一个一模一样的空盘，而 `kubectl get pvc` 看不出空盘和满盘的区别。\n\n要把字节也带上，得靠 `CSI 卷快照`。三个对象：`VolumeSnapshotClass` 说谁来拍、拍完怎么处置，`VolumeSnapshot` 是应用侧的一次请求，`VolumeSnapshotContent` 是存储上真正那张。快照是`时间点`：拍完之后往盘里再写什么都跟它无关。另外要留意拍快照的是 `snapshot-controller` 这个工作负载，它和 CSI 驱动是两个东西，只装驱动的话 VolumeSnapshot 建得出来然后永远不就绪。\n\n`Velero` 把这两件事缝起来：它自己导出对象图放进桶里，卷数据则委托给 CSI 快照。缝的地方有一个标签：`velero.io/csi-volumesnapshot-class: \"true\"`。没有任何快照类打这个标签时，Velero **不报错**，备份照样 `Completed`，只是 warnings 加一，卷数据一个字节都没进去。所以判断一次备份好不好，要看的是 `volumeSnapshotsCompleted` 而不是 `phase`。\n\n恢复这一侧有一条默认行为要记住：Velero **跳过**已经存在的对象。所以往原地恢复的结果通常是「跑完了，phase 是 PartiallyFailed，集群一点没变」，很容易被读成「恢复成功，只是有点小问题」。演练要用 `--namespace-mappings` 恢复到一个新命名空间，进去读一行真数据出来对一下，再把它删掉。\n\n最后是灾难本身。`kubectl delete namespace` 不只是删掉一堆对象，它会一起带走 PVC；回收策略是 `Delete` 的话，盘和盘上的字节跟着消失，apiserver 里再也查不到它存在过。一条命令、一个词的差别，带走的是整个环境，这也正是备份存在的理由。",
           "en": "The first question to ask about a system you have just inherited is not whether it has backups, it is when somebody last restored from one. Those are far apart: a backup job going green every day says nothing about whether the contents of that bucket can bring the service back. This stage is about making the second sentence true.\n\nData in Kubernetes lives on two levels, and every confusion here comes from that split. A `PersistentVolumeClaim` is an **object** in the apiserver; the bytes on the volume are not, they live on the storage backend. So exporting every object from the apiserver gives you a complete set of YAML and **zero bytes of data**. What comes back is an identical empty disk, and `kubectl get pvc` shows no difference between an empty one and a full one.\n\nCarrying the bytes as well takes `CSI volume snapshots`. Three objects: a `VolumeSnapshotClass` says who takes them and what happens afterwards, a `VolumeSnapshot` is the request from the application side, and a `VolumeSnapshotContent` is the real snapshot on the storage system. A snapshot is a `point in time`: whatever is written to the volume afterwards is not in it. Note also that snapshots are taken by the `snapshot-controller` workload, which is separate from the CSI driver: install only the driver and a VolumeSnapshot will be created and then never become ready.\n\n`Velero` stitches the two together: it exports the object graph into the bucket itself and delegates volume data to CSI snapshots. The seam is a label, `velero.io/csi-volumesnapshot-class: \"true\"`. When no snapshot class carries it, Velero does **not** fail. The backup still reports `Completed`, just with one more warning, and not a byte of volume data goes in. So the health of a backup is read from `volumeSnapshotsCompleted`, not from `phase`.\n\nOn the restore side there is one default worth memorising: Velero **skips** resources that already exist. Restoring in place therefore usually means \"it ran, phase is PartiallyFailed, and nothing in the cluster changed\", which reads a lot like \"restored, with minor issues\". Drill with `--namespace-mappings` into a fresh namespace, read a row of real data out of it, and delete it afterwards.\n\nFinally the disaster itself. `kubectl delete namespace` does not just remove a pile of objects, it takes the PVCs with it; with a `Delete` reclaim policy the volume and every byte on it go too, leaving no record in the apiserver that they ever existed. One command, one word of difference, and an entire environment is gone, which is the whole reason backups exist."
+        }
+      },
+      {
+        "id": "elastic-capacity",
+        "title": {
+          "zh": "让机器按需出现，也按需消失",
+          "en": "Capacity That Comes and Goes"
+        },
+        "goal": {
+          "zh": "月末结算今天要跑。六个分片，每个要 3 核；集群里手工装的那三台各 4 核，\n装不下。运维的做法一直是提前一天手工加机器，跑完再手工删掉 ——\n有一次忘了删，多花了两个月的钱。\n\n集群里已经有 Cluster API 和 cluster-autoscaler，机器组 `workers` 也建好了，\n但从来没生效过：伸缩器**看都不看**它。\n\n还有一件事：那个协调器 `settlement-reconciler` 一直 Pending，\n而伸缩器一台机器都不给它加。先搞清楚为什么，再让它跑起来。\n\n## 通关标准\n\n1. 机器组 `workers` 归伸缩器管，而且有上限（无上限的弹性是账单事故）；\n2. 结算的六个分片全部 Running，扩出来的机器是 Cluster API 造的；\n3. 协调器也跑起来了；\n4. 活干完之后机器要还回去 —— 判定会删掉结算负载并等一段时间，\n   机器组要缩回下限。\n\n## 会用到的命令\n\n```bash\nkubectl get machinedeployment,machine -n capi-system\nkubectl get nodes\nkubectl describe pod -n payments <pod>\nkubectl annotate machinedeployment workers -n capi-system <key>=<value>\nkubectl set resources deployment <name> -n payments --requests=cpu=<n>\n```\n",
+          "en": "Month-end settlement runs today. Six shards, three cores each; the three\nhand-installed nodes have four cores apiece and cannot take them. Ops has always\nadded machines by hand the day before and removed them afterwards, except for the\ntime somebody forgot and the bill ran for two extra months.\n\nThe cluster already has Cluster API and cluster-autoscaler, and the `workers`\nnode group exists, but it has never done anything: the autoscaler does not even\nlook at it.\n\nThere is one more thing. The `settlement-reconciler` pod stays Pending and the\nautoscaler adds nothing for it. Work out why before you make it run.\n\n## Done when\n\n1. the `workers` group is managed by the autoscaler and has an upper bound\n   (elasticity without a ceiling is a billing incident);\n2. all six settlement shards are Running on machines created by Cluster API;\n3. the reconciler runs too;\n4. the capacity goes away afterwards: the grader deletes the settlement workloads,\n   waits, and expects the group back at its lower bound.\n\n## Commands you will need\n\n```bash\nkubectl get machinedeployment,machine -n capi-system\nkubectl get nodes\nkubectl describe pod -n payments <pod>\nkubectl annotate machinedeployment workers -n capi-system <key>=<value>\nkubectl set resources deployment <name> -n payments --requests=cpu=<n>\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "机器组归伸缩器管",
+            "en": "The node group is managed"
+          },
+          {
+            "zh": "结算跑得完",
+            "en": "Settlement completes"
+          },
+          {
+            "zh": "机器会还回去",
+            "en": "Capacity is returned"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "伸缩器怎么知道哪些机器组归它管？靠 MachineDeployment 上的两个注解：`cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size` 和 `...-max-size`。没打注解的机器组它看都不看 —— 这就是「装了但不工作」。",
+            "en": "How does the autoscaler know which node groups are its business? Two annotations on the MachineDeployment: `cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size` and `...-max-size`. A group without them is invisible to it, which is exactly what \"installed but does nothing\" looks like."
+          },
+          {
+            "zh": "协调器的问题不在伸缩器上。伸缩器每次都会问一句「加一台这种机器，这个 Pod 能落上去吗」—— 请求 32 核而池子里最大的机器是 8 核，答案是不能，所以它一台都不加。`kubectl describe pod` 里那条 NotTriggerScaleUp 事件写着原因。",
+            "en": "The reconciler problem is not in the autoscaler. It asks one question every time: would this pod fit on a new machine of this shape? Requesting 32 cores when the biggest machine is 8 means no, so it adds nothing. The reason is in the NotTriggerScaleUp event on the pod."
+          },
+          {
+            "zh": "缩容不是立刻发生的。一台机器要「闲得够久」才会被回收（默认十分钟），这是为了避免抖一下就还机器、下一批活来了又得等装机。判定会自己把时间推过去。",
+            "en": "Scale-down is not immediate. A machine must be idle for long enough (ten minutes by default) before it is reclaimed, so that a brief lull does not cost you a full provisioning wait when the next batch arrives. The grader advances time for you."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "以为伸缩器会看「CPU 使用率」。它不看负载，只看**调度器的结论**：有 Pod 调度不上就加机器，没有就不加。CPU 用满而 Pod 都调度得上，它一台都不会加 —— 那是 HPA 的活。",
+            "en": "Expecting the autoscaler to watch CPU usage. It does not look at load at all, only at the scheduler verdict: pods that cannot be scheduled mean add machines, nothing else does. A cluster pegged at 100% CPU with everything scheduled gets no new machines, because that is HPA territory."
+          },
+          {
+            "zh": "上限设成一个很大的数「以防万一」。一个写错的副本数或者一段死循环的重试，能在一夜之间把机器开到上限 —— 上限就是这类事故的最后一道闸。",
+            "en": "Setting the maximum to something huge \"just in case\". A wrong replica count or a retry loop can run the group to the ceiling overnight, and the ceiling is the last thing standing between that and the invoice."
+          },
+          {
+            "zh": "给关键负载加 `cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\"`，然后忘了。这个注解会把它所在的整台机器**永远**钉住，缩容再也发生不了。「为什么半夜三点还有十台空机器」十次有八次是它。",
+            "en": "Annotating something important with `cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\"` and forgetting. That annotation pins the entire machine it lands on, permanently, and scale-down never happens again. It is the usual answer to \"why are ten empty machines still running at 3am\"."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "cilium",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cilium"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cilium"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cilium"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "cilium-agent",
+                        "image": "quay.io/cilium/cilium:v1.19.2",
+                        "ports": [
+                          {
+                            "containerPort": 9962
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "Certificate",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "secretName": "portal-tls",
+                "duration": "2160h",
+                "renewBefore": "720h",
+                "commonName": "portal.corp.internal",
+                "dnsNames": [
+                  "portal.corp.internal"
+                ],
+                "issuerRef": {
+                  "name": "corp-ca",
+                  "kind": "ClusterIssuer"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "Gateway",
+              "metadata": {
+                "name": "corp-gw",
+                "namespace": "payments"
+              },
+              "spec": {
+                "gatewayClassName": "envoy-internal",
+                "listeners": [
+                  {
+                    "name": "https",
+                    "port": 443,
+                    "protocol": "HTTPS",
+                    "hostname": "portal.corp.internal",
+                    "tls": {
+                      "mode": "Terminate",
+                      "certificateRefs": [
+                        {
+                          "name": "portal-tls"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "http",
+                    "port": 80,
+                    "protocol": "HTTP",
+                    "hostname": "portal.corp.internal"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "argo-rollouts",
+                "namespace": "argocd",
+                "labels": {
+                  "app.kubernetes.io/name": "argo-rollouts"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "argo-rollouts"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "argo-rollouts"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/argoproj/argo-rollouts:v1.8.3"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "prometheus",
+                "namespace": "monitoring",
+                "labels": {
+                  "app.kubernetes.io/name": "prometheus"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "prometheus"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "prometheus"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "prometheus",
+                        "image": "quay.io/prometheus/prometheus:v3.9.1",
+                        "ports": [
+                          {
+                            "containerPort": 9090
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "monitoring.coreos.com/v1",
+              "kind": "ServiceMonitor",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments",
+                "labels": {
+                  "release": "kube-prom"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "endpoints": [
+                  {
+                    "port": "http"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "argoproj.io/v1alpha1",
+              "kind": "Rollout",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 4,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "strategy": {
+                  "canary": {
+                    "steps": [
+                      {
+                        "setWeight": 25
+                      },
+                      {
+                        "setWeight": 100
+                      }
+                    ]
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments",
+                "labels": {
+                  "app": "portal"
+                }
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.corp.internal"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "capi-controller-manager",
+                "namespace": "capi-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cluster-api"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cluster-api"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cluster-api"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "manager",
+                        "image": "registry.k8s.io/cluster-api/cluster-api-controller:v1.9.4"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cluster-autoscaler",
+                "namespace": "capi-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cluster-autoscaler"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cluster-autoscaler"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cluster-autoscaler"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "autoscaler",
+                        "image": "registry.k8s.io/autoscaling/cluster-autoscaler:v1.32.0"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "infrastructure.cluster.x-k8s.io/v1beta1",
+              "kind": "VSphereMachineTemplate",
+              "metadata": {
+                "name": "worker-8c",
+                "namespace": "capi-system"
+              },
+              "spec": {
+                "template": {
+                  "spec": {
+                    "numCPUs": 8,
+                    "memoryMiB": 16384,
+                    "diskGiB": 120
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cluster.x-k8s.io/v1beta1",
+              "kind": "MachineDeployment",
+              "metadata": {
+                "name": "workers",
+                "namespace": "capi-system"
+              },
+              "spec": {
+                "clusterName": "corp",
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "pool": "workers"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "pool": "workers"
+                    }
+                  },
+                  "spec": {
+                    "clusterName": "corp",
+                    "version": "v1.36.0",
+                    "infrastructureRef": {
+                      "apiVersion": "infrastructure.cluster.x-k8s.io/v1beta1",
+                      "kind": "VSphereMachineTemplate",
+                      "name": "worker-8c"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "settlement",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 6,
+                "selector": {
+                  "matchLabels": {
+                    "app": "settlement"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "settlement"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "shard",
+                        "image": "harbor.corp.internal/team/settlement:2.1",
+                        "resources": {
+                          "requests": {
+                            "cpu": "3",
+                            "memory": "256Mi"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "settlement-reconciler",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app": "settlement-reconciler"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "settlement-reconciler"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "reconciler",
+                        "image": "harbor.corp.internal/team/settlement:2.1",
+                        "resources": {
+                          "requests": {
+                            "cpu": "32",
+                            "memory": "256Mi"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ],
+          "referenceCommands": [
+            "kubectl annotate machinedeployment workers -n capi-system cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size=1 cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size=6",
+            "kubectl set resources deployment settlement-reconciler -n payments --requests=cpu=4"
+          ]
+        },
+        "specs": [
+          {
+            "path": "elastic-capacity.spec.ts",
+            "content": "import { advance, get, list, sh } from '@ops/lab';\n\nconst MIN = 'cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size';\nconst MAX = 'cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size';\nconst POOL = () => get('MachineDeployment', 'workers', 'capi-system');\n\nconst runningIn = (namespace, app) => list('Pod', { namespace })\n  .filter((pod) => (pod.metadata.labels || {}).app === app)\n  .filter((pod) => pod.status.phase === 'Running');\n\ndescribe('弹性', () => {\n  it('机器组归伸缩器管，而且有上限', () => {\n    const annotations = POOL().metadata.annotations || {};\n    const min = Number(annotations[MIN]);\n    const max = Number(annotations[MAX]);\n    expect(Number.isFinite(min)).toBe(true);\n    expect(Number.isFinite(max)).toBe(true);\n    expect(max).toBeGreaterThan(min);\n  });\n\n  it('结算的六个分片都跑起来了', () => {\n    expect(runningIn('payments', 'settlement').length).toBe(6);\n  });\n\n  it('多出来的机器是 Cluster API 造的，不是手工加的', () => {\n    const machines = list('Machine', { namespace: 'capi-system' });\n    expect(machines.length).toBeGreaterThan(1);\n\n    const nodeNames = machines\n      .map((machine) => (machine.status.nodeRef || {}).name)\n      .filter(Boolean);\n    const shards = runningIn('payments', 'settlement');\n    // 分片确实落在新机器上，而不是全挤在原来那三台上\n    expect(shards.some((pod) => nodeNames.includes(pod.spec.nodeName))).toBe(true);\n\n    const max = Number(POOL().metadata.annotations[MAX]);\n    expect(POOL().spec.replicas).toBeLessThanOrEqual(max);\n  });\n\n  it('那个要 32 核的协调器也跑起来了', () => {\n    expect(runningIn('payments', 'settlement-reconciler').length).toBe(1);\n  });\n\n  it('活干完了机器要还回去', async () => {\n    const peak = POOL().spec.replicas;\n    expect(peak).toBeGreaterThan(1);\n\n    await sh('kubectl delete deployment settlement settlement-reconciler -n payments');\n    await advance(60000);\n    // 刚闲下来不缩：抖一下就还机器，下一批活来了又得等装机\n    expect(POOL().spec.replicas).toBe(peak);\n\n    await advance(900000);\n    const min = Number(POOL().metadata.annotations[MIN]);\n    expect(POOL().spec.replicas).toBe(min);\n    expect(list('Machine', { namespace: 'capi-system' }).length).toBe(min);\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "resilience",
+          "operations"
+        ],
+        "extension": {
+          "zh": "弹性伸缩最容易被误解的一点是**它不看负载**。cluster-autoscaler 只认调度器的\n结论：有 Pod 调度不上就加机器，没有就不加。一个 CPU 跑满但所有 Pod 都调度\n得上的集群，它一台机器都不会加 —— 那是 HPA 的事。两个东西经常被混着说成\n「自动扩容」，但它们工作在完全不同的层：HPA 加的是副本，伸缩器加的是机器，\n而且伸缩器是被 HPA 加出来的那些 Pod 触发的。\n\n第二点是**扩容有代价而缩容有风险**。扩容的代价是时间：装机几分钟，\n这几分钟里请求是排队的，所以真要扛突发流量得靠预留容量，不能指望伸缩器。\n缩容的风险是打断：机器上的 Pod 要挪走，挪的过程中就是有一段服务能力\n的缺口 —— 这也是为什么缩容要等「闲够十分钟」，以及为什么 PDB 在这里\n同样管用。\n\n第三点是**上限就是闸**。弹性系统最贵的故障不是不扩容，是扩容失控：\n一个写错的副本数、一段死循环的重试、一个刷不出来的镜像导致 Pod 一直\nPending，都能让机器一台台加下去。上限不是「性能调优参数」，\n它和 ResourceQuota、LimitRange 一样，是防止一个错误变成一场事故的东西。\n",
+          "en": "The most misunderstood thing about the cluster autoscaler is that **it does not\nwatch load**. It reads one signal: the scheduler's verdict. Pods that cannot be\nscheduled mean add machines; anything else means do nothing. A cluster pegged at\n100% CPU with everything scheduled gets no new machines, because that is HPA\nterritory. The two are often lumped together as \"autoscaling\" while working at\ncompletely different layers: HPA adds replicas, the autoscaler adds machines, and\nit is the pods HPA created that trigger it.\n\nThe second thing is that **scaling up costs time and scaling down carries risk**.\nProvisioning takes minutes, and requests queue during those minutes, so real burst\ntraffic is absorbed by headroom you kept, not by the autoscaler. Scaling down\nmoves pods off a machine, and that movement is a real gap in capacity, which is\nwhy a node must be idle for ten minutes first and why PDBs matter here too.\n\nThe third is that **the ceiling is the brake**. The expensive failure in an elastic\nsystem is not failing to scale up, it is scaling without end: a wrong replica\ncount, a retry loop, an image that never pulls leaving pods Pending forever, each\none can walk the group up machine by machine. The maximum is not a tuning\nparameter. Like ResourceQuota and LimitRange, it is there so one mistake does not\nbecome an incident.\n"
+        },
+        "primer": {
+          "zh": "机器从哪儿来，是这一层的第一个问题。内网集群没有云厂商的弹性伸缩组，机器要么是人手装的，要么是 `Cluster API` 声明出来的。它的形状和工作负载那一套故意长得一样：`MachineDeployment` 对 Deployment，`MachineSet` 对 ReplicaSet，`Machine` 对 Pod。改副本数就是加机器，换模板就是换一批。\n\nMachine 和 Node 是两个对象，这个区别要记牢。Machine 是「我要一台机器」，Node 是「这台机器上的 kubelet 报到了」。中间隔着装机时间，表现为三段：`Provisioning`（provider 在造）、`Provisioned`（Node 对象出现但 NotReady）、`Running`（kubelet 报到，调度器才看得见它）。`kubectl get machines` 里 NODENAME 那一列在第一段是空的。另外机器的规格写在 infra 模板上，不在 MachineDeployment 上，「我改了副本数为什么新机器还是老规格」的答案就在这个分层里。\n\n`cluster-autoscaler` 做的事只有两件，而且都不看负载。扩容：看到**调度不上**的 Pod，问一句「加一台这种机器，它能落上去吗」，能就加，不能就一台都不加。所以一个请求 32 核的 Pod 在最大 8 核的池子里会永远 Pending 而机器数纹丝不动。这不是坏了，是它算出来加了也没用，理由写在 Pod 的 `NotTriggerScaleUp` 事件里。缩容：看到利用率低的节点，问一句「上面的 Pod 挪得走吗」。\n\n它怎么知道哪些机器组归它管？靠 MachineDeployment 上的两个注解：`cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size` 和 `...-max-size`。没打注解的机器组它**看都不看**，这是「伸缩器装了但不工作」最常见的原因。上限不是调优参数，它是闸：一个写错的副本数或者一段死循环的重试，能让机器一台台加到天亮。\n\n缩容那一侧有三道门：利用率够低、闲得够久（默认十分钟）、上面的 Pod 挪得走。第三道最容易卡住，而且卡住的时候伸缩器是沉默的。能钉住一台机器的东西有：PDB 不允许再驱逐、Pod 没有属主（删了就不会被重建）、以及打了 `cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\"` 的 Pod。最后这一条最阴：加的时候是为了保护某个关键任务，忘了摘，那台机器就永远还不回去了。\n\n最后分清两件常被混着说成「自动扩容」的事：`HPA` 加的是**副本**，看的是指标；伸缩器加的是**机器**，看的是调度结果。顺序是 HPA 先加出一批调度不上的 Pod，伸缩器再为它们加机器。还要记住扩容有代价：装机要几分钟，这几分钟里请求是排队的，所以真要扛突发流量得靠预留容量，不能指望伸缩器。",
+          "en": "Where machines come from is the first question at this layer. An intranet cluster has no cloud autoscaling group: machines are either installed by hand or declared through `Cluster API`. Its shape deliberately mirrors the workload API: `MachineDeployment` to Deployment, `MachineSet` to ReplicaSet, `Machine` to Pod. Changing a replica count adds machines; changing the template replaces a batch of them.\n\nMachine and Node are two objects, and the difference matters. A Machine is \"I want a machine\"; a Node is \"the kubelet on that machine has reported in\". Between them sits provisioning time, visible as three phases: `Provisioning` (the provider is building it), `Provisioned` (the Node object exists but is NotReady), and `Running` (the kubelet reported and the scheduler can finally see it). The NODENAME column of `kubectl get machines` is empty during the first phase. Note also that machine size lives on the infra template, not on the MachineDeployment, which is the answer to \"I changed the replica count, why are the new machines still the old size\".\n\n`cluster-autoscaler` does exactly two things, and neither of them looks at load. Scaling up: for pods that **cannot be scheduled**, it asks whether one more machine of this shape would fit them, and adds machines only if the answer is yes. A pod requesting 32 cores in a pool whose largest machine is 8 will therefore stay Pending forever while the machine count never moves. That is not a malfunction, it is the answer to the question, and the reason is recorded in a `NotTriggerScaleUp` event on the pod. Scaling down: for underutilised nodes, it asks whether the pods on them can move.\n\nHow does it know which node groups are its business? Two annotations on the MachineDeployment: `cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size` and `...-max-size`. A group without them is invisible to it, which is the usual reason an installed autoscaler does nothing. The maximum is not a tuning parameter but a brake: a wrong replica count or a retry loop can walk a group up machine by machine all night.\n\nScaling down has three gates: utilisation low enough, idle long enough (ten minutes by default), and the pods on the node able to move. The third is the one that jams, and the autoscaler is silent when it does. Things that pin a machine: a PDB that allows no further eviction, a pod with no controller (delete it and nothing recreates it), and any pod annotated `cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\"`. That last one is the sneakiest, added to protect something important and then forgotten, and the machine never goes back.\n\nFinally, separate the two things routinely called autoscaling. `HPA` adds **replicas** based on metrics; the autoscaler adds **machines** based on scheduling outcomes. The order is that HPA produces pods that cannot be scheduled and the autoscaler then provides machines for them. And remember that scaling up costs time: provisioning takes minutes during which requests queue, so genuine burst traffic is absorbed by headroom you kept, not by the autoscaler."
         }
       }
     ]

@@ -42,12 +42,14 @@ import {
   BackupStore, SNAPSHOT_RESOURCES, SnapshotController, VELERO_RESOURCES, VeleroController,
 } from '../backup';
 import {
-  CAPI_RESOURCES, MachineController, MachineDeploymentController, MachineSetController,
+  AutoscalerController, CAPI_RESOURCES, MachineController, MachineDeploymentController,
+  MachineSetController,
 } from '../capi';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
   EndpointsController,
+  GarbageCollector,
   NamespaceController,
   ImageSpec,
   KubeletController,
@@ -647,6 +649,8 @@ export class Cluster {
       new EndpointsController(context),
       // 删掉一个命名空间，里面的东西全部跟着没 —— 包括 PVC，也就包括数据
       new NamespaceController(context),
+      // 属主没了，附属品跟着没。`kubectl delete deployment` 靠的就是它。
+      new GarbageCollector(context),
       // PDB 的状态。`kubectl get pdb` 里 ALLOWED DISRUPTIONS 那一列就是它写的。
       new PdbController(context),
       /**
@@ -665,6 +669,8 @@ export class Cluster {
       new MachineDeploymentController(context),
       new MachineSetController(context),
       new MachineController(context),
+      // 弹性。它只认调度器的结论，不认「负载」——「CPU 高了加 Pod」是 HPA 的事。
+      new AutoscalerController(context),
       // 入口：控制器自己是集群里的一个工作负载，卸载掉 Gateway 就不再被 program
       new GatewayController(context),
       // 内网 PKI：同样是集群里的一个工作负载，卸载掉就不再签发

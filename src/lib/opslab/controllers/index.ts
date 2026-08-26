@@ -13,7 +13,8 @@ export {
   matchesSelector, templateHash,
 } from './resources';
 export {
-  DeploymentController, EndpointsController, KubeletController, NamespaceController,
+  DeploymentController, EndpointsController, GarbageCollector, KubeletController,
+  NamespaceController,
   NodePressureController,
   ReplicaSetController, SchedulerController, isPodReady, parseCpu, resolveCount,
 } from './workloads';

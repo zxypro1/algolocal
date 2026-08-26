@@ -1363,6 +1363,25 @@ const primers = {
       )
     ),
 
+    'elastic-capacity': t(
+      p(
+        '机器从哪儿来，是这一层的第一个问题。内网集群没有云厂商的弹性伸缩组，机器要么是人手装的，要么是 `Cluster API` 声明出来的。它的形状和工作负载那一套故意长得一样：`MachineDeployment` 对 Deployment，`MachineSet` 对 ReplicaSet，`Machine` 对 Pod。改副本数就是加机器，换模板就是换一批。',
+        'Machine 和 Node 是两个对象，这个区别要记牢。Machine 是「我要一台机器」，Node 是「这台机器上的 kubelet 报到了」。中间隔着装机时间，表现为三段：`Provisioning`（provider 在造）、`Provisioned`（Node 对象出现但 NotReady）、`Running`（kubelet 报到，调度器才看得见它）。`kubectl get machines` 里 NODENAME 那一列在第一段是空的。另外机器的规格写在 infra 模板上，不在 MachineDeployment 上，「我改了副本数为什么新机器还是老规格」的答案就在这个分层里。',
+        '`cluster-autoscaler` 做的事只有两件，而且都不看负载。扩容：看到**调度不上**的 Pod，问一句「加一台这种机器，它能落上去吗」，能就加，不能就一台都不加。所以一个请求 32 核的 Pod 在最大 8 核的池子里会永远 Pending 而机器数纹丝不动。这不是坏了，是它算出来加了也没用，理由写在 Pod 的 `NotTriggerScaleUp` 事件里。缩容：看到利用率低的节点，问一句「上面的 Pod 挪得走吗」。',
+        '它怎么知道哪些机器组归它管？靠 MachineDeployment 上的两个注解：`cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size` 和 `...-max-size`。没打注解的机器组它**看都不看**，这是「伸缩器装了但不工作」最常见的原因。上限不是调优参数，它是闸：一个写错的副本数或者一段死循环的重试，能让机器一台台加到天亮。',
+        '缩容那一侧有三道门：利用率够低、闲得够久（默认十分钟）、上面的 Pod 挪得走。第三道最容易卡住，而且卡住的时候伸缩器是沉默的。能钉住一台机器的东西有：PDB 不允许再驱逐、Pod 没有属主（删了就不会被重建）、以及打了 `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` 的 Pod。最后这一条最阴：加的时候是为了保护某个关键任务，忘了摘，那台机器就永远还不回去了。',
+        '最后分清两件常被混着说成「自动扩容」的事：`HPA` 加的是**副本**，看的是指标；伸缩器加的是**机器**，看的是调度结果。顺序是 HPA 先加出一批调度不上的 Pod，伸缩器再为它们加机器。还要记住扩容有代价：装机要几分钟，这几分钟里请求是排队的，所以真要扛突发流量得靠预留容量，不能指望伸缩器。'
+      ),
+      p(
+        'Where machines come from is the first question at this layer. An intranet cluster has no cloud autoscaling group: machines are either installed by hand or declared through `Cluster API`. Its shape deliberately mirrors the workload API: `MachineDeployment` to Deployment, `MachineSet` to ReplicaSet, `Machine` to Pod. Changing a replica count adds machines; changing the template replaces a batch of them.',
+        'Machine and Node are two objects, and the difference matters. A Machine is "I want a machine"; a Node is "the kubelet on that machine has reported in". Between them sits provisioning time, visible as three phases: `Provisioning` (the provider is building it), `Provisioned` (the Node object exists but is NotReady), and `Running` (the kubelet reported and the scheduler can finally see it). The NODENAME column of `kubectl get machines` is empty during the first phase. Note also that machine size lives on the infra template, not on the MachineDeployment, which is the answer to "I changed the replica count, why are the new machines still the old size".',
+        '`cluster-autoscaler` does exactly two things, and neither of them looks at load. Scaling up: for pods that **cannot be scheduled**, it asks whether one more machine of this shape would fit them, and adds machines only if the answer is yes. A pod requesting 32 cores in a pool whose largest machine is 8 will therefore stay Pending forever while the machine count never moves. That is not a malfunction, it is the answer to the question, and the reason is recorded in a `NotTriggerScaleUp` event on the pod. Scaling down: for underutilised nodes, it asks whether the pods on them can move.',
+        'How does it know which node groups are its business? Two annotations on the MachineDeployment: `cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size` and `...-max-size`. A group without them is invisible to it, which is the usual reason an installed autoscaler does nothing. The maximum is not a tuning parameter but a brake: a wrong replica count or a retry loop can walk a group up machine by machine all night.',
+        'Scaling down has three gates: utilisation low enough, idle long enough (ten minutes by default), and the pods on the node able to move. The third is the one that jams, and the autoscaler is silent when it does. Things that pin a machine: a PDB that allows no further eviction, a pod with no controller (delete it and nothing recreates it), and any pod annotated `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`. That last one is the sneakiest, added to protect something important and then forgotten, and the machine never goes back.',
+        'Finally, separate the two things routinely called autoscaling. `HPA` adds **replicas** based on metrics; the autoscaler adds **machines** based on scheduling outcomes. The order is that HPA produces pods that cannot be scheduled and the autoscaler then provides machines for them. And remember that scaling up costs time: provisioning takes minutes during which requests queue, so genuine burst traffic is absorbed by headroom you kept, not by the autoscaler.'
+      )
+    ),
+
     'take-over-cluster': t(
       p(
         '`Kubernetes` 是一套管理容器的系统。你不直接告诉它「在哪台机器上起一个进程」，而是声明「我要三个这样的副本」，它自己去凑够三个。这套「声明期望、由控制器不断向期望收敛」的做法，是理解后面所有关卡的前提。',
