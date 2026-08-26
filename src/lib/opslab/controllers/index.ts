@@ -13,7 +13,8 @@ export {
   matchesSelector, templateHash,
 } from './resources';
 export {
-  DeploymentController, EndpointsController, KubeletController, NodePressureController,
+  DeploymentController, EndpointsController, KubeletController, NamespaceController,
+  NodePressureController,
   ReplicaSetController, SchedulerController, isPodReady, parseCpu, resolveCount,
 } from './workloads';
 export type { ImageSpec, KubeletOptions } from './workloads';
