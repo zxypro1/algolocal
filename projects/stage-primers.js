@@ -1068,7 +1068,7 @@ const primers = {
         + '`blockIdx` 是它所在的 block 编号，`blockDim` 是每个 block 有多少线程。'
         + '把它们拼起来得到全局编号：`blockIdx.x * blockDim.x + threadIdx.x`。',
         '**线程数几乎总是比数据多。** 数据长度很少正好是 block 大小的整数倍，'
-        + '所以每个 kernel 开头都要有一句边界检查 —— 多出来的线程必须什么都不做。'
+        + '所以每个 kernel 开头都要有一句边界检查，多出来的线程必须什么都不做。'
         + '让它们越界写，在真卡上就是踩坏别人的显存。'
       ),
       p(
@@ -1093,7 +1093,7 @@ const primers = {
         '一个 `warp`（32 个线程，GPU 调度的最小单位）同时发出的 32 个访存请求会被硬件合并：'
         + '落在同一个扇区里的合成一次传输。于是同样是读 32 个 float，'
         + '**连续读**只要 4 个扇区（32 × 4 = 128 字节），'
-        + '而**每个 lane 隔得很远**就要 32 个扇区 —— 传输量差 8 倍，指令却一条没多。',
+        + '而**每个 lane 隔得很远**就要 32 个扇区，传输量差 8 倍，指令却一条没多。',
         '这就是「合并访问」。判断方法很简单：看同一个 warp 里相邻的线程，它们访问的地址是不是相邻的。'
         + '在 `ncu` 里对应的指标叫 `l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio`，'
         + '完美是 4.0，最坏是 32.0。',
@@ -1105,7 +1105,7 @@ const primers = {
         + '**32-byte sector**; asking for 4 bytes brings the other 28 along and then discards them.',
         'The 32 memory requests issued by one `warp` (32 threads, the GPU\'s scheduling unit) are coalesced: '
         + 'lanes landing in the same sector become one transfer. Reading 32 consecutive floats therefore '
-        + 'costs **4 sectors** (32 × 4 = 128 bytes), while 32 scattered lanes cost **32 sectors** — 8× the '
+        + 'costs **4 sectors** (32 × 4 = 128 bytes), while 32 scattered lanes cost **32 sectors**, 8x the '
         + 'traffic for exactly the same instructions.',
         'That is coalescing. The test is simple: do neighbouring threads in a warp touch neighbouring '
         + 'addresses? In `ncu` the metric is '
@@ -1118,7 +1118,7 @@ const primers = {
       p(
         '`共享内存`是每个 block 独有的一小块内存，比显存快一个数量级，用 `__shared__` 声明。'
         + '它的典型用法是「中转」：先把一块数据按合并的方式读进来，'
-        + '再按任意顺序从共享内存里取用 —— 于是读和写都能保持合并。矩阵转置就是这么解的。',
+        + '再按任意顺序从共享内存里取用，于是读和写都能保持合并。矩阵转置就是这么解的。',
         '但共享内存是**共用**的，这就带来了竞态。一个线程写 `tile[y][x]`、另一个线程读 `tile[x][y]`，'
         + '如果中间没有同步，读的人完全可能读到还没被写进去的旧值。'
         + '`__syncthreads()` 就是那道同步：整个 block 的线程都停在这里，等所有人都到齐了再一起走。',
@@ -1126,20 +1126,20 @@ const primers = {
         + '只有一部分线程到达屏障，真卡上是未定义行为，通常直接挂死。',
         '竞态最麻烦的地方是它**不一定表现出来**。GPU 上 warp 的执行顺序不确定，'
         + '同一份有竞态的代码可能今天对、明天错，也可能在你的卡上一直对、在别人的卡上一直错。'
-        + '所以不能靠「多跑几遍看看」，要用 `compute-sanitizer --tool racecheck` ——'
+        + '所以不能靠「多跑几遍看看」，要用 `compute-sanitizer --tool racecheck`，'
         + '它给共享内存的每个字记住最近谁读谁写、中间过了几次屏障，冲突就报出来。'
       ),
       p(
         '`Shared memory` is a small per-block memory an order of magnitude faster than device memory, '
         + 'declared with `__shared__`. Its classic use is staging: read a tile in coalesced, then take '
-        + 'values out of shared memory in any order — so both the read and the write stay coalesced. '
+        + 'values out of shared memory in any order, so both the read and the write stay coalesced. '
         + 'That is how matrix transpose is solved.',
         'But shared memory is **shared**, which introduces races. If one thread writes `tile[y][x]` and '
         + 'another reads `tile[x][y]` with nothing in between, the reader may well see a value that has '
         + 'not been written yet. `__syncthreads()` is the barrier: every thread in the block waits there '
         + 'until all of them have arrived.',
         '**`__syncthreads()` must be reached by the whole block.** Inside an `if`, only some threads reach '
-        + 'it — undefined behaviour on real hardware, usually a hang.',
+        + 'it, which is undefined behaviour on real hardware and usually a hang.',
         'The hard part about races is that they **need not show up**. Warp scheduling is not deterministic, '
         + 'so the same racy code can be right today and wrong tomorrow, or always right on your GPU and '
         + 'always wrong on someone else\'s. Re-running proves nothing. Use '
