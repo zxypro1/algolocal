@@ -214,7 +214,7 @@ export class GpuDevice {
       memset: (address, value, bytes) => {
         new Uint8Array(this.memory.bytes, address, bytes).fill(value & 0xff);
       },
-      launch: (name, grid, block, args, line) => {
+      launch: (name, grid, block, args, line, _stream) => {
         const kernel = kernels.get(name);
         if (!kernel) {
           throw new HostRuntimeError(

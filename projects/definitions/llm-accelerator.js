@@ -7089,6 +7089,393 @@ const STAGE_26 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 27 关：通信与计算重叠                                              */
+/* ------------------------------------------------------------------ */
+
+const OV_DEVICES = 8;
+const OV_CHUNKS = 8;
+const OV_CHUNK = 64;
+
+const OV_KERNELS = code`
+  // 反向传播算出一块梯度
+  __global__ void backwardChunk(float* grad, const float* act, int n) {
+    int i = threadIdx.x;
+    if (i < n) grad[i] = act[i] * 0.5f + 0.001f;
+  }
+  __global__ void fill(float* a, float v, int n) {
+    int i = threadIdx.x;
+    if (i < n) a[i] = v;
+  }
+`;
+
+const ovBench = {
+  sources: ['/root/overlap.cu'],
+  buffers: [
+    { name: 'check', length: OV_DEVICES, fill: { kind: 'zeros' } },
+  ],
+  launches: [],
+};
+
+const STAGE_27 = {
+  id: 'comm-compute-overlap',
+  title: t('通信与计算重叠 —— 别等算完了再发',
+    'Overlapping communication and computation — do not wait to finish computing'),
+  goal: t(
+    [
+      '第 23 关的梯度分桶把消息数降了下来，但那个版本仍然是**先算完再发**：',
+      '反向传播全部结束，才开始 all-reduce。这段时间里通信链路完全闲着，',
+      '而 all-reduce 期间计算单元又完全闲着。',
+      '',
+      '第 23 关的扩展里提过为什么 DDP 按参数的**反向顺序**分桶：',
+      '反向传播从最后一层往前算，最后一层的梯度最先就绪 ——',
+      '**第一个桶在反向刚开始不久就能发出去**。',
+      '',
+      '这一关把那件事做出来。反向分成 8 块，每算完一块就立刻发出去，',
+      '同时接着算下一块。要用两个流：',
+      '',
+      '```cuda',
+      'int compute;',
+      'cudaStreamCreate(&compute);',
+      '',
+      'for (int c = 0; c < CHUNKS; ++c) {',
+      '  // 这一块的反向挂在 compute 流上，**不等它**',
+      '  backwardChunk<<<1, 64, 0, compute>>>(grad + c * CHUNK, act, CHUNK);',
+      '  // 上一块的通信这时候发出去，和这一块的计算重叠',
+      '  ...',
+      '}',
+      '```',
+      '',
+      '重叠率是这么数的：**发起一次集合操作时，别的流上还有没有没同步过的 kernel。**',
+      '有就算这次通信重叠了。',
+      '',
+      '```',
+      '重叠率 = 重叠了的通信字节数 / 总通信字节数',
+      '```',
+      '',
+      '⚠️ 这个子集是**即时执行**的，流不改变执行顺序，也不检测跨流的数据竞争。',
+      '真卡上把有依赖的活放到不同的流上而不 `cudaStreamWaitEvent`，会静默出错。',
+      '这一关的分块之间本来就是独立的，所以不会踩到 —— 但别养成习惯。',
+      '',
+      '```bash',
+      'nvcc -o bench overlap.cu && ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 重叠率 ≥ 0.7（先算完再发是 0）',
+      '- 通信总量与消息数都不变 —— 重叠不改变搬多少、发几条',
+    ].join('\n'),
+    [
+      'The gradient bucketing of stage 23 cut the message count, but it still **computes everything',
+      'before sending anything**: backward finishes, then the all-reduce starts. The links idle for',
+      'the whole backward pass, and the compute units idle for the whole all-reduce.',
+      '',
+      'Stage 23\'s extension mentioned why DDP buckets in **reverse** parameter order: backward runs',
+      'from the last layer forward, so the last layer\'s gradients are ready first and **the first',
+      'bucket can go out shortly after backward begins**.',
+      '',
+      'This stage builds that. Backward is split into 8 chunks; each one is sent as soon as it is',
+      'computed, while the next one computes. That needs two streams:',
+      '',
+      '```cuda',
+      'int compute;',
+      'cudaStreamCreate(&compute);',
+      '',
+      'for (int c = 0; c < CHUNKS; ++c) {',
+      '  // this chunk\'s backward goes on the compute stream, and we do NOT wait for it',
+      '  backwardChunk<<<1, 64, 0, compute>>>(grad + c * CHUNK, act, CHUNK);',
+      '  // the previous chunk\'s collective goes out now, overlapping this chunk\'s compute',
+      '  ...',
+      '}',
+      '```',
+      '',
+      'The overlap is counted like this: **when a collective is issued, is there unsynchronised',
+      'kernel work outstanding on another stream?** If so, that collective counts as overlapped.',
+      '',
+      '```',
+      'overlap = overlapped communication bytes / total communication bytes',
+      '```',
+      '',
+      '⚠️ This subset executes **eagerly**; streams do not change execution order and cross-stream',
+      'data hazards are not detected. On real hardware, putting dependent work on different streams',
+      'without `cudaStreamWaitEvent` fails silently. The chunks here are genuinely independent so it',
+      'cannot bite, but do not build the habit.',
+      '',
+      '```bash',
+      'nvcc -o bench overlap.cu && ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- overlap ratio at least 0.7 (0 when computing before sending)',
+      '- unchanged total bytes and message count: overlap changes neither',
+    ].join('\n')
+  ),
+  checklist: [
+    t('建一个计算流', 'Create a compute stream'),
+    t('每算完一块就发一块，不等全部算完',
+      'Send each chunk as soon as it is computed, without waiting for the rest'),
+    t('计算挂在计算流上，通信留在默认流',
+      'Put the compute on the compute stream and leave the collectives on the default stream'),
+  ],
+  hints: [
+    t('顺序很关键：**先发起这一块的计算，再发上一块的通信**。'
+      + '反过来的话通信发出去时计算还没挂上，就不算重叠。',
+      'Order matters: **issue this chunk\'s compute first, then the previous chunk\'s collective**. '
+      + 'The other way round the collective goes out before any compute is outstanding, and does not '
+      + 'count as overlapped.'),
+    t('循环结束后还有最后一块没发 —— 补一次。',
+      'The last chunk is still unsent after the loop; flush it.'),
+  ],
+  pitfalls: [
+    t('**计算和通信放在同一个流上。** 真卡上同一个流是严格串行的，'
+      + '所以那根本没有重叠 —— 而代码看起来完全像是重叠了。'
+      + '这是这类优化里最常见的假重叠。',
+      '**Putting compute and communication on the same stream.** A stream is strictly serial on real '
+      + 'hardware, so nothing overlaps, while the code looks exactly as though it does. This is the '
+      + 'most common false overlap in this kind of optimisation.'),
+    t('**每块之后就 cudaStreamSynchronize。** 那等于把异步又变回同步了，'
+      + '重叠率直接掉回 0。同步要留到最后。',
+      '**Calling cudaStreamSynchronize after every chunk.** That turns the asynchrony back into '
+      + 'synchrony and the overlap ratio drops to zero. Synchronise at the end.'),
+  ],
+  extension: t(
+    '重叠是「不改变工作量、只改变时间安排」这一类优化里最纯粹的一个：'
+    + '通信总量不变、消息数不变、计算量不变，变的只是**发起的时机**。'
+    + '\n\n'
+    + '真实系统里重叠无处不在：'
+    + 'DDP 的反向顺序分桶（第 23 关）、'
+    + 'ZeRO-3 在用到某层权重之前就把它 all-gather 出来、'
+    + '流水线并行里一级的通信和另一级的计算天然重叠（第 26 关）、'
+    + '以及张量并行里把 all-reduce 拆开、和后面的矩阵乘按块交错。'
+    + '\n\n'
+    + '重叠的上限由两件事定死：**通信时间与计算时间的比值**，'
+    + '以及**依赖链允许你提前多久发出去**。'
+    + '如果通信比计算长，重叠再好也只是把计算藏进通信里，'
+    + '总时间还是通信时间 —— 这时候该做的是第 22、23 关那种降低通信本身的事。'
+    + '所以真实调优的顺序通常是：先看通信/计算比，比值小于 1 才值得花力气做重叠。'
+    + '\n\n'
+    + '还要提醒一句这个子集的边界：它是即时执行的，'
+    + '不检测跨流的数据竞争。真卡上流之间要靠 `cudaEvent` 建立依赖，'
+    + '而漏建依赖的错误和第 3 关那个共享内存竞态是同一类 ——'
+    + '**结果稳定地错，看起来像是算法不对。**',
+    'Overlap is the purest member of the "same work, different schedule" family: same total bytes, '
+    + 'same message count, same computation. Only the **timing of the issue** changes.\n\n'
+    + 'Real systems overlap everywhere: DDP\'s reverse-order bucketing (stage 23), ZeRO-3 '
+    + 'all-gathering a layer\'s weights before they are needed, pipeline parallelism where one '
+    + 'stage\'s communication naturally overlaps another\'s compute (stage 26), and tensor '
+    + 'parallelism splitting an all-reduce to interleave with the following matmul.\n\n'
+    + 'Two things cap how much overlap can buy: **the ratio of communication time to compute time**, '
+    + 'and **how far ahead the dependency chain lets you issue**. If communication takes longer than '
+    + 'compute, perfect overlap merely hides the compute inside the communication and the total is '
+    + 'still the communication time; at that point the thing to do is reduce communication itself, '
+    + 'as in stages 22 and 23. Real tuning therefore usually starts by measuring the '
+    + 'communication-to-compute ratio and only invests in overlap when it is below one.\n\n'
+    + 'One more note on this subset\'s boundary: it executes eagerly and does not detect cross-stream '
+    + 'data hazards. On real hardware streams are ordered with `cudaEvent`, and a missing dependency '
+    + 'is the same class of bug as the shared-memory race in stage 3: **stably wrong, and it looks '
+    + 'like the algorithm is broken.**'
+  ),
+  gpu: {
+    world: CLUSTER_WORLD,
+    files: {
+      '/root/overlap.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "cuda_runtime.h"
+        #include "nccl.h"
+
+        ${OV_KERNELS}
+
+        int main(void) {
+          const int N = ${OV_DEVICES};
+          const int CHUNKS = ${OV_CHUNKS};
+          const int CHUNK = ${OV_CHUNK};
+          const int TOTAL = CHUNKS * CHUNK;
+
+          int devs[8];
+          for (int d = 0; d < N; ++d) devs[d] = d;
+          int comms[8];
+          ncclCommInitAll(comms, N, devs);
+
+          int act[8]; int grad[8]; int out[8];
+          for (int d = 0; d < N; ++d) {
+            cudaSetDevice(d);
+            float* a; float* g; float* o;
+            cudaMalloc((void**)&a, TOTAL * 4);
+            cudaMalloc((void**)&g, TOTAL * 4);
+            cudaMalloc((void**)&o, TOTAL * 4);
+            fill<<<1, 64>>>(a, (float)(d + 1), 64);
+            act[d] = a; grad[d] = g; out[d] = o;
+          }
+
+          // TODO: 先把全部 8 块算完，再一块一块发出去。
+          //       反向的整段时间里链路闲着，通信的整段时间里算力闲着。
+          //       改成边算边发：这一块的计算挂在计算流上不等它，
+          //       同时把上一块的通信发出去。
+          for (int c = 0; c < CHUNKS; ++c) {
+            for (int d = 0; d < N; ++d) {
+              cudaSetDevice(d);
+              backwardChunk<<<1, 64>>>(grad[d] + c * CHUNK, act[d], CHUNK);
+            }
+          }
+          for (int c = 0; c < CHUNKS; ++c) {
+            ncclGroupStart();
+            for (int d = 0; d < N; ++d) {
+              ncclAllReduce(grad[d] + c * CHUNK, out[d] + c * CHUNK, CHUNK,
+                            ncclFloat, ncclSum, comms[d], 0);
+            }
+            ncclGroupEnd();
+          }
+
+          float* check = lab_buffer(0);
+          float host[8];
+          for (int d = 0; d < N; ++d) {
+            cudaSetDevice(d);
+            float one[1];
+            cudaMemcpy(one, out[d], 4, cudaMemcpyDeviceToHost);
+            host[d] = one[0];
+          }
+          cudaSetDevice(0);
+          cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+    bench: ovBench,
+    referenceFiles: {
+      '/root/overlap.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "cuda_runtime.h"
+        #include "nccl.h"
+
+        ${OV_KERNELS}
+
+        int main(void) {
+          const int N = ${OV_DEVICES};
+          const int CHUNKS = ${OV_CHUNKS};
+          const int CHUNK = ${OV_CHUNK};
+          const int TOTAL = CHUNKS * CHUNK;
+
+          int devs[8];
+          for (int d = 0; d < N; ++d) devs[d] = d;
+          int comms[8];
+          ncclCommInitAll(comms, N, devs);
+
+          int act[8]; int grad[8]; int out[8];
+          for (int d = 0; d < N; ++d) {
+            cudaSetDevice(d);
+            float* a; float* g; float* o;
+            cudaMalloc((void**)&a, TOTAL * 4);
+            cudaMalloc((void**)&g, TOTAL * 4);
+            cudaMalloc((void**)&o, TOTAL * 4);
+            fill<<<1, 64>>>(a, (float)(d + 1), 64);
+            act[d] = a; grad[d] = g; out[d] = o;
+          }
+
+          // 计算挂在这个流上，通信留在默认流 —— 两个流才有重叠可言
+          int compute;
+          cudaStreamCreate(&compute);
+
+          for (int c = 0; c < CHUNKS; ++c) {
+            // 先发起这一块的计算，**不等它**
+            for (int d = 0; d < N; ++d) {
+              cudaSetDevice(d);
+              backwardChunk<<<1, 64, 0, compute>>>(grad[d] + c * CHUNK, act[d], CHUNK);
+            }
+            // 再把上一块的通信发出去 —— 这时计算流上还有活在飞，算重叠。
+            // 顺序反过来的话通信发出去时计算还没挂上，就不算了
+            if (c > 0) {
+              ncclGroupStart();
+              for (int d = 0; d < N; ++d) {
+                ncclAllReduce(grad[d] + (c - 1) * CHUNK, out[d] + (c - 1) * CHUNK, CHUNK,
+                              ncclFloat, ncclSum, comms[d], 0);
+              }
+              ncclGroupEnd();
+            }
+          }
+
+          // 最后一块还没发 —— 补上。这时计算流上仍有活，所以它也算重叠
+          ncclGroupStart();
+          for (int d = 0; d < N; ++d) {
+            ncclAllReduce(grad[d] + (CHUNKS - 1) * CHUNK, out[d] + (CHUNKS - 1) * CHUNK, CHUNK,
+                          ncclFloat, ncclSum, comms[d], 0);
+          }
+          ncclGroupEnd();
+          cudaStreamSynchronize(compute);
+          cudaStreamDestroy(compute);
+
+          float* check = lab_buffer(0);
+          float host[8];
+          for (int d = 0; d < N; ++d) {
+            cudaSetDevice(d);
+            float one[1];
+            cudaMemcpy(one, out[d], 4, cudaMemcpyDeviceToHost);
+            host[d] = one[0];
+          }
+          cudaSetDevice(0);
+          cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('overlap.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const N = ${OV_DEVICES};
+      const CHUNKS = ${OV_CHUNKS};
+      const CHUNK = ${OV_CHUNK};
+
+      describe('通信与计算重叠', () => {
+        it('结果正确', async () => {
+          await lab.buildAndRun();
+          const check = lab.buffer('check');
+          // 第 d 张卡的激活是 d+1，梯度是 0.5(d+1)+0.001，八张卡加起来
+          let expected = 0;
+          for (let d = 0; d < N; d += 1) expected += 0.5 * (d + 1) + 0.001;
+          for (let d = 0; d < N; d += 1) {
+            expect(Math.abs(check[d] - expected)).toBeLessThanOrEqual(1e-4);
+          }
+        });
+
+        it('**重叠率上来了**', async () => {
+          await lab.buildAndRun();
+          expect(lab.comm().overlapRatio).toBeGreaterThanOrEqual(0.7);
+        });
+
+        it('通信总量没变 —— 重叠不改变搬多少', async () => {
+          await lab.buildAndRun();
+          expect(lab.comm().bytes).toBe(2 * (N - 1) * CHUNKS * CHUNK * 4);
+        });
+
+        it('消息数也没变 —— 还是 8 次集合操作', async () => {
+          await lab.buildAndRun();
+          expect(lab.comm().messages).toBe(CHUNKS * 2 * (N - 1) * N);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.comm.overlapRatio', op: 'gte', value: 0.7,
+      zh: '和计算重叠了的通信占比（先算完再发是 0）',
+      en: 'share of communication overlapped with compute (0 when computing first)',
+      unit: 'ratio', dimension: 'throughput',
+    }),
+    gate({
+      metric: 'gpu.comm.bytes', op: 'gte', value: 2 * 7 * 8 * 64 * 4,
+      zh: '通信总量 —— 重叠不改变搬多少，少了就是漏了块',
+      en: 'total bytes: overlap does not change this, so a drop means chunks were skipped',
+      unit: 'byte', dimension: 'correctness',
+    }),
+  ],
+  focus: ['throughput', 'correctness'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -7155,5 +7542,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22, STAGE_23, STAGE_24, STAGE_25, STAGE_26],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22, STAGE_23, STAGE_24, STAGE_25, STAGE_26, STAGE_27],
 };

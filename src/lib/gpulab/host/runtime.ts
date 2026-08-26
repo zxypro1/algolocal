@@ -29,8 +29,10 @@ export interface HostEnvironment {
   /** 在两个地址空间之间搬字节 */
   copy(dst: number, src: number, bytes: number, kind: number): void;
   memset(address: number, value: number, bytes: number): void;
-  /** 起一个 kernel，同步执行完 */
-  launch(name: string, grid: Dim3, block: Dim3, args: number[], line: number): void;
+  /** 起一个 kernel，同步执行完。`stream` 只影响重叠计量，不影响执行 */
+  launch(
+    name: string, grid: Dim3, block: Dim3, args: number[], line: number, stream: number
+  ): void;
   /**
    * 重放一整张 graph。
    *
@@ -58,7 +60,9 @@ export interface HostEnvironment {
     ranks: Array<{ device: number; send: number; recv: number }>,
     count: number,
     op: number,
-    root: number
+    root: number,
+    /** 发起时别的流上还有计算在飞 */
+    overlapped: boolean
   ): void;
   /**
    * 关卡在 `BenchSpec.buffers` 里声明的第 index 个缓冲区。
@@ -107,6 +111,8 @@ interface PendingCollective {
   op: number;
   comm: number;
   root: number;
+  /** 这次调用挂在哪个流上 */
+  stream: number;
 }
 
 /** 一个宿主程序跑起来需要的全部状态 */
@@ -125,6 +131,15 @@ export class HostRuntime implements HostServices {
    */
   private group: PendingCollective[] | null = null;
   private commCount = 0;
+  /**
+   * 每个流上有多少件还没同步的活。
+   *
+   * **模拟器是即时执行的**，kernel 在 launch 那一刻就跑完了。
+   * 这张表纯粹是记账：它回答"发起这次集合通信的时候，
+   * 别的流上还有没有计算在飞"—— 也就是重叠率量的那件事。
+   */
+  private readonly outstanding = new Map<number, number>();
+  private nextStream = 1;
 
   constructor(
     private readonly env: HostEnvironment,
@@ -145,13 +160,18 @@ export class HostRuntime implements HostServices {
     }
   }
 
-  launch(name: string, grid: Dim3, block: Dim3, args: number[], line: number): void {
+  launch(
+    name: string, grid: Dim3, block: Dim3, args: number[], line: number, stream = 0
+  ): void {
     if (this.capturing) {
       // 捕获期间**不执行**，只录下来 —— 和真 CUDA 一样
       this.capturing.push({ kind: 'launch', name, grid, block, args: args.slice(), line });
       return;
     }
-    this.env.launch(name, grid, block, args, line);
+    // 这个流上多了一件"还没同步"的活。**执行是即时的** ——
+    // 这只是记账，用来回答"发起集合操作时还有没有计算在飞"。
+    this.outstanding.set(stream, (this.outstanding.get(stream) ?? 0) + 1);
+    this.env.launch(name, grid, block, args, line, stream);
   }
 
   private requireCluster(what: string): HostEnvironment {
@@ -170,9 +190,9 @@ export class HostRuntime implements HostServices {
    */
   private enqueue(
     kind: string, send: number, recv: number, count: number,
-    op: number, comm: number, root: number
+    op: number, comm: number, root: number, stream = 0
   ): number {
-    const item: PendingCollective = { kind, send, recv, count, op, comm, root };
+    const item: PendingCollective = { kind, send, recv, count, op, comm, root, stream };
     if (this.group) {
       this.group.push(item);
       return 0;
@@ -190,6 +210,13 @@ export class HostRuntime implements HostServices {
   private flushGroup(pending: PendingCollective[]): void {
     if (!pending.length) return;
     const env = this.requireCluster('NCCL');
+    // 发起这次通信时，**别的流**上还有没有没同步的计算？
+    // 有就算重叠 —— 这是个结构性的判断，和模拟耗时无关
+    let elsewhere = 0;
+    for (const [stream, count] of this.outstanding) {
+      if (stream !== pending[0].stream) elsewhere += count;
+    }
+    const overlapped = elsewhere > 0;
     // 同一种操作、同一批 rank 的调用凑成一次集合操作
     const byKind = new Map<string, PendingCollective[]>();
     for (const item of pending) {
@@ -202,7 +229,7 @@ export class HostRuntime implements HostServices {
       const ranks = list.map((item) => ({
         device: item.comm, send: item.send, recv: item.recv,
       }));
-      env.collective!(list[0].kind, ranks, list[0].count, list[0].op, list[0].root);
+      env.collective!(list[0].kind, ranks, list[0].count, list[0].op, list[0].root, overlapped);
     }
   }
 
@@ -280,6 +307,20 @@ export class HostRuntime implements HostServices {
       case HOST.cudaSetDevice:
         this.requireCluster('cudaSetDevice').setDevice!(args[0] | 0);
         return 0;
+      /* ---- 流 ---- */
+      case HOST.cudaStreamCreate: {
+        const handle = this.nextStream;
+        this.nextStream += 1;
+        this.outstanding.set(handle, 0);
+        return handle;
+      }
+      case HOST.cudaStreamSynchronize:
+        this.outstanding.set(args[0] | 0, 0);
+        return 0;
+      case HOST.cudaStreamDestroy:
+        this.outstanding.delete(args[0] | 0);
+        return 0;
+
       case HOST.pipe_step:
         this.requireCluster('pipe_step').pipeStep!();
         return 0;
@@ -338,15 +379,15 @@ export class HostRuntime implements HostServices {
       //   Broadcast(send, recv, count, datatype, root, comm, stream)
       //   Reduce(send, recv, count, datatype, op, root, comm, stream)
       case HOST.ncclAllReduce:
-        return this.enqueue('allreduce', args[0], args[1], args[2] | 0, args[4] | 0, args[5] | 0, -1);
+        return this.enqueue('allreduce', args[0], args[1], args[2] | 0, args[4] | 0, args[5] | 0, -1, args[6] | 0);
       case HOST.ncclAllGather:
-        return this.enqueue('allgather', args[0], args[1], args[2] | 0, 0, args[4] | 0, -1);
+        return this.enqueue('allgather', args[0], args[1], args[2] | 0, 0, args[4] | 0, -1, args[5] | 0);
       case HOST.ncclReduceScatter:
-        return this.enqueue('reducescatter', args[0], args[1], args[2] | 0, args[4] | 0, args[5] | 0, -1);
+        return this.enqueue('reducescatter', args[0], args[1], args[2] | 0, args[4] | 0, args[5] | 0, -1, args[6] | 0);
       case HOST.ncclBroadcast:
-        return this.enqueue('broadcast', args[0], args[1], args[2] | 0, 0, args[5] | 0, args[4] | 0);
+        return this.enqueue('broadcast', args[0], args[1], args[2] | 0, 0, args[5] | 0, args[4] | 0, args[6] | 0);
       case HOST.ncclReduce:
-        return this.enqueue('reduce', args[0], args[1], args[2] | 0, args[4] | 0, args[6] | 0, args[5] | 0);
+        return this.enqueue('reduce', args[0], args[1], args[2] | 0, args[4] | 0, args[6] | 0, args[5] | 0, args[7] | 0);
       case HOST.ncclSend:
       case HOST.ncclRecv:
         throw new HostRuntimeError(
@@ -354,6 +395,9 @@ export class HostRuntime implements HostServices {
         );
 
       case HOST.cudaDeviceSynchronize:
+        // 同步所有流：之后再发集合操作就不算重叠了
+        this.outstanding.clear();
+        this.nextStream = this.nextStream;
         // 我们的 launch 是同步的，所以这里没有实际工作。**保留它不是装样子**：
         // 真卡上少写这一句、紧接着读回结果，是最经典的一类 bug，
         // 关卡的正文会讲到，代码里出现过学员才有印象。

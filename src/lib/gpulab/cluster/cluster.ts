@@ -73,6 +73,16 @@ export interface CommMetrics {
    */
   maxDeviceBytes: number;
   /**
+   * 和计算重叠了的通信字节数。
+   *
+   * 判据是**结构性的**：发起这次集合操作时，别的流上还有没有同步过的
+   * kernel。有就算重叠。这不看模拟耗时 —— 它回答的是"你有没有把通信
+   * 发在计算还在飞的时候"，而那正是重叠这件事的全部内容。
+   */
+  overlappedBytes: number;
+  /** 重叠了的比例 */
+  overlapRatio: number;
+  /**
    * 算法带宽与总线带宽。
    *
    * nccl-tests 的口径：algbw = 字节数 / 耗时，
@@ -88,7 +98,7 @@ export function emptyCommMetrics(): CommMetrics {
     bytes: 0, messages: 0,
     bytesByLink: { nvlink: 0, pcie: 0, ib: 0 },
     messagesByLink: { nvlink: 0, pcie: 0, ib: 0 },
-    seconds: 0, maxDeviceBytes: 0, algbw: 0, busbw: 0,
+    seconds: 0, maxDeviceBytes: 0, overlappedBytes: 0, overlapRatio: 0, algbw: 0, busbw: 0,
   };
 }
 
@@ -277,6 +287,11 @@ export class Cluster {
     this.account(srcDevice, dstDevice, bytes);
   }
 
+  /** 记一次和计算重叠了的通信 */
+  accountOverlap(bytes: number): void {
+    this.comm.overlappedBytes += bytes;
+  }
+
   /** 记一次跨卡传输 */
   account(from: number, to: number, bytes: number): void {
     const link = linkBetween(from, to, this.spec);
@@ -311,6 +326,9 @@ export class Cluster {
    * （all-reduce 就是缓冲区大小），`factor` 是集合操作的修正因子。
    */
   finishBandwidth(payloadBytes: number, factor: number): void {
+    this.comm.overlapRatio = this.comm.bytes > 0
+      ? this.comm.overlappedBytes / this.comm.bytes
+      : 0;
     if (this.comm.seconds <= 0) return;
     this.comm.algbw = payloadBytes / this.comm.seconds;
     this.comm.busbw = this.comm.algbw * factor;

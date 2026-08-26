@@ -1977,6 +1977,50 @@ const primers = {
         + 'rest on the same observation: the bubble is a scheduling problem, not a bandwidth one.'
       )
     ),
+    'comm-compute-overlap': t(
+      p(
+        '先算完再发，是分布式训练里最自然也最浪费的写法：'
+        + '反向传播的整段时间里通信链路完全闲着，'
+        + 'all-reduce 的整段时间里计算单元又完全闲着。'
+        + '两件事本来可以同时做。',
+        '做法是分块加多流。把梯度分成若干块，每算完一块就立刻发出去，'
+        + '同时接着算下一块。计算挂在一个流上、通信在另一个流上 --'
+        + '同一个流上是严格串行的，放在一起等于没重叠，'
+        + '而代码看起来完全像是重叠了。这是这类优化里最常见的假重叠。',
+        '重叠是「不改变工作量、只改变时间安排」这一类优化里最纯粹的一个：'
+        + '通信总量不变、消息数不变、计算量不变，变的只是发起的时机。'
+        + '真实系统里它无处不在，DDP 按反向顺序分桶、'
+        + 'ZeRO-3 在用到某层权重之前就把它取回来、'
+        + '流水线并行里一级的通信和另一级的计算天然重叠。',
+        '重叠的上限由两件事定死：通信时间与计算时间的比值，'
+        + '以及依赖链允许你提前多久发出去。'
+        + '如果通信本来就比计算长，重叠再好也只是把计算藏进通信里，'
+        + '总时间还是通信时间，这时候该做的是降低通信本身。'
+        + '所以真实调优的顺序通常是先量通信与计算的比值，'
+        + '比值小于一才值得花力气做重叠。'
+      ),
+      p(
+        'Computing everything before sending anything is the most natural and most wasteful shape in '
+        + 'distributed training: the links idle through the whole backward pass, and the compute '
+        + 'units idle through the whole all-reduce. Both could be happening at once.',
+        'The technique is chunking plus multiple streams. Split the gradients, send each chunk as '
+        + 'soon as it is computed, and keep computing the next one meanwhile. Put the compute on one '
+        + 'stream and the communication on another, because a single stream is strictly serial and '
+        + 'putting both on it overlaps nothing while the code looks exactly as though it does. That '
+        + 'is the most common false overlap in this kind of work.',
+        'Overlap is the purest member of the "same work, different schedule" family: same total '
+        + 'bytes, same message count, same computation, only the timing of the issue changes. Real '
+        + 'systems overlap everywhere, from DDP bucketing in reverse order, to ZeRO-3 fetching a '
+        + 'layer weights before they are needed, to pipeline parallelism where one stage '
+        + 'communication naturally covers another stage compute.',
+        'Two things cap what overlap can buy: the ratio of communication time to compute time, and '
+        + 'how far ahead the dependency chain lets you issue. If communication already takes longer '
+        + 'than compute, perfect overlap merely hides the compute inside it and the total is still '
+        + 'the communication time, at which point the thing to do is reduce communication itself. '
+        + 'Real tuning therefore starts by measuring that ratio and only invests in overlap when it '
+        + 'is below one.'
+      )
+    ),
   },
 
   'intranet-k8s': {

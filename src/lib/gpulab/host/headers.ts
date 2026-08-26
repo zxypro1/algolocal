@@ -90,6 +90,22 @@ int cudaMemcpy(void* dst, const void* src, int bytes, int kind);
 int cudaMemset(void* devicePtr, int value, int bytes);
 int cudaDeviceSynchronize(void);
 
+/* ---- 流 ----
+ *
+ * 起 kernel 时指定流：kernel<<<grid, block, 0, stream>>>(...)
+ * 第三个参数（动态共享内存）必须写 0，那个还不支持。
+ *
+ * ⚠️ **一处要说清楚的偏差**：这个模拟器是**即时执行**的 ——
+ * kernel 在 launch 那一刻就跑完了，流不改变执行顺序，也**不检测
+ * 跨流的数据竞争**。流在这里的作用是记账：平台据此回答
+ * "发起这次集合通信时，别的流上还有没有计算在飞"，也就是重叠率。
+ *
+ * 真卡上把有依赖的活放到不同的流上而不 cudaStreamWaitEvent，
+ * 是一个会静默出错的严重问题。这个子集查不出来，别养成习惯。 */
+int cudaStreamCreate(int* stream);
+int cudaStreamSynchronize(int stream);
+int cudaStreamDestroy(int stream);
+
 /* ---- CUDA Graph ----
  *
  * 把一串 launch 录下来，之后一次重放。省下来的是**提交开销** ——

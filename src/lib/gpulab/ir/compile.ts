@@ -221,6 +221,9 @@ const HOST_FNS: Record<string, { fn: HostFn; arity: number; scalar: 'int' | 'voi
   cudaGetDevice: { fn: 'cudaGetDevice', arity: 1, scalar: 'int' },
   cudaMemcpyPeer: { fn: 'cudaMemcpyPeer', arity: 5, scalar: 'int' },
   pipe_step: { fn: 'pipe_step', arity: 0, scalar: 'void' },
+  cudaStreamSynchronize: { fn: 'cudaStreamSynchronize', arity: 1, scalar: 'int' },
+  cudaStreamDestroy: { fn: 'cudaStreamDestroy', arity: 1, scalar: 'int' },
+  cudaStreamCreate: { fn: 'cudaStreamCreate', arity: 1, scalar: 'int' },
 
   // NCCL。真 API 的形状：通信子按设备各一个，集合操作在 group 里发起。
   ncclCommInitAll: { fn: 'ncclCommInitAll', arity: 3, scalar: 'int' },
@@ -278,6 +281,7 @@ const HOST_OUT_PARAM: Record<string, { at: number; hint: string }> = {
   cudaMalloc: { at: 0, hint: '(void**)&指针变量' },
   cudaGetDeviceCount: { at: 0, hint: '&变量' },
   cudaGetDevice: { at: 0, hint: '&变量' },
+  cudaStreamCreate: { at: 0, hint: '&变量' },
   cudaStreamEndCapture: { at: 1, hint: '&变量' },
   cudaGraphInstantiate: { at: 0, hint: '&变量' },
 };
@@ -1713,8 +1717,14 @@ class Compiler {
     const grid = dim(node.grid);
     const block = dim(node.block);
     const args = node.args.map((arg) => this.expr(arg).reg);
+    const stream = node.stream
+      ? this.convert(this.expr(node.stream), { kind: 'scalar', scalar: 'int' }, node.span.line).reg
+      : undefined;
     const site = this.launches.length;
-    this.launches.push({ kernel: node.kernel, grid, block, args, line: node.span.line });
+    this.launches.push({
+      kernel: node.kernel, grid, block, args, line: node.span.line,
+      ...(stream !== undefined ? { stream } : {}),
+    });
     this.emit({ op: 'launch', site, line: node.span.line }, node.span.line);
   }
 

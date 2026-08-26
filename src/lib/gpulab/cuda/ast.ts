@@ -205,6 +205,8 @@ export type Stmt =
       kernel: string;
       grid: Expr[];
       block: Expr[];
+      /** `<<<g, b, 0, stream>>>` 的第四个参数。不写就是默认流（0） */
+      stream?: Expr;
       args: Expr[];
       span: SourceSpan;
     };
