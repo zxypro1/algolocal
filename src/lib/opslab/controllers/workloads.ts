@@ -1365,9 +1365,31 @@ export class NamespaceController extends Controller {
  * 摘掉那条引用，附属品就变成没人管的孤儿，而不是被删掉。
  */
 export class GarbageCollector extends Controller {
+  /** 已经在盯的类型。CRD 是后来注册的，所以这张表要能长。 */
+  private watched = new Set<string>();
+
   constructor(context: ControllerContext) {
     super(context, 'garbage-collector');
-    for (const definition of context.scheme.list()) {
+    this.syncInformers();
+    /**
+     * 自定义类型也要盯。
+     *
+     * CRD 是运行时注册进来的，构造这个控制器的时候它还不存在 ——
+     * 不补这一步的话，删掉一个自定义资源，它造出来的东西全变成孤儿留在集群里，
+     * 而这恰恰是最需要垃圾回收的场景（Operator 造出来的那些）。
+     */
+    const crds = this.track(new Informer(this.registry, {
+      group: 'apiextensions.k8s.io', version: 'v1', resource: 'customresourcedefinitions',
+      singular: 'customresourcedefinition', kind: 'CustomResourceDefinition', namespaced: false,
+    }));
+    crds.onChange(() => this.syncInformers());
+  }
+
+  private syncInformers(): void {
+    for (const definition of this.context.scheme.list()) {
+      const key = `${definition.group}/${definition.version}/${definition.resource}`;
+      if (this.watched.has(key)) continue;
+      this.watched.add(key);
       const informer = this.track(new Informer(this.registry, definition));
       /**
        * 只有删除才可能产生孤儿。每次变更都扫一遍的话，
@@ -1376,9 +1398,10 @@ export class GarbageCollector extends Controller {
        * 判断「这是一次删除」看的是缓存里还有没有它 —— 事件本身带的是
        * 被删掉的那个对象，不是 undefined。
        */
-      informer.onChange((key) => {
-        if (informer.get(key) === undefined) this.queue.add('sweep');
+      informer.onChange((eventKey) => {
+        if (informer.get(eventKey) === undefined) this.queue.add('sweep');
       });
+      informer.start();
     }
   }
 

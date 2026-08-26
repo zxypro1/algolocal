@@ -414,6 +414,21 @@ export interface OpsStageSpec {
    * key 是 PVC 的 `命名空间/名字`，value 是卷内相对路径到内容。
    */
   volumes?: Record<string, Record<string, string>>;
+  /**
+   * 学员自己写的 Operator。
+   *
+   * 声明了它，世界就会把 `path` 那个文件当成一个控制器跑起来：watch 事件、
+   * 调它导出的 reconcile、给它一个 apiserver 客户端。文件改了立刻生效
+   * （真集群里这一步是重新构建镜像再发布）。
+   */
+  operator?: {
+    /** 代码在机器磁盘上的位置 */
+    path: string;
+    /** 它管的自定义资源的 kind */
+    kind: string;
+    /** 它那个 Deployment 的 `app.kubernetes.io/name`。停掉它，自定义资源就没人管了。 */
+    name: string;
+  };
 }
 
 export type WorkspaceSpec = CodeWorkspaceSpec | OpsWorkspaceSpec;

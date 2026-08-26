@@ -23,6 +23,7 @@ import { materializePki } from './pki';
 import { GitNetwork, createGitCommand, parseCommit, readTree, seedRepository } from '../git';
 import { createIstioctlCommand } from '../mesh';
 import { createVeleroCommand } from '../backup';
+import { OperatorController } from '../operator';
 import { SignatureStore, createCosignCommand } from '../admission';
 import { OpenBao, createBaoCommand } from '../secrets';
 import { createPromtoolCommand } from '../observability';
@@ -403,6 +404,22 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
       return undefined;
     }
   };
+
+  /**
+   * 学员自己写的 Operator。
+   *
+   * 代码在机器磁盘上，所以只能等机器建好之后再挂。文件不在也没关系 ——
+   * 那就是「还没开始写」，控制器什么都不做。
+   */
+  if (stage.operator) {
+    const { path: operatorPath, kind, name } = stage.operator;
+    cluster.attach((context) => new OperatorController(context, {
+      name, kind,
+      source: () => (machine.vfs.exists(operatorPath)
+        ? machine.vfs.readFile(operatorPath)
+        : undefined),
+    }));
+  }
 
   // `kubectl exec` 落到 Pod 里那个 shell 上
   cluster.execHandler = createExecHandler(cluster);
