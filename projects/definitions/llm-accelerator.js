@@ -6718,6 +6718,377 @@ const STAGE_25 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 26 关：流水线并行 1F1B                                             */
+/* ------------------------------------------------------------------ */
+
+const PP_STAGES = 8;
+const PP_MICROBATCHES = 32;
+
+const PP_KERNELS = code`
+  __global__ void forward(float* act, const float* in, int n) {
+    int i = threadIdx.x;
+    if (i < n) act[i] = in[i] * 1.0009765625f + 0.001f;
+  }
+  __global__ void backward(float* grad, const float* act, int n) {
+    int i = threadIdx.x;
+    if (i < n) grad[i] = act[i] * 0.5f;
+  }
+`;
+
+const ppBench = {
+  sources: ['/root/pipeline.cu'],
+  buffers: [
+    { name: 'check', length: PP_STAGES, fill: { kind: 'zeros' } },
+  ],
+  launches: [],
+};
+
+const STAGE_26 = {
+  id: 'pipeline-parallel',
+  title: t('流水线并行 1F1B —— 一步只做一件事',
+    'Pipeline parallelism with 1F1B — one thing per step'),
+  goal: t(
+    [
+      '张量并行只能在机内（第 24 关）。模型再大就得**按层切**，',
+      '每台机器负责几层 —— 这就是流水线并行。这一关 8 级、32 个 microbatch。',
+      '',
+      '`pipeline.cu` 现在用的是 **GPipe** 排程：把 32 个 microbatch 的前向',
+      '全部做完，再全部做反向。',
+      '',
+      '两个代价：',
+      '',
+      '1. **前向流水线要完全排空才开始反向** —— fill 与 drain 各付了两次。',
+      '2. **每一级要同时存 32 份激活**（每个 microbatch 的都得留着给反向）。',
+      '',
+      '**1F1B**（一前一后）把这两件事一起解决。第 d 级的操作序列是：',
+      '',
+      '```',
+      'warmup  : P-1-d 次前向          （越靠后的级，热身越短）',
+      'steady  : (前向, 反向) 交替      （这里是稳态，每步一件事）',
+      'cooldown: 剩下的反向',
+      '```',
+      '',
+      '一共还是 2M 个操作，一件不多一件不少。变的是**顺序** ——',
+      '流水线不再排空，而且因为反向紧跟着前向，',
+      '**一份激活用完就能立刻复用**，每级只需要 P 个槽而不是 M 个。',
+      '',
+      '气泡率是数出来的：`pipe_step()` 声明一个步边界，',
+      '平台记下每一步里哪几张卡真的干了活。',
+      '',
+      '```',
+      '气泡率 = 1 - 干活的(步, 卡)格子数 / (步数 × 卡数)',
+      '```',
+      '',
+      '```bash',
+      'nvcc -o bench pipeline.cu && ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 气泡率 ≤ 0.12（GPipe 是 0.1795）',
+      '- 每张卡的显存峰值 ≤ 4 KB（GPipe 是 8960 字节）',
+      '- **总工作量一格不少** —— 干活的格子必须正好 `2 × M × P = 512`',
+    ].join('\n'),
+    [
+      'Tensor parallelism has to stay in-node (stage 24). Larger models get **split by layer**, a few',
+      'layers per machine, which is pipeline parallelism. This stage has 8 stages and 32 microbatches.',
+      '',
+      '`pipeline.cu` uses the **GPipe** schedule: run all 32 forwards, then all 32 backwards.',
+      '',
+      'Two costs:',
+      '',
+      '1. **The forward pipeline drains completely before backward starts**, so fill and drain are',
+      '   each paid twice.',
+      '2. **Each stage holds 32 activations at once**, since every microbatch\'s has to survive until',
+      '   its backward.',
+      '',
+      '**1F1B** (one forward, one backward) fixes both. Stage d\'s operation sequence is:',
+      '',
+      '```',
+      'warmup  : P-1-d forwards        (later stages warm up for less time)',
+      'steady  : alternating forward, backward   (steady state, one op per step)',
+      'cooldown: the remaining backwards',
+      '```',
+      '',
+      'Still 2M operations, not one more or fewer. What changes is the **order**: the pipeline never',
+      'drains, and because each backward closely follows its forward, **an activation can be reused',
+      'as soon as it is consumed**, so each stage needs P slots instead of M.',
+      '',
+      'The bubble is counted, not assumed: `pipe_step()` declares a step boundary and the platform',
+      'records which GPUs actually did work in it.',
+      '',
+      '```',
+      'bubble = 1 - busy (step, GPU) cells / (steps x GPUs)',
+      '```',
+      '',
+      '```bash',
+      'nvcc -o bench pipeline.cu && ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- bubble at most 0.12 (0.1795 for GPipe)',
+      '- peak memory per GPU at most 4 KB (8960 bytes for GPipe)',
+      '- **not one cell of work missing**: busy cells must be exactly `2 x M x P = 512`',
+    ].join('\n')
+  ),
+  checklist: [
+    t('第 d 级热身 P-1-d 次前向', 'Warm up stage d with P-1-d forwards'),
+    t('稳态里前向反向交替，一步只做一件事',
+      'Alternate forward and backward in steady state, one op per step'),
+    t('每级只开 P 个激活槽，循环复用', 'Allocate P activation slots per stage and reuse them'),
+  ],
+  hints: [
+    t('第 d 级从第 d 步开始动，一共动 2M 步 —— 所以总步数是 `2M + P - 1`。'
+      + 'GPipe 是 `2(M + P - 1)`，多出来的 `P-1` 就是第二次 fill/drain。',
+      'Stage d starts at step d and runs for 2M steps, so the total is `2M + P - 1`. GPipe needs '
+      + '`2(M + P - 1)`; the extra `P-1` is the second fill and drain.'),
+    t('激活槽用 `microbatch % P` 索引就够 —— 1F1B 保证同时在飞的不超过 P 个。',
+      'Indexing activation slots by `microbatch % P` suffices: 1F1B guarantees at most P are in '
+      + 'flight at once.'),
+  ],
+  pitfalls: [
+    t('**一步里同时做前向和反向。** 那不是 1F1B，那是"把两步压成一步"——'
+      + '气泡率会显得很好看，但真硬件上一张卡同一时刻只能做一件事。'
+      + '判定要求干活的格子数正好等于总操作数，压步会立刻露馅。',
+      '**Doing a forward and a backward in the same step.** That is not 1F1B, it is squeezing two '
+      + 'steps into one. The bubble looks great but a real GPU does one thing at a time. The check '
+      + 'requires busy cells to equal the operation count exactly, so squeezing shows up at once.'),
+    t('**激活槽还是开 M 个。** 排程对了但显存没省 —— '
+      + '1F1B 的显存收益完全来自"用完就复用"这一步。',
+      '**Still allocating M activation slots.** The schedule is right but the memory is not saved; '
+      + '1F1B\'s memory win comes entirely from reusing a slot as soon as it is consumed.'),
+    t('**热身长度算反了。** 第 0 级热身最长（P-1 次），最后一级最短（0 次）。'
+      + '反了的话流水线永远填不满。',
+      '**Getting the warmup lengths backwards.** Stage 0 warms up longest (P-1) and the last stage '
+      + 'not at all. Reversed, the pipeline never fills.'),
+  ],
+  extension: t(
+    '这一关实测的两个数值得放在一起看：'
+    + '\n\n'
+    + '| | 步数 | 气泡率 | 每卡显存 | 总工作量 |'
+    + '\n| --- | --- | --- | --- | --- |'
+    + '\n| GPipe | 78 | 0.1795 | 8960 | 512 |'
+    + '\n| 1F1B | 71 | **0.0986** | **2816** | 512 |'
+    + '\n\n'
+    + '气泡率 `(P-1)/(2M+P-1)` 对 `(P-1)/(M+P-1)`，差了将近一倍；'
+    + '显存差 3.2 倍。而**总工作量一格不差**。'
+    + '\n\n'
+    + '教科书里常说"GPipe 与 1F1B 的气泡率相同"，那是把一个 microbatch 的'
+    + '前向加反向算成一个时间单位时的说法。按真实的步来数（前向一步、反向一步），'
+    + 'GPipe 要多付一次 fill/drain。这一关的数字是**数出来的**，不是套的公式 ——'
+    + '这也是为什么值得自己跑一遍。'
+    + '\n\n'
+    + '再往下还有 interleaved 1F1B（Megatron 的 virtual pipeline）：'
+    + '把每台机器负责的层拆成几段不连续的，一台机器在流水线里出现多次。'
+    + '级数从 P 变成 P × v，气泡率降到 `(P-1)/(v·M+P-1)`，'
+    + '代价是通信次数乘 v 倍。'
+    + '\n\n'
+    + '还有一个方向是 **zero-bubble**：把反向拆成"算输入梯度"和"算权重梯度"两半，'
+    + '后者不阻塞流水线、可以填进气泡里。'
+    + '这些都建立在同一个观察上 —— 气泡是**排程**问题，不是带宽问题。',
+    'The two measured numbers are worth seeing together:\n\n'
+    + '| | steps | bubble | memory per GPU | total work |\n'
+    + '| --- | --- | --- | --- | --- |\n'
+    + '| GPipe | 78 | 0.1795 | 8960 | 512 |\n'
+    + '| 1F1B | 71 | **0.0986** | **2816** | 512 |\n\n'
+    + 'The bubble is `(P-1)/(2M+P-1)` against `(P-1)/(M+P-1)`, nearly a factor of two, and memory '
+    + 'differs by 3.2x, with **exactly the same total work**.\n\n'
+    + 'Textbooks often say GPipe and 1F1B have the same bubble, which holds when a microbatch\'s '
+    + 'forward and backward count as one time unit. Counted in real steps, where forward and '
+    + 'backward each take one, GPipe pays an extra fill and drain. These numbers were **counted**, '
+    + 'not derived from a formula, which is exactly why it is worth running yourself.\n\n'
+    + 'Beyond this lies interleaved 1F1B (Megatron\'s virtual pipeline): split each machine\'s layers '
+    + 'into several non-contiguous chunks so a machine appears in the pipeline more than once. The '
+    + 'stage count becomes P x v and the bubble falls to `(P-1)/(v*M+P-1)`, at the cost of v times '
+    + 'as many transfers.\n\n'
+    + 'Another direction is **zero-bubble**: split backward into computing input gradients and '
+    + 'computing weight gradients, where the latter does not block the pipeline and can be dropped '
+    + 'into the bubbles. All of these rest on the same observation, that the bubble is a '
+    + '**scheduling** problem, not a bandwidth one.'
+  ),
+  gpu: {
+    world: CLUSTER_WORLD,
+    files: {
+      '/root/pipeline.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "containers.h"
+
+        ${PP_KERNELS}
+
+        int main(void) {
+          const int P = 8; const int M = 32; const int SIZE = 64;
+          int inbuf[8]; int grad[8];
+          for (int d = 0; d < P; ++d) {
+            cudaSetDevice(d);
+            float* a; float* g;
+            cudaMalloc((void**)&a, SIZE * 4);
+            cudaMalloc((void**)&g, SIZE * 4);
+            inbuf[d] = a; grad[d] = g;
+          }
+          // 每个 (microbatch, stage) 的激活都要留着
+          int acts = vec_new();
+          for (int mb = 0; mb < M; ++mb) {
+            for (int d = 0; d < P; ++d) {
+              cudaSetDevice(d);
+              float* a; cudaMalloc((void**)&a, SIZE * 4);
+              vec_push(acts, a);
+            }
+          }
+
+          // TODO: GPipe —— 前向流水线**完全排空**之后才开始反向，
+          //       于是 fill / drain 付了两次；而且每级要同时存 M 份激活。
+          //       改成 1F1B：warmup / steady / cooldown，一步只做一件事。
+          //
+          // 前向：M + P - 1 步
+          for (int step = 0; step < M + P - 1; ++step) {
+            for (int d = 0; d < P; ++d) {
+              int mb = step - d;
+              if (mb >= 0 && mb < M) {
+                cudaSetDevice(d);
+                forward<<<1, 64>>>(vec_get(acts, mb * P + d), inbuf[d], SIZE);
+              }
+            }
+            pipe_step();
+          }
+          // 反向：再 M + P - 1 步
+          for (int step = 0; step < M + P - 1; ++step) {
+            for (int d = P - 1; d >= 0; --d) {
+              int mb = step - (P - 1 - d);
+              if (mb >= 0 && mb < M) {
+                cudaSetDevice(d);
+                backward<<<1, 64>>>(grad[d], vec_get(acts, mb * P + d), SIZE);
+              }
+            }
+            pipe_step();
+          }
+          printf("gpipe\n");
+          return 0;
+        }
+      `,
+    },
+    bench: ppBench,
+    referenceFiles: {
+      '/root/pipeline.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "containers.h"
+
+        ${PP_KERNELS}
+
+        int main(void) {
+          const int P = 8; const int M = 32; const int SIZE = 64;
+          int inbuf[8]; int grad[8];
+          for (int d = 0; d < P; ++d) {
+            cudaSetDevice(d);
+            float* a; float* g;
+            cudaMalloc((void**)&a, SIZE * 4);
+            cudaMalloc((void**)&g, SIZE * 4);
+            inbuf[d] = a; grad[d] = g;
+          }
+          // **每级只开 P 个激活槽**，循环复用 —— 这是 1F1B 换来的东西
+          int acts = vec_new();
+          for (int d = 0; d < P; ++d) {
+            cudaSetDevice(d);
+            for (int slot = 0; slot < P; ++slot) {
+              float* a; cudaMalloc((void**)&a, SIZE * 4);
+              vec_push(acts, a);
+            }
+          }
+
+          for (int step = 0; step < 2 * M + P - 1; ++step) {
+            for (int d = 0; d < P; ++d) {
+              int k = step - d;
+              if (k < 0) { continue; }
+              if (k >= 2 * M) { continue; }
+              int w = P - 1 - d;
+              if (w > M) { w = M; }
+
+              int isForward = 0;
+              int mb = 0;
+              if (k < w) {
+                isForward = 1; mb = k;
+              } else {
+                int j = k - w;
+                int steady = 2 * (M - w);
+                if (j < steady) {
+                  if (j % 2 == 0) { isForward = 1; mb = w + j / 2; }
+                  else { isForward = 0; mb = (j - 1) / 2; }
+                } else {
+                  isForward = 0; mb = M - w + (j - steady);
+                }
+              }
+
+              cudaSetDevice(d);
+              if (isForward == 1) {
+                forward<<<1, 64>>>(vec_get(acts, d * P + (mb % P)), inbuf[d], SIZE);
+              } else {
+                backward<<<1, 64>>>(grad[d], vec_get(acts, d * P + (mb % P)), SIZE);
+              }
+            }
+            pipe_step();
+          }
+          printf("1f1b\n");
+          return 0;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('pipeline.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const P = ${PP_STAGES};
+      const M = ${PP_MICROBATCHES};
+
+      describe('流水线并行', () => {
+        it('**总工作量一格不少** —— 压步会立刻露馅', async () => {
+          await lab.buildAndRun();
+          // 每个 microbatch 在每一级都要前向与反向各一次
+          expect(lab.pipeline().busySlots).toBe(2 * M * P);
+        });
+
+        it('气泡率降下来了', async () => {
+          await lab.buildAndRun();
+          expect(lab.pipeline().bubbleRatio).toBeLessThanOrEqual(0.12);
+        });
+
+        it('总步数是 2M + P - 1，不是 2(M + P - 1)', async () => {
+          await lab.buildAndRun();
+          expect(lab.pipeline().steps).toBe(2 * M + P - 1);
+        });
+
+        it('**每级只留 P 份激活**，不是 M 份', async () => {
+          await lab.buildAndRun();
+          expect(lab.peakBytes()).toBeLessThanOrEqual(4 * 1024);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.pipeline.bubbleRatio', op: 'lte', value: 0.12,
+      zh: '流水线气泡率（GPipe 是 0.1795）', en: 'pipeline bubble ratio (0.1795 for GPipe)',
+      unit: 'ratio', dimension: 'throughput',
+    }),
+    gate({
+      metric: 'gpu.memoryPeakBytes', op: 'lte', value: 4 * 1024,
+      zh: '每张卡的显存峰值（GPipe 是 8960 字节）',
+      en: 'peak memory per GPU (8960 bytes for GPipe)',
+      unit: 'byte', dimension: 'throughput',
+    }),
+    gate({
+      metric: 'gpu.pipeline.busySlots', op: 'gte', value: 2 * PP_MICROBATCHES * PP_STAGES,
+      zh: '干活的格子数 —— 少了就是压了步或漏了活，不是优化',
+      en: 'busy cells: fewer means steps were squeezed or work dropped, not optimised',
+      unit: 'slot', dimension: 'correctness',
+    }),
+  ],
+  focus: ['throughput', 'correctness'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -6784,5 +7155,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22, STAGE_23, STAGE_24, STAGE_25],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22, STAGE_23, STAGE_24, STAGE_25, STAGE_26],
 };

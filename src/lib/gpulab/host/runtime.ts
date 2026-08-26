@@ -50,6 +50,8 @@ export interface HostEnvironment {
   setDevice?(index: number): void;
   getDevice?(): number;
   peerCopy?(dst: number, dstDevice: number, src: number, srcDevice: number, bytes: number): void;
+  /** 流水线步边界 */
+  pipeStep?(): void;
   /** 一次集合操作。`kind` 是操作名，`ranks` 是每个 rank 的收发缓冲区 */
   collective?(
     kind: string,
@@ -135,6 +137,8 @@ export class HostRuntime implements HostServices {
       return this.dispatch(fn, args);
     } catch (error) {
       if (error instanceof HostRuntimeError) {
+        // 已经带行号的不要再包一层 —— 否则会打成「第 49 行：第 49 行：…」
+        if (/^第 \d+ 行：/.test(error.message)) throw error;
         throw new HostRuntimeError(`第 ${line} 行：${error.message}`);
       }
       throw error;
@@ -275,6 +279,9 @@ export class HostRuntime implements HostServices {
         return this.requireCluster('cudaGetDevice').getDevice!();
       case HOST.cudaSetDevice:
         this.requireCluster('cudaSetDevice').setDevice!(args[0] | 0);
+        return 0;
+      case HOST.pipe_step:
+        this.requireCluster('pipe_step').pipeStep!();
         return 0;
       case HOST.cudaMemcpyPeer:
         this.requireCluster('cudaMemcpyPeer').peerCopy!(

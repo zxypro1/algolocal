@@ -211,6 +211,17 @@ int cudaSetDevice(int device);
 int cudaGetDevice(int* device);
 int cudaMemcpyPeer(void* dst, int dstDevice, const void* src, int srcDevice, int bytes);
 
+/* 流水线调度：声明一个步边界。
+ *
+ * 真硬件上没有这个函数 —— 流水线的"步"是 nsys 时间线上看出来的，
+ * 不是程序里声明的。这里让你显式声明，是因为气泡率要**数**出来：
+ * 平台记下每一步里哪几张卡真的干了活。
+ *
+ *   气泡率 = 1 - 干活的(步, 卡)格子数 / (步数 x 卡数)
+ *
+ * 少报步数能让这个数好看，所以判定同时校验总工作量 —— 两头对上才算数。 */
+void pipe_step(void);
+
 #endif
 `;
 

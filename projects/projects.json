@@ -27135,6 +27135,158 @@
           "zh": "张量并行只切了矩阵乘，矩阵乘之间的那些算子没切 --LayerNorm、dropout、残差加，这些逐元素的操作在每张卡上都是在完整的激活上重复做一遍。重复计算还是小事，真正贵的是激活要留着给反向用：几十层的模型，每张卡都得存几十份完整的激活。\n\n序列并行的做法很直接：既然这些算子是逐元素的，那就按序列维度切开，每张卡只做 1/n、只存 1/n。有意思的是通信怎么接。张量并行末尾的 all-reduce 之后每张卡都有完整的结果，而序列并行只想要 1/n，这两件事合起来正好是一次 reduce-scatter；等到下一个矩阵乘需要完整输入时，再用 all-gather 凑回来。\n\n关键在于 reduce-scatter 加 all-gather 的通信量和一次 all-reduce 完全相同。ring all-reduce 本来就是这两个阶段拼起来的，各占 (n-1)/n，加起来正好 2(n-1)/n。所以序列并行是白拿的：通信一个字节不多，激活显存降到 1/n，逐元素的计算也降到 1/n。\n\n值得体会的是这一关和前几关的对照。手写 ring 是把通信量摊开、梯度分桶是把消息数降下来、序列并行是通信完全不动而换来显存与计算 --三次优化，通信总量一次都没降。这不是巧合：集合通信的总量由算法的语义定死了，能动的只有分布、粒度、以及用哪个集合操作把它接到别的优化上。",
           "en": "Tensor parallelism splits only the matmuls; the operators between them are not split. LayerNorm, dropout and the residual add are repeated on the full activation by every GPU. The repeated compute is the smaller problem. The expensive part is that activations are kept for the backward pass, so a model with dozens of layers stores dozens of full activations per GPU.\n\nSequence parallelism is direct about it: since those operators are elementwise, split them along the sequence so each GPU does and stores 1/n. The interesting part is how the communication connects. After tensor parallelism's all-reduce every GPU has the whole result while sequence parallelism wants only 1/n, and those two together are exactly a reduce-scatter. When the next matmul needs the full tensor, an all-gather reassembles it.\n\nThe key is that reduce-scatter plus all-gather costs exactly as much as one all-reduce. A ring all-reduce is those two phases stitched together, each costing (n-1)/n, together 2(n-1)/n. So sequence parallelism is free: not one extra byte of communication, activation memory down to 1/n, elementwise compute down to 1/n.\n\nThe contrast with earlier stages is worth sitting with. Hand-written ring spreads the communication out, gradient bucketing reduces the message count, and sequence parallelism leaves communication untouched while buying memory and compute. Three optimisations and the total volume never dropped once. That is not a coincidence: the volume of a collective is fixed by its semantics. What you can change is the distribution, the granularity, and which collective connects it to another optimisation."
         }
+      },
+      {
+        "id": "pipeline-parallel",
+        "title": {
+          "zh": "流水线并行 1F1B —— 一步只做一件事",
+          "en": "Pipeline parallelism with 1F1B — one thing per step"
+        },
+        "goal": {
+          "zh": "张量并行只能在机内（第 24 关）。模型再大就得**按层切**，\n每台机器负责几层 —— 这就是流水线并行。这一关 8 级、32 个 microbatch。\n\n`pipeline.cu` 现在用的是 **GPipe** 排程：把 32 个 microbatch 的前向\n全部做完，再全部做反向。\n\n两个代价：\n\n1. **前向流水线要完全排空才开始反向** —— fill 与 drain 各付了两次。\n2. **每一级要同时存 32 份激活**（每个 microbatch 的都得留着给反向）。\n\n**1F1B**（一前一后）把这两件事一起解决。第 d 级的操作序列是：\n\n```\nwarmup  : P-1-d 次前向          （越靠后的级，热身越短）\nsteady  : (前向, 反向) 交替      （这里是稳态，每步一件事）\ncooldown: 剩下的反向\n```\n\n一共还是 2M 个操作，一件不多一件不少。变的是**顺序** ——\n流水线不再排空，而且因为反向紧跟着前向，\n**一份激活用完就能立刻复用**，每级只需要 P 个槽而不是 M 个。\n\n气泡率是数出来的：`pipe_step()` 声明一个步边界，\n平台记下每一步里哪几张卡真的干了活。\n\n```\n气泡率 = 1 - 干活的(步, 卡)格子数 / (步数 × 卡数)\n```\n\n```bash\nnvcc -o bench pipeline.cu && ./bench\n```\n\n**通关标准**\n\n- 气泡率 ≤ 0.12（GPipe 是 0.1795）\n- 每张卡的显存峰值 ≤ 4 KB（GPipe 是 8960 字节）\n- **总工作量一格不少** —— 干活的格子必须正好 `2 × M × P = 512`",
+          "en": "Tensor parallelism has to stay in-node (stage 24). Larger models get **split by layer**, a few\nlayers per machine, which is pipeline parallelism. This stage has 8 stages and 32 microbatches.\n\n`pipeline.cu` uses the **GPipe** schedule: run all 32 forwards, then all 32 backwards.\n\nTwo costs:\n\n1. **The forward pipeline drains completely before backward starts**, so fill and drain are\n   each paid twice.\n2. **Each stage holds 32 activations at once**, since every microbatch's has to survive until\n   its backward.\n\n**1F1B** (one forward, one backward) fixes both. Stage d's operation sequence is:\n\n```\nwarmup  : P-1-d forwards        (later stages warm up for less time)\nsteady  : alternating forward, backward   (steady state, one op per step)\ncooldown: the remaining backwards\n```\n\nStill 2M operations, not one more or fewer. What changes is the **order**: the pipeline never\ndrains, and because each backward closely follows its forward, **an activation can be reused\nas soon as it is consumed**, so each stage needs P slots instead of M.\n\nThe bubble is counted, not assumed: `pipe_step()` declares a step boundary and the platform\nrecords which GPUs actually did work in it.\n\n```\nbubble = 1 - busy (step, GPU) cells / (steps x GPUs)\n```\n\n```bash\nnvcc -o bench pipeline.cu && ./bench\n```\n\n**To pass**\n\n- bubble at most 0.12 (0.1795 for GPipe)\n- peak memory per GPU at most 4 KB (8960 bytes for GPipe)\n- **not one cell of work missing**: busy cells must be exactly `2 x M x P = 512`"
+        },
+        "checklist": [
+          {
+            "zh": "第 d 级热身 P-1-d 次前向",
+            "en": "Warm up stage d with P-1-d forwards"
+          },
+          {
+            "zh": "稳态里前向反向交替，一步只做一件事",
+            "en": "Alternate forward and backward in steady state, one op per step"
+          },
+          {
+            "zh": "每级只开 P 个激活槽，循环复用",
+            "en": "Allocate P activation slots per stage and reuse them"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "第 d 级从第 d 步开始动，一共动 2M 步 —— 所以总步数是 `2M + P - 1`。GPipe 是 `2(M + P - 1)`，多出来的 `P-1` 就是第二次 fill/drain。",
+            "en": "Stage d starts at step d and runs for 2M steps, so the total is `2M + P - 1`. GPipe needs `2(M + P - 1)`; the extra `P-1` is the second fill and drain."
+          },
+          {
+            "zh": "激活槽用 `microbatch % P` 索引就够 —— 1F1B 保证同时在飞的不超过 P 个。",
+            "en": "Indexing activation slots by `microbatch % P` suffices: 1F1B guarantees at most P are in flight at once."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**一步里同时做前向和反向。** 那不是 1F1B，那是\"把两步压成一步\"——气泡率会显得很好看，但真硬件上一张卡同一时刻只能做一件事。判定要求干活的格子数正好等于总操作数，压步会立刻露馅。",
+            "en": "**Doing a forward and a backward in the same step.** That is not 1F1B, it is squeezing two steps into one. The bubble looks great but a real GPU does one thing at a time. The check requires busy cells to equal the operation count exactly, so squeezing shows up at once."
+          },
+          {
+            "zh": "**激活槽还是开 M 个。** 排程对了但显存没省 —— 1F1B 的显存收益完全来自\"用完就复用\"这一步。",
+            "en": "**Still allocating M activation slots.** The schedule is right but the memory is not saved; 1F1B's memory win comes entirely from reusing a slot as soon as it is consumed."
+          },
+          {
+            "zh": "**热身长度算反了。** 第 0 级热身最长（P-1 次），最后一级最短（0 次）。反了的话流水线永远填不满。",
+            "en": "**Getting the warmup lengths backwards.** Stage 0 warms up longest (P-1) and the last stage not at all. Reversed, the pipeline never fills."
+          }
+        ],
+        "extension": {
+          "zh": "这一关实测的两个数值得放在一起看：\n\n| | 步数 | 气泡率 | 每卡显存 | 总工作量 |\n| --- | --- | --- | --- | --- |\n| GPipe | 78 | 0.1795 | 8960 | 512 |\n| 1F1B | 71 | **0.0986** | **2816** | 512 |\n\n气泡率 `(P-1)/(2M+P-1)` 对 `(P-1)/(M+P-1)`，差了将近一倍；显存差 3.2 倍。而**总工作量一格不差**。\n\n教科书里常说\"GPipe 与 1F1B 的气泡率相同\"，那是把一个 microbatch 的前向加反向算成一个时间单位时的说法。按真实的步来数（前向一步、反向一步），GPipe 要多付一次 fill/drain。这一关的数字是**数出来的**，不是套的公式 ——这也是为什么值得自己跑一遍。\n\n再往下还有 interleaved 1F1B（Megatron 的 virtual pipeline）：把每台机器负责的层拆成几段不连续的，一台机器在流水线里出现多次。级数从 P 变成 P × v，气泡率降到 `(P-1)/(v·M+P-1)`，代价是通信次数乘 v 倍。\n\n还有一个方向是 **zero-bubble**：把反向拆成\"算输入梯度\"和\"算权重梯度\"两半，后者不阻塞流水线、可以填进气泡里。这些都建立在同一个观察上 —— 气泡是**排程**问题，不是带宽问题。",
+          "en": "The two measured numbers are worth seeing together:\n\n| | steps | bubble | memory per GPU | total work |\n| --- | --- | --- | --- | --- |\n| GPipe | 78 | 0.1795 | 8960 | 512 |\n| 1F1B | 71 | **0.0986** | **2816** | 512 |\n\nThe bubble is `(P-1)/(2M+P-1)` against `(P-1)/(M+P-1)`, nearly a factor of two, and memory differs by 3.2x, with **exactly the same total work**.\n\nTextbooks often say GPipe and 1F1B have the same bubble, which holds when a microbatch's forward and backward count as one time unit. Counted in real steps, where forward and backward each take one, GPipe pays an extra fill and drain. These numbers were **counted**, not derived from a formula, which is exactly why it is worth running yourself.\n\nBeyond this lies interleaved 1F1B (Megatron's virtual pipeline): split each machine's layers into several non-contiguous chunks so a machine appears in the pipeline more than once. The stage count becomes P x v and the bubble falls to `(P-1)/(v*M+P-1)`, at the cost of v times as many transfers.\n\nAnother direction is **zero-bubble**: split backward into computing input gradients and computing weight gradients, where the latter does not block the pipeline and can be dropped into the bubbles. All of these rest on the same observation, that the bubble is a **scheduling** problem, not a bandwidth one."
+        },
+        "gpu": {
+          "world": {
+            "globalBytes": 4194304,
+            "cluster": {
+              "devices": 8,
+              "devicesPerNode": 8
+            }
+          },
+          "files": {
+            "/root/pipeline.cu": "        #include \"engine.h\"\n        #include \"cluster.h\"\n        #include \"containers.h\"\n\n        __global__ void forward(float* act, const float* in, int n) {\n  int i = threadIdx.x;\n  if (i < n) act[i] = in[i] * 1.0009765625f + 0.001f;\n}\n__global__ void backward(float* grad, const float* act, int n) {\n  int i = threadIdx.x;\n  if (i < n) grad[i] = act[i] * 0.5f;\n}\n\n\n        int main(void) {\n          const int P = 8; const int M = 32; const int SIZE = 64;\n          int inbuf[8]; int grad[8];\n          for (int d = 0; d < P; ++d) {\n            cudaSetDevice(d);\n            float* a; float* g;\n            cudaMalloc((void**)&a, SIZE * 4);\n            cudaMalloc((void**)&g, SIZE * 4);\n            inbuf[d] = a; grad[d] = g;\n          }\n          // 每个 (microbatch, stage) 的激活都要留着\n          int acts = vec_new();\n          for (int mb = 0; mb < M; ++mb) {\n            for (int d = 0; d < P; ++d) {\n              cudaSetDevice(d);\n              float* a; cudaMalloc((void**)&a, SIZE * 4);\n              vec_push(acts, a);\n            }\n          }\n\n          // TODO: GPipe —— 前向流水线**完全排空**之后才开始反向，\n          //       于是 fill / drain 付了两次；而且每级要同时存 M 份激活。\n          //       改成 1F1B：warmup / steady / cooldown，一步只做一件事。\n          //\n          // 前向：M + P - 1 步\n          for (int step = 0; step < M + P - 1; ++step) {\n            for (int d = 0; d < P; ++d) {\n              int mb = step - d;\n              if (mb >= 0 && mb < M) {\n                cudaSetDevice(d);\n                forward<<<1, 64>>>(vec_get(acts, mb * P + d), inbuf[d], SIZE);\n              }\n            }\n            pipe_step();\n          }\n          // 反向：再 M + P - 1 步\n          for (int step = 0; step < M + P - 1; ++step) {\n            for (int d = P - 1; d >= 0; --d) {\n              int mb = step - (P - 1 - d);\n              if (mb >= 0 && mb < M) {\n                cudaSetDevice(d);\n                backward<<<1, 64>>>(grad[d], vec_get(acts, mb * P + d), SIZE);\n              }\n            }\n            pipe_step();\n          }\n          printf(\"gpipe\n\");\n          return 0;\n        }\n"
+          },
+          "bench": {
+            "sources": [
+              "/root/pipeline.cu"
+            ],
+            "buffers": [
+              {
+                "name": "check",
+                "length": 8,
+                "fill": {
+                  "kind": "zeros"
+                }
+              }
+            ],
+            "launches": []
+          },
+          "referenceFiles": {
+            "/root/pipeline.cu": "        #include \"engine.h\"\n        #include \"cluster.h\"\n        #include \"containers.h\"\n\n        __global__ void forward(float* act, const float* in, int n) {\n  int i = threadIdx.x;\n  if (i < n) act[i] = in[i] * 1.0009765625f + 0.001f;\n}\n__global__ void backward(float* grad, const float* act, int n) {\n  int i = threadIdx.x;\n  if (i < n) grad[i] = act[i] * 0.5f;\n}\n\n\n        int main(void) {\n          const int P = 8; const int M = 32; const int SIZE = 64;\n          int inbuf[8]; int grad[8];\n          for (int d = 0; d < P; ++d) {\n            cudaSetDevice(d);\n            float* a; float* g;\n            cudaMalloc((void**)&a, SIZE * 4);\n            cudaMalloc((void**)&g, SIZE * 4);\n            inbuf[d] = a; grad[d] = g;\n          }\n          // **每级只开 P 个激活槽**，循环复用 —— 这是 1F1B 换来的东西\n          int acts = vec_new();\n          for (int d = 0; d < P; ++d) {\n            cudaSetDevice(d);\n            for (int slot = 0; slot < P; ++slot) {\n              float* a; cudaMalloc((void**)&a, SIZE * 4);\n              vec_push(acts, a);\n            }\n          }\n\n          for (int step = 0; step < 2 * M + P - 1; ++step) {\n            for (int d = 0; d < P; ++d) {\n              int k = step - d;\n              if (k < 0) { continue; }\n              if (k >= 2 * M) { continue; }\n              int w = P - 1 - d;\n              if (w > M) { w = M; }\n\n              int isForward = 0;\n              int mb = 0;\n              if (k < w) {\n                isForward = 1; mb = k;\n              } else {\n                int j = k - w;\n                int steady = 2 * (M - w);\n                if (j < steady) {\n                  if (j % 2 == 0) { isForward = 1; mb = w + j / 2; }\n                  else { isForward = 0; mb = (j - 1) / 2; }\n                } else {\n                  isForward = 0; mb = M - w + (j - steady);\n                }\n              }\n\n              cudaSetDevice(d);\n              if (isForward == 1) {\n                forward<<<1, 64>>>(vec_get(acts, d * P + (mb % P)), inbuf[d], SIZE);\n              } else {\n                backward<<<1, 64>>>(grad[d], vec_get(acts, d * P + (mb % P)), SIZE);\n              }\n            }\n            pipe_step();\n          }\n          printf(\"1f1b\n\");\n          return 0;\n        }\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "pipeline.spec.ts",
+            "content": "const lab = require('@gpu/lab');\nconst P = 8;\nconst M = 32;\n\ndescribe('流水线并行', () => {\n  it('**总工作量一格不少** —— 压步会立刻露馅', async () => {\n    await lab.buildAndRun();\n    // 每个 microbatch 在每一级都要前向与反向各一次\n    expect(lab.pipeline().busySlots).toBe(2 * M * P);\n  });\n\n  it('气泡率降下来了', async () => {\n    await lab.buildAndRun();\n    expect(lab.pipeline().bubbleRatio).toBeLessThanOrEqual(0.12);\n  });\n\n  it('总步数是 2M + P - 1，不是 2(M + P - 1)', async () => {\n    await lab.buildAndRun();\n    expect(lab.pipeline().steps).toBe(2 * M + P - 1);\n  });\n\n  it('**每级只留 P 份激活**，不是 M 份', async () => {\n    await lab.buildAndRun();\n    expect(lab.peakBytes()).toBeLessThanOrEqual(4 * 1024);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "gpu.sanitizer.races",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "数据竞态",
+              "en": "data races"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.sanitizer.warpSyncErrors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "warp 同步用错",
+              "en": "warp sync errors"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.pipeline.bubbleRatio",
+            "op": "lte",
+            "value": 0.12,
+            "label": {
+              "zh": "流水线气泡率（GPipe 是 0.1795）",
+              "en": "pipeline bubble ratio (0.1795 for GPipe)"
+            },
+            "unit": "ratio",
+            "dimension": "throughput"
+          },
+          {
+            "metric": "gpu.memoryPeakBytes",
+            "op": "lte",
+            "value": 4096,
+            "label": {
+              "zh": "每张卡的显存峰值（GPipe 是 8960 字节）",
+              "en": "peak memory per GPU (8960 bytes for GPipe)"
+            },
+            "unit": "byte",
+            "dimension": "throughput"
+          },
+          {
+            "metric": "gpu.pipeline.busySlots",
+            "op": "gte",
+            "value": 512,
+            "label": {
+              "zh": "干活的格子数 —— 少了就是压了步或漏了活，不是优化",
+              "en": "busy cells: fewer means steps were squeezed or work dropped, not optimised"
+            },
+            "unit": "slot",
+            "dimension": "correctness"
+          }
+        ],
+        "focus": [
+          "throughput",
+          "correctness"
+        ],
+        "primer": {
+          "zh": "张量并行只能在机内，模型再大就得按层切：每台机器负责几层，激活像流水线一样一级一级往前传。问题是流水线要填满才满负荷，第一个 microbatch 走到最后一级之前，后面的级都闲着；最后一个 microbatch 走完之前，前面的级也闲着。这段空转叫气泡。\n\nGPipe 的排程是把所有 microbatch 的前向做完，再全部做反向。这有两个代价：前向流水线要完全排空才开始反向，于是填充与排空各付了两次；而且每一级要同时存下所有 microbatch 的激活，因为每一份都得留到它自己的反向。\n\n1F1B 把这两件事一起解决。它让每一级热身若干次前向之后进入稳态，在稳态里前向反向交替、一步只做一件事。操作总数一件不多一件不少，变的只是顺序。流水线因此不再排空，气泡少一半；而且反向紧跟着前向，一份激活用完就能立刻复用，每级只需要与级数相当的槽位，而不是与 microbatch 数相当。\n\n再往下还有 interleaved 1F1B：把每台机器负责的层拆成几段不连续的，一台机器在流水线里出现多次，级数翻倍而气泡进一步下降，代价是通信次数成倍增加。还有 zero-bubble 的路子：把反向拆成算输入梯度与算权重梯度两半，后者不阻塞流水线、可以填进气泡里。这些都建立在同一个观察上，气泡是排程问题，不是带宽问题。",
+          "en": "Tensor parallelism has to stay in-node, so larger models get split by layer: each machine owns a few layers and activations flow through like a pipeline. The catch is that a pipeline has to fill before it runs at capacity. Until the first microbatch reaches the last stage the later stages sit idle, and until the last microbatch finishes the earlier stages sit idle. That idleness is the bubble.\n\nGPipe schedules all forwards first, then all backwards. That costs twice: the forward pipeline drains completely before backward begins, so fill and drain are each paid twice, and every stage holds the activations of all microbatches at once, since each must survive until its own backward.\n\n1F1B fixes both. Each stage warms up with some forwards and then enters a steady state alternating forward and backward, one operation per step. The number of operations is unchanged; only the order differs. The pipeline never drains, roughly halving the bubble, and because each backward closely follows its forward an activation can be reused as soon as it is consumed, so a stage needs about as many slots as there are stages rather than as many as there are microbatches.\n\nBeyond this lies interleaved 1F1B, splitting each machine into several non-contiguous chunks so it appears in the pipeline more than once, multiplying the stage count and shrinking the bubble further at the cost of proportionally more transfers. There is also the zero-bubble line, splitting backward into input gradients and weight gradients where the latter does not block the pipeline and can be dropped into the bubbles. All of them rest on the same observation: the bubble is a scheduling problem, not a bandwidth one."
+        }
       }
     ]
   },

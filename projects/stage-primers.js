@@ -1930,6 +1930,53 @@ const primers = {
         + 'granularity, and which collective connects it to another optimisation.'
       )
     ),
+    'pipeline-parallel': t(
+      p(
+        '张量并行只能在机内，模型再大就得按层切：每台机器负责几层，'
+        + '激活像流水线一样一级一级往前传。'
+        + '问题是流水线要填满才满负荷，第一个 microbatch 走到最后一级之前，'
+        + '后面的级都闲着；最后一个 microbatch 走完之前，前面的级也闲着。'
+        + '这段空转叫气泡。',
+        'GPipe 的排程是把所有 microbatch 的前向做完，再全部做反向。'
+        + '这有两个代价：前向流水线要完全排空才开始反向，'
+        + '于是填充与排空各付了两次；而且每一级要同时存下所有 microbatch 的激活，'
+        + '因为每一份都得留到它自己的反向。',
+        '1F1B 把这两件事一起解决。它让每一级热身若干次前向之后进入稳态，'
+        + '在稳态里前向反向交替、一步只做一件事。'
+        + '操作总数一件不多一件不少，变的只是顺序。'
+        + '流水线因此不再排空，气泡少一半；'
+        + '而且反向紧跟着前向，一份激活用完就能立刻复用，'
+        + '每级只需要与级数相当的槽位，而不是与 microbatch 数相当。',
+        '再往下还有 interleaved 1F1B：把每台机器负责的层拆成几段不连续的，'
+        + '一台机器在流水线里出现多次，级数翻倍而气泡进一步下降，代价是通信次数成倍增加。'
+        + '还有 zero-bubble 的路子：把反向拆成算输入梯度与算权重梯度两半，'
+        + '后者不阻塞流水线、可以填进气泡里。'
+        + '这些都建立在同一个观察上，气泡是排程问题，不是带宽问题。'
+      ),
+      p(
+        'Tensor parallelism has to stay in-node, so larger models get split by layer: each machine '
+        + 'owns a few layers and activations flow through like a pipeline. The catch is that a '
+        + 'pipeline has to fill before it runs at capacity. Until the first microbatch reaches the '
+        + 'last stage the later stages sit idle, and until the last microbatch finishes the earlier '
+        + 'stages sit idle. That idleness is the bubble.',
+        'GPipe schedules all forwards first, then all backwards. That costs twice: the forward '
+        + 'pipeline drains completely before backward begins, so fill and drain are each paid twice, '
+        + 'and every stage holds the activations of all microbatches at once, since each must '
+        + 'survive until its own backward.',
+        '1F1B fixes both. Each stage warms up with some forwards and then enters a steady state '
+        + 'alternating forward and backward, one operation per step. The number of operations is '
+        + 'unchanged; only the order differs. The pipeline never drains, roughly halving the bubble, '
+        + 'and because each backward closely follows its forward an activation can be reused as soon '
+        + 'as it is consumed, so a stage needs about as many slots as there are stages rather than '
+        + 'as many as there are microbatches.',
+        'Beyond this lies interleaved 1F1B, splitting each machine into several non-contiguous '
+        + 'chunks so it appears in the pipeline more than once, multiplying the stage count and '
+        + 'shrinking the bubble further at the cost of proportionally more transfers. There is also '
+        + 'the zero-bubble line, splitting backward into input gradients and weight gradients where '
+        + 'the latter does not block the pipeline and can be dropped into the bubbles. All of them '
+        + 'rest on the same observation: the bubble is a scheduling problem, not a bandwidth one.'
+      )
+    ),
   },
 
   'intranet-k8s': {
