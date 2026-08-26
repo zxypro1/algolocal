@@ -13,3 +13,8 @@ export {
   PROVISION_MS, BOOTSTRAP_MS,
 } from './controller';
 export type { CapiOptions } from './controller';
+export {
+  AutoscalerController, AUTOSCALER_LABEL, MIN_SIZE_ANNOTATION, MAX_SIZE_ANNOTATION,
+  DELETE_MACHINE_ANNOTATION, SAFE_TO_EVICT_ANNOTATION,
+  SCAN_INTERVAL_MS, UNNEEDED_MS, UTILIZATION_THRESHOLD,
+} from './autoscaler';

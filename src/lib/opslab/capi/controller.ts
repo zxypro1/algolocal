@@ -216,10 +216,23 @@ export class MachineSetController extends Controller {
     for (let index = owned.length; index < desired; index += 1) {
       this.createMachine(set, index);
     }
-    // 缩容删最新的那台
+    /**
+     * 缩容删哪一台。
+     *
+     * 先删打了 `delete-machine` 注解的 —— 伸缩器算好了要回收哪一台，
+     * 光减副本数的话具体少哪台由这里说了算，很可能不是它挑的那台。
+     * 剩下的按「最新的先删」：老机器上跑的东西更可能是已经稳定的。
+     */
     const extra = owned
       .slice()
-      .sort((a, b) => (a.metadata.creationTimestamp! < b.metadata.creationTimestamp! ? 1 : -1))
+      .sort((a, b) => {
+        const marked = (item: KubeObject) => (
+          item.metadata.annotations?.['cluster.x-k8s.io/delete-machine'] !== undefined ? 0 : 1
+        );
+        const byMark = marked(a) - marked(b);
+        if (byMark !== 0) return byMark;
+        return a.metadata.creationTimestamp! < b.metadata.creationTimestamp! ? 1 : -1;
+      })
       .slice(0, Math.max(0, owned.length - desired));
     for (const machine of extra) {
       try {

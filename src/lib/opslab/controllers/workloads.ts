@@ -339,6 +339,16 @@ export class ReplicaSetController extends Controller {
         name: `${replicaSet.metadata.name}-${suffix}`,
         namespace: replicaSet.metadata.namespace,
         labels: { ...(template.metadata?.labels ?? {}) },
+        /**
+         * 注解也要带过来。
+         *
+         * 很多东西是靠 Pod 上的注解生效的：伸缩器的 safe-to-evict、
+         * 采集的 scrape 提示、注入的开关。模板上写了而 Pod 上没有，
+         * 现象是「我明明配了，但一点用都没有」。
+         */
+        ...(template.metadata?.annotations
+          ? { annotations: { ...template.metadata.annotations } }
+          : {}),
         ownerReferences: [{
           apiVersion: 'apps/v1', kind: 'ReplicaSet',
           name: replicaSet.metadata.name, uid: replicaSet.metadata.uid!,
@@ -1333,6 +1343,64 @@ export class NamespaceController extends Controller {
           // 属主先被删掉时，级联已经把它带走了
           if (!isNotFound(error)) throw error;
         }
+      }
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 垃圾回收                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 属主没了，附属品也要跟着没。
+ *
+ * `kubectl delete deployment x` 只删了一个对象 —— ReplicaSet 和 Pod 是靠
+ * **属主引用**被连带删掉的，干这件事的是 kube-controller-manager 里的
+ * garbage collector。没有它，删掉 Deployment 之后 Pod 还在跑，
+ * 而且再也没有人管它们。
+ *
+ * 只认 `controller: true` 那条引用：一个对象可以有多个属主，但「谁管它的
+ * 生命周期」只能有一个。这也是 `kubectl delete --cascade=orphan` 的作用点 ——
+ * 摘掉那条引用，附属品就变成没人管的孤儿，而不是被删掉。
+ */
+export class GarbageCollector extends Controller {
+  constructor(context: ControllerContext) {
+    super(context, 'garbage-collector');
+    for (const definition of context.scheme.list()) {
+      const informer = this.track(new Informer(this.registry, definition));
+      /**
+       * 只有删除才可能产生孤儿。每次变更都扫一遍的话，
+       * 一个几百对象的世界会把大部分时间花在这上面。
+       *
+       * 判断「这是一次删除」看的是缓存里还有没有它 —— 事件本身带的是
+       * 被删掉的那个对象，不是 undefined。
+       */
+      informer.onChange((key) => {
+        if (informer.get(key) === undefined) this.queue.add('sweep');
+      });
+    }
+  }
+
+  protected reconcile(key: string): void {
+    if (key !== 'sweep') return;
+    const alive = new Set<string>();
+    const all: Array<{ definition: ResourceDefinition; object: KubeObject }> = [];
+    for (const definition of this.context.scheme.list()) {
+      for (const object of this.registry.list(definition).items) {
+        if (object.metadata.uid) alive.add(object.metadata.uid);
+        all.push({ definition, object });
+      }
+    }
+
+    for (const { definition, object } of all) {
+      const owners = object.metadata.ownerReferences ?? [];
+      const orphaned = owners.some((ref) => ref.controller && ref.uid && !alive.has(ref.uid));
+      if (!orphaned) continue;
+      try {
+        this.registry.delete(definition, object.metadata.namespace, object.metadata.name!);
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
       }
     }
   }
