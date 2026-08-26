@@ -186,6 +186,8 @@ export type HostFn =
   | 'cudaGraphDestroy' | 'cudaGraphExecDestroy'
   /** 多卡 */
   | 'cudaGetDeviceCount' | 'cudaSetDevice' | 'cudaGetDevice' | 'cudaMemcpyPeer'
+  /** 流水线调度：声明一个步边界，气泡率靠它数出来 */
+  | 'pipe_step'
   /** NCCL 集合通信 */
   | 'ncclCommInitAll' | 'ncclCommDestroy'
   | 'ncclGroupStart' | 'ncclGroupEnd'

@@ -220,6 +220,7 @@ const HOST_FNS: Record<string, { fn: HostFn; arity: number; scalar: 'int' | 'voi
   cudaSetDevice: { fn: 'cudaSetDevice', arity: 1, scalar: 'int' },
   cudaGetDevice: { fn: 'cudaGetDevice', arity: 1, scalar: 'int' },
   cudaMemcpyPeer: { fn: 'cudaMemcpyPeer', arity: 5, scalar: 'int' },
+  pipe_step: { fn: 'pipe_step', arity: 0, scalar: 'void' },
 
   // NCCL。真 API 的形状：通信子按设备各一个，集合操作在 group 里发起。
   ncclCommInitAll: { fn: 'ncclCommInitAll', arity: 3, scalar: 'int' },

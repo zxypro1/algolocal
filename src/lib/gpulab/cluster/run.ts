@@ -94,6 +94,7 @@ export function runClusterHost(
     peerCopy: (dst, dstDevice, src, srcDevice, bytes) => {
       cluster.peerCopy(dst, dstDevice, src, srcDevice, bytes);
     },
+    pipeStep: () => cluster.pipeStep(),
     writeHostInts: (address, values) => {
       const view = new Int32Array(hostLocal.bytes, address, values.length);
       for (let i = 0; i < values.length; i += 1) view[i] = values[i] | 0;

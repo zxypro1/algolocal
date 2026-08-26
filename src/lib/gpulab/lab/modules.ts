@@ -10,7 +10,7 @@
  *  3. **过程指标** —— `metrics()`，也就是门槛读的那棵树。
  */
 import type { GpuMetrics, StaticMetrics } from '../metrics';
-import type { CommMetrics } from '../cluster/cluster';
+import type { CommMetrics, PipelineMetrics } from '../cluster/cluster';
 import type { RooflinePoint, TimingResult } from '../timing';
 import type { SanitizerReport } from '../vm/sanitizer';
 import type { CommandRecord } from '../../labkit/machine';
@@ -57,6 +57,8 @@ export interface GpuLabApi {
   metrics(): GpuMetrics;
   /** 集群关卡的通信计量。单卡关卡上是 null */
   comm(): CommMetrics | null;
+  /** 流水线调度的计量。没调用过 pipe_step 时步数是 0 */
+  pipeline(): PipelineMetrics | null;
   /** 集群里第 index 张卡的指标 */
   deviceMetrics(index: number): GpuMetrics;
   /** 寄存器 / 共享内存 / 占用率 */
@@ -137,6 +139,7 @@ export function createGpuLabApi(world: GpuWorld): GpuLabApi {
 
     metrics: () => world.gpu.metrics(),
     comm: () => world.cluster?.comm ?? null,
+    pipeline: () => world.cluster?.pipeline ?? null,
     deviceMetrics: (index) => {
       if (!world.cluster) {
         if (index !== 0) throw new GpuLabError('这一关只有一张卡');

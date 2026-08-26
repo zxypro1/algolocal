@@ -92,6 +92,30 @@ export function emptyCommMetrics(): CommMetrics {
   };
 }
 
+/**
+ * 流水线调度的计量。
+ *
+ * 气泡率是**数出来的**，不是套公式：学员用 `pipe_step()` 声明流水线的
+ * 步边界，平台记下每一步里哪几张卡真的干了活。
+ *
+ *   气泡率 = 1 - 干活的(步, 卡)格子数 / (步数 × 卡数)
+ *
+ * 声明步数是可以少报的，所以用例还要同时校验**总工作量**
+ * （每个 microbatch 在每一级都要前向与反向各一次）—— 两头对上才算数。
+ */
+export interface PipelineMetrics {
+  /** 声明了多少个流水线步 */
+  steps: number;
+  /** 有活干的 (步, 卡) 格子数 */
+  busySlots: number;
+  /** 空转的格子占比 */
+  bubbleRatio: number;
+}
+
+export function emptyPipelineMetrics(): PipelineMetrics {
+  return { steps: 0, busySlots: 0, bubbleRatio: 0 };
+}
+
 export interface ClusterOptions extends DeviceOptions {
   spec: ClusterSpec;
 }
@@ -100,6 +124,9 @@ export class Cluster {
   readonly devices: GpuDevice[] = [];
   readonly spec: ClusterSpec;
   readonly comm = emptyCommMetrics();
+  readonly pipeline = emptyPipelineMetrics();
+  /** 当前流水线步里，哪几张卡已经干过活 */
+  private busyThisStep = new Set<number>();
   /** 当前 cudaSetDevice 选中的卡 */
   current = 0;
 
@@ -208,8 +235,18 @@ export class Cluster {
     return this.devices[found.device].copyOutInts(address - (found.device + 1) * DEVICE_SPAN, count);
   }
 
+  /** 学员声明一个流水线步边界 */
+  pipeStep(): void {
+    this.pipeline.steps += 1;
+    this.pipeline.busySlots += this.busyThisStep.size;
+    this.busyThisStep.clear();
+    const total = this.pipeline.steps * this.count;
+    this.pipeline.bubbleRatio = total > 0 ? 1 - this.pipeline.busySlots / total : 0;
+  }
+
   launch(name: string, kernel: ExecutableKernel, config: LaunchConfig, args: number[]): void {
     const device = this.current;
+    this.busyThisStep.add(device);
     const translated = args.map((arg, index) => (
       this.isPointer(arg)
         ? this.localAddress(arg, device, `${name} 的第 ${index + 1} 个参数`)
@@ -293,6 +330,8 @@ export class Cluster {
     this.deviceBusy.length = 0;
     this.deviceBytes.length = 0;
     this.current = 0;
+    this.busyThisStep.clear();
     Object.assign(this.comm, emptyCommMetrics());
+    Object.assign(this.pipeline, emptyPipelineMetrics());
   }
 }
