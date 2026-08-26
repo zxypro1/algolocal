@@ -5398,7 +5398,7 @@ const STAGE_22 = {
           const int N = ${R_DEVICES};
           const int COUNT = ${R_COUNT};
 
-          int buf[8]; int tmp[8];
+          float* buf[8]; float* tmp[8];
           for (int d = 0; d < N; ++d) {
             cudaSetDevice(d);
             float* b; float* t;
@@ -5422,12 +5422,18 @@ const STAGE_22 = {
 
           // 把每张卡的第 0 个元素写回平台的缓冲区，判定读它
           float* check = lab_buffer(0);
+          // 每张卡上取**一个靠后的元素**，不是第 0 个 ——
+          // 只查第 0 个的话，缓冲区偏移算错（按字节而不是按元素）
+          // 的实现会一路全绿，因为第 0 块两种算法落点相同
           float host[8];
+          float sample[64];
           for (int d = 0; d < N; ++d) {
             cudaSetDevice(d);
-            float one[1];
-            cudaMemcpy(one, buf[d], 4, cudaMemcpyDeviceToHost);
-            host[d] = one[0];
+            cudaMemcpy(sample, buf[d], COUNT * 4, cudaMemcpyDeviceToHost);
+            // 把整段加起来，任何一处偏移错都会露出来
+            float acc = 0.0f;
+            for (int i = 0; i < COUNT; ++i) acc = acc + sample[i];
+            host[d] = acc;
           }
           cudaSetDevice(0);
           cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);
@@ -5448,7 +5454,7 @@ const STAGE_22 = {
           const int COUNT = ${R_COUNT};
           const int CHUNK = COUNT / N;
 
-          int buf[8]; int tmp[8];
+          float* buf[8]; float* tmp[8];
           for (int d = 0; d < N; ++d) {
             cudaSetDevice(d);
             float* b; float* t;
@@ -5492,12 +5498,18 @@ const STAGE_22 = {
           }
 
           float* check = lab_buffer(0);
+          // 每张卡上取**一个靠后的元素**，不是第 0 个 ——
+          // 只查第 0 个的话，缓冲区偏移算错（按字节而不是按元素）
+          // 的实现会一路全绿，因为第 0 块两种算法落点相同
           float host[8];
+          float sample[64];
           for (int d = 0; d < N; ++d) {
             cudaSetDevice(d);
-            float one[1];
-            cudaMemcpy(one, buf[d], 4, cudaMemcpyDeviceToHost);
-            host[d] = one[0];
+            cudaMemcpy(sample, buf[d], COUNT * 4, cudaMemcpyDeviceToHost);
+            // 把整段加起来，任何一处偏移错都会露出来
+            float acc = 0.0f;
+            for (int i = 0; i < COUNT; ++i) acc = acc + sample[i];
+            host[d] = acc;
           }
           cudaSetDevice(0);
           cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);
@@ -5513,12 +5525,16 @@ const STAGE_22 = {
       const COUNT = ${R_COUNT};
 
       describe('ring all-reduce', () => {
-        it('8 张卡都拿到正确的和', async () => {
+        it('**8 张卡都拿到正确的和，而且是整段都对**', async () => {
           await lab.buildAndRun();
           const check = lab.buffer('check');
-          // 第 d 张卡的第 0 个元素是 d + 1，加起来是 1+2+...+8 = 36
+          // check[d] 是第 d 张卡整个缓冲区的和。
+          // 第 d 张卡的第 i 个元素是 (d+1) + i*0.01，八张卡加起来
+          // 每个位置是 36 + 8*i*0.01，整段求和：
+          let expected = 0;
+          for (let i = 0; i < COUNT; i += 1) expected += 36 + 8 * i * 0.01;
           for (let d = 0; d < N; d += 1) {
-            expect(Math.abs(check[d] - 36)).toBeLessThanOrEqual(1e-5);
+            expect(Math.abs(check[d] - expected)).toBeLessThanOrEqual(1e-2);
           }
         });
 
@@ -5573,9 +5589,11 @@ const DP_TOTAL = 1408;
 const DP_DEVICES = 8;
 
 const DP_KERNELS = code`
-  __global__ void fill(float* a, float v, int n) {
-    int i = threadIdx.x;
-    if (i < n) a[i] = v;
+  // **位置相关**的填充：a[i] = base + i * 0.01。
+  // 填成常数的话，桶的偏移算错也看不出来 —— 值都一样，摆哪都对
+  __global__ void fill(float* a, float base, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) a[i] = base + (float)i * 0.01f;
   }
 `;
 
@@ -5750,13 +5768,13 @@ const STAGE_23 = {
           int comms[8];
           ncclCommInitAll(comms, N, 0);
 
-          int grad[8]; int out[8];
+          float* grad[8]; float* out[8];
           for (int d = 0; d < N; ++d) {
             cudaSetDevice(d);
             float* g; float* o;
             cudaMalloc((void**)&g, TOTAL * 4);
             cudaMalloc((void**)&o, TOTAL * 4);
-            fill<<<1, 64>>>(g, (float)(d + 1), 64);
+            fill<<<TOTAL / 64, 64>>>(g, (float)(d + 1), TOTAL);
             grad[d] = g; out[d] = o;
           }
 
@@ -5776,13 +5794,18 @@ const STAGE_23 = {
           }
 
           // 每张卡的第 0 个结果写回平台的缓冲区
+          // **整段求和**而不是只取第 0 个 —— 只查第 0 个的话，
+          // 桶的偏移算错（按字节而不是按元素）的实现会一路全绿
           float* check = lab_buffer(0);
+          // 抽查散布在整段上的四个位置，还带权重。**求和是不够的** ——
+          // 偏移算错只是把值搬到别处，总和可能一点不变
           float host[8];
+          float sample[1408];
           for (int d = 0; d < N; ++d) {
             cudaSetDevice(d);
-            float one[1];
-            cudaMemcpy(one, out[d], 4, cudaMemcpyDeviceToHost);
-            host[d] = one[0];
+            cudaMemcpy(sample, out[d], TOTAL * 4, cudaMemcpyDeviceToHost);
+            host[d] = sample[0] + sample[137] * 2.0f
+                    + sample[700] * 3.0f + sample[1407] * 4.0f;
           }
           cudaSetDevice(0);
           cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);
@@ -5812,13 +5835,13 @@ const STAGE_23 = {
           int comms[8];
           ncclCommInitAll(comms, N, 0);
 
-          int grad[8]; int out[8];
+          float* grad[8]; float* out[8];
           for (int d = 0; d < N; ++d) {
             cudaSetDevice(d);
             float* g; float* o;
             cudaMalloc((void**)&g, TOTAL * 4);
             cudaMalloc((void**)&o, TOTAL * 4);
-            fill<<<1, 64>>>(g, (float)(d + 1), 64);
+            fill<<<TOTAL / 64, 64>>>(g, (float)(d + 1), TOTAL);
             grad[d] = g; out[d] = o;
           }
 
@@ -5844,12 +5867,15 @@ const STAGE_23 = {
           }
 
           float* check = lab_buffer(0);
+          // 抽查散布在整段上的四个位置，还带权重。**求和是不够的** ——
+          // 偏移算错只是把值搬到别处，总和可能一点不变
           float host[8];
+          float sample[1408];
           for (int d = 0; d < N; ++d) {
             cudaSetDevice(d);
-            float one[1];
-            cudaMemcpy(one, out[d], 4, cudaMemcpyDeviceToHost);
-            host[d] = one[0];
+            cudaMemcpy(sample, out[d], TOTAL * 4, cudaMemcpyDeviceToHost);
+            host[d] = sample[0] + sample[137] * 2.0f
+                    + sample[700] * 3.0f + sample[1407] * 4.0f;
           }
           cudaSetDevice(0);
           cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);
@@ -5865,12 +5891,16 @@ const STAGE_23 = {
       const TOTAL = ${DP_TOTAL};
 
       describe('数据并行的梯度同步', () => {
-        it('8 张卡都拿到正确的和', async () => {
+        it('**每一层的梯度都对，不只是第一个桶**', async () => {
           await lab.buildAndRun();
           const check = lab.buffer('check');
-          // 第 d 张卡的梯度是 d + 1，加起来 1+2+...+8 = 36
+          // 第 d 张卡的第 i 个梯度是 (d+1) + i*0.01，八张卡归约后是 36 + 8*0.01*i。
+          // check[d] 是四个散布位置的**加权**和 —— 加权是为了让"值被搬到别处"
+          // 也露馅：光求和的话偏移错了总数可能一点不变
+          const at = (i) => 36 + 8 * 0.01 * i;
+          const expected = at(0) + at(137) * 2 + at(700) * 3 + at(1407) * 4;
           for (let d = 0; d < N; d += 1) {
-            expect(Math.abs(check[d] - 36)).toBeLessThanOrEqual(1e-5);
+            expect(Math.abs(check[d] - expected)).toBeLessThanOrEqual(1e-1);
           }
         });
 
@@ -7298,7 +7328,7 @@ const STAGE_27 = {
           int comms[8];
           ncclCommInitAll(comms, N, devs);
 
-          int act[8]; int grad[8]; int out[8];
+          float* act[8]; float* grad[8]; float* out[8];
           for (int d = 0; d < N; ++d) {
             cudaSetDevice(d);
             float* a; float* g; float* o;
@@ -7329,12 +7359,15 @@ const STAGE_27 = {
           }
 
           float* check = lab_buffer(0);
+          // 整段求和 —— 只查第 0 个的话，分块偏移算错的实现会一路全绿
           float host[8];
+          float sample[512];
           for (int d = 0; d < N; ++d) {
             cudaSetDevice(d);
-            float one[1];
-            cudaMemcpy(one, out[d], 4, cudaMemcpyDeviceToHost);
-            host[d] = one[0];
+            cudaMemcpy(sample, out[d], TOTAL * 4, cudaMemcpyDeviceToHost);
+            float acc = 0.0f;
+            for (int i = 0; i < TOTAL; ++i) acc = acc + sample[i];
+            host[d] = acc;
           }
           cudaSetDevice(0);
           cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);
@@ -7363,7 +7396,7 @@ const STAGE_27 = {
           int comms[8];
           ncclCommInitAll(comms, N, devs);
 
-          int act[8]; int grad[8]; int out[8];
+          float* act[8]; float* grad[8]; float* out[8];
           for (int d = 0; d < N; ++d) {
             cudaSetDevice(d);
             float* a; float* g; float* o;
@@ -7407,12 +7440,15 @@ const STAGE_27 = {
           cudaStreamDestroy(compute);
 
           float* check = lab_buffer(0);
+          // 整段求和 —— 只查第 0 个的话，分块偏移算错的实现会一路全绿
           float host[8];
+          float sample[512];
           for (int d = 0; d < N; ++d) {
             cudaSetDevice(d);
-            float one[1];
-            cudaMemcpy(one, out[d], 4, cudaMemcpyDeviceToHost);
-            host[d] = one[0];
+            cudaMemcpy(sample, out[d], TOTAL * 4, cudaMemcpyDeviceToHost);
+            float acc = 0.0f;
+            for (int i = 0; i < TOTAL; ++i) acc = acc + sample[i];
+            host[d] = acc;
           }
           cudaSetDevice(0);
           cudaMemcpy(check, host, N * 4, cudaMemcpyHostToDevice);
@@ -7429,14 +7465,17 @@ const STAGE_27 = {
       const CHUNK = ${OV_CHUNK};
 
       describe('通信与计算重叠', () => {
-        it('结果正确', async () => {
+        it('**结果正确，而且每一块都对**', async () => {
           await lab.buildAndRun();
           const check = lab.buffer('check');
-          // 第 d 张卡的激活是 d+1，梯度是 0.5(d+1)+0.001，八张卡加起来
-          let expected = 0;
-          for (let d = 0; d < N; d += 1) expected += 0.5 * (d + 1) + 0.001;
+          // 第 d 张卡的激活是 d+1，梯度是 0.5(d+1)+0.001，八张卡加起来；
+          // check[d] 是整段 CHUNKS × CHUNK 个元素的和。
+          // 整段而不是第 0 个 —— 分块偏移算错的实现只在第 0 块上碰巧对
+          let perElement = 0;
+          for (let d = 0; d < N; d += 1) perElement += 0.5 * (d + 1) + 0.001;
+          const expected = perElement * CHUNKS * CHUNK;
           for (let d = 0; d < N; d += 1) {
-            expect(Math.abs(check[d] - expected)).toBeLessThanOrEqual(1e-4);
+            expect(Math.abs(check[d] - expected)).toBeLessThanOrEqual(1e-1);
           }
         });
 
@@ -7846,6 +7885,419 @@ const STAGE_28 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 29 关：分离式部署与容错                                            */
+/* ------------------------------------------------------------------ */
+
+const DS_DEVICES = 8;
+const DS_PREFILL = 2;      // 0、1 号卡做 prefill
+const DS_REQUESTS = 24;
+const DS_DECODE_STEPS = 4;
+const DS_FAIL_DEVICE = 4;  // 第 4 号卡在中途掉线
+
+const DS_KERNELS = code`
+  __global__ void fill(float* a, float v, int n) {
+    int i = threadIdx.x;
+    if (i < n) a[i] = v;
+  }
+  // prefill：一次把整个提示词算完，计算量大
+  __global__ void prefillReq(int* progress, float* kv, int req, int n) {
+    int i = threadIdx.x;
+    if (i == 0) progress[req] = progress[req] + 1;
+    if (i < n) kv[i] = kv[i] + 1.0f;
+  }
+  // decode：一步一个 token，计算量小
+  __global__ void decodeStep(int* progress, float* kv, int req, int n) {
+    int i = threadIdx.x;
+    if (i == 0) progress[req] = progress[req] + 1;
+    if (i < n) kv[i] = kv[i] * 1.0009765625f;
+  }
+`;
+
+const dsBench = {
+  sources: ['/root/serving.cu'],
+  buffers: [
+    { name: 'progress', length: DS_REQUESTS, type: 'int', fill: { kind: 'zeros' } },
+  ],
+  launches: [],
+};
+
+const STAGE_29 = {
+  id: 'disaggregated-serving',
+  title: t('分离式部署与容错 —— 掉一张卡，服务不能停',
+    'Disaggregated serving and fault tolerance — lose a GPU, keep serving'),
+  goal: t(
+    [
+      '最后一关。前 28 关做的每一件事，在这一关都要在一个**会出故障的集群**上活下来。',
+      '',
+      '**分离式部署**。prefill 与 decode 是两种完全不同的负载：',
+      '',
+      '| | 一次的计算量 | 瓶颈 | 批的效果 |',
+      '| --- | --- | --- | --- |',
+      '| prefill | 几千个 token 一起算 | **算力** | 本来就满 |',
+      '| decode | 一个 token | **访存与提交开销** | 批越大越好 |',
+      '',
+      '混在一起跑，两边都被拖累：一个大 prefill 插进来，所有正在 decode 的请求',
+      '都要等它算完（这就是 TTFT 好而 TPOT 抖的来源）。',
+      '所以生产里把它们**分到不同的卡上**：这一关 0、1 号卡做 prefill，',
+      '2 到 7 号做 decode。prefill 完的 KV cache 传给某张 decode 卡接着跑。',
+      '',
+      '**容错**。8 张卡跑上几个月，掉一张是常态而不是意外。',
+      '这一关会在处理到第 12 个请求时让 4 号卡掉线。',
+      '',
+      '掉线之后，对它的所有调用都会返回错误 —— 和真卡一样：',
+      '',
+      '```cuda',
+      'if (cudaSetDevice(d) != 0) {',
+      '  // 这张卡没了，换一张',
+      '}',
+      '```',
+      '',
+      '**不检查返回值的话，下一次起 kernel 直接崩。** 现在的 `serving.cu` 就是这样。',
+      '',
+      '你要做的是：发现某张 decode 卡不可用时，把请求改派给还活着的卡。',
+      '**24 个请求一个都不能丢** —— 每个都要走完 1 次 prefill 加 4 步 decode。',
+      '',
+      '```bash',
+      'nvcc -o bench serving.cu && ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 24 个请求全部完成，每个都是 5 步（平台记账，改不了）',
+      '- 掉线的那张卡在故障之后**一个 block 都没起**',
+      '- 活着的 decode 卡之间负载不均 ≤ 1.6',
+    ].join('\n'),
+    [
+      'The last stage. Everything from the previous 28 has to survive on a cluster that **breaks**.',
+      '',
+      '**Disaggregated serving.** Prefill and decode are entirely different workloads:',
+      '',
+      '| | work per call | bottleneck | effect of batching |',
+      '| --- | --- | --- | --- |',
+      '| prefill | thousands of tokens at once | **compute** | already saturated |',
+      '| decode | one token | **memory and launch overhead** | bigger is better |',
+      '',
+      'Run together, both suffer: one large prefill arriving forces every decoding request to wait',
+      'for it (this is where good TTFT with jittery TPOT comes from). Production therefore splits',
+      'them **across different GPUs**: here GPUs 0 and 1 do prefill and 2 through 7 do decode, with',
+      'the finished KV cache handed to a decode GPU.',
+      '',
+      '**Fault tolerance.** Run 8 GPUs for a few months and losing one is routine, not exceptional.',
+      'This stage kills GPU 4 while request 12 is being processed.',
+      '',
+      'After that, every call to it returns an error, exactly as on real hardware:',
+      '',
+      '```cuda',
+      'if (cudaSetDevice(d) != 0) {',
+      '  // this GPU is gone, use another',
+      '}',
+      '```',
+      '',
+      '**Without checking the return value, the next launch crashes.** That is what `serving.cu`',
+      'does today.',
+      '',
+      'Your job: when a decode GPU becomes unavailable, reassign its requests to a surviving one.',
+      '**None of the 24 requests may be lost**: each needs 1 prefill and 4 decode steps.',
+      '',
+      '```bash',
+      'nvcc -o bench serving.cu && ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- all 24 requests complete, 5 steps each (counted by the platform, not by you)',
+      '- the failed GPU launches **not one block** after the failure',
+      '- imbalance across the surviving decode GPUs at most 1.6',
+    ].join('\n')
+  ),
+  checklist: [
+    t('每次 cudaSetDevice 都检查返回值', 'Check the return value of every cudaSetDevice'),
+    t('decode 卡不可用时改派给还活着的',
+      'Reassign to a live GPU when a decode GPU is unavailable'),
+    t('24 个请求一个不丢，每个 5 步', 'All 24 requests, 5 steps each, none lost'),
+  ],
+  hints: [
+    t('挑 decode 卡的时候顺着往下找第一张活着的就行 —— '
+      + '`cudaSetDevice` 的返回值就是"活着没有"的答案，不需要另外的健康检查。',
+      'Picking a decode GPU can simply scan forward to the first live one: the return value of '
+      + '`cudaSetDevice` already answers "is it alive", no separate health check needed.'),
+    t('故障是在处理请求的过程中发生的，所以**每一次**都要检查，'
+      + '不是开头查一遍就完了。',
+      'The failure happens mid-run, so check **every time**, not once at startup.'),
+  ],
+  pitfalls: [
+    t('**只在开头做一次健康检查。** 故障发生在第 12 个请求 —— '
+      + '开头查的时候 4 号卡还好好的。',
+      '**Health-checking once at startup.** The failure happens at request 12, when GPU 4 was '
+      + 'perfectly fine at startup.'),
+    t('**发现掉卡之后就把那个请求跳过。** 服务是没崩，但那个用户的请求丢了。'
+      + '判定要求 24 个请求全部完成 —— 容错的意思是**转移**，不是**放弃**。',
+      '**Skipping the request when a GPU is found dead.** The service survives but that user\'s '
+      + 'request is lost. The check requires all 24 to complete: fault tolerance means **migrating**, '
+      + 'not **abandoning**.'),
+    t('**全都改派给同一张备用卡。** 请求是不丢了，但那张卡的负载翻倍，'
+      + '成了新的瓶颈。不均度门槛专门抓这个。',
+      '**Reassigning everything to one spare GPU.** No requests are lost but that GPU\'s load '
+      + 'doubles and becomes the new bottleneck. The imbalance gate exists for this.'),
+  ],
+  extension: t(
+    '分离式部署在 2026 年是主流方案，vLLM 与 TensorRT-LLM 都有。'
+    + '它带来的最大好处不是吞吐，而是**两条 SLO 可以分开调**：'
+    + 'prefill 集群按 TTFT 调，decode 集群按 TPOT 调，'
+    + '两边的批大小、并行策略、甚至卡型都可以不一样。'
+    + '\n\n'
+    + '代价是 KV cache 要跨卡传。一条 4K 上下文的序列，'
+    + 'KV 可能有好几个 GB —— 传它的时间可能比 prefill 本身还长。'
+    + '所以真实系统会在这上面下很多功夫：走 NVLink 而不是网络、'
+    + '一边 prefill 一边分层传（layer-wise streaming）、'
+    + '以及把 KV 量化到 fp8 再传（第 19 关那件事在这里又出现了一次）。'
+    + '\n\n'
+    + '容错这一侧，掉卡在千卡规模上是每天都发生的事。'
+    + '推理的容错相对简单 —— 请求是无状态的，转走就行；'
+    + '训练要难得多，因为整个集群共享一份同步的状态，'
+    + '掉一张卡意味着整步作废，得从检查点恢复。'
+    + '所以训练侧的功夫花在"检查点写得多快"和"能不能只重算掉的那一部分"上。'
+    + '\n\n'
+    + '---'
+    + '\n\n'
+    + '**到这里 29 关走完了。** 回头看这条链：'
+    + '第 1 关你写了一个把两个数组加起来的 kernel，'
+    + '第 2 关发现同样的加法换个访存方式差 8 倍；'
+    + '第 16 关你让一个 seq×seq 的矩阵彻底不存在；'
+    + '第 20 关你把 240 次提交合成 48 次而计算一点没变；'
+    + '第 22 关你数出了 2(n-1)/n；'
+    + '第 25 关你看到三次通信优化里总量一次都没降。'
+    + '\n\n'
+    + '这些数字都是你自己量出来的。'
+    + '换到真卡上，工具会变（ncu、nsys、nccl-tests），'
+    + '而你要看的那几个数不会变。',
+    'Disaggregated serving is mainstream in 2026, in both vLLM and TensorRT-LLM. Its biggest benefit '
+    + 'is not throughput but that **the two SLOs can be tuned separately**: the prefill fleet for '
+    + 'TTFT and the decode fleet for TPOT, with different batch sizes, parallel strategies, even '
+    + 'different GPU models.\n\n'
+    + 'The cost is moving the KV cache between GPUs. A 4K-context sequence can carry several GB of '
+    + 'KV, and transferring it can take longer than the prefill itself. Real systems work hard here: '
+    + 'moving it over NVLink rather than the network, streaming it layer by layer as prefill '
+    + 'proceeds, and quantising it to fp8 before sending, which is stage 19 showing up again.\n\n'
+    + 'On the fault-tolerance side, losing a GPU happens daily at thousand-GPU scale. Inference is '
+    + 'the easy case, since requests are stateless and can simply be moved. Training is far harder, '
+    + 'because the whole cluster shares synchronised state, so losing one GPU invalidates the step '
+    + 'and requires recovering from a checkpoint. Effort there goes into how fast checkpoints can be '
+    + 'written and whether only the lost portion can be recomputed.\n\n---\n\n'
+    + '**That is all 29 stages.** Look back at the chain: in stage 1 you wrote a kernel adding two '
+    + 'arrays, and in stage 2 you found the same addition eight times slower depending on how it '
+    + 'reads memory. In stage 16 you made a seq×seq matrix cease to exist. In stage 20 you turned 240 '
+    + 'submissions into 48 with the computation untouched. In stage 22 you counted out 2(n-1)/n. In '
+    + 'stage 25 you saw three communication optimisations where the total volume never dropped once.'
+    + '\n\nEvery one of those numbers you measured yourself. On real hardware the tools change (ncu, '
+    + 'nsys, nccl-tests); the numbers you look at do not.'
+  ),
+  gpu: {
+    world: CLUSTER_WORLD,
+    files: {
+      '/root/serving.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "containers.h"
+
+        ${DS_KERNELS}
+
+        int main(void) {
+          const int PREFILL = ${DS_PREFILL};
+          const int DEVICES = ${DS_DEVICES};
+          const int REQUESTS = ${DS_REQUESTS};
+          const int STEPS = ${DS_DECODE_STEPS};
+
+          // **每张卡一份记账数组。** 一张卡的指针在另一张卡上是非法的 ——
+          // 共用一份的话，第一个跨卡的 kernel 就是 illegal memory access
+          int* progress[8];
+          float* kv[8];
+          for (int d = 0; d < DEVICES; ++d) {
+            cudaSetDevice(d);
+            int* pg; float* k;
+            cudaMalloc((void**)&pg, REQUESTS * 4);
+            cudaMemset(pg, 0, REQUESTS * 4);
+            cudaMalloc((void**)&k, 64 * 4);
+            fill<<<1, 16>>>(k, 1.0f, 16);
+            progress[d] = pg; kv[d] = k;
+          }
+
+          // 请求一完成就把结果取回宿主。**一完成就取** ——
+          // 留在卡上的话，那张卡之后掉线就再也读不出来了。
+          // 真实引擎也是这么做的：结果返回给用户之后就不再依赖那张卡
+          int total[24];
+          int one[24];
+          for (int r = 0; r < REQUESTS; ++r) total[r] = 0;
+
+          for (int req = 0; req < REQUESTS; ++req) {
+            // 4 号卡在处理第 12 个请求时掉线
+            if (req == 12) { lab_fail_device(${DS_FAIL_DEVICE}); }
+
+            // prefill：0、1 号卡轮流
+            int p = req % PREFILL;
+            cudaSetDevice(p);
+            prefillReq<<<1, 16>>>(progress[p], kv[p], req, 16);
+
+            // TODO: decode 卡按 req 轮流挑，**没检查 cudaSetDevice 的返回值**。
+            //       4 号卡掉线之后，轮到它的请求会直接把程序打崩。
+            //       改成：挑到不可用的卡就顺着往下找一张活着的。
+            int d = PREFILL + (req % (DEVICES - PREFILL));
+            cudaSetDevice(d);
+            for (int s = 0; s < STEPS; ++s) {
+              decodeStep<<<1, 16>>>(progress[d], kv[d], req, 16);
+            }
+
+            // 取回这个请求的记账
+            cudaSetDevice(p);
+            cudaMemcpy(one, progress[p] + req, 4, cudaMemcpyDeviceToHost);
+            total[req] = one[0];
+            cudaSetDevice(d);
+            cudaMemcpy(one, progress[d] + req, 4, cudaMemcpyDeviceToHost);
+            total[req] = total[req] + one[0];
+          }
+
+          cudaSetDevice(0);
+          cudaMemcpy(lab_buffer(0), total, REQUESTS * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+    bench: dsBench,
+    referenceFiles: {
+      '/root/serving.cu': code`
+        #include "engine.h"
+        #include "cluster.h"
+        #include "containers.h"
+
+        ${DS_KERNELS}
+
+        int main(void) {
+          const int PREFILL = ${DS_PREFILL};
+          const int DEVICES = ${DS_DEVICES};
+          const int REQUESTS = ${DS_REQUESTS};
+          const int STEPS = ${DS_DECODE_STEPS};
+
+          // **每张卡一份记账数组。** 一张卡的指针在另一张卡上是非法的 ——
+          // 共用一份的话，第一个跨卡的 kernel 就是 illegal memory access
+          int* progress[8];
+          float* kv[8];
+          for (int d = 0; d < DEVICES; ++d) {
+            cudaSetDevice(d);
+            int* pg; float* k;
+            cudaMalloc((void**)&pg, REQUESTS * 4);
+            cudaMemset(pg, 0, REQUESTS * 4);
+            cudaMalloc((void**)&k, 64 * 4);
+            fill<<<1, 16>>>(k, 1.0f, 16);
+            progress[d] = pg; kv[d] = k;
+          }
+
+          // 请求一完成就把结果取回宿主。**一完成就取** ——
+          // 留在卡上的话，那张卡之后掉线就再也读不出来了。
+          // 真实引擎也是这么做的：结果返回给用户之后就不再依赖那张卡
+          int total[24];
+          int one[24];
+          for (int r = 0; r < REQUESTS; ++r) total[r] = 0;
+
+          for (int req = 0; req < REQUESTS; ++req) {
+            if (req == 12) { lab_fail_device(${DS_FAIL_DEVICE}); }
+
+            int p = req % PREFILL;
+            cudaSetDevice(p);
+            prefillReq<<<1, 16>>>(progress[p], kv[p], req, 16);
+
+            // 从轮到的那张卡开始，**顺着往下找第一张活着的**。
+            // cudaSetDevice 的返回值就是"活着没有"的答案，不需要另外的健康检查。
+            // 从 req % 里挑起点而不是固定挑一张备用卡 ——
+            // 全改派给同一张的话，那张卡的负载会翻倍，成了新的瓶颈
+            int start = req % (DEVICES - PREFILL);
+            int d = -1;
+            for (int k2 = 0; k2 < DEVICES - PREFILL; ++k2) {
+              int cand = PREFILL + (start + k2) % (DEVICES - PREFILL);
+              if (cudaSetDevice(cand) == 0) { d = cand; break; }
+            }
+            // 一张活着的都没有才算真的服务不了 —— 这一关不会发生
+            if (d < 0) { continue; }
+
+            for (int s = 0; s < STEPS; ++s) {
+              decodeStep<<<1, 16>>>(progress[d], kv[d], req, 16);
+            }
+
+            // 取回这个请求的记账。**请求一完成就取** ——
+            // 留在卡上的话，那张卡之后掉线就再也读不出来了
+            cudaSetDevice(p);
+            cudaMemcpy(one, progress[p] + req, 4, cudaMemcpyDeviceToHost);
+            total[req] = one[0];
+            cudaSetDevice(d);
+            cudaMemcpy(one, progress[d] + req, 4, cudaMemcpyDeviceToHost);
+            total[req] = total[req] + one[0];
+          }
+
+          cudaSetDevice(0);
+          cudaMemcpy(lab_buffer(0), total, REQUESTS * 4, cudaMemcpyHostToDevice);
+          return 0;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('serving.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const REQUESTS = ${DS_REQUESTS};
+      const STEPS = ${DS_DECODE_STEPS};
+      const FAILED = ${DS_FAIL_DEVICE};
+      const PREFILL = ${DS_PREFILL};
+
+      describe('分离式部署与容错', () => {
+        it('**24 个请求一个不丢，每个都走完 5 步**', async () => {
+          await lab.buildAndRun();
+          const progress = lab.bufferInts('progress');
+          for (let req = 0; req < REQUESTS; req += 1) {
+            expect(progress[req]).toBe(1 + STEPS);
+          }
+        });
+
+        it('掉线的卡在故障之后一个 block 都没起', async () => {
+          await lab.buildAndRun();
+          const blocks = lab.imbalance().blocksByDevice;
+          // 它只接 req % 6 == 2 的请求，故障（req 12）之前是 2 和 8 两个，
+          // 各 4 步，加上一次 fill
+          expect(blocks[FAILED]).toBe(1 + 2 * STEPS);
+        });
+
+        it('**活着的 decode 卡之间没有把负载压给同一张**', async () => {
+          await lab.buildAndRun();
+          const blocks = lab.imbalance().blocksByDevice;
+          const alive = [];
+          for (let d = PREFILL; d < blocks.length; d += 1) {
+            if (d !== FAILED) alive.push(blocks[d]);
+          }
+          const mean = alive.reduce((sum, n) => sum + n, 0) / alive.length;
+          expect(Math.max(...alive) / mean).toBeLessThanOrEqual(1.6);
+        });
+
+        it('prefill 与 decode 是分开的卡', async () => {
+          await lab.buildAndRun();
+          const blocks = lab.imbalance().blocksByDevice;
+          // 0、1 号只做 prefill：每卡 12 个请求各 1 次，加一次 fill
+          expect(blocks[0]).toBe(1 + REQUESTS / PREFILL);
+          expect(blocks[1]).toBe(1 + REQUESTS / PREFILL);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.imbalance.maxOverMean', op: 'lte', value: 2.2,
+      zh: '八张卡的负载不均 —— 全改派给同一张备用卡会被抓住',
+      en: 'imbalance across all 8 GPUs: reassigning everything to one spare shows up here',
+      unit: 'ratio', dimension: 'throughput',
+    }),
+  ],
+  focus: ['correctness', 'throughput'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -7912,5 +8364,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22, STAGE_23, STAGE_24, STAGE_25, STAGE_26, STAGE_27, STAGE_28],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18, STAGE_19, STAGE_20, STAGE_21, STAGE_22, STAGE_23, STAGE_24, STAGE_25, STAGE_26, STAGE_27, STAGE_28, STAGE_29],
 };

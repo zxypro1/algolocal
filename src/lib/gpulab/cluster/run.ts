@@ -91,6 +91,7 @@ export function runClusterHost(
     deviceCount: () => cluster.count,
     getDevice: () => cluster.current,
     setDevice: (index) => cluster.setDevice(index),
+    failDevice: (index) => cluster.failDevice(index),
     peerCopy: (dst, dstDevice, src, srcDevice, bytes) => {
       cluster.peerCopy(dst, dstDevice, src, srcDevice, bytes);
     },

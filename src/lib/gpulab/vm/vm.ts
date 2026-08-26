@@ -130,7 +130,10 @@ export function emptyCounters(): GpuCounters {
 export class KernelError extends Error {
   line: number;
   constructor(message: string, line: number) {
-    super(line > 0 ? `第 ${line} 行：${message}` : message);
+    // 已经带行号的不要再加一遍 —— 宿主运行时的错误会先被它自己标上行号，
+    // 再被这里包一层，打出来就是「第 78 行：第 78 行：…」
+    const prefixed = /^第 \d+ 行：/.test(message);
+    super(line > 0 && !prefixed ? `第 ${line} 行：${message}` : message);
     this.name = 'KernelError';
     this.line = line;
   }

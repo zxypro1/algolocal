@@ -188,6 +188,8 @@ export type HostFn =
   | 'cudaGetDeviceCount' | 'cudaSetDevice' | 'cudaGetDevice' | 'cudaMemcpyPeer'
   /** 流水线调度：声明一个步边界，气泡率靠它数出来 */
   | 'pipe_step'
+  /** 让一张卡掉线 —— 容错那一关的脚手架用它注入故障 */
+  | 'lab_fail_device'
   /** 流 */
   | 'cudaStreamCreate' | 'cudaStreamSynchronize' | 'cudaStreamDestroy'
   | 'cudaDeviceSynchronizeAll'

@@ -74,7 +74,7 @@ export const HOST: Record<HostFn, number> = {
   cudaGraphInstantiate: 42, cudaGraphLaunch: 43,
   cudaGraphDestroy: 44, cudaGraphExecDestroy: 45,
   cudaGetDeviceCount: 50, cudaSetDevice: 51, cudaGetDevice: 52, cudaMemcpyPeer: 53,
-  pipe_step: 54,
+  pipe_step: 54, lab_fail_device: 59,
   cudaStreamCreate: 55, cudaStreamSynchronize: 56, cudaStreamDestroy: 57,
   cudaDeviceSynchronizeAll: 58,
   ncclCommInitAll: 60, ncclCommDestroy: 61,
