@@ -88,6 +88,12 @@ const DEPLOY = {
   },
 };
 
+const SERVICE = {
+  apiVersion: 'v1', kind: 'Service',
+  metadata: { name: 'ledger', namespace: 'payments' },
+  spec: { selector: { app: 'ledger' }, ports: [{ port: 5432, targetPort: 5432 }] },
+};
+
 const CONFIG = {
   apiVersion: 'v1', kind: 'ConfigMap',
   metadata: { name: 'ledger-config', namespace: 'payments' },
@@ -113,7 +119,7 @@ async function build(labelled: boolean) {
       deployment('csi-driver', CSI_IMAGE),
       deployment('snapshot-controller', SNAP_IMAGE),
       VELERO, LOCATION, STORAGE_CLASS, snapshotClass(labelled),
-      CLAIM, DEPLOY, CONFIG,
+      CLAIM, DEPLOY, SERVICE, CONFIG,
     ]),
   });
   await world.cluster.advanceBy(90_000);
@@ -322,6 +328,28 @@ describe('恢复', () => {
     await restoreInto(w);
     expect(restoreOf(w, 'rescue').phase).toBe('PartiallyFailed');
     expect(restoreOf(w, 'rescue').warnings).toBeGreaterThan(0);
+  });
+
+  /**
+   * clusterIP 是集群分配的，不是用户写的。
+   * 原样带回去就是两个 Service 抢同一个地址。
+   */
+  it('恢复出来的 Service 重新分地址，不抢原来那个', async () => {
+    const w = await build(true);
+    const services = { group: '', version: 'v1', resource: 'services' } as const;
+    const before = (w.cluster.registry.get(
+      w.cluster.scheme.mustGet(services), 'payments', 'ledger'
+    ).spec as any).clusterIP;
+    expect(before).toBeTruthy();
+
+    await makeBackup(w);
+    await restoreInto(w, { namespaceMapping: { payments: 'payments-drill' } });
+
+    const after = (w.cluster.registry.get(
+      w.cluster.scheme.mustGet(services), 'payments-drill', 'ledger'
+    ).spec as any).clusterIP;
+    expect(after).toBeTruthy();
+    expect(after).not.toBe(before);
   });
 
   it('备份不存在：恢复直接失败', async () => {

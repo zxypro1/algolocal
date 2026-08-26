@@ -150,11 +150,20 @@ export class VeleroController extends Controller {
   private async validateLocations(): Promise<void> {
     for (const location of this.locations.list()) {
       const bucket = ((location.spec ?? {}) as any)?.objectStorage?.bucket;
+      const phase = bucket ? 'Available' : 'Unavailable';
+      const status = (location.status ?? {}) as any;
+      /**
+       * 只在结论变了的时候才写回。
+       *
+       * 每次 reconcile 都刷一个新的 lastValidationTime 的话，写回本身会
+       * 触发下一轮 reconcile —— 世界自己把自己吵醒，永远静不下来。
+       */
+      if (status.phase === phase) continue;
       await ignoreConflict(() => {
         updateStatusIfChanged(
           this.registry, BACKUPSTORAGELOCATIONS, location.metadata.namespace, location.metadata.name!,
           {
-            phase: bucket ? 'Available' : 'Unavailable',
+            phase,
             lastValidationTime: new Date(this.context.now()).toISOString(),
             ...(bucket ? {} : { message: 'no bucket configured' }),
           }
@@ -466,6 +475,20 @@ export class VeleroController extends Controller {
       annotations: body.metadata.annotations,
     } as any;
     delete (body as any).status;
+
+    /**
+     * Service 上那个 clusterIP 不能原样带回去。
+     *
+     * 它是集群分配的，不是用户写的。恢复到另一个命名空间时原样放回去，
+     * 就是两个 Service 抢同一个 IP；恢复到原地也未必还空着。
+     * 真 Velero 也是把它清掉让集群重新分配。
+     */
+    if (body.kind === 'Service') {
+      const spec = (body.spec ?? {}) as any;
+      delete spec.clusterIP;
+      delete spec.clusterIPs;
+      body.spec = spec;
+    }
 
     if (body.kind === 'PersistentVolumeClaim') {
       const spec = (body.spec ?? {}) as any;
