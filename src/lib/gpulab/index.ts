@@ -9,7 +9,8 @@ import { encode, type ExecutableKernel } from './ir/program';
 import type { CompiledKernel } from './ir/types';
 import { lowerTranslationUnit } from './cuda/lower';
 import { parseCuda, type CudaParserOptions } from './cuda/parser';
-import { flattenMetrics, toMetrics, type GpuMetrics } from './metrics';
+import { flattenMetrics, staticMetricsOf, toMetrics, type GpuMetrics, type StaticMetrics } from './metrics';
+import { H100, computeOccupancy, type DeviceSpec } from './device';
 import { LinearMemory } from './vm/memory';
 import { RaceDetector, formatRaceReports, type SanitizerReport } from './vm/sanitizer';
 import { emptyCounters, launchKernel, type Dim3, type GpuCounters, type LaunchConfig, type KernelArg } from './vm/vm';
@@ -18,7 +19,10 @@ export { CudaSyntaxError, parseCuda, resetCudaParser } from './cuda/parser';
 export { CudaCompileError } from './cuda/lower';
 export { KernelError, dim3, launchKernel } from './vm/vm';
 export { LinearMemory, MemoryFault, SECTOR_BYTES, WARP_SIZE } from './vm/memory';
-export { flattenMetrics, toMetrics } from './metrics';
+export { flattenMetrics, staticMetricsOf, toMetrics } from './metrics';
+export { H100, B200, DEVICES, computeOccupancy } from './device';
+export type { DeviceSpec, Occupancy } from './device';
+export type { StaticMetrics } from './metrics';
 export { RaceDetector, formatRaceReports } from './vm/sanitizer';
 export type { SanitizerReport, RaceReport } from './vm/sanitizer';
 export type { GpuMetrics } from './metrics';
@@ -48,6 +52,13 @@ export interface DeviceOptions {
   /** 每个 block 的共享内存上限。默认 48KB，和不显式提高时的 CUDA 一致。 */
   sharedBytesPerBlock?: number;
   /**
+   * 用哪张卡的参数。默认 H100。
+   *
+   * 换成 B200 之后学员的 kernel 一个字都不用改 —— 变的只是占用率、
+   * 带宽与各单元的吞吐比例。见 design/gpulab.md 拍板记录第 2 条。
+   */
+  device?: DeviceSpec;
+  /**
    * 执行预算：跑到这么多条 warp 指令还没停就报错。
    *
    * 防的是学员写错的死循环。默认按「判定最多跑十来秒」定，
@@ -66,6 +77,8 @@ export class GpuDevice {
   readonly memory: LinearMemory;
   private readonly sharedCapacity: number;
   private readonly maxWarpInsts: number | undefined;
+  readonly device: DeviceSpec;
+  private lastStatic: StaticMetrics | null = null;
   private counters = emptyCounters();
   private lastSanitizer: SanitizerReport = { races: [], truncated: 0 };
 
@@ -73,6 +86,7 @@ export class GpuDevice {
     this.memory = new LinearMemory(options.globalBytes ?? 64 * 1024 * 1024, 'global');
     this.sharedCapacity = options.sharedBytesPerBlock ?? 48 * 1024;
     this.maxWarpInsts = options.maxWarpInsts;
+    this.device = options.device ?? H100;
   }
 
   /** cudaMalloc：返回设备地址 */
@@ -103,6 +117,8 @@ export class GpuDevice {
   }
 
   launch(kernel: CompiledKernel | ExecutableKernel, config: LaunchConfig, args: KernelArg[]): void {
+    const threadsPerBlock = config.block.x * config.block.y * config.block.z;
+    this.lastStatic = staticMetricsOf(this.device, kernel, threadsPerBlock);
     const result = launchKernel(kernel, config, args, {
       memory: this.memory,
       sharedCapacity: this.sharedCapacity,
@@ -142,6 +158,11 @@ export class GpuDevice {
     return this.lastSanitizer;
   }
 
+  /** 最近一次 launch 的静态指标（寄存器、共享内存、占用率） */
+  staticMetrics(): StaticMetrics | null {
+    return this.lastStatic;
+  }
+
   /** 最近一次 racecheck 的结果；没跑过就是空的 */
   sanitizerReport(): SanitizerReport {
     return this.lastSanitizer;
@@ -163,9 +184,15 @@ export class GpuDevice {
    * `gpu.sanitizer.races` 一并放进来 —— 第 3 关起它是恒为 0 的硬门槛。
    */
   flatMetrics(): Record<string, number> {
+    const stat = this.lastStatic;
     return {
       ...flattenMetrics(this.metrics()),
       'gpu.sanitizer.races': this.lastSanitizer.races.length + this.lastSanitizer.truncated,
+      'gpu.registers.perThread': stat?.registersPerThread ?? 0,
+      'gpu.shared.bytesPerBlock': stat?.sharedBytesPerBlock ?? 0,
+      'gpu.occupancy.theoretical': stat?.occupancy.theoretical ?? 0,
+      'gpu.occupancy.warpsPerSm': stat?.occupancy.warpsPerSm ?? 0,
+      'gpu.occupancy.blocksPerSm': stat?.occupancy.blocksPerSm ?? 0,
     };
   }
 

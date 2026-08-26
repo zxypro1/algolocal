@@ -51,6 +51,7 @@ export const OP = {
   ACTIVEMASK: 21,
   SYNCWARP: 22,
   ATOM: 23,
+  LOCALBASE: 24,
 } as const;
 
 export const SHFL = { idx: 0, up: 1, down: 2, xor: 3 } as const;
@@ -60,7 +61,7 @@ export const ATOM = {
 } as const;
 
 export const TY = { F32: 0, I32: 1, U32: 2 } as const;
-export const SPACE = { GLOBAL: 0, SHARED: 1 } as const;
+export const SPACE = { GLOBAL: 0, SHARED: 1, LOCAL: 2 } as const;
 
 export const BIN = {
   add: 0, sub: 1, mul: 2, div: 3, rem: 4,
@@ -85,6 +86,10 @@ export const SREG = {
   'nctaid.x': 9, 'nctaid.y': 10, 'nctaid.z': 11,
   warpsize: 12,
 } as const;
+
+function spaceCode(space: Space): number {
+  return space === 'global' ? SPACE.GLOBAL : space === 'shared' ? SPACE.SHARED : SPACE.LOCAL;
+}
 
 function tyCode(ty: IrType): number {
   return ty === 'f32' ? TY.F32 : ty === 'i32' ? TY.I32 : TY.U32;
@@ -176,18 +181,23 @@ export function encode(kernel: CompiledKernel): ExecutableKernel {
         code[at + 1] = inst.dst;
         code[at + 2] = inst.offset;
         break;
+      case 'localbase':
+        code[at] = OP.LOCALBASE;
+        code[at + 1] = inst.dst;
+        code[at + 2] = inst.offset;
+        break;
       case 'load':
         code[at] = OP.LOAD;
         code[at + 1] = inst.dst;
         code[at + 2] = inst.addr;
-        code[at + 3] = inst.space === 'global' ? SPACE.GLOBAL : SPACE.SHARED;
+        code[at + 3] = spaceCode(inst.space);
         code[at + 4] = tyCode(inst.ty);
         break;
       case 'store':
         code[at] = OP.STORE;
         code[at + 1] = inst.addr;
         code[at + 2] = inst.src;
-        code[at + 3] = inst.space === 'global' ? SPACE.GLOBAL : SPACE.SHARED;
+        code[at + 3] = spaceCode(inst.space);
         code[at + 4] = tyCode(inst.ty);
         break;
       case 'jmp':
@@ -257,7 +267,7 @@ export function encode(kernel: CompiledKernel): ExecutableKernel {
         code[at + 2] = inst.addr;
         code[at + 3] = inst.value;
         code[at + 4] = ATOM[inst.kind as AtomKind];
-        code[at + 5] = inst.space === 'global' ? SPACE.GLOBAL : SPACE.SHARED;
+        code[at + 5] = spaceCode(inst.space);
         code[at + 6] = tyCode(inst.ty);
         code[at + 7] = inst.compare;
         break;

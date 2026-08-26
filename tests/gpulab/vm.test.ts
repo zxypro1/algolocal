@@ -58,7 +58,9 @@ describe('CUDA 前端', () => {
       ['__global__ void k(float* a) { for (int i=0;i<4;++i) { break; } }', /break/],
       ['__device__ float f(float x) { return x; }', /__device__/],
       ['__global__ void k(float* a) { extern __shared__ float s[]; }', /extern|动态共享内存/],
-      ['__global__ void k(float* a) { float t[8]; t[0] = 1.0f; }', /local memory|私有的数组/],
+      // 线程私有数组现在支持了（常量下标进寄存器、动态下标落 local memory），
+      // 这一行换成还没做的：数组初始化列表
+      ['__global__ void k(float* a) { float t[2] = {1.0f, 2.0f}; a[0] = t[0]; }', /初始化列表|暂不支持/],
     ];
     for (const [source, pattern] of cases) {
       await expect(compileSource(source)).rejects.toThrow(pattern);
