@@ -83,14 +83,6 @@ export function typeName(type: CudaType): string {
   }
 }
 
-export function sameType(a: CudaType, b: CudaType): boolean {
-  if (a.kind !== b.kind) return false;
-  if (a.kind === 'scalar' && b.kind === 'scalar') return a.scalar === b.scalar;
-  if (a.kind === 'pointer' && b.kind === 'pointer') return sameType(a.to, b.to);
-  if (a.kind === 'array' && b.kind === 'array') return a.length === b.length && sameType(a.of, b.of);
-  return false;
-}
-
 /* ------------------------------------------------------------------ */
 /* 表达式                                                              */
 /* ------------------------------------------------------------------ */
