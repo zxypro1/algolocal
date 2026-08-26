@@ -30,6 +30,13 @@ export interface ApiServerDeps {
    */
   exec?: ExecHandler;
   /**
+   * 驱逐一个 Pod 之前问一句。
+   *
+   * 不给就是「这个集群不管 PDB」，驱逐等同于删除。
+   */
+  evict?(namespace: string | undefined, name: string):
+    { allowed: true } | { allowed: false; message: string; pdb: string };
+  /**
    * token -> 身份。不给就是「这个世界没配认证」，所有请求都是 cluster-admin。
    *
    * 真集群里这一步由 OIDC / 客户端证书 / ServiceAccount token 完成，形式不同，
@@ -182,6 +189,7 @@ export class ApiServer {
   private readonly exec?: ExecHandler;
   private readonly authenticate?: ApiServerDeps['authenticate'];
   private readonly authorizeFn?: ApiServerDeps['authorize'];
+  private readonly evict?: ApiServerDeps['evict'];
   /** 收到的请求，调试与测试用 */
   readonly requestLog: string[] = [];
 
@@ -193,6 +201,7 @@ export class ApiServer {
     this.exec = deps.exec;
     this.authenticate = deps.authenticate;
     this.authorizeFn = deps.authorize;
+    this.evict = deps.evict;
   }
 
   /**
@@ -404,6 +413,32 @@ export class ApiServer {
       return this.handleWatch(definition, parsed, params);
     }
 
+    /**
+     * 驱逐。
+     *
+     * `POST .../pods/<name>/eviction` 和 delete 是两回事：delete 谁也拦不住，
+     * eviction 会先问 PDB，违反就回 429。`kubectl drain` 用的是这条路，
+     * 所以它会在 PDB 不允许时停下来等，而 `kubectl delete pod` 不会。
+     */
+    if (parsed.subresource === 'eviction' && method === 'POST' && parsed.name) {
+      const verdict = this.evict?.(parsed.namespace, parsed.name);
+      if (verdict && !verdict.allowed) {
+        return json({
+          kind: 'Status', apiVersion: 'v1', metadata: {}, status: 'Failure',
+          code: 429, reason: 'TooManyRequests',
+          message: verdict.message,
+          details: {
+            causes: [{
+              reason: 'DisruptionBudget',
+              message: `The disruption budget ${verdict.pdb} needs 1 more healthy pod(s)`,
+            }],
+          },
+        }, 429);
+      }
+      this.registry.delete(definition, parsed.namespace, parsed.name);
+      return json({ kind: 'Status', apiVersion: 'v1', status: 'Success', code: 201 }, 201);
+    }
+
     switch (method) {
       case 'GET':
         return parsed.name
@@ -457,14 +492,30 @@ export class ApiServer {
         ...(definition.shortNames?.length ? { shortNames: definition.shortNames } : {}),
         ...(definition.categories?.length ? { categories: definition.categories } : {}),
       };
-      // 子资源在 discovery 里是独立条目，形如 `pods/status`
-      const subs = (definition.subresources ?? []).map((sub) => ({
-        name: `${definition.resource}/${sub}`,
-        singularName: '',
-        namespaced: definition.namespaced,
-        kind: definition.kind,
-        verbs: ['get', 'patch', 'update'],
-      }));
+      /**
+       * 子资源在 discovery 里是独立条目，形如 `pods/status`。
+       *
+       * `eviction` 是个例外：它的 kind 是 `Eviction`、group 是 policy、
+       * 动词只有 create。kubectl drain 就是靠在 discovery 里找到它
+       * 才走驱逐这条路的 —— 找不到就退回 delete，于是 PDB 形同虚设。
+       */
+      const subs = (definition.subresources ?? []).map((sub) => (sub === 'eviction'
+        ? {
+            name: `${definition.resource}/eviction`,
+            singularName: '',
+            namespaced: definition.namespaced,
+            group: 'policy',
+            version: 'v1',
+            kind: 'Eviction',
+            verbs: ['create'],
+          }
+        : {
+            name: `${definition.resource}/${sub}`,
+            singularName: '',
+            namespaced: definition.namespaced,
+            kind: definition.kind,
+            verbs: ['get', 'patch', 'update'],
+          }));
       return [base, ...subs];
     });
     return {

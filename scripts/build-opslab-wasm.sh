@@ -123,7 +123,8 @@ cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$ROOT/$OUT_DIR/wasm_exec.js" 2>/dev
 
 # Go 的 time.Now() 在 js/wasm 里读的是宿主的 Date。虚拟世界里这会让
 # `helm list` 的 UPDATED 列、各种时间戳每次都不一样，回放就对不上了。
-# 把两个时钟入口接到宿主提供的虚拟时钟上（不提供时仍然用真时间）。
+# 把**墙钟**接到宿主提供的虚拟时钟上（不提供时仍然用真时间）。
+# 单调时钟保持真实时间 —— 原因见下面那段注释。
 python3 - "$ROOT/$OUT_DIR/wasm_exec.js" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -132,12 +133,12 @@ old_wall = '''					const msec = (new Date).getTime();'''
 new_wall = '''					// opslab: 虚拟时钟优先，回放才逐字节一致
 					const msec = (globalThis.__opslabNow ? globalThis.__opslabNow() : (new Date).getTime());'''
 old_nano = '''						setInt64(sp + 8, (timeOrigin + performance.now()) * 1000000);'''
-new_nano = '''						// opslab: 单调时钟同样跟着虚拟时钟走。
-						// 加 1 是必须的：Go 的运行时把 nanotime 返回 0 当成致命错误，
-						// 而虚拟时钟从 0 开始是很正常的事。
-						setInt64(sp + 8, (globalThis.__opslabNow
-							? globalThis.__opslabNow() + 1
-							: (timeOrigin + performance.now())) * 1000000);'''
+# 单调时钟**不能**跟着虚拟时钟走。
+# Go 的 context.WithTimeout、time.After、各种重试循环用的都是单调时钟；
+# 虚拟时钟在一条命令执行期间是不动的，接上去的话 `kubectl drain` 这类
+# 「重试到超时为止」的命令会永远转下去。
+# 墙钟（time.Now 打出来的那个）跟虚拟时钟，输出才可复现；单调时钟走真实时间。
+new_nano = old_nano
 if old_wall not in source or old_nano not in source:
     raise SystemExit('wasm_exec.js 的时钟入口变了，补丁要重写')
 source = source.replace(old_wall, new_wall).replace(old_nano, new_nano)

@@ -19,7 +19,10 @@ export const NODES: ResourceDefinition = {
 
 export const PODS: ResourceDefinition = {
   group: '', version: 'v1', resource: 'pods', singular: 'pod', kind: 'Pod',
-  namespaced: true, shortNames: ['po'], categories: ['all'], subresources: ['status'],
+  namespaced: true, shortNames: ['po'], categories: ['all'],
+  // eviction 必须出现在 discovery 里，否则 kubectl drain 会退回 delete，
+  // 而 delete 不问 PDB
+  subresources: ['status', 'eviction'],
 };
 
 export const SERVICES: ResourceDefinition = {

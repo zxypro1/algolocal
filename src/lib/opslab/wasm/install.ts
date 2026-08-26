@@ -36,7 +36,19 @@ export interface InstallCliOptions {
    */
   endpoints?: string[];
   now?: () => number;
+  /**
+   * CLI 每发一次请求，就让世界往前走一点。
+   *
+   * 真集群里 kubectl 轮询的时候世界照样在动 —— `kubectl wait`、
+   * `rollout status`、`drain` 全都指望这一点。虚拟世界里时间只在被推动时
+   * 才走，所以要在这里推：**按请求次数推，不按真实时间推**，
+   * 于是同一串命令重放两遍走过的虚拟时间完全一样。
+   */
+  advance?: (ms: number) => Promise<void> | void;
 }
+
+/** 每次请求推进多少虚拟毫秒。够一个 Pod 在几次轮询里起来。 */
+export const TICK_PER_REQUEST_MS = 1000;
 
 /** kubeconfig 里的 server 是完整 URL，取出主机名（不含端口） */
 function hostOf(url: string): string | undefined {
@@ -57,13 +69,14 @@ export async function installClusterCli(options: InstallCliOptions): Promise<str
   }
 
   const endpoints = options.endpoints ?? ['apiserver.opslab'];
-  const fetchImpl: FetchLike = (url, init) => {
+  const fetchImpl: FetchLike = async (url, init) => {
     const host = hostOf(url);
     if (host && !endpoints.includes(host)) {
       // fetch 在 DNS 失败时抛的就是 TypeError，client-go 那边会翻成
       // 「Unable to connect to the server」
-      return Promise.reject(new TypeError(`dial tcp: lookup ${host}: no such host`));
+      throw new TypeError(`dial tcp: lookup ${host}: no such host`);
     }
+    await options.advance?.(TICK_PER_REQUEST_MS);
     return options.apiServer.handle(url, init as never);
   };
   /**

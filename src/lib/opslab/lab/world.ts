@@ -407,6 +407,8 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
       machine,
       runtime: options.runtime,
       apiServer: cluster.apiServer,
+      // CLI 在轮询的时候世界也该往前走，否则 kubectl wait / drain 永远等不到
+      advance: (ms) => cluster.advanceBy(ms),
       endpoints: spec.endpoints,
       now: () => cluster.wallClock(),
     })
