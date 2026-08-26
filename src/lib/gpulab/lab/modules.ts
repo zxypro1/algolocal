@@ -63,6 +63,14 @@ export interface GpuLabApi {
   timing(): TimingResult;
   /** roofline 上的那个点 */
   roofline(): RooflinePoint;
+  /**
+   * 显存峰值字节数。
+   *
+   * 和门槛读的 `gpu.memoryPeakBytes` 是同一个数 —— 分页 KV、量化那几关
+   * 的用例要它。不放进 `metrics()` 是因为那棵树是从计数器算出来的，
+   * 而峰值来自分配器，两者不是一个来源。
+   */
+  peakBytes(): number;
 
   /** 把一个缓冲区读回来 */
   buffer(name: string): Float32Array;
@@ -126,6 +134,7 @@ export function createGpuLabApi(world: GpuWorld): GpuLabApi {
     staticMetrics: () => world.gpu.staticMetrics(),
     timing: () => world.gpu.timing(),
     roofline: () => world.gpu.roofline(),
+    peakBytes: () => world.gpu.usedBytes,
 
     buffer(name) {
       const buffer = world.buffers.get(name);

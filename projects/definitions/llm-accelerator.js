@@ -3726,6 +3726,385 @@ const STAGE_17 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 18 关：分页 KV cache                                              */
+/* ------------------------------------------------------------------ */
+
+const PAGE_DIM = 64;
+const PAGE_BLOCK = 16;
+const PAGE_SEQS = 6;
+/** 长度差别很大，而且**事先不可知** —— 真实负载就长这样 */
+const PAGE_LENGTHS = [90, 7, 40, 5, 61, 22];
+
+/**
+ * 平台给的两个 kernel。
+ *
+ * `attendPaged` 收一张**块表**，位置 j 的物理槽是
+ * `table[j / blockSize] * blockSize + j % blockSize`。真实的 vLLM
+ * paged attention kernel 收的就是这个 `block_tables` 参数。
+ */
+const PAGE_KERNELS = code`
+  __global__ void project(const float* x, const float* W,
+                          float* q, float* k, float* v, int dim) {
+    int d = threadIdx.x;
+    float aq = 0.0f; float ak = 0.0f; float av = 0.0f;
+    for (int j = 0; j < dim; ++j) {
+      float xv = x[j];
+      aq = fmaf(xv, W[j * dim + d], aq);
+      ak = fmaf(xv, W[dim * dim + j * dim + d], ak);
+      av = fmaf(xv, W[2 * dim * dim + j * dim + d], av);
+    }
+    q[d] = aq; k[d] = ak; v[d] = av;
+  }
+
+  // 位置 j 不在 j * dim，而在 table 说的那一块里
+  __global__ void attendPaged(const float* q, const float* kPool, const float* vPool,
+                              const int* table, float* out,
+                              int len, int blockSize, int dim) {
+    int lane = threadIdx.x;
+    float scale = rsqrtf((float)dim);
+    float m = -3.4e38f; float l = 0.0f; float a0 = 0.0f; float a1 = 0.0f;
+    for (int j = 0; j < len; ++j) {
+      int slot = table[j / blockSize] * blockSize + (j % blockSize);
+      float p = 0.0f;
+      for (int d = lane; d < dim; d += 32) p = fmaf(q[d], kPool[slot * dim + d], p);
+      for (int dd = 16; dd > 0; dd >>= 1) p += __shfl_xor_sync(0xffffffff, p, dd);
+      p = p * scale;
+      float mN = fmaxf(m, p); float c = expf(m - mN); float w = expf(p - mN);
+      l = l * c + w;
+      a0 = a0 * c + w * vPool[slot * dim + lane];
+      a1 = a1 * c + w * vPool[slot * dim + lane + 32];
+      m = mN;
+    }
+    out[lane] = a0 / l; out[lane + 32] = a1 / l;
+  }
+`;
+
+const PAGE_LENS = PAGE_LENGTHS.map((n) => `vec_push(lens, ${n});`).join('\n            ');
+
+const pagedBench = {
+  sources: ['/root/paged.cu'],
+  buffers: [
+    { name: 'W', length: 3 * PAGE_DIM * PAGE_DIM, fill: { kind: 'random', seed: 11, min: -0.15, max: 0.15 } },
+    { name: 'states', length: PAGE_SEQS * PAGE_DIM, fill: { kind: 'iota', scale: 0.0007, offset: 0.05 } },
+  ],
+  launches: [],
+};
+
+/**
+ * 黄金值。
+ *
+ * 交叉验证同第 17 关：预留版与分页版是两套完全不同的显存布局，
+ * 跑出来**逐位相同**。块表错一个数，attention 就会读到别的位置的 k/v，
+ * 结果立刻对不上。
+ */
+const PAGE_GOLDEN = [[0, -0.007809331640601158], [63, -0.0009999065659940243], [64, -0.02667618915438652], [127, 0.009406697936356068], [200, -0.09454234689474106], [300, 0.0036766950506716967], [383, 0.009400105103850365]];
+
+const STAGE_18 = {
+  id: 'paged-kv-cache',
+  title: t('分页 KV cache —— 把显存当虚拟内存管',
+    'Paged KV cache — manage memory the way an OS manages pages'),
+  goal: t(
+    [
+      '上一关的 KV cache 是一整片连续显存。放到多条序列一起跑的场景里，',
+      '这个做法立刻出问题：**你不知道每条序列最后会有多长。**',
+      '',
+      '于是只能按最坏情况预留 —— 每条序列都按最长上下文划一片。',
+      '`paged.cu` 现在就是这么干的：6 条序列，每条预留 8 块。',
+      '而实际长度是 90 / 7 / 40 / 5 / 61 / 22 —— 那条 5 个位置的序列',
+      '占着 8 块（128 个位置）的地方，浪费了 96%。',
+      '',
+      '操作系统早就解决过这个问题：**分页**。把显存切成固定大小的块，',
+      '序列需要了才给一块，用完了还回去。序列在物理上不再连续，',
+      '靠一张**块表**记录「逻辑第 b 块在物理第几块」。',
+      '',
+      '`attendPaged` 已经收块表了（真实的 vLLM paged attention kernel 也是这个签名），',
+      '现在的块表只是一张静态的恒等映射。你要做的是：',
+      '',
+      '1. 开一个**固定大小**的块池（这一关给你 12 块），用 `ring` 当空闲块链表',
+      '2. 用 `map` 当块表：`(序列号 * 1024 + 逻辑块号) -> 物理块号`',
+      '3. 序列写到一个新块的第一个位置时，才从空闲链表取一块',
+      '4. **序列结束时把它的块全部还回去** —— 12 块之所以够用，全靠这一步',
+      '',
+      '```bash',
+      'nvcc -o bench paged.cu && ncu ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 输出和预留版逐位相同（块表对了，attention 读到的就是同一批 k/v）',
+      '- 显存峰值 ≤ 200 KB（预留版是 435 KB）',
+    ].join('\n'),
+    [
+      'The KV cache in the previous stage was one contiguous slab. Run several sequences together',
+      'and that breaks immediately: **you do not know how long each sequence will end up being.**',
+      '',
+      'So you reserve for the worst case, a full max-context slab per sequence. That is what',
+      '`paged.cu` does now: 6 sequences, 8 blocks each. The actual lengths are 90 / 7 / 40 / 5 /',
+      '61 / 22, so the 5-position sequence holds 8 blocks (128 positions) and wastes 96% of them.',
+      '',
+      'Operating systems solved this long ago: **paging**. Cut memory into fixed-size blocks, hand',
+      'one out when a sequence needs it, take it back when it is done. Sequences are no longer',
+      'physically contiguous, so a **block table** records which physical block holds logical block b.',
+      '',
+      '`attendPaged` already takes a block table (the real vLLM paged attention kernel has the same',
+      'signature); right now that table is just a static identity mapping. Your job:',
+      '',
+      '1. allocate a **fixed-size** block pool (12 blocks here) and keep a free list in a `ring`',
+      '2. use a `map` as the block table: `(seq * 1024 + logical block) -> physical block`',
+      '3. take a block from the free list only when a sequence reaches a new block\'s first position',
+      '4. **return every block when a sequence finishes** — 12 blocks only suffice because of this',
+      '',
+      '```bash',
+      'nvcc -o bench paged.cu && ncu ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- output bit-identical to the reserving version (a correct table reads the same k/v)',
+      '- peak memory at most 200 KB (435 KB reserving)',
+    ].join('\n')
+  ),
+  checklist: [
+    t('用 ring 维护空闲块链表', 'Keep a free-block list in a `ring`'),
+    t('用 map 维护块表，键是「序列号 * 1024 + 逻辑块号」',
+      'Keep the block table in a `map` keyed by `seq * 1024 + logical block`'),
+    t('每次 attend 之前把这条序列的块表拷到设备上',
+      'Copy this sequence\'s block table to the device before each attend'),
+    t('序列结束时把它占的块全部还回空闲链表',
+      'Return every block to the free list when a sequence finishes'),
+  ],
+  hints: [
+    t('只有当 `have % BLOCK == 0` 时才需要新块 —— 别的位置落在已有的块里。'
+      + '用 `map_has` 判断更直白。',
+      'A new block is only needed when `have % BLOCK == 0`; every other position falls inside an '
+      + 'existing block. Checking with `map_has` reads more directly.'),
+    t('块表是宿主侧的 `map`，而 kernel 要读设备上的数组。'
+      + '每步把这条序列的 `logical + 1` 个块号拷成一个小数组送上去。',
+      'The block table lives in a host-side `map`, but the kernel reads a device array. Each step, '
+      + 'copy this sequence\'s `logical + 1` block numbers into a small array and send it up.'),
+  ],
+  pitfalls: [
+    t('**忘了归还。** 12 块很快就被取空，`ring_pop` 会在空队列上报错。'
+      + '这不是平台在为难你 —— 真实引擎里这一刻就是 OOM。',
+      '**Forgetting to free.** Twelve blocks run out fast and `ring_pop` errors on an empty queue. '
+      + 'That is not the platform being difficult: in a real engine this moment is an OOM.'),
+    t('**块表只拷了最后一块。** kernel 要遍历位置 0 到 len-1，'
+      + '所以整张表都得在设备上，不是只有当前这一块。',
+      '**Only uploading the last block.** The kernel walks positions 0 through len-1, so the whole '
+      + 'table has to be on the device, not just the current block.'),
+    t('**归还的时候用错了长度。** 序列写到第 61 个位置占了 4 块（ceil(61/16)），'
+      + '按 61/16 = 3 算会漏还一块，慢慢就把池漏空了。',
+      '**Using the wrong count when freeing.** A sequence of 61 positions holds 4 blocks '
+      + '(ceil(61/16)); computing 61/16 = 3 leaks one block per sequence and drains the pool.'),
+  ],
+  extension: t(
+    '这就是 vLLM 那篇论文的核心，也是它名字的由来（PagedAttention）。'
+    + '论文里报的数字是显存浪费从 60~80% 降到 4% 以下，'
+    + '于是同样一张卡能同时装下的序列数翻了好几倍 —— 吞吐的提升主要来自这里，'
+    + '不是来自 kernel 变快了。'
+    + '\n\n'
+    + '分页还顺手带来一件事：**块可以共享**。'
+    + '几个请求用同一个系统提示词时，那部分的块表可以指向同一批物理块，'
+    + '一份 KV 服务所有请求。再配上写时复制，就是前缀缓存。'
+    + '\n\n'
+    + '代价也和操作系统一样：多了一次间接寻址。'
+    + '所以块大小是个取舍 —— 太小则块表变长、间接开销占比高，'
+    + '太大则最后一块的内部碎片变大。vLLM 默认 16，和这一关一样。',
+    'This is the core of the vLLM paper, and where its name comes from (PagedAttention). The paper '
+    + 'reports memory waste dropping from 60-80% to under 4%, so a single card holds several times '
+    + 'as many concurrent sequences. That is where the throughput came from, not from faster '
+    + 'kernels.\n\n'
+    + 'Paging brings something else along: **blocks can be shared**. When several requests share a '
+    + 'system prompt, that part of their block tables can point at the same physical blocks, one '
+    + 'copy of the KV serving every request. Add copy-on-write and you have prefix caching.\n\n'
+    + 'The cost is the same one operating systems pay: an extra indirection. Block size is therefore '
+    + 'a trade: too small and the table grows while indirection dominates; too large and the last '
+    + 'block of each sequence wastes more. vLLM defaults to 16, the same as this stage.'
+  ),
+  gpu: {
+    files: {
+      '/root/paged.cu': code`
+        #include "engine.h"
+        #include "containers.h"
+
+        ${PAGE_KERNELS}
+
+        int main(void) {
+          const int DIM = ${PAGE_DIM};
+          const int SEQS = ${PAGE_SEQS};
+          const int BLOCK = ${PAGE_BLOCK};
+          const int MAXB = 8;
+
+          float* W = lab_buffer(0);
+          float* states = lab_buffer(1);
+          int lens = vec_new();
+          ${PAGE_LENS}
+
+          // TODO: 现在每条序列预留 MAXB 块，谁也不还。
+          //       改成一个 12 块的池 + 空闲链表 + 块表 + 用完归还。
+          float* kP; float* vP; float* q; float* k; float* v; float* out; int* table;
+          cudaMalloc((void**)&kP, SEQS * MAXB * BLOCK * DIM * 4);
+          cudaMalloc((void**)&vP, SEQS * MAXB * BLOCK * DIM * 4);
+          cudaMalloc((void**)&q, DIM * 4); cudaMalloc((void**)&k, DIM * 4);
+          cudaMalloc((void**)&v, DIM * 4); cudaMalloc((void**)&out, DIM * 4);
+          cudaMalloc((void**)&table, MAXB * 4);
+
+          int len = vec_new();
+          for (int s = 0; s < SEQS; ++s) vec_push(len, 0);
+
+          int host[8];
+          int alive = 1;
+          while (alive == 1) {
+            alive = 0;
+            for (int s = 0; s < SEQS; ++s) {
+              int have = vec_get(len, s);
+              if (have >= vec_get(lens, s)) { continue; }
+              int logical = have / BLOCK;
+              // 静态恒等映射：第 s 条序列的第 b 块永远是物理块 s * MAXB + b
+              int slot = (s * MAXB + logical) * BLOCK + (have % BLOCK);
+
+              float* x = states + s * DIM;
+              project<<<1, DIM>>>(x, W, q, k, v, DIM);
+              cudaMemcpy(kP + slot * DIM, k, DIM * 4, cudaMemcpyDeviceToDevice);
+              cudaMemcpy(vP + slot * DIM, v, DIM * 4, cudaMemcpyDeviceToDevice);
+
+              int nb = logical + 1;
+              for (int b = 0; b < nb; ++b) host[b] = s * MAXB + b;
+              cudaMemcpy(table, host, nb * 4, cudaMemcpyHostToDevice);
+
+              attendPaged<<<1, 32>>>(q, kP, vP, table, out, have + 1, BLOCK, DIM);
+              cudaMemcpy(x, out, DIM * 4, cudaMemcpyDeviceToDevice);
+              vec_set(len, s, have + 1);
+              alive = 1;
+            }
+          }
+          return 0;
+        }
+      `,
+    },
+    bench: pagedBench,
+    referenceFiles: {
+      '/root/paged.cu': code`
+        #include "engine.h"
+        #include "containers.h"
+
+        ${PAGE_KERNELS}
+
+        int main(void) {
+          const int DIM = ${PAGE_DIM};
+          const int SEQS = ${PAGE_SEQS};
+          const int BLOCK = ${PAGE_BLOCK};
+          const int POOL = 12;
+          const int MAXB = 8;
+
+          float* W = lab_buffer(0);
+          float* states = lab_buffer(1);
+          int lens = vec_new();
+          ${PAGE_LENS}
+
+          float* kP; float* vP; float* q; float* k; float* v; float* out; int* table;
+          cudaMalloc((void**)&kP, POOL * BLOCK * DIM * 4);
+          cudaMalloc((void**)&vP, POOL * BLOCK * DIM * 4);
+          cudaMalloc((void**)&q, DIM * 4); cudaMalloc((void**)&k, DIM * 4);
+          cudaMalloc((void**)&v, DIM * 4); cudaMalloc((void**)&out, DIM * 4);
+          cudaMalloc((void**)&table, MAXB * 4);
+
+          // 空闲块链表与块表
+          int freeList = ring_new();
+          for (int b = 0; b < POOL; ++b) ring_push(freeList, b);
+          int blockTable = map_new();
+
+          int len = vec_new();
+          int done = vec_new();
+          for (int s = 0; s < SEQS; ++s) { vec_push(len, 0); vec_push(done, 0); }
+
+          int host[8];
+          int alive = 1;
+          while (alive == 1) {
+            alive = 0;
+            for (int s = 0; s < SEQS; ++s) {
+              if (vec_get(done, s) == 1) { continue; }
+              int have = vec_get(len, s);
+
+              if (have >= vec_get(lens, s)) {
+                // 结束了：把占的块全还回去。用 ceil 而不是整除 ——
+                // 61 个位置占的是 4 块不是 3 块，少还一块就是慢性泄漏
+                int nb = (have + BLOCK - 1) / BLOCK;
+                for (int b = 0; b < nb; ++b) {
+                  ring_push(freeList, map_get(blockTable, s * 1024 + b, 0));
+                  map_del(blockTable, s * 1024 + b);
+                }
+                vec_set(done, s, 1);
+                continue;
+              }
+
+              int logical = have / BLOCK;
+              if (map_has(blockTable, s * 1024 + logical) == 0) {
+                map_set(blockTable, s * 1024 + logical, ring_pop(freeList));
+              }
+              int physical = map_get(blockTable, s * 1024 + logical, -1);
+              int slot = physical * BLOCK + (have % BLOCK);
+
+              float* x = states + s * DIM;
+              project<<<1, DIM>>>(x, W, q, k, v, DIM);
+              cudaMemcpy(kP + slot * DIM, k, DIM * 4, cudaMemcpyDeviceToDevice);
+              cudaMemcpy(vP + slot * DIM, v, DIM * 4, cudaMemcpyDeviceToDevice);
+
+              // 整张表都要在设备上 —— kernel 会遍历位置 0 到 len-1
+              int nb = logical + 1;
+              for (int b = 0; b < nb; ++b) host[b] = map_get(blockTable, s * 1024 + b, -1);
+              cudaMemcpy(table, host, nb * 4, cudaMemcpyHostToDevice);
+
+              attendPaged<<<1, 32>>>(q, kP, vP, table, out, have + 1, BLOCK, DIM);
+              cudaMemcpy(x, out, DIM * 4, cudaMemcpyDeviceToDevice);
+              vec_set(len, s, have + 1);
+              alive = 1;
+            }
+          }
+          return 0;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('paged.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const GOLDEN = ${JSON.stringify(PAGE_GOLDEN)};
+
+      describe('分页 KV cache', () => {
+        it('结果和预留版逐位相同 —— 块表对了才读得到同一批 k/v', async () => {
+          await lab.buildAndRun();
+          const states = lab.buffer('states');
+          for (const [index, expected] of GOLDEN) {
+            expect(Math.abs(states[index] - expected)).toBeLessThanOrEqual(1e-9);
+          }
+        });
+
+        it('六条序列全都跑完了', async () => {
+          await lab.buildAndRun();
+          // 每步 project（2 个 warp）加 attend（1 个），一共 225 个位置
+          expect(lab.metrics().launch.blocks).toBe(450);
+        });
+
+        it('**显存峰值降下来了**', async () => {
+          await lab.buildAndRun();
+          expect(lab.peakBytes()).toBeLessThanOrEqual(200 * 1024);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.memoryPeakBytes', op: 'lte', value: 200 * 1024,
+      zh: '显存峰值（预留版是 435KB）', en: 'peak device memory (435KB reserving)',
+      unit: 'byte', dimension: 'throughput',
+    }),
+  ],
+  focus: ['throughput', 'correctness'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -3792,5 +4171,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17, STAGE_18],
 };
