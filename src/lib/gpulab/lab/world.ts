@@ -147,6 +147,14 @@ export function materialize(spec: BufferSpec, seed: number): Float32Array | Int3
         out[i] = isInt ? value | 0 : Math.fround(value);
       }
       break;
+    default:
+      // 认不出来的填法**必须炸**，不能默默留一片零。
+      // 关卡里把 'const' 写成 'constant' 这种手滑，静默填零之后
+      // 整个计算会「跑得很成功」而结果全是 0 —— 排查起来极其昂贵。
+      throw new Error(
+        `缓冲区 \`${spec.name}\` 的填法 \`${(fill as { kind: string }).kind}\` 不认识 —— `
+        + '有的是：zeros / const / iota / random / values'
+      );
   }
   return out;
 }

@@ -3385,6 +3385,347 @@ const STAGE_16 = {
 };
 
 /* ------------------------------------------------------------------ */
+/* 第 17 关：KV cache                                                   */
+/* ------------------------------------------------------------------ */
+
+const DECODE_DIM = 64;
+const DECODE_PROMPT = 32;
+const DECODE_STEPS = 16;
+const DECODE_TOTAL = DECODE_PROMPT + DECODE_STEPS;
+
+/**
+ * 两个 kernel 由平台给定、学员不改。
+ *
+ * 这一关考的是**宿主侧的循环怎么写**，不是 kernel 怎么优化。
+ * 算术因此是完全固定的：任何正确的写法都会得到逐位相同的结果，
+ * 所以判定可以直接比黄金值。
+ */
+const DECODE_KERNELS = code`
+  // 从当前状态 x 投影出这一步的 q / k / v
+  __global__ void project(const float* x, const float* W,
+                          float* q, float* k, float* v, int dim) {
+    int d = threadIdx.x;
+    float aq = 0.0f; float ak = 0.0f; float av = 0.0f;
+    for (int j = 0; j < dim; ++j) {
+      float xv = x[j];
+      aq = fmaf(xv, W[j * dim + d], aq);
+      ak = fmaf(xv, W[dim * dim + j * dim + d], ak);
+      av = fmaf(xv, W[2 * dim * dim + j * dim + d], av);
+    }
+    q[d] = aq; k[d] = ak; v[d] = av;
+  }
+
+  // 对 kCache / vCache 里前 len 个位置做注意力（第 16 关那份 FlashAttention）
+  __global__ void attend(const float* q, const float* kCache, const float* vCache,
+                         float* out, int len, int dim) {
+    int lane = threadIdx.x;
+    float scale = rsqrtf((float)dim);
+    float m = -3.4e38f; float l = 0.0f; float acc0 = 0.0f; float acc1 = 0.0f;
+    for (int j = 0; j < len; ++j) {
+      float p = 0.0f;
+      for (int d = lane; d < dim; d += 32) p = fmaf(q[d], kCache[j * dim + d], p);
+      for (int dd = 16; dd > 0; dd >>= 1) p += __shfl_xor_sync(0xffffffff, p, dd);
+      p = p * scale;
+      float mNew = fmaxf(m, p);
+      float corr = expf(m - mNew);
+      float w = expf(p - mNew);
+      l = l * corr + w;
+      acc0 = acc0 * corr + w * vCache[j * dim + lane];
+      acc1 = acc1 * corr + w * vCache[j * dim + lane + 32];
+      m = mNew;
+    }
+    out[lane] = acc0 / l;
+    out[lane + 32] = acc1 / l;
+  }
+`;
+
+const decodeBench = {
+  sources: ['/root/decode.cu'],
+  buffers: [
+    // 编号就是 lab_buffer 的下标，顺序不能改
+    { name: 'W', length: 3 * DECODE_DIM * DECODE_DIM, fill: { kind: 'random', seed: 7, min: -0.15, max: 0.15 } },
+    { name: 'x', length: DECODE_DIM, fill: { kind: 'const', value: 0.1 } },
+    { name: 'out', length: DECODE_DIM, fill: { kind: 'zeros' } },
+  ],
+  // 学员自己写 main，平台不代起 kernel
+  launches: [],
+};
+
+/**
+ * 黄金值。
+ *
+ * 来源不是「参考解打印了什么」：重算版与缓存版是两个结构完全不同的实现，
+ * 它们跑出来**逐位相同**，这才是可信的交叉验证。
+ */
+const DECODE_GOLDEN = [[0, -0.010491766035556793], [1, 0.0045389835722744465], [7, -0.0033696589525789022], [15, 0.025088032707571983], [23, -0.001545826904475689], [31, 0.005528752226382494], [47, -0.011208686977624893], [63, -0.01979956403374672]];
+
+const STAGE_17 = {
+  id: 'kv-cache',
+  title: t('KV cache —— 别把算过的再算一遍', 'KV cache — stop recomputing what you already have'),
+  goal: t(
+    [
+      '前 16 关都在优化单个 kernel。从这一关开始，**主战场挪到宿主侧**：',
+      '你要写 `int main()`，自己决定分配什么显存、每一步起哪些 kernel。',
+      '',
+      '`decode.cu` 里给了两个 kernel（不用改）：',
+      '',
+      '- `project(x, W, q, k, v, dim)` —— 从当前状态投影出这一步的 q / k / v',
+      '- `attend(q, kCache, vCache, out, len, dim)` —— 对前 `len` 个位置做注意力',
+      '',
+      '现在的 `main` 是**能跑但很蠢的版本**：每生成一步，它把历史上',
+      '每一个位置的 k / v 全部重新投影一遍。这在数学上没错 ——',
+      '同样的 x 和同样的 W，投影出来当然是同一个 k。',
+      '',
+      '但自回归解码有一个关键性质：**已经生成过的位置，它的 k 和 v 永远不会再变。**',
+      '第 3 步算出来的 k，到第 48 步还是那个 k。既然如此，算一次存起来就行了。',
+      '这就是 KV cache，也是所有推理引擎的第一块基石。',
+      '',
+      '把重算改成缓存：',
+      '',
+      '1. 分配 `kCache` / `vCache`，能装下最长 48 个位置',
+      '2. 每一步只 `project` 一次，把新的 k / v **追加**到缓存末尾',
+      '3. `attend` 对整个缓存做',
+      '',
+      '```bash',
+      'nvcc -o bench decode.cu && ncu ./bench',
+      '```',
+      '',
+      '**通关标准**',
+      '',
+      '- 输出和重算版逐位相同（kernel 是给定的，算术完全固定）',
+      '- FMA 次数 ≤ 150 万（重算版是 1450 万）',
+      '- 起的 block 总数 ≤ 200（重算版是 1224）',
+    ].join('\n'),
+    [
+      'The first 16 stages optimised individual kernels. From here the action moves to the **host**:',
+      'you write `int main()` and decide what to allocate and which kernels each step launches.',
+      '',
+      '`decode.cu` gives you two kernels (leave them alone):',
+      '',
+      '- `project(x, W, q, k, v, dim)` projects this step\'s q / k / v from the current state',
+      '- `attend(q, kCache, vCache, out, len, dim)` attends over the first `len` positions',
+      '',
+      'The `main` you start with **works but is foolish**: for every generated step it reprojects',
+      'the k and v of every historical position. Mathematically that is fine, the same x and the',
+      'same W obviously project to the same k.',
+      '',
+      'But autoregressive decoding has one crucial property: **once a position has been generated,',
+      'its k and v never change again.** The k computed at step 3 is still that k at step 48. So',
+      'compute it once and keep it. That is the KV cache, the first foundation stone of every',
+      'inference engine.',
+      '',
+      'Turn the recomputation into a cache:',
+      '',
+      '1. allocate `kCache` / `vCache` large enough for all 48 positions',
+      '2. `project` once per step and **append** the new k / v to the end of the cache',
+      '3. run `attend` over the whole cache',
+      '',
+      '```bash',
+      'nvcc -o bench decode.cu && ncu ./bench',
+      '```',
+      '',
+      '**To pass**',
+      '',
+      '- output bit-identical to the recomputing version (the kernels are fixed, so the arithmetic is)',
+      '- at most 1.5M FMAs (14.5M recomputing)',
+      '- at most 200 blocks launched (1224 recomputing)',
+    ].join('\n')
+  ),
+  checklist: [
+    t('分配能装下全部 48 个位置的 kCache / vCache',
+      'Allocate kCache / vCache big enough for all 48 positions'),
+    t('每步只 project 一次，把 k / v 追加到缓存末尾',
+      'Project once per step and append the new k / v'),
+    t('attend 对整个缓存做，长度随步数增长',
+      'Attend over the whole cache, whose length grows with the step'),
+  ],
+  hints: [
+    t('追加就是往 `kCache + len * dim` 这个位置拷 `dim * 4` 字节，'
+      + '方向是 `cudaMemcpyDeviceToDevice` —— 两头都在显存里。',
+      'Appending means copying `dim * 4` bytes to `kCache + len * dim`, with '
+      + '`cudaMemcpyDeviceToDevice`: both ends are in device memory.'),
+    t('注意顺序：**先追加再 attend**。当前这一步的 token 也要能被它自己看到，'
+      + '这就是因果注意力。',
+      'Mind the order: **append first, then attend**. The current token must be visible to '
+      + 'itself, which is what causal attention means.'),
+  ],
+  pitfalls: [
+    t('**先 attend 再追加。** 结果会差一个位置，而且前几步差得不明显 ——'
+      + '越往后错得越离谱，最后看起来像是「模型不收敛」而不是「代码写错了」。',
+      '**Attending before appending.** The result is off by one position, and the first few '
+      + 'steps barely differ, so it looks like the model failing to converge rather than a bug.'),
+    t('**缓存开小了。** 提示词 32 个位置加上生成 16 步，一共要 48 个，'
+      + '不是 16 个。开小了会写到别人的显存上去。',
+      '**Sizing the cache too small.** 32 prompt positions plus 16 generated steps is 48, not 16. '
+      + 'Undersizing it writes into someone else\'s memory.'),
+  ],
+  extension: t(
+    'KV cache 是拿显存换算力，而它换掉的显存不是小数：'
+    + '每个位置每层要存 `2 × 头数 × 头维度` 个数，一个 70B 的模型在 fp16 下'
+    + '大约是每个 token 每层 320KB，80 层就是 2.5MB —— 一条 4K 上下文的序列'
+    + '光 KV cache 就要 10GB。'
+    + '\n\n'
+    + '所以从这一关往后，几乎所有工程都在跟这块显存较劲：'
+    + '第 18 关的分页 KV 解决碎片，MQA / GQA 让多个查询头共享一份 KV，'
+    + '再往后还有 KV 量化、跨请求前缀共享。'
+    + '\n\n'
+    + '另外注意重算版慢在哪：FMA 多了 21.8 倍，但**起 kernel 的次数多了 12.75 倍**。'
+    + '真卡上每次 launch 有几微秒的固定开销，解码这种「每步计算量很小」的场景里，'
+    + 'launch 开销本身就能成为瓶颈 —— 第 20 关的 CUDA Graph 就是来治这个的。',
+    'A KV cache trades memory for compute, and the memory is not a rounding error: each position '
+    + 'per layer stores `2 × heads × head_dim` values, roughly 320KB per token per layer for a 70B '
+    + 'model in fp16, so 2.5MB across 80 layers. A single 4K-context sequence needs 10GB of KV '
+    + 'cache alone.\n\n'
+    + 'From here on almost all the engineering fights over that memory: stage 18 pages it to kill '
+    + 'fragmentation, MQA and GQA share one KV across many query heads, and beyond that lie KV '
+    + 'quantisation and cross-request prefix sharing.\n\n'
+    + 'Note also *where* the recomputing version loses: 21.8x the FMAs, but **12.75x the kernel '
+    + 'launches**. On real hardware each launch costs a few microseconds of fixed overhead, and in '
+    + 'decoding, where each step does very little work, that overhead alone can be the bottleneck. '
+    + 'Stage 20 and CUDA Graphs exist to fix exactly this.'
+  ),
+  gpu: {
+    files: {
+      '/root/decode.cu': code`
+        #include "engine.h"
+
+        ${DECODE_KERNELS}
+
+        // 平台交过来的缓冲区：0 = 权重 W，1 = 当前状态 x，2 = 输出暂存 out
+        int main(void) {
+          const int DIM = ${DECODE_DIM};
+          const int TOTAL = ${DECODE_TOTAL};
+          float* W = lab_buffer(0);
+          float* x = lab_buffer(1);
+          float* out = lab_buffer(2);
+
+          float* kCache; float* vCache; float* q; float* k; float* v; float* hist;
+          cudaMalloc((void**)&kCache, TOTAL * DIM * 4);
+          cudaMalloc((void**)&vCache, TOTAL * DIM * 4);
+          cudaMalloc((void**)&q, DIM * 4);
+          cudaMalloc((void**)&k, DIM * 4);
+          cudaMalloc((void**)&v, DIM * 4);
+          cudaMalloc((void**)&hist, TOTAL * DIM * 4);
+
+          int len = 0;
+          for (int step = 0; step < TOTAL; ++step) {
+            cudaMemcpy(hist + len * DIM, x, DIM * 4, cudaMemcpyDeviceToDevice);
+            len += 1;
+
+            // TODO: 这个内层循环把历史上每一个位置的 k / v 都重新投影了一遍。
+            //       已经生成过的位置，它的 k 和 v 永远不会再变 ——
+            //       所以这里应该只 project 这一步的，追加到缓存末尾。
+            for (int j = 0; j < len; ++j) {
+              project<<<1, DIM>>>(hist + j * DIM, W, q, k, v, DIM);
+              cudaMemcpy(kCache + j * DIM, k, DIM * 4, cudaMemcpyDeviceToDevice);
+              cudaMemcpy(vCache + j * DIM, v, DIM * 4, cudaMemcpyDeviceToDevice);
+            }
+
+            attend<<<1, 32>>>(q, kCache, vCache, out, len, DIM);
+            cudaMemcpy(x, out, DIM * 4, cudaMemcpyDeviceToDevice);
+          }
+
+          cudaFree(kCache); cudaFree(vCache);
+          cudaFree(q); cudaFree(k); cudaFree(v); cudaFree(hist);
+          return 0;
+        }
+      `,
+    },
+    bench: decodeBench,
+    referenceFiles: {
+      '/root/decode.cu': code`
+        #include "engine.h"
+
+        ${DECODE_KERNELS}
+
+        int main(void) {
+          const int DIM = ${DECODE_DIM};
+          const int TOTAL = ${DECODE_TOTAL};
+          float* W = lab_buffer(0);
+          float* x = lab_buffer(1);
+          float* out = lab_buffer(2);
+
+          float* kCache; float* vCache; float* q; float* k; float* v;
+          cudaMalloc((void**)&kCache, TOTAL * DIM * 4);
+          cudaMalloc((void**)&vCache, TOTAL * DIM * 4);
+          cudaMalloc((void**)&q, DIM * 4);
+          cudaMalloc((void**)&k, DIM * 4);
+          cudaMalloc((void**)&v, DIM * 4);
+
+          int len = 0;
+          for (int step = 0; step < TOTAL; ++step) {
+            // 这一步的 k / v 只算一次
+            project<<<1, DIM>>>(x, W, q, k, v, DIM);
+            // 追加到缓存末尾，先追加再 attend —— 当前 token 要能看到自己
+            cudaMemcpy(kCache + len * DIM, k, DIM * 4, cudaMemcpyDeviceToDevice);
+            cudaMemcpy(vCache + len * DIM, v, DIM * 4, cudaMemcpyDeviceToDevice);
+            len += 1;
+
+            attend<<<1, 32>>>(q, kCache, vCache, out, len, DIM);
+            cudaMemcpy(x, out, DIM * 4, cudaMemcpyDeviceToDevice);
+          }
+
+          cudaFree(kCache); cudaFree(vCache);
+          cudaFree(q); cudaFree(k); cudaFree(v);
+          return 0;
+        }
+      `,
+    },
+  },
+  specs: [
+    spec('decode.spec.ts', code`
+      const lab = require('@gpu/lab');
+      const GOLDEN = ${JSON.stringify(DECODE_GOLDEN)};
+
+      describe('KV cache', () => {
+        it('结果和重算版逐位相同', async () => {
+          await lab.buildAndRun();
+          const x = lab.buffer('x');
+          for (const [index, expected] of GOLDEN) {
+            expect(Math.abs(x[index] - expected)).toBeLessThanOrEqual(1e-9);
+          }
+        });
+
+        it('确实跑满了 48 步', async () => {
+          await lab.buildAndRun();
+          // 每步一次 project（DIM/32 = 2 个 warp）加一次 attend（1 个 warp）
+          expect(lab.metrics().launch.blocks).toBeGreaterThanOrEqual(2 * 48);
+        });
+
+        it('**每个位置只投影一次** —— 算力不再随步数平方增长', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().inst.fma).toBeLessThanOrEqual(1500000);
+        });
+
+        it('起 kernel 的次数不再随步数平方增长', async () => {
+          await lab.buildAndRun();
+          expect(lab.metrics().launch.blocks).toBeLessThanOrEqual(200);
+        });
+      });
+    `),
+  ],
+  gates: [
+    ...SAFETY_GATES,
+    gate({
+      metric: 'gpu.inst.fma', op: 'lte', value: 1500000,
+      zh: 'FMA 次数（重算版是 1450 万）', en: 'FMA count (14.5M recomputing)',
+      unit: 'inst', dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.launch.blocks', op: 'lte', value: 200,
+      zh: '起的 block 总数（重算版是 1224）', en: 'blocks launched (1224 recomputing)',
+      unit: 'block', dimension: 'latency',
+    }),
+    gate({
+      metric: 'gpu.memory.readBytes', op: 'lte', value: 8 * 1024 * 1024,
+      zh: 'DRAM 读字节数（重算版是 63.5MB）', en: 'DRAM bytes read (63.5MB recomputing)',
+      unit: 'byte', dimension: 'latency',
+    }),
+  ],
+  focus: ['latency', 'correctness'],
+};
+
+/* ------------------------------------------------------------------ */
 
 module.exports = {
   id: 'llm-accelerator',
@@ -3451,5 +3792,5 @@ module.exports = {
   },
   workspace: { kind: 'gpu', world: WORLD },
   files: [],
-  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16],
+  stages: [STAGE_1, STAGE_2, STAGE_3, STAGE_4, STAGE_5, STAGE_6, STAGE_7, STAGE_8, STAGE_9, STAGE_10, STAGE_11, STAGE_12, STAGE_13, STAGE_14, STAGE_15, STAGE_16, STAGE_17],
 };

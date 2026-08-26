@@ -17595,6 +17595,165 @@
           "zh": "FlashAttention 的出发点是一句朴素的观察：**S 只是中间结果，没人需要它。**既然最终要的是 `O`，那就一边算分数、一边做 softmax、一边加权 V，算完就扔。\n\n难点在 softmax 需要整行的最大值与和，而这两个量要走完整行才知道。在线 softmax 解决了它：维护当前的 (m, l)，见到更大的分数就把已经攒的部分按 `exp(m_old - m_new)` 缩放一下。**输出累加器也要按同一个因子缩放** --它和分母是在同一个 max 下算出来的，只修正一个就会算错。\n\n于是显存从 O(seq²) 降到 O(seq)：只需要几个标量寄存器，不需要任何 seq×seq 的缓冲区。真实现还会在这之上分块：K 与 V 按块搬进共享内存，于是访存量也降下来。\n\nFlashAttention-4 在 2026 年 3 月发布，针对 Blackwell 重写。有意思的地方在于**瓶颈换了**：tensor core 变快了而 SFU 没跟上，softmax 里那个指数运算变得和矩阵乘一样贵，于是要在两个 tile 之间 ping-pong，让一块的矩阵乘和另一块的指数重叠。它也因此从 Triton 退回了 CuTe DSL --Blackwell 的 TMA 与 TMEM 需要 tile 级控制，Triton 的抽象暴露不出来。",
           "en": "FlashAttention starts from a plain observation: **S is only an intermediate and nobody needs it**. Since the goal is `O`, compute scores, apply softmax and weight V in a single pass, discarding each score as soon as it has been used.\n\nThe obstacle is that softmax needs the maximum and sum of the whole row, and neither is known until the row is finished. Online softmax solves it: keep a running (m, l) and rescale what has been accumulated by `exp(m_old - m_new)` whenever a larger score appears. **The output accumulator must be rescaled by the same factor**, since it was built under the same running maximum; correcting only one of them gives a wrong answer.\n\nMemory then drops from O(seq²) to O(seq): a handful of scalar registers and no seq×seq buffer at all. Real implementations tile on top of this, staging blocks of K and V through shared memory so that memory *traffic* falls as well.\n\nFlashAttention-4 shipped in March 2026, rewritten for Blackwell. The interesting part is that **the bottleneck moved**: tensor cores got faster while the SFU did not, so the exponentials in softmax became as expensive as the matmuls. The kernel now ping-pongs between two tiles to overlap one tile's matmuls with the other's exponentials. It also moved back from Triton to CuTe DSL, because Blackwell's TMA and TMEM need tile-level control that Triton does not expose."
         }
+      },
+      {
+        "id": "kv-cache",
+        "title": {
+          "zh": "KV cache —— 别把算过的再算一遍",
+          "en": "KV cache — stop recomputing what you already have"
+        },
+        "goal": {
+          "zh": "前 16 关都在优化单个 kernel。从这一关开始，**主战场挪到宿主侧**：\n你要写 `int main()`，自己决定分配什么显存、每一步起哪些 kernel。\n\n`decode.cu` 里给了两个 kernel（不用改）：\n\n- `project(x, W, q, k, v, dim)` —— 从当前状态投影出这一步的 q / k / v\n- `attend(q, kCache, vCache, out, len, dim)` —— 对前 `len` 个位置做注意力\n\n现在的 `main` 是**能跑但很蠢的版本**：每生成一步，它把历史上\n每一个位置的 k / v 全部重新投影一遍。这在数学上没错 ——\n同样的 x 和同样的 W，投影出来当然是同一个 k。\n\n但自回归解码有一个关键性质：**已经生成过的位置，它的 k 和 v 永远不会再变。**\n第 3 步算出来的 k，到第 48 步还是那个 k。既然如此，算一次存起来就行了。\n这就是 KV cache，也是所有推理引擎的第一块基石。\n\n把重算改成缓存：\n\n1. 分配 `kCache` / `vCache`，能装下最长 48 个位置\n2. 每一步只 `project` 一次，把新的 k / v **追加**到缓存末尾\n3. `attend` 对整个缓存做\n\n```bash\nnvcc -o bench decode.cu && ncu ./bench\n```\n\n**通关标准**\n\n- 输出和重算版逐位相同（kernel 是给定的，算术完全固定）\n- FMA 次数 ≤ 150 万（重算版是 1450 万）\n- 起的 block 总数 ≤ 200（重算版是 1224）",
+          "en": "The first 16 stages optimised individual kernels. From here the action moves to the **host**:\nyou write `int main()` and decide what to allocate and which kernels each step launches.\n\n`decode.cu` gives you two kernels (leave them alone):\n\n- `project(x, W, q, k, v, dim)` projects this step's q / k / v from the current state\n- `attend(q, kCache, vCache, out, len, dim)` attends over the first `len` positions\n\nThe `main` you start with **works but is foolish**: for every generated step it reprojects\nthe k and v of every historical position. Mathematically that is fine, the same x and the\nsame W obviously project to the same k.\n\nBut autoregressive decoding has one crucial property: **once a position has been generated,\nits k and v never change again.** The k computed at step 3 is still that k at step 48. So\ncompute it once and keep it. That is the KV cache, the first foundation stone of every\ninference engine.\n\nTurn the recomputation into a cache:\n\n1. allocate `kCache` / `vCache` large enough for all 48 positions\n2. `project` once per step and **append** the new k / v to the end of the cache\n3. run `attend` over the whole cache\n\n```bash\nnvcc -o bench decode.cu && ncu ./bench\n```\n\n**To pass**\n\n- output bit-identical to the recomputing version (the kernels are fixed, so the arithmetic is)\n- at most 1.5M FMAs (14.5M recomputing)\n- at most 200 blocks launched (1224 recomputing)"
+        },
+        "checklist": [
+          {
+            "zh": "分配能装下全部 48 个位置的 kCache / vCache",
+            "en": "Allocate kCache / vCache big enough for all 48 positions"
+          },
+          {
+            "zh": "每步只 project 一次，把 k / v 追加到缓存末尾",
+            "en": "Project once per step and append the new k / v"
+          },
+          {
+            "zh": "attend 对整个缓存做，长度随步数增长",
+            "en": "Attend over the whole cache, whose length grows with the step"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "追加就是往 `kCache + len * dim` 这个位置拷 `dim * 4` 字节，方向是 `cudaMemcpyDeviceToDevice` —— 两头都在显存里。",
+            "en": "Appending means copying `dim * 4` bytes to `kCache + len * dim`, with `cudaMemcpyDeviceToDevice`: both ends are in device memory."
+          },
+          {
+            "zh": "注意顺序：**先追加再 attend**。当前这一步的 token 也要能被它自己看到，这就是因果注意力。",
+            "en": "Mind the order: **append first, then attend**. The current token must be visible to itself, which is what causal attention means."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**先 attend 再追加。** 结果会差一个位置，而且前几步差得不明显 ——越往后错得越离谱，最后看起来像是「模型不收敛」而不是「代码写错了」。",
+            "en": "**Attending before appending.** The result is off by one position, and the first few steps barely differ, so it looks like the model failing to converge rather than a bug."
+          },
+          {
+            "zh": "**缓存开小了。** 提示词 32 个位置加上生成 16 步，一共要 48 个，不是 16 个。开小了会写到别人的显存上去。",
+            "en": "**Sizing the cache too small.** 32 prompt positions plus 16 generated steps is 48, not 16. Undersizing it writes into someone else's memory."
+          }
+        ],
+        "extension": {
+          "zh": "KV cache 是拿显存换算力，而它换掉的显存不是小数：每个位置每层要存 `2 × 头数 × 头维度` 个数，一个 70B 的模型在 fp16 下大约是每个 token 每层 320KB，80 层就是 2.5MB —— 一条 4K 上下文的序列光 KV cache 就要 10GB。\n\n所以从这一关往后，几乎所有工程都在跟这块显存较劲：第 18 关的分页 KV 解决碎片，MQA / GQA 让多个查询头共享一份 KV，再往后还有 KV 量化、跨请求前缀共享。\n\n另外注意重算版慢在哪：FMA 多了 21.8 倍，但**起 kernel 的次数多了 12.75 倍**。真卡上每次 launch 有几微秒的固定开销，解码这种「每步计算量很小」的场景里，launch 开销本身就能成为瓶颈 —— 第 20 关的 CUDA Graph 就是来治这个的。",
+          "en": "A KV cache trades memory for compute, and the memory is not a rounding error: each position per layer stores `2 × heads × head_dim` values, roughly 320KB per token per layer for a 70B model in fp16, so 2.5MB across 80 layers. A single 4K-context sequence needs 10GB of KV cache alone.\n\nFrom here on almost all the engineering fights over that memory: stage 18 pages it to kill fragmentation, MQA and GQA share one KV across many query heads, and beyond that lie KV quantisation and cross-request prefix sharing.\n\nNote also *where* the recomputing version loses: 21.8x the FMAs, but **12.75x the kernel launches**. On real hardware each launch costs a few microseconds of fixed overhead, and in decoding, where each step does very little work, that overhead alone can be the bottleneck. Stage 20 and CUDA Graphs exist to fix exactly this."
+        },
+        "gpu": {
+          "files": {
+            "/root/decode.cu": "        #include \"engine.h\"\n\n        // 从当前状态 x 投影出这一步的 q / k / v\n__global__ void project(const float* x, const float* W,\n                        float* q, float* k, float* v, int dim) {\n  int d = threadIdx.x;\n  float aq = 0.0f; float ak = 0.0f; float av = 0.0f;\n  for (int j = 0; j < dim; ++j) {\n    float xv = x[j];\n    aq = fmaf(xv, W[j * dim + d], aq);\n    ak = fmaf(xv, W[dim * dim + j * dim + d], ak);\n    av = fmaf(xv, W[2 * dim * dim + j * dim + d], av);\n  }\n  q[d] = aq; k[d] = ak; v[d] = av;\n}\n\n// 对 kCache / vCache 里前 len 个位置做注意力（第 16 关那份 FlashAttention）\n__global__ void attend(const float* q, const float* kCache, const float* vCache,\n                       float* out, int len, int dim) {\n  int lane = threadIdx.x;\n  float scale = rsqrtf((float)dim);\n  float m = -3.4e38f; float l = 0.0f; float acc0 = 0.0f; float acc1 = 0.0f;\n  for (int j = 0; j < len; ++j) {\n    float p = 0.0f;\n    for (int d = lane; d < dim; d += 32) p = fmaf(q[d], kCache[j * dim + d], p);\n    for (int dd = 16; dd > 0; dd >>= 1) p += __shfl_xor_sync(0xffffffff, p, dd);\n    p = p * scale;\n    float mNew = fmaxf(m, p);\n    float corr = expf(m - mNew);\n    float w = expf(p - mNew);\n    l = l * corr + w;\n    acc0 = acc0 * corr + w * vCache[j * dim + lane];\n    acc1 = acc1 * corr + w * vCache[j * dim + lane + 32];\n    m = mNew;\n  }\n  out[lane] = acc0 / l;\n  out[lane + 32] = acc1 / l;\n}\n\n\n        // 平台交过来的缓冲区：0 = 权重 W，1 = 当前状态 x，2 = 输出暂存 out\n        int main(void) {\n          const int DIM = 64;\n          const int TOTAL = 48;\n          float* W = lab_buffer(0);\n          float* x = lab_buffer(1);\n          float* out = lab_buffer(2);\n\n          float* kCache; float* vCache; float* q; float* k; float* v; float* hist;\n          cudaMalloc((void**)&kCache, TOTAL * DIM * 4);\n          cudaMalloc((void**)&vCache, TOTAL * DIM * 4);\n          cudaMalloc((void**)&q, DIM * 4);\n          cudaMalloc((void**)&k, DIM * 4);\n          cudaMalloc((void**)&v, DIM * 4);\n          cudaMalloc((void**)&hist, TOTAL * DIM * 4);\n\n          int len = 0;\n          for (int step = 0; step < TOTAL; ++step) {\n            cudaMemcpy(hist + len * DIM, x, DIM * 4, cudaMemcpyDeviceToDevice);\n            len += 1;\n\n            // TODO: 这个内层循环把历史上每一个位置的 k / v 都重新投影了一遍。\n            //       已经生成过的位置，它的 k 和 v 永远不会再变 ——\n            //       所以这里应该只 project 这一步的，追加到缓存末尾。\n            for (int j = 0; j < len; ++j) {\n              project<<<1, DIM>>>(hist + j * DIM, W, q, k, v, DIM);\n              cudaMemcpy(kCache + j * DIM, k, DIM * 4, cudaMemcpyDeviceToDevice);\n              cudaMemcpy(vCache + j * DIM, v, DIM * 4, cudaMemcpyDeviceToDevice);\n            }\n\n            attend<<<1, 32>>>(q, kCache, vCache, out, len, DIM);\n            cudaMemcpy(x, out, DIM * 4, cudaMemcpyDeviceToDevice);\n          }\n\n          cudaFree(kCache); cudaFree(vCache);\n          cudaFree(q); cudaFree(k); cudaFree(v); cudaFree(hist);\n          return 0;\n        }\n"
+          },
+          "bench": {
+            "sources": [
+              "/root/decode.cu"
+            ],
+            "buffers": [
+              {
+                "name": "W",
+                "length": 12288,
+                "fill": {
+                  "kind": "random",
+                  "seed": 7,
+                  "min": -0.15,
+                  "max": 0.15
+                }
+              },
+              {
+                "name": "x",
+                "length": 64,
+                "fill": {
+                  "kind": "const",
+                  "value": 0.1
+                }
+              },
+              {
+                "name": "out",
+                "length": 64,
+                "fill": {
+                  "kind": "zeros"
+                }
+              }
+            ],
+            "launches": []
+          },
+          "referenceFiles": {
+            "/root/decode.cu": "        #include \"engine.h\"\n\n        // 从当前状态 x 投影出这一步的 q / k / v\n__global__ void project(const float* x, const float* W,\n                        float* q, float* k, float* v, int dim) {\n  int d = threadIdx.x;\n  float aq = 0.0f; float ak = 0.0f; float av = 0.0f;\n  for (int j = 0; j < dim; ++j) {\n    float xv = x[j];\n    aq = fmaf(xv, W[j * dim + d], aq);\n    ak = fmaf(xv, W[dim * dim + j * dim + d], ak);\n    av = fmaf(xv, W[2 * dim * dim + j * dim + d], av);\n  }\n  q[d] = aq; k[d] = ak; v[d] = av;\n}\n\n// 对 kCache / vCache 里前 len 个位置做注意力（第 16 关那份 FlashAttention）\n__global__ void attend(const float* q, const float* kCache, const float* vCache,\n                       float* out, int len, int dim) {\n  int lane = threadIdx.x;\n  float scale = rsqrtf((float)dim);\n  float m = -3.4e38f; float l = 0.0f; float acc0 = 0.0f; float acc1 = 0.0f;\n  for (int j = 0; j < len; ++j) {\n    float p = 0.0f;\n    for (int d = lane; d < dim; d += 32) p = fmaf(q[d], kCache[j * dim + d], p);\n    for (int dd = 16; dd > 0; dd >>= 1) p += __shfl_xor_sync(0xffffffff, p, dd);\n    p = p * scale;\n    float mNew = fmaxf(m, p);\n    float corr = expf(m - mNew);\n    float w = expf(p - mNew);\n    l = l * corr + w;\n    acc0 = acc0 * corr + w * vCache[j * dim + lane];\n    acc1 = acc1 * corr + w * vCache[j * dim + lane + 32];\n    m = mNew;\n  }\n  out[lane] = acc0 / l;\n  out[lane + 32] = acc1 / l;\n}\n\n\n        int main(void) {\n          const int DIM = 64;\n          const int TOTAL = 48;\n          float* W = lab_buffer(0);\n          float* x = lab_buffer(1);\n          float* out = lab_buffer(2);\n\n          float* kCache; float* vCache; float* q; float* k; float* v;\n          cudaMalloc((void**)&kCache, TOTAL * DIM * 4);\n          cudaMalloc((void**)&vCache, TOTAL * DIM * 4);\n          cudaMalloc((void**)&q, DIM * 4);\n          cudaMalloc((void**)&k, DIM * 4);\n          cudaMalloc((void**)&v, DIM * 4);\n\n          int len = 0;\n          for (int step = 0; step < TOTAL; ++step) {\n            // 这一步的 k / v 只算一次\n            project<<<1, DIM>>>(x, W, q, k, v, DIM);\n            // 追加到缓存末尾，先追加再 attend —— 当前 token 要能看到自己\n            cudaMemcpy(kCache + len * DIM, k, DIM * 4, cudaMemcpyDeviceToDevice);\n            cudaMemcpy(vCache + len * DIM, v, DIM * 4, cudaMemcpyDeviceToDevice);\n            len += 1;\n\n            attend<<<1, 32>>>(q, kCache, vCache, out, len, DIM);\n            cudaMemcpy(x, out, DIM * 4, cudaMemcpyDeviceToDevice);\n          }\n\n          cudaFree(kCache); cudaFree(vCache);\n          cudaFree(q); cudaFree(k); cudaFree(v);\n          return 0;\n        }\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "decode.spec.ts",
+            "content": "const lab = require('@gpu/lab');\nconst GOLDEN = [[0,-0.010491766035556793],[1,0.0045389835722744465],[7,-0.0033696589525789022],[15,0.025088032707571983],[23,-0.001545826904475689],[31,0.005528752226382494],[47,-0.011208686977624893],[63,-0.01979956403374672]];\n\ndescribe('KV cache', () => {\n  it('结果和重算版逐位相同', async () => {\n    await lab.buildAndRun();\n    const x = lab.buffer('x');\n    for (const [index, expected] of GOLDEN) {\n      expect(Math.abs(x[index] - expected)).toBeLessThanOrEqual(1e-9);\n    }\n  });\n\n  it('确实跑满了 48 步', async () => {\n    await lab.buildAndRun();\n    // 每步一次 project（DIM/32 = 2 个 warp）加一次 attend（1 个 warp）\n    expect(lab.metrics().launch.blocks).toBeGreaterThanOrEqual(2 * 48);\n  });\n\n  it('**每个位置只投影一次** —— 算力不再随步数平方增长', async () => {\n    await lab.buildAndRun();\n    expect(lab.metrics().inst.fma).toBeLessThanOrEqual(1500000);\n  });\n\n  it('起 kernel 的次数不再随步数平方增长', async () => {\n    await lab.buildAndRun();\n    expect(lab.metrics().launch.blocks).toBeLessThanOrEqual(200);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "gpu.sanitizer.races",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "数据竞态",
+              "en": "data races"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.sanitizer.warpSyncErrors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "warp 同步用错",
+              "en": "warp sync errors"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "gpu.inst.fma",
+            "op": "lte",
+            "value": 1500000,
+            "label": {
+              "zh": "FMA 次数（重算版是 1450 万）",
+              "en": "FMA count (14.5M recomputing)"
+            },
+            "unit": "inst",
+            "dimension": "latency"
+          },
+          {
+            "metric": "gpu.launch.blocks",
+            "op": "lte",
+            "value": 200,
+            "label": {
+              "zh": "起的 block 总数（重算版是 1224）",
+              "en": "blocks launched (1224 recomputing)"
+            },
+            "unit": "block",
+            "dimension": "latency"
+          },
+          {
+            "metric": "gpu.memory.readBytes",
+            "op": "lte",
+            "value": 8388608,
+            "label": {
+              "zh": "DRAM 读字节数（重算版是 63.5MB）",
+              "en": "DRAM bytes read (63.5MB recomputing)"
+            },
+            "unit": "byte",
+            "dimension": "latency"
+          }
+        ],
+        "focus": [
+          "latency",
+          "correctness"
+        ],
+        "primer": {
+          "zh": "自回归解码是一个一个 token 往外吐的：算出第 n 个，把它接回输入，再算第 n+1 个。每一步都要对**前面所有位置**做注意力，也就是说每一步都需要那些位置的 k 与 v。\n\n最直白的写法是每一步重新算一遍。这在数学上没有任何问题，同样的输入配同样的权重，投影出来当然是同一个 k。问题在于代价：第 n 步要投影 n 个位置，跑完 N 步就是 N 平方 / 2 次投影。\n\n而自回归有一个关键性质救了这件事：**已经生成过的位置，它的 k 和 v 永远不会再变。**因果注意力只让每个位置看它自己和它前面的，所以后面新增的 token 影响不到前面。既然不会变，算一次存起来就行，这就是 KV cache。\n\n它把每一步的投影量从 O(n) 降到 O(1)，代价是显存。而这个代价相当可观：一个 70B 模型在 fp16 下大约是每个 token 每层 320KB，80 层加起来 2.5MB，一条 4K 上下文的序列光 KV cache 就要 10GB。从这里开始，推理引擎的工程几乎全在跟这块显存较劲。",
+          "en": "Autoregressive decoding emits one token at a time: compute the nth, feed it back, compute the n+1th. Every step attends over **all previous positions**, so every step needs the k and v of those positions.\n\nThe most literal implementation recomputes them each step. Mathematically nothing is wrong with that: the same input and the same weights obviously project to the same k. The problem is the cost. Step n projects n positions, so N steps cost N squared over two.\n\nOne property of autoregression rescues this: **once a position has been generated, its k and v never change.** Causal attention lets each position see only itself and what came before, so later tokens cannot affect earlier ones. If they never change, compute them once and keep them. That is the KV cache.\n\nIt takes the projection work per step from O(n) to O(1), paid for in memory, and the payment is steep: roughly 320KB per token per layer for a 70B model in fp16, 2.5MB across 80 layers, so a single 4K-context sequence needs 10GB of cache. From here on, almost all inference engineering is a fight over that memory."
+        }
       }
     ]
   },
