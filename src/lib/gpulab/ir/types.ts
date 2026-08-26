@@ -184,6 +184,13 @@ export type HostFn =
   | 'cudaStreamBeginCapture' | 'cudaStreamEndCapture'
   | 'cudaGraphInstantiate' | 'cudaGraphLaunch'
   | 'cudaGraphDestroy' | 'cudaGraphExecDestroy'
+  /** 多卡 */
+  | 'cudaGetDeviceCount' | 'cudaSetDevice' | 'cudaGetDevice' | 'cudaMemcpyPeer'
+  /** NCCL 集合通信 */
+  | 'ncclCommInitAll' | 'ncclCommDestroy'
+  | 'ncclGroupStart' | 'ncclGroupEnd'
+  | 'ncclAllReduce' | 'ncclAllGather' | 'ncclReduceScatter'
+  | 'ncclBroadcast' | 'ncclReduce' | 'ncclSend' | 'ncclRecv'
   | 'vec_new' | 'vec_push' | 'vec_pop' | 'vec_get' | 'vec_set' | 'vec_len' | 'vec_clear'
   | 'map_new' | 'map_set' | 'map_get' | 'map_has' | 'map_del' | 'map_len'
   | 'ring_new' | 'ring_push' | 'ring_pop' | 'ring_peek' | 'ring_len';
@@ -229,6 +236,14 @@ export interface CompiledKernel {
   strings?: string[];
   /** `<<<>>>` 现场表，只有宿主程序有 */
   launches?: LaunchSite[];
+  /**
+   * 超过 4 个参数的 hostcall 的实参寄存器表。
+   *
+   * 定长记录里只放得下 4 个（8 个槽减去操作码、dst、函数号、argc）。
+   * NCCL 的真签名有 7 到 8 个参数，所以多出来的走这张边表 ——
+   * 和 `launches` 一个路子。为了 NCCL 去加宽每一条指令不划算。
+   */
+  hostArgs?: number[][];
 }
 
 /**

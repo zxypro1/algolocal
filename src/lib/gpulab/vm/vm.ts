@@ -796,7 +796,13 @@ class Executor {
             const fn = code[at + 2];
             const argc = code[at + 3];
             hostArgs.length = 0;
-            for (let i = 0; i < argc; i += 1) hostArgs.push(regs[code[at + 4 + i] * WARP_SIZE]);
+            if (argc > 4) {
+              const site = this.kernel.hostArgs?.[code[at + 4]];
+              if (!site) throw new KernelError('宿主调用的实参表丢了', lines[pc]);
+              for (const reg of site) hostArgs.push(regs[reg * WARP_SIZE]);
+            } else {
+              for (let i = 0; i < argc; i += 1) hostArgs.push(regs[code[at + 4 + i] * WARP_SIZE]);
+            }
             regs[dst] = services.call(fn, hostArgs, lines[pc]);
             instBookkeeping += lanes;
             pc += 1;

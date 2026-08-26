@@ -149,10 +149,76 @@ half __nv_cvt_fp8_to_halfraw(int storage, int interpretation);
 #endif
 `;
 
+export const NCCL_H = `/* nccl.h -- 集合通信
+ *
+ * 名字与参数顺序和真 NCCL 一致。两处偏差：
+ *
+ * 1. ncclCommInitAll 的真签名是 (comms, ndev, devlist)。这里省掉 devlist ——
+ *    设备固定就是 0..ndev-1。comms 仍然按真 API 那样被填上。
+ * 2. 通信子是一个 int（就是 rank 号），不是不透明句柄。
+ *
+ * ⚠️ **单线程管多张卡时，集合操作必须放在 ncclGroupStart / ncclGroupEnd 之间。**
+ * 每个 NCCL 调用都可能阻塞在等对端上，不成组就会死锁 ——
+ * 这一条是 NVIDIA 文档里明写的，这里不成组会直接报错而不是跑出个结果。
+ */
+#ifndef NCCL_H
+#define NCCL_H
+
+/* ncclDataType_t */
+#define ncclFloat  0
+#define ncclInt    1
+
+/* ncclRedOp_t */
+#define ncclSum   0
+#define ncclProd  1
+#define ncclMax   2
+#define ncclMin   3
+
+#define ncclSuccess 0
+
+int ncclCommInitAll(int* comms, int ndev);
+int ncclCommDestroy(int comm);
+
+int ncclGroupStart(void);
+int ncclGroupEnd(void);
+
+int ncclAllReduce(const void* send, void* recv, int count, int datatype,
+                  int op, int comm, int stream);
+int ncclAllGather(const void* send, void* recv, int sendcount, int datatype,
+                  int comm, int stream);
+int ncclReduceScatter(const void* send, void* recv, int recvcount, int datatype,
+                      int op, int comm, int stream);
+int ncclBroadcast(const void* send, void* recv, int count, int datatype,
+                  int root, int comm, int stream);
+int ncclReduce(const void* send, void* recv, int count, int datatype,
+               int op, int root, int comm, int stream);
+
+#endif
+`;
+
+export const CLUSTER_H = `/* cluster.h -- 多卡
+ *
+ * 每张卡有自己的地址空间。**一张卡的指针在另一张卡上是非法的** ——
+ * 真卡上误用会得到 illegal memory access，这里会直接报错告诉你
+ * 那是哪张卡的指针。要跨卡搬数据，用 cudaMemcpyPeer。
+ */
+#ifndef CLUSTER_H
+#define CLUSTER_H
+
+int cudaGetDeviceCount(int* count);
+int cudaSetDevice(int device);
+int cudaGetDevice(int* device);
+int cudaMemcpyPeer(void* dst, int dstDevice, const void* src, int srcDevice, int bytes);
+
+#endif
+`;
+
 /** 挂进机器磁盘的那几个头文件 */
 export const HOST_HEADERS: Record<string, string> = {
   '/root/containers.h': CONTAINERS_H,
   '/root/engine.h': ENGINE_H,
   '/root/cuda_runtime.h': CUDA_RUNTIME_H,
   '/root/cuda_fp8.h': CUDA_FP8_H,
+  '/root/nccl.h': NCCL_H,
+  '/root/cluster.h': CLUSTER_H,
 };

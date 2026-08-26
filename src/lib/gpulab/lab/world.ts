@@ -17,6 +17,8 @@ import { B200, H100, type DeviceSpec } from '../device';
 import type { ExecutableKernel } from '../ir/program';
 import type { Dim3 } from '../vm/vm';
 import { HOST_HEADERS } from '../host/headers';
+import { Cluster } from '../cluster/cluster';
+import { IB_NDR, NVLINK4, NVLINK5, PCIE5 } from '../cluster/topology';
 
 /** 缓冲区里一开始装什么。要能写进 JSON，所以是声明而不是函数。 */
 export type BufferFill =
@@ -55,6 +57,13 @@ export interface BenchSpec {
 }
 
 export interface GpuWorldSpec {
+  /**
+   * 集群关卡：几张卡、每台机器几张。
+   *
+   * 不给就是单卡，和前 21 关一样。给了之后 `cudaSetDevice` 那一套才可用，
+   * 判定也才拿得到 `gpu.comm.*`。
+   */
+  cluster?: { devices: number; devicesPerNode: number; link?: 'nvlink4' | 'nvlink5' };
   seed?: number;
   device?: 'H100' | 'B200';
   /** 显存大小，默认 64MB */
@@ -89,6 +98,8 @@ export interface CompiledArtifact {
 }
 
 export interface GpuWorld {
+  /** 集群关卡才有 */
+  cluster?: Cluster;
   machine: Machine;
   gpu: GpuDevice;
   spec: GpuWorldSpec;
@@ -187,9 +198,26 @@ export function createGpuWorld(spec: GpuWorldSpec): GpuWorld {
     files: { ...HOST_HEADERS, ...(spec.machine?.files ?? {}) },
   });
 
+  const cluster = spec.cluster
+    ? new Cluster({
+        ...options,
+        // 每张卡的显存独立算，别拿单卡的总量去乘卡数
+        globalBytes: spec.globalBytes ?? 16 * 1024 * 1024,
+        spec: {
+          devices: spec.cluster.devices,
+          devicesPerNode: spec.cluster.devicesPerNode,
+          nvlink: spec.cluster.link === 'nvlink5' ? NVLINK5 : NVLINK4,
+          ib: IB_NDR,
+          pcie: PCIE5,
+        },
+      })
+    : undefined;
+
   const world: GpuWorld = {
     machine,
-    gpu: new GpuDevice(options),
+    // 集群关卡里，`gpu` 指的是 0 号卡 —— 单卡的那些指标照常读得到
+    gpu: cluster ? cluster.devices[0] : new GpuDevice(options),
+    ...(cluster ? { cluster } : {}),
     spec,
     device: deviceSpec,
     artifacts: new Map(),
