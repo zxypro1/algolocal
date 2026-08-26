@@ -5,7 +5,7 @@
  * `Not After :` 和 `X509v3 Subject Alternative Name:` 这两行找问题，
  * 格式不一样就白搭。
  */
-import type { CommandHandler, CommandResult } from '../machine';
+import type { CommandHandler, CommandResult } from '../../labkit/machine';
 import { parseChain, verifyChain, type Certificate } from '../crypto';
 
 export function createOpensslCommand(): CommandHandler {

@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { createVfs } from '../../src/lib/opslab/machine';
+import { createVfs } from '../../src/lib/labkit/machine';
 import { CliRuntime, createCliRuntime, defaultKubeconfig, renderKubeconfig } from '../../src/lib/opslab/wasm';
 import { Cluster, createCluster } from '../../src/lib/opslab/controllers';
 

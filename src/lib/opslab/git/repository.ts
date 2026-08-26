@@ -5,7 +5,7 @@
  * 而快照的是文件系统。把仓库状态藏在内存里，回放就对不上了。
  * 顺带的好处是 `find .git/objects` 真的能翻，`cat .git/HEAD` 真的有东西。
  */
-import type { Vfs } from '../machine/vfs';
+import type { Vfs } from '../../labkit/machine/vfs';
 import {
   Commit, FileMap, ObjectStore, encodeCommit, parseCommit, readTree, writeTree,
   type GitObjectType,

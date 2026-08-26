@@ -7,7 +7,7 @@
  * `BAO_ADDR` 与 `BAO_TOKEN` 两个环境变量的行为和真 CLI 一致：不设地址就报
  * 连不上，不设令牌就是 permission denied。这两个错很常见，值得原样保留。
  */
-import type { CommandHandler, CommandResult } from '../machine/shell/shell';
+import type { CommandHandler, CommandResult } from '../../labkit/machine/shell/shell';
 import type { OpenBao } from './openbao';
 
 export interface BaoCliOptions {

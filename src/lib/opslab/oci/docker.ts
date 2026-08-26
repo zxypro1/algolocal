@@ -5,8 +5,8 @@
  * 报错前缀 `Error response from daemon:`。学员把报错贴进搜索引擎，
  * 应该能搜到现实世界的答案。
  */
-import { Vfs, normalizePath } from '../vfs';
-import type { CommandContext, CommandHandler, CommandResult } from '../shell/shell';
+import { Vfs, normalizePath } from '../../labkit/machine/vfs';
+import type { CommandContext, CommandHandler, CommandResult } from '../../labkit/machine/shell/shell';
 import { shortId } from './digest';
 import { buildImage } from './build';
 import { Image, flattenLayers, imageManifest, manifestDigest, parseReference } from './image';

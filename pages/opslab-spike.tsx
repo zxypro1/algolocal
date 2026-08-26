@@ -13,7 +13,7 @@ import dynamic from 'next/dynamic';
 import { AppShell, Badge, Code, Group, Stack, Text } from '@mantine/core';
 import { AppHeader, HEADER_HEIGHT } from '../src/components/AppHeader';
 import { createCluster } from '../src/lib/opslab/controllers';
-import { createMachine, Machine } from '../src/lib/opslab/machine';
+import { createMachine, Machine } from '../src/lib/labkit/machine';
 import { installClusterCli, sharedCliRuntime } from '../src/lib/opslab/wasm';
 
 const OpsTerminal = dynamic(() => import('../src/components/opslab/OpsTerminal'), { ssr: false });

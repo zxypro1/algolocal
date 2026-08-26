@@ -11,7 +11,7 @@
  *  2. 把 Go 的 fs / fetch / process 接到我们的机器与 apiserver 上；
  *  3. 跑完把实例彻底断开 —— 不断的话每条命令泄漏 68MB（见下面那段注释）。
  */
-import { Vfs, createVfs } from '../machine/vfs';
+import { Vfs, createVfs } from '../../labkit/machine/vfs';
 import { createGoFs } from './gofs';
 import { WebSocketConnection, type StreamServer } from '../net/websocket';
 import { CacheEntry, ModuleCache, createIndexedDbCache, remoteSignature } from './cache';

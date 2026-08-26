@@ -9,7 +9,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { KubeObject } from '../lib/opslab/apiserver';
-import type { CommandRecord } from '../lib/opslab/machine';
+import type { CommandRecord } from '../lib/labkit/machine';
 import {
   buildPacketPaths, buildTopology, createOpsWorld, currentNamespaceOf, diffVersions, snapshotVersions,
   type ChangeEntry, type OpsWorld, type PacketPath, type TopologyGraph,

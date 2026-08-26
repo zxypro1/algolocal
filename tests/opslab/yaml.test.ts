@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { parseYaml, parseYamlAll, stringifyYaml, YamlError } from '../../src/lib/opslab/yaml';
-import { createVfs } from '../../src/lib/opslab/machine';
+import { createVfs } from '../../src/lib/labkit/machine';
 import { createCliRuntime, defaultKubeconfig, renderKubeconfig } from '../../src/lib/opslab/wasm';
 import { createCluster } from '../../src/lib/opslab/controllers';
 

@@ -8,7 +8,7 @@
  */
 import type { KubeObject } from '../apiserver';
 import type { Cluster } from '../controllers';
-import { COREUTILS, createShell, createVfs } from '../machine';
+import { COREUTILS, createShell, createVfs } from '../../labkit/machine';
 import { createNetTools } from '../net';
 import type { ExecRequest, ExecResult } from '../apiserver';
 

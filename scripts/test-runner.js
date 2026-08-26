@@ -42,9 +42,14 @@ class TestRunner {
         description: 'Structural validation, stage verification and the save path for generated projects'
       },
       {
-        name: 'Opslab Deterministic Kernel',
+        name: 'Labkit Foundation',
+        file: 'tests/labkit',
+        description: 'The deterministic kernel and machine layer both labs stand on: virtual clock ordering, settle/deadlock detection, snapshots, VFS and the shell'
+      },
+      {
+        name: 'Opslab Cluster',
         file: 'tests/opslab',
-        description: 'Virtual clock ordering, settle/deadlock detection, snapshots, and byte-identical replay of dozens of concurrent entities'
+        description: 'apiserver semantics, controllers, the real kubectl/helm WASM runtime, and byte-identical replay of dozens of concurrent entities'
       },
       {
         name: 'Desktop Menus',

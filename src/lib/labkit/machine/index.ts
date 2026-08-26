@@ -1,8 +1,9 @@
 /**
  * 机器层
  *
- * 集群之下的那一层：磁盘、shell、命令。kubectl 也只是这台机器上的
- * 一个命令 —— 它凭 kubeconfig 找到 apiserver，和现实里一样。
+ * 实验台之下的那一层：磁盘、shell、命令。上面跑什么由各个实验台决定 ——
+ * opslab 往里装 kubectl / helm / docker，gpulab 往里装 nvcc / ncu。
+ * 这一层不认识它们中的任何一个。
  */
 export {
   Vfs, VfsError, createVfs, normalizePath, dirname, basename,
@@ -26,13 +27,3 @@ export {
   Machine, createMachine,
   type MachineOptions, type MachineSnapshot, type CommandRecord,
 } from './machine';
-
-export {
-  ImageStore, Registry, RegistryNetwork, RegistryError,
-  buildImage, createDockerCommand, imageRootfs, readCredentials,
-  parseDockerfile, parseReference, normalizeReference, flattenLayers,
-  finalizeImage, makeLayer, imageManifest, manifestDigest,
-  digestOf, sha256Hex, shortId,
-  type Image, type Layer, type OciImageConfig, type Credentials,
-  type BuildOptions, type BuildOutcome, type DockerOptions,
-} from './oci';

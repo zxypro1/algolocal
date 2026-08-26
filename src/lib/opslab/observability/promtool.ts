@@ -7,7 +7,7 @@
  * `query instant` 打出来的格式照抄真 promtool —— 学员在这里练出来的读法
  * 要能带走。
  */
-import type { CommandHandler, CommandResult } from '../machine/shell/shell';
+import type { CommandHandler, CommandResult } from '../../labkit/machine/shell/shell';
 import { evaluate, parseDuration, PromqlError } from './promql';
 import { Tsdb } from './tsdb';
 import { parseYamlAll } from '../yaml';

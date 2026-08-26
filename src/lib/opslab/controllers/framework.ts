@@ -13,7 +13,7 @@
  *    下一轮重扫也会把世界拉回期望状态 —— 这也是快照恢复之后
  *    只要重新起控制器就能收敛的原因。
  */
-import { Kernel, Priority } from '../kernel';
+import { Kernel, Priority } from '../../labkit/kernel';
 import { ApiError, KubeObject, Registry, ResourceDefinition, Scheme } from '../apiserver';
 
 /** 对象在队列里的身份：`namespace/name`，集群级资源就是 `name` */

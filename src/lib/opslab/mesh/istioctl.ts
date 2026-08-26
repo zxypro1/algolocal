@@ -10,7 +10,7 @@
  * （那是 sidecar 模式的东西，ambient 里没有 sidecar）。
  */
 import type { KubeObject } from '../apiserver';
-import type { CommandHandler, CommandResult } from '../machine/shell/shell';
+import type { CommandHandler, CommandResult } from '../../labkit/machine/shell/shell';
 import { policiesFor } from './policy';
 import { isAmbient, strictnessFor, type MeshPeer, type MeshView } from './mesh';
 import { AMBIENT_LABEL, spiffeId } from './resources';

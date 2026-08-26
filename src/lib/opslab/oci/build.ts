@@ -6,10 +6,10 @@
  * 所以「把密钥 COPY 进去再 rm 掉」这种事，在层里查得出来 —— 第 3 关
  * 要考的就是它。
  */
-import { Vfs, createVfs, normalizePath } from '../vfs';
-import { COREUTILS } from '../shell/coreutils';
-import { CommandHandler, createShell } from '../shell/shell';
-import { matchesGlob } from '../shell/shell';
+import { Vfs, createVfs, normalizePath } from '../../labkit/machine/vfs';
+import { COREUTILS } from '../../labkit/machine/shell/coreutils';
+import { CommandHandler, createShell } from '../../labkit/machine/shell/shell';
+import { matchesGlob } from '../../labkit/machine/shell/shell';
 import {
   Dockerfile, DockerfileError, DockerfileStage, Instruction,
   METADATA_INSTRUCTIONS, parseDockerfile, parseExecForm, parseKeyValues, tokenize, unquote,
