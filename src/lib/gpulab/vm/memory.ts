@@ -12,9 +12,8 @@
 /** 全局访存的最小传输单位。ncu 的 dram__bytes 就是扇区数 × 32。 */
 export const SECTOR_BYTES = 32;
 
-/** 共享内存有 32 个 bank，每个 bank 4 字节宽 */
+/** 共享内存有 32 个 bank，每个 bank 4 字节宽 —— bank 号 = (字节地址 / 4) % 32 */
 export const SHARED_BANKS = 32;
-export const SHARED_BANK_BYTES = 4;
 
 export const WARP_SIZE = 32;
 

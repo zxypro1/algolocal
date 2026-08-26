@@ -11,7 +11,7 @@ import { lowerTranslationUnit } from './cuda/lower';
 import { parseCuda, type CudaParserOptions } from './cuda/parser';
 import { flattenMetrics, toMetrics, type GpuMetrics } from './metrics';
 import { LinearMemory } from './vm/memory';
-import { launchKernel, type Dim3, type GpuCounters, type LaunchConfig, type KernelArg } from './vm/vm';
+import { emptyCounters, launchKernel, type Dim3, type GpuCounters, type LaunchConfig, type KernelArg } from './vm/vm';
 
 export { CudaSyntaxError, parseCuda, resetCudaParser } from './cuda/parser';
 export { CudaCompileError } from './cuda/lower';
@@ -63,7 +63,7 @@ export class GpuDevice {
   readonly memory: LinearMemory;
   private readonly sharedCapacity: number;
   private readonly maxWarpInsts: number | undefined;
-  private counters = emptyTotals();
+  private counters = emptyCounters();
 
   constructor(options: DeviceOptions = {}) {
     this.memory = new LinearMemory(options.globalBytes ?? 64 * 1024 * 1024, 'global');
@@ -118,19 +118,8 @@ export class GpuDevice {
   }
 
   resetMetrics(): void {
-    this.counters = emptyTotals();
+    this.counters = emptyCounters();
   }
-}
-
-function emptyTotals(): GpuCounters {
-  return {
-    warpInsts: 0, laneInsts: 0, instFma: 0, instLdSt: 0,
-    globalLoadRequests: 0, globalStoreRequests: 0,
-    globalLoadSectors: 0, globalStoreSectors: 0,
-    sharedLoadRequests: 0, sharedStoreRequests: 0, sharedBankConflicts: 0,
-    divergentBranches: 0, activeLanes: 0,
-    barriers: 0, blocksLaunched: 0, warpsLaunched: 0,
-  };
 }
 
 /** 每次 launch 的计数器累加到设备上 —— 一关可能 launch 很多次 */

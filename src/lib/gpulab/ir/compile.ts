@@ -9,7 +9,7 @@
  * int 和 unsigned 混算提升到 unsigned。够用，且和真 nvcc 在这个子集上一致。
  */
 import {
-  isFloat, isPointer, sizeOf, typeName,
+  isPointer, sizeOf, typeName,
   type BinaryOp, type CudaType, type Expr, type KernelDecl, type Stmt, type VarDecl,
 } from '../cuda/ast';
 import { CudaCompileError } from '../cuda/lower';
@@ -742,4 +742,3 @@ export function compileKernel(kernel: KernelDecl): CompiledKernel {
   return new Compiler(kernel).compile();
 }
 
-export { isFloat };

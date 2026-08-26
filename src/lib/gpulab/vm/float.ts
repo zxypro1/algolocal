@@ -42,23 +42,6 @@ export function floatToU32Bits(value: number): number {
   return bitsU32[0];
 }
 
-/**
- * 两个 fp32 之间差多少个 ulp。
- *
- * 数值判定用它而不是相对误差：相对误差在接近 0 的地方会炸，
- * 而 ulp 在整个范围上都是同一把尺子。
- */
-export function ulpDistance(a: number, b: number): number {
-  if (Number.isNaN(a) || Number.isNaN(b)) return Number.POSITIVE_INFINITY;
-  if (a === b) return 0;
-  const toOrdered = (value: number): number => {
-    const bits = floatToBits(value);
-    // 负数的位模式是反的，翻成一条单调的整数轴
-    return bits < 0 ? 0x80000000 - bits : bits;
-  };
-  return Math.abs(toOrdered(a) - toOrdered(b));
-}
-
 /* ------------------------------------------------------------------ */
 /* 基本算术                                                            */
 /* ------------------------------------------------------------------ */
@@ -151,7 +134,6 @@ export function expF32(x: number): number {
   const r = (x - k * LN2_HI) - k * LN2_LO;
 
   // e^r ≈ 1 + r + r²/2 + r³/6 + r⁴/24 + r⁵/120 + r⁶/720
-  const r2 = r * r;
   const poly =
     1 + r * (1 + r * (0.5 + r * (1 / 6 + r * (1 / 24 + r * (1 / 120 + r / 720)))));
 
@@ -257,14 +239,6 @@ function truncateMantissa(value: number, bits: number): number {
 /* ------------------------------------------------------------------ */
 /* 整数                                                               */
 /* ------------------------------------------------------------------ */
-
-export function toI32(value: number): number {
-  return value | 0;
-}
-
-export function toU32(value: number): number {
-  return value >>> 0;
-}
 
 /** C 的 float → int 是截断（朝零取整），不是四舍五入 */
 export function floatToInt(value: number): number {
