@@ -151,11 +151,12 @@ half __nv_cvt_fp8_to_halfraw(int storage, int interpretation);
 
 export const NCCL_H = `/* nccl.h -- 集合通信
  *
- * 名字与参数顺序和真 NCCL 一致。两处偏差：
+ * 名字与参数顺序和真 NCCL 一致。一处偏差：
+ * 通信子是一个 int（就是它所在那张卡的编号），不是不透明句柄。
  *
- * 1. ncclCommInitAll 的真签名是 (comms, ndev, devlist)。这里省掉 devlist ——
- *    设备固定就是 0..ndev-1。comms 仍然按真 API 那样被填上。
- * 2. 通信子是一个 int（就是 rank 号），不是不透明句柄。
+ * devlist 决定第 i 个 rank 在哪张卡上。**它不是摆设** ——
+ * ring 是按实际的卡走的，一个组摊在两台机器上时环上就会有跨机的边。
+ * 传 0 表示用 0..ndev-1。
  *
  * ⚠️ **单线程管多张卡时，集合操作必须放在 ncclGroupStart / ncclGroupEnd 之间。**
  * 每个 NCCL 调用都可能阻塞在等对端上，不成组就会死锁 ——
@@ -176,7 +177,7 @@ export const NCCL_H = `/* nccl.h -- 集合通信
 
 #define ncclSuccess 0
 
-int ncclCommInitAll(int* comms, int ndev);
+int ncclCommInitAll(int* comms, int ndev, const int* devlist);
 int ncclCommDestroy(int comm);
 
 int ncclGroupStart(void);

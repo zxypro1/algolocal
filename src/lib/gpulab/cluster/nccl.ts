@@ -40,8 +40,16 @@ function combine(a: number, b: number, op: RedOp): number {
   }
 }
 
-/** 一次集合操作里，每个 rank 的收发缓冲区 */
+/**
+ * 一次集合操作里，每个 rank 的收发缓冲区。
+ *
+ * `device` 是这个 rank **实际在哪张卡上**，来自 `ncclCommInitAll` 的
+ * devlist。环是按这个走的，不是按 rank 号 —— 一个 TP 组摊在两台机器上
+ * 时，环上就会有跨机的边，`comm.bytesByLink.ib` 立刻暴增。
+ * 少了这一层映射，"张量并行必须留在机内"这条约束就演不出来。
+ */
 export interface CommBuffers {
+  device: number;
   send: number;
   recv: number;
 }
@@ -89,7 +97,7 @@ export function ringAllReduce(
         index: sendIndex,
         values: data[rank].slice(start, end),
       });
-      cluster.account(rank, (rank + 1) % n, (end - start) * 4);
+      cluster.account(buffers[rank].device, buffers[(rank + 1) % n].device, (end - start) * 4);
     }
     for (const item of pending) {
       const { start, end } = range(item.index);
@@ -110,7 +118,7 @@ export function ringAllReduce(
         index: sendIndex,
         values: data[rank].slice(start, end),
       });
-      cluster.account(rank, (rank + 1) % n, (end - start) * 4);
+      cluster.account(buffers[rank].device, buffers[(rank + 1) % n].device, (end - start) * 4);
     }
     for (const item of pending) {
       const { start, end } = range(item.index);
@@ -129,7 +137,7 @@ export function ringAllGather(cluster: Cluster, buffers: CommBuffers[], count: n
     parts.push(cluster.copyOut(buffers[rank].send, count));
   }
   for (let step = 0; step < n - 1; step += 1) {
-    for (let rank = 0; rank < n; rank += 1) cluster.account(rank, (rank + 1) % n, count * 4);
+    for (let rank = 0; rank < n; rank += 1) cluster.account(buffers[rank].device, buffers[(rank + 1) % n].device, count * 4);
   }
   const all = new Float32Array(n * count);
   for (let rank = 0; rank < n; rank += 1) all.set(parts[rank], rank * count);
@@ -147,7 +155,7 @@ export function ringReduceScatter(
     data.push(cluster.copyOut(buffers[rank].send, total));
   }
   for (let step = 0; step < n - 1; step += 1) {
-    for (let rank = 0; rank < n; rank += 1) cluster.account(rank, (rank + 1) % n, recvCount * 4);
+    for (let rank = 0; rank < n; rank += 1) cluster.account(buffers[rank].device, buffers[(rank + 1) % n].device, recvCount * 4);
   }
   for (let rank = 0; rank < n; rank += 1) {
     const out = new Float32Array(recvCount);
@@ -181,7 +189,7 @@ export function treeBroadcast(
         if (!have.includes(candidate)) { target = candidate; break; }
       }
       if (target < 0) break;
-      cluster.account(source, target, count * 4);
+      cluster.account(buffers[source].device, buffers[target].device, count * 4);
       have.push(target);
     }
   }
@@ -196,7 +204,7 @@ export function treeReduce(
   const data: Float32Array[] = [];
   for (let rank = 0; rank < n; rank += 1) data.push(cluster.copyOut(buffers[rank].send, count));
   for (let rank = 0; rank < n; rank += 1) {
-    if (rank !== root) cluster.account(rank, root, count * 4);
+    if (rank !== root) cluster.account(buffers[rank].device, buffers[root].device, count * 4);
   }
   const out = new Float32Array(count);
   for (let i = 0; i < count; i += 1) {

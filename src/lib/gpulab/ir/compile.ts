@@ -222,7 +222,7 @@ const HOST_FNS: Record<string, { fn: HostFn; arity: number; scalar: 'int' | 'voi
   cudaMemcpyPeer: { fn: 'cudaMemcpyPeer', arity: 5, scalar: 'int' },
 
   // NCCL。真 API 的形状：通信子按设备各一个，集合操作在 group 里发起。
-  ncclCommInitAll: { fn: 'ncclCommInitAll', arity: 2, scalar: 'int' },
+  ncclCommInitAll: { fn: 'ncclCommInitAll', arity: 3, scalar: 'int' },
   // 下面几个的参数个数与真 nccl.h 一致
   ncclCommDestroy: { fn: 'ncclCommDestroy', arity: 1, scalar: 'int' },
   ncclGroupStart: { fn: 'ncclGroupStart', arity: 0, scalar: 'int' },
@@ -384,6 +384,14 @@ class Compiler {
         elementBytes: pointer ? sizeOf((param.type as { to: CudaType }).to) : 4,
       });
     });
+
+    if (this.ctx.host) {
+      // 宿主侧把 local 空间的头 4 个字节留空，**让 0 号地址不属于任何变量**。
+      // 不留的话第一个局部数组的地址正好是 0，而真 C 里 0 是空指针 ——
+      // `ncclCommInitAll(comms, n, devs)` 里 devs 传 0 表示"用默认设备表"，
+      // 于是一个合法的 devs 会被当成没传。踩过一次，很难查。
+      this.localBytes = 4;
+    }
 
     for (const [name, value] of Object.entries(DEVICE_CONSTANTS)) {
       const reg = this.constant(value, 'i32', this.kernel.span.line);

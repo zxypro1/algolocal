@@ -1840,6 +1840,51 @@ const primers = {
         + 'overhead. Communication optimisation is almost never about moving less data.'
       )
     ),
+    'tensor-parallel': t(
+      p(
+        '模型大到一张卡放不下时，就得把单个权重矩阵切开放到多张卡上。'
+        + '切法有讲究：一个前馈层是两次矩阵乘，'
+        + '第一次按列切（每张卡算出中间结果的一竖条，各算各的、不需要通信），'
+        + '第二次按行切（每张卡拿自己那一竖条乘对应的横条，得到一个部分和）。'
+        + '所有部分和加起来才是答案，这需要一次 all-reduce。',
+        '关键在于列并行的输出形状正好是行并行想要的输入形状。'
+        + '于是一整层只需要末尾一次通信。'
+        + '换成先行后列，中间就得凑一次，一层要两次 all-reduce --'
+        + 'Megatron-LM 那篇论文最核心的设计就是这个顺序。'
+        + '注意力层是同一个套路：QKV 投影按头切等价于列并行，输出投影按行切。',
+        '张量并行的通信频率极高。数据并行一步只 all-reduce 一次，'
+        + '而张量并行一个 Transformer 层就要两次（注意力一次、前馈一次），'
+        + '反向再两次，80 层的模型每步就是 320 次集合操作。'
+        + '这个频率决定了它对延迟极其敏感，也决定了它不能跨机。',
+        '机内的 NVLink 和跨机的 InfiniBand 带宽差将近一个数量级，延迟差三倍。'
+        + '所以现实中的并行策略是分层的：张量并行只在机内，'
+        + '流水线并行跨机（每级之间只传一次激活），'
+        + '数据并行在最外层（每步一次 all-reduce，频率最低）。'
+        + '这几个维度的排布顺序，几乎完全由「这一维通信多频繁」决定。'
+      ),
+      p(
+        'When a model no longer fits on one GPU, individual weight matrices get split across GPUs, '
+        + 'and how you split them matters. A feed-forward layer is two matmuls: split the first by '
+        + 'columns (each GPU computes a vertical strip of the intermediate, independently, with no '
+        + 'communication) and the second by rows (each GPU multiplies its strip by the matching '
+        + 'horizontal strip and gets a partial sum). Summing the partials needs one all-reduce.',
+        'The key is that column-parallel output has exactly the shape row-parallel wants as input, '
+        + 'so a whole layer needs one collective at the end. Row-then-column would need one in the '
+        + 'middle as well, two per layer. That ordering is the core design of the Megatron-LM paper. '
+        + 'Attention follows the same pattern: splitting QKV by head is equivalent to column '
+        + 'parallel, and the output projection splits by row.',
+        'Tensor parallelism communicates extremely often. Data parallelism all-reduces once per '
+        + 'step; tensor parallelism does it twice per Transformer layer (attention, feed-forward) '
+        + 'plus twice more in backward, so an 80-layer model issues 320 collectives per step. That '
+        + 'frequency makes it acutely latency-sensitive, and it is why it cannot span nodes.',
+        'In-node NVLink and cross-node InfiniBand differ by nearly an order of magnitude in '
+        + 'bandwidth and threefold in latency. Real parallel strategies are therefore layered: '
+        + 'tensor parallelism stays in-node, pipeline parallelism goes across nodes (one activation '
+        + 'transfer per stage boundary), and data parallelism sits outermost with one all-reduce per '
+        + 'step. The ordering of these dimensions is decided almost entirely by how often each one '
+        + 'communicates.'
+      )
+    ),
   },
 
   'intranet-k8s': {
