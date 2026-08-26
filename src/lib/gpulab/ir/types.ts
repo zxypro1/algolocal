@@ -188,6 +188,9 @@ export type HostFn =
   | 'cudaGetDeviceCount' | 'cudaSetDevice' | 'cudaGetDevice' | 'cudaMemcpyPeer'
   /** 流水线调度：声明一个步边界，气泡率靠它数出来 */
   | 'pipe_step'
+  /** 流 */
+  | 'cudaStreamCreate' | 'cudaStreamSynchronize' | 'cudaStreamDestroy'
+  | 'cudaDeviceSynchronizeAll'
   /** NCCL 集合通信 */
   | 'ncclCommInitAll' | 'ncclCommDestroy'
   | 'ncclGroupStart' | 'ncclGroupEnd'
@@ -205,6 +208,8 @@ export interface LaunchSite {
   block: number[];
   /** 实参寄存器；指针参数里装的是地址 */
   args: number[];
+  /** 流的寄存器。没指定就是默认流 */
+  stream?: number;
   /** 每个实参是不是指针 —— 运行时要按这个决定怎么解释 */
   line: number;
 }

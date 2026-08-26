@@ -578,8 +578,13 @@ function lowerLaunch(node: TsNode, syntax: TsNode, span: SourceSpan): Stmt {
 
   const config = namedChildren(syntax);
   if (config.length < 2) fail(syntax, '<<<>>> 里至少要写 grid 与 block 两个参数');
-  if (config.length > 2) {
-    fail(syntax, '<<<>>> 的第三、四个参数（动态共享内存、流）暂不支持 —— '
+  if (config.length === 3) {
+    fail(syntax, '<<<>>> 只写三个参数的话第三个是动态共享内存 —— 那个还不支持。'
+      + '要指定流请写成 <<<grid, block, 0, stream>>>');
+  }
+  if (config.length > 4) fail(syntax, '<<<>>> 最多四个参数');
+  if (config.length === 4 && config[2].text.trim() !== '0') {
+    fail(syntax, '动态共享内存暂不支持，第三个参数必须写 0 —— '
       + '共享内存请用 __shared__ 静态声明');
   }
 
@@ -591,6 +596,7 @@ function lowerLaunch(node: TsNode, syntax: TsNode, span: SourceSpan): Stmt {
     kernel: callee.text,
     grid: lowerDim(config[0]),
     block: lowerDim(config[1]),
+    ...(config.length === 4 ? { stream: lowerExpr(config[3]) } : {}),
     args,
     span,
   };

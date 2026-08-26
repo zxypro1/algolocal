@@ -65,7 +65,7 @@ export function runClusterHost(
       const local = cluster.localAddress(address, device, 'cudaMemset');
       new Uint8Array(cluster.devices[device].memory.bytes, local, bytes).fill(value & 0xff);
     },
-    launch: (name, grid, block, args, line) => {
+    launch: (name, grid, block, args, line, _stream) => {
       const kernel = kernels.get(name);
       if (!kernel) {
         throw new HostRuntimeError(
@@ -102,7 +102,7 @@ export function runClusterHost(
     readHostInts: (address, count) => (
       Array.from(new Int32Array(hostLocal.bytes, address, count))
     ),
-    collective: (kind, ranks, count, op, root) => {
+    collective: (kind, ranks, count, op, root, overlapped) => {
       // 环按**实际的卡**走，不是按 rank 号 —— 一个组摊在两台机器上时，
       // 环上就会有跨机的边，`comm.bytesByLink.ib` 立刻暴增
       const sorted = ranks.slice().sort((a, b) => a.device - b.device);
@@ -115,6 +115,7 @@ export function runClusterHost(
         seen.add(rank.device);
       }
       const reduce = redOpOf(op);
+      const before = cluster.comm.bytes;
       switch (kind) {
         case 'allreduce': ringAllReduce(cluster, sorted, count, reduce); break;
         case 'allgather': ringAllGather(cluster, sorted, count); break;
@@ -125,6 +126,11 @@ export function runClusterHost(
       }
       const bytes = count * 4 * (kind === 'reducescatter' ? sorted.length : 1);
       if (bytes > payload) { payload = bytes; factorKind = kind; }
+      if (overlapped) {
+        // 这一次集合操作搬了多少，就算多少重叠。
+        // before/after 相减而不是重新算一遍，免得两处口径分家
+        cluster.accountOverlap(cluster.comm.bytes - before);
+      }
     },
   };
 

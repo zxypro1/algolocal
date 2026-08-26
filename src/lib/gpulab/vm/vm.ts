@@ -215,7 +215,9 @@ export interface HostServices {
   /** 一次运行时调用；返回值写回 dst 寄存器 */
   call(fn: number, args: number[], line: number): number;
   /** `kernel<<<grid, block>>>(args)` */
-  launch(name: string, grid: Dim3, block: Dim3, args: number[], line: number): void;
+  launch(
+    name: string, grid: Dim3, block: Dim3, args: number[], line: number, stream: number
+  ): void;
 }
 
 const DEFAULT_MAX_WARP_INSTS = 200_000_000;
@@ -828,7 +830,10 @@ class Executor {
             };
             hostArgs.length = 0;
             for (const reg of site.args) hostArgs.push(regs[reg * WARP_SIZE]);
-            services.launch(site.kernel, grid, block, hostArgs.slice(), lines[pc]);
+            const stream = site.stream !== undefined
+              ? regs[site.stream * WARP_SIZE] | 0
+              : 0;
+            services.launch(site.kernel, grid, block, hostArgs.slice(), lines[pc], stream);
             instBookkeeping += lanes;
             pc += 1;
             break;
