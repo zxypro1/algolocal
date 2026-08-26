@@ -30,6 +30,7 @@ import {
   CLUSTERROLEBINDINGS, CLUSTERROLES, RBAC_RESOURCES, ROLEBINDINGS, ROLES, authorize,
 } from '../rbac';
 import { ESO_RESOURCES, ExternalSecretsController } from '../secrets';
+import { OBSERVABILITY_RESOURCES, PrometheusController } from '../observability';
 import { CORE_RESOURCES, EVENTS, NAMESPACES, NODES } from './resources';
 import {
   DeploymentController,
@@ -89,6 +90,8 @@ export interface ClusterOptions {
    * 所有请求都是 cluster-admin —— 前面十几关不必为此各配一套角色。
    */
   users?: Record<string, { username: string; groups?: string[] }>;
+  /** 每个采集目标这一轮贡献哪些指标。由世界注入 —— 指标从集群状态里长出来。 */
+  metrics?: import('../observability').MetricsSource;
   /** 去外部密钥库取值。由世界注入 —— 集群自己不认识 OpenBao。 */
   fetchSecret?: import('../secrets').SecretFetcher;
   /** 镜像签名库。由世界注入，和镜像仓库一样是集群外的东西。 */
@@ -131,6 +134,8 @@ export class Cluster {
   /** 网络：DNS、Service 转发、NetworkPolicy 判定，全都读 apiserver 里的对象 */
   readonly network: Network;
 
+  /** 监控。世界没配 metrics 就是 undefined。 */
+  prometheus?: PrometheusController;
   /** 由外面装上（createOpsWorld 会接一个 Pod 里的 shell 进来） */
   execHandler?: import('../apiserver').ExecHandler;
   private controllers: Controller[] = [];
@@ -149,6 +154,7 @@ export class Cluster {
     this.scheme = createScheme([
       ...CORE_RESOURCES, ...GATEWAY_RESOURCES, ...CERT_RESOURCES, ...ARGOCD_RESOURCES,
       ...MESH_RESOURCES, ...RBAC_RESOURCES, ...KYVERNO_RESOURCES, ...ESO_RESOURCES,
+      ...OBSERVABILITY_RESOURCES,
       ...(options.extraResources ?? []),
     ]);
     this.registry = new Registry({
@@ -592,6 +598,10 @@ export class Cluster {
       new GatewayController(context),
       // 内网 PKI：同样是集群里的一个工作负载，卸载掉就不再签发
       new CertManagerController(context),
+      // 监控：采集是定时拉的，所以采样之间发生的事看不见
+      ...(this.options.metrics
+        ? [(this.prometheus = new PrometheusController(context, this.options.metrics))]
+        : []),
       // 密钥：真值住在集群外面，这里只维护一份投影
       ...(this.options.fetchSecret
         ? [new ExternalSecretsController(context, { fetch: this.options.fetchSecret })]

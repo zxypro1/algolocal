@@ -222,6 +222,12 @@ export interface OpsImageSpec {
    * 一个维度：没有执行者时策略对象还在，但一个包都不拦。
    */
   enforcesNetworkPolicy?: boolean;
+  /**
+   * 稳定状态下每秒处理多少请求。指标从这里长出来，不是伪造的。
+   */
+  requestsPerSecond?: number;
+  /** 其中多少比例是 5xx。注入故障就是把这个数调上去。 */
+  errorRatio?: number;
 }
 
 /** 内网的密钥库（OpenBao） */

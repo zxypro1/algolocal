@@ -5620,7 +5620,8 @@
           "argocd",
           "istio-system",
           "kyverno",
-          "external-secrets"
+          "external-secrets",
+          "monitoring"
         ],
         "images": {
           "harbor.corp.internal/team/portal:1.4.0": {
@@ -5637,7 +5638,8 @@
             },
             "memoryUsage": "180Mi",
             "handlesSigterm": true,
-            "runAsUser": 10001
+            "runAsUser": 10001,
+            "requestsPerSecond": 40
           },
           "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2": {
             "pullMs": 300,
@@ -5735,6 +5737,29 @@
               8080
             ]
           },
+          "quay.io/prometheus/prometheus:v3.9.1": {
+            "pullMs": 600,
+            "startupMs": 900,
+            "readyAfterMs": 400,
+            "listens": [
+              9090
+            ]
+          },
+          "harbor.corp.internal/team/reports:2.3.0": {
+            "pullMs": 500,
+            "startupMs": 800,
+            "readyAfterMs": 200,
+            "listens": [
+              9090
+            ],
+            "routes": {
+              "/healthz": 200,
+              "/metrics": 200
+            },
+            "memoryUsage": "300Mi",
+            "requestsPerSecond": 25,
+            "errorRatio": 0.2
+          },
           "docker.io/library/redis:7.4": {
             "pullMs": 300,
             "startupMs": 400,
@@ -5776,9 +5801,11 @@
               9090
             ],
             "routes": {
-              "/healthz": 200
+              "/healthz": 200,
+              "/metrics": 200
             },
-            "memoryUsage": "900Mi"
+            "memoryUsage": "900Mi",
+            "requestsPerSecond": 25
           }
         },
         "baseImages": {
@@ -6735,7 +6762,10 @@
               "kind": "Service",
               "metadata": {
                 "name": "portal",
-                "namespace": "payments"
+                "namespace": "payments",
+                "labels": {
+                  "app": "portal"
+                }
               },
               "spec": {
                 "clusterIP": "10.96.1.10",
@@ -7029,7 +7059,10 @@
               "kind": "Service",
               "metadata": {
                 "name": "portal",
-                "namespace": "payments"
+                "namespace": "payments",
+                "labels": {
+                  "app": "portal"
+                }
               },
               "spec": {
                 "clusterIP": "10.96.1.10",
@@ -7441,7 +7474,10 @@
               "kind": "Service",
               "metadata": {
                 "name": "portal",
-                "namespace": "payments"
+                "namespace": "payments",
+                "labels": {
+                  "app": "portal"
+                }
               },
               "spec": {
                 "clusterIP": "10.96.1.10",
@@ -8464,7 +8500,10 @@
               "kind": "Service",
               "metadata": {
                 "name": "portal",
-                "namespace": "payments"
+                "namespace": "payments",
+                "labels": {
+                  "app": "portal"
+                }
               },
               "spec": {
                 "clusterIP": "10.96.1.10",
@@ -8890,7 +8929,10 @@
               "kind": "Service",
               "metadata": {
                 "name": "portal",
-                "namespace": "payments"
+                "namespace": "payments",
+                "labels": {
+                  "app": "portal"
+                }
               },
               "spec": {
                 "clusterIP": "10.96.1.10",
@@ -9311,7 +9353,10 @@
               "kind": "Service",
               "metadata": {
                 "name": "portal",
-                "namespace": "payments"
+                "namespace": "payments",
+                "labels": {
+                  "app": "portal"
+                }
               },
               "spec": {
                 "clusterIP": "10.96.1.10",
@@ -10492,7 +10537,10 @@
               "kind": "Service",
               "metadata": {
                 "name": "portal",
-                "namespace": "payments"
+                "namespace": "payments",
+                "labels": {
+                  "app": "portal"
+                }
               },
               "spec": {
                 "clusterIP": "10.96.1.10",
@@ -11030,7 +11078,10 @@
               "kind": "Service",
               "metadata": {
                 "name": "portal",
-                "namespace": "payments"
+                "namespace": "payments",
+                "labels": {
+                  "app": "portal"
+                }
               },
               "spec": {
                 "clusterIP": "10.96.1.10",
@@ -11663,6 +11714,547 @@
         "primer": {
           "zh": "先说清楚一件常被误解的事：Kubernetes 的 `Secret` **不是加密的**，它只是 base64。`kubectl get secret -o yaml` 拿到的值，接一句 `base64 -d` 就是明文。Secret 在集群里唯一的保护是 RBAC，也就是「谁有权 get 它」。所以把口令写进 Secret 并不算「保护」了它，只是换了个地方放。\n\n更麻烦的是 GitOps 带来的矛盾：仓库要能被所有人读，密钥不能。把 Secret 的 YAML 提交进 Git，等于把明文分发给每一个有仓库权限的人，而且留在历史里删不掉。`External Secrets Operator` 的答案是让仓库里只放「去哪儿取」的说明：`SecretStore` 说去哪个密钥库、用什么身份，`ExternalSecret` 说取哪几个键、放进哪个 Secret。真值由控制器在集群里生成，谁都不用提交明文。\n\n外部密钥库这里用 `OpenBao`（Vault 改协议之后 fork 出来的开源版本）。它的 KV v2 引擎有一处容易绊人：挂载路径和读写路径不是一回事，引擎挂在 `kv/` 上时，`bao kv get kv/payments/db` 实际读的是 `kv/data/payments/db`。SecretStore 里的 `path` 指的是挂载路径，`remoteRef.key` 里就不要再重复写它。另外 KV v2 保留版本历史，读到的默认是最新一版。\n\n认证方式的选择比工具选择更要紧。用静态令牌是个死循环：为了保护密钥，你得先保护一把能读所有密钥的令牌，而那把令牌只能存在集群里的另一个 Secret 里。`Kubernetes 认证`跳出了这个循环：身份由集群自己签发、短期有效、绑定到具体的 ServiceAccount，泄露一个 Pod 的 token 也只拿得到那个 SA 的权限。云上的 IRSA 与 Workload Identity 是同一思路的不同实现。最后记住 ESO 同步出来的 Secret 归控制器管：手改会被下一轮同步盖回去，`refreshInterval` 决定这一轮有多久。",
           "en": "Start with a common misconception: a Kubernetes `Secret` is **not encrypted**, it is base64. Take the value from `kubectl get secret -o yaml`, pipe it through `base64 -d`, and there is the plaintext. The only protection a Secret has inside the cluster is RBAC, meaning who may get it. Putting a password into a Secret does not protect it, it relocates it.\n\nGitOps sharpens the problem: the repository must be readable by everyone and secrets must not be. Committing Secret YAML distributes plaintext to everyone with repository access and leaves it in history where deleting does not help. The `External Secrets Operator` answers by keeping only the instructions in Git: a `SecretStore` says which vault and which identity, an `ExternalSecret` says which keys to fetch into which Secret. The controller materialises the real values in the cluster and nobody commits plaintext.\n\nThe external store here is `OpenBao`, the open-source fork created after Vault changed its licence. Its KV v2 engine trips people on paths: the mount path and the read path differ, so with the engine at `kv/`, `bao kv get kv/payments/db` actually reads `kv/data/payments/db`. In a SecretStore the `path` field is the mount, so `remoteRef.key` should not repeat it. KV v2 also keeps version history, and a read returns the latest version by default.\n\nChoosing the authentication method matters more than choosing the tool. A static token is circular: protecting your secrets requires protecting a token that reads all of them, and that token can only live in another Secret in the cluster. `Kubernetes auth` breaks the circle, because identity is issued by the cluster, short lived, and bound to a specific ServiceAccount, so a leaked pod token buys only that ServiceAccount permissions. IRSA and Workload Identity are the same idea in the clouds. Finally, the Secret ESO produces belongs to the controller: hand edits are overwritten on the next sync, and `refreshInterval` decides how long that takes."
+        }
+      },
+      {
+        "id": "metrics-and-alerts",
+        "title": {
+          "zh": "让集群自己说出哪儿不对",
+          "en": "Let the Cluster Say What Is Wrong"
+        },
+        "goal": {
+          "zh": "财务报了一个说不清的问题：「报表有时候打不开，刷新几次又好了」。\n`kubectl get pods` 全是 Running，探针全过，日志里也没有异常堆栈 ——\n因为进程确实活着，只是**一部分请求返回了 5xx**。\n\n这类问题不看指标是查不出来的。Prometheus 装好了，但集群里一个\n`ServiceMonitor` 都没有，一条告警规则也没有。\n\n## 通关标准\n\n1. 门户与报表的指标都采得到（`up` 有它们的序列）；\n2. 有一条按 **PromQL 求值**的错误率告警，能真的触发；\n3. 有一条目标掉线的告警；\n4. 两条都带 `for`，抖动不会立刻变成告警；\n5. 规则文件过 `promtool check rules`。\n\n## 会用到的命令\n\n```bash\nkubectl get prometheus -n monitoring -o yaml\nkubectl apply -f /root/infra/monitoring.yaml\npromtool check rules /root/infra/monitoring.yaml\npromtool query instant http://localhost:9090 'up'\npromtool query instant http://localhost:9090 'sum(rate(http_requests_total{code=~\"5..\"}[5m])) by (job)'\n```\n",
+          "en": "Finance reports something vague: \"the reports page sometimes fails, refreshing a\nfew times fixes it\". `kubectl get pods` shows everything Running, probes pass,\nand the logs hold no stack traces, because the process really is alive and only\n**some requests return 5xx**.\n\nProblems like this are invisible without metrics. Prometheus is installed, but\nthe cluster has no `ServiceMonitor` and no alerting rules at all.\n\n## Done when\n\n1. metrics from the portal and reports are being collected (`up` has series for\n   both);\n2. an error-rate alert exists, evaluated as real **PromQL**, and it fires;\n3. a target-down alert exists;\n4. both carry `for`, so a blip does not become a page;\n5. the rule file passes `promtool check rules`.\n\n## Commands you will need\n\n```bash\nkubectl get prometheus -n monitoring -o yaml\nkubectl apply -f /root/infra/monitoring.yaml\npromtool check rules /root/infra/monitoring.yaml\npromtool query instant http://localhost:9090 'up'\npromtool query instant http://localhost:9090 'sum(rate(http_requests_total{code=~\"5..\"}[5m])) by (job)'\n```\n"
+        },
+        "checklist": [
+          {
+            "zh": "指标采得到",
+            "en": "Metrics are being collected"
+          },
+          {
+            "zh": "告警按 PromQL 求值并真的触发",
+            "en": "Alerts evaluate as PromQL and fire"
+          },
+          {
+            "zh": "带 for，抖动不会变成告警",
+            "en": "They carry for, so blips do not page"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "采集要过**两层**选择器：Prometheus 实例的 `serviceMonitorSelector` 先选中 ServiceMonitor，ServiceMonitor 的 `selector` 再选中 Service。少配哪一层都是一条指标都采不到，而两边看起来都很正常。",
+            "en": "Collection passes **two** selectors: the Prometheus instance `serviceMonitorSelector` picks ServiceMonitors, and the ServiceMonitor `selector` picks Services. Miss either and nothing is collected, while both objects look perfectly fine."
+          },
+          {
+            "zh": "错误率是**两个 rate 相除**，不是一个计数。分子分母都要先 `sum ... by (job)` 聚合到同一组标签上，否则两边配不上，表达式返回空 —— 而返回空的告警永远不会触发，也不会报错。",
+            "en": "An error rate is **one rate divided by another**, not a count. Aggregate both sides with `sum ... by (job)` onto the same label set, or they will not match and the expression returns nothing. An alert whose expression returns nothing never fires and never complains."
+          },
+          {
+            "zh": "写完先 `promtool check rules` 跑一遍，再 `promtool query instant` 把表达式单独查一次。apiserver 收 PrometheusRule 的时候**不校验表达式**，写错了照样收下。",
+            "en": "Run `promtool check rules` first, then query the expression alone with `promtool query instant`. The apiserver does **not validate expressions** when accepting a PrometheusRule; a broken one is stored happily."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "用 `http_requests_total{code=~\"5..\"} > 0` 当告警。counter 只会涨，这条从第一个 5xx 起就永远成立 —— 而且它衡量的是「历史上出过多少错」，不是「现在错得多不多」。错误率永远要用 `rate` 加除法。",
+            "en": "Alerting on `http_requests_total{code=~\"5..\"} > 0`. A counter only grows, so this is true forever after the first 5xx, and it measures how many errors ever happened rather than how bad things are now. Error rates always need `rate` and a division."
+          },
+          {
+            "zh": "不写 `for`。一次采集抖动就会发一条告警，收告警的人很快就不看了 —— 而这比没有告警更糟，因为大家会以为「有人在盯着」。",
+            "en": "Omitting `for`. A single scrape blip pages someone, and people stop reading alerts, which is worse than having none because everyone assumes somebody is watching."
+          },
+          {
+            "zh": "以为指标里能看到一切。采集是**定时拉**的（默认 15 秒一次），只活了十秒的 Pod 很可能一个点都没采到。指标回答的是「持续的、按比例的」问题；一次性的、短暂的事件要看 Event 与日志。",
+            "en": "Expecting metrics to show everything. Scraping is **periodic pull** (15s by default), so a pod that lived ten seconds may contribute no samples at all. Metrics answer sustained, proportional questions; one-off short events live in Events and logs."
+          }
+        ],
+        "ops": {
+          "setupCommands": [
+            "kubectl config use-context prod"
+          ],
+          "objects": [
+            {
+              "apiVersion": "apps/v1",
+              "kind": "DaemonSet",
+              "metadata": {
+                "name": "cilium",
+                "namespace": "kube-system",
+                "labels": {
+                  "app.kubernetes.io/name": "cilium"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cilium"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cilium"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "cilium-agent",
+                        "image": "quay.io/cilium/cilium:v1.19.2",
+                        "ports": [
+                          {
+                            "containerPort": 9962
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "envoy-gateway",
+                "namespace": "envoy-gateway-system",
+                "labels": {
+                  "app.kubernetes.io/name": "envoy-gateway"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "envoy-gateway"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "envoy-gateway"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "registry.k8s.io/gateway-api/envoy-gateway:v1.6.2"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "internal",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/office-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+              "kind": "EnvoyProxy",
+              "metadata": {
+                "name": "public",
+                "namespace": "envoy-gateway-system"
+              },
+              "spec": {
+                "provider": {
+                  "kubernetes": {
+                    "envoyService": {
+                      "loadBalancerClass": "corp.internal/public-lb"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-internal"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "internal",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "GatewayClass",
+              "metadata": {
+                "name": "envoy-public"
+              },
+              "spec": {
+                "controllerName": "gateway.envoyproxy.io/gatewayclass-controller",
+                "parametersRef": {
+                  "group": "gateway.envoyproxy.io",
+                  "kind": "EnvoyProxy",
+                  "name": "public",
+                  "namespace": "envoy-gateway-system"
+                }
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "cert-manager",
+                "namespace": "cert-manager",
+                "labels": {
+                  "app.kubernetes.io/name": "cert-manager"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "cert-manager"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "cert-manager"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "controller",
+                        "image": "quay.io/jetstack/cert-manager-controller:v1.19.1"
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "ClusterIssuer",
+              "metadata": {
+                "name": "corp-ca"
+              },
+              "spec": {
+                "ca": {
+                  "secretName": "corp-issuing-ca"
+                }
+              }
+            },
+            {
+              "apiVersion": "cert-manager.io/v1",
+              "kind": "Certificate",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "secretName": "portal-tls",
+                "duration": "2160h",
+                "renewBefore": "720h",
+                "commonName": "portal.corp.internal",
+                "dnsNames": [
+                  "portal.corp.internal"
+                ],
+                "issuerRef": {
+                  "name": "corp-ca",
+                  "kind": "ClusterIssuer"
+                }
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "Gateway",
+              "metadata": {
+                "name": "corp-gw",
+                "namespace": "payments"
+              },
+              "spec": {
+                "gatewayClassName": "envoy-internal",
+                "listeners": [
+                  {
+                    "name": "https",
+                    "port": 443,
+                    "protocol": "HTTPS",
+                    "hostname": "portal.corp.internal",
+                    "tls": {
+                      "mode": "Terminate",
+                      "certificateRefs": [
+                        {
+                          "name": "portal-tls"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "http",
+                    "port": 80,
+                    "protocol": "HTTP",
+                    "hostname": "portal.corp.internal"
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "prometheus",
+                "namespace": "monitoring",
+                "labels": {
+                  "app.kubernetes.io/name": "prometheus"
+                }
+              },
+              "spec": {
+                "replicas": 1,
+                "selector": {
+                  "matchLabels": {
+                    "app.kubernetes.io/name": "prometheus"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app.kubernetes.io/name": "prometheus"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "prometheus",
+                        "image": "quay.io/prometheus/prometheus:v3.9.1",
+                        "ports": [
+                          {
+                            "containerPort": 9090
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "monitoring.coreos.com/v1",
+              "kind": "Prometheus",
+              "metadata": {
+                "name": "main",
+                "namespace": "monitoring"
+              },
+              "spec": {
+                "serviceMonitorSelector": {
+                  "matchLabels": {
+                    "release": "kube-prom"
+                  }
+                },
+                "replicas": 1
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "portal"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "portal"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "web",
+                        "image": "harbor.corp.internal/team/portal:1.4.0",
+                        "ports": [
+                          {
+                            "containerPort": 8080
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments",
+                "labels": {
+                  "app": "portal"
+                }
+              },
+              "spec": {
+                "clusterIP": "10.96.1.10",
+                "selector": {
+                  "app": "portal"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 8080
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "gateway.networking.k8s.io/v1",
+              "kind": "HTTPRoute",
+              "metadata": {
+                "name": "portal",
+                "namespace": "payments"
+              },
+              "spec": {
+                "parentRefs": [
+                  {
+                    "name": "corp-gw"
+                  }
+                ],
+                "hostnames": [
+                  "portal.corp.internal"
+                ],
+                "rules": [
+                  {
+                    "matches": [
+                      {
+                        "path": {
+                          "type": "PathPrefix",
+                          "value": "/"
+                        }
+                      }
+                    ],
+                    "backendRefs": [
+                      {
+                        "name": "portal",
+                        "port": 80
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "apiVersion": "apps/v1",
+              "kind": "Deployment",
+              "metadata": {
+                "name": "reports",
+                "namespace": "payments"
+              },
+              "spec": {
+                "replicas": 2,
+                "selector": {
+                  "matchLabels": {
+                    "app": "reports"
+                  }
+                },
+                "template": {
+                  "metadata": {
+                    "labels": {
+                      "app": "reports"
+                    }
+                  },
+                  "spec": {
+                    "containers": [
+                      {
+                        "name": "app",
+                        "image": "harbor.corp.internal/team/reports:2.3.0",
+                        "ports": [
+                          {
+                            "containerPort": 9090
+                          }
+                        ],
+                        "resources": {
+                          "requests": {
+                            "memory": "256Mi"
+                          },
+                          "limits": {
+                            "memory": "1Gi"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "apiVersion": "v1",
+              "kind": "Service",
+              "metadata": {
+                "name": "reports",
+                "namespace": "payments",
+                "labels": {
+                  "app": "reports"
+                }
+              },
+              "spec": {
+                "selector": {
+                  "app": "reports"
+                },
+                "ports": [
+                  {
+                    "port": 80,
+                    "targetPort": 9090
+                  }
+                ]
+              }
+            }
+          ],
+          "files": {
+            "/root/infra/monitoring.yaml": "# 采集与告警都还没配。\n#\n# 提示：Prometheus 实例上写着 serviceMonitorSelector，\n#      去看看它要求 ServiceMonitor 带什么标签。\n"
+          },
+          "referenceFiles": {
+            "/root/infra/monitoring.yaml": "apiVersion: monitoring.coreos.com/v1\nkind: ServiceMonitor\nmetadata:\n  name: reports\n  namespace: payments\n  labels:\n    release: kube-prom\nspec:\n  selector:\n    matchLabels:\n      app: reports\n  endpoints:\n  - port: http\n---\napiVersion: monitoring.coreos.com/v1\nkind: ServiceMonitor\nmetadata:\n  name: portal\n  namespace: payments\n  labels:\n    release: kube-prom\nspec:\n  selector:\n    matchLabels:\n      app: portal\n  endpoints:\n  - port: http\n---\napiVersion: monitoring.coreos.com/v1\nkind: PrometheusRule\nmetadata:\n  name: payments\n  namespace: payments\n  labels:\n    release: kube-prom\nspec:\n  groups:\n  - name: payments.rules\n    rules:\n    - alert: TargetDown\n      expr: up == 0\n      for: 5m\n      labels:\n        severity: critical\n      annotations:\n        summary: \"{{ $labels.job }} 的 {{ $labels.pod }} 采不到了\"\n    - alert: HighErrorRate\n      expr: sum(rate(http_requests_total{code=~\"5..\"}[5m])) by (job)\n        / sum(rate(http_requests_total[5m])) by (job) > 0.05\n      for: 10m\n      labels:\n        severity: critical\n      annotations:\n        summary: \"{{ $labels.job }} 的 5xx 比例是 {{ $value }}\"\n"
+          },
+          "referenceCommands": [
+            "kubectl apply -f /root/infra/monitoring.yaml"
+          ]
+        },
+        "specs": [
+          {
+            "path": "metrics-and-alerts.spec.ts",
+            "content": "import { advance, list, sh } from '@ops/lab';\n\nconst PROM = 'http://localhost:9090';\n\ndescribe('指标与告警', () => {\n  it('门户与报表的指标都采得到', async () => {\n    await advance(300000);\n    const result = await sh(\"promtool query instant \" + PROM + \" 'up'\");\n    expect(result.code).toBe(0);\n    expect(result.stdout).toContain('payments/reports');\n    expect(result.stdout).toContain('payments/portal');\n  });\n\n  it('规则文件是干净的', async () => {\n    const result = await sh('promtool check rules /root/infra/monitoring.yaml');\n    expect(result.code).toBe(0);\n    expect(result.stdout).toContain('SUCCESS');\n  });\n\n  it('错误率告警真的触发了', async () => {\n    await advance(1200000);\n    const rules = list('PrometheusRule', { namespace: 'payments' });\n    expect(rules.length).toBeGreaterThan(0);\n\n    const firing = list('Pod', { namespace: 'monitoring' });\n    expect(firing.length).toBeGreaterThan(0);\n\n    const result = await sh(\n      \"promtool query instant \" + PROM\n      + \" 'sum(rate(http_requests_total{code=~\\\"5..\\\"}[5m])) by (job)\"\n      + \" / sum(rate(http_requests_total[5m])) by (job) > 0.05'\"\n    );\n    expect(result.stdout).toContain('payments/reports');\n    // 门户没坏，不该出现在结果里\n    expect(result.stdout).not.toContain('payments/portal');\n  });\n\n  it('告警是按 PromQL 写的，而且带 for', () => {\n    const rules = list('PrometheusRule', { namespace: 'payments' })\n      .flatMap((rule) => (rule.spec.groups || []).flatMap((group) => group.rules || []))\n      .filter((rule) => rule.alert);\n    expect(rules.length).toBeGreaterThanOrEqual(2);\n    for (const rule of rules) {\n      expect(rule.for).toBeTruthy();\n    }\n    // 错误率那条必须是比率，不能是裸计数\n    const rate = rules.find((rule) => /rate\\(/.test(rule.expr) && rule.expr.includes('/'));\n    expect(rate).toBeTruthy();\n  });\n\n  it('有一条目标掉线的告警', () => {\n    const rules = list('PrometheusRule', { namespace: 'payments' })\n      .flatMap((rule) => (rule.spec.groups || []).flatMap((group) => group.rules || []));\n    expect(rules.some((rule) => /\\bup\\b/.test(rule.expr || ''))).toBe(true);\n  });\n\n  it('ServiceMonitor 带上了 Prometheus 要求的标签', () => {\n    const monitors = list('ServiceMonitor', { namespace: 'payments' });\n    expect(monitors.length).toBeGreaterThanOrEqual(2);\n    for (const monitor of monitors) {\n      expect(monitor.metadata.labels.release).toBe('kube-prom');\n    }\n  });\n});\n"
+          }
+        ],
+        "focus": [
+          "observability",
+          "correctness"
+        ],
+        "extension": {
+          "zh": "这一关的场景之所以值得单独练，是因为它落在**监控的盲区之间**：\n进程活着（探针过）、日志没异常（5xx 是正常返回不是崩溃）、\nPod 没重启（`kubectl get` 一片绿）。三个最常用的信号全说「没事」，\n只有比例型指标看得出来。\n\n三类信号各管一段，混着用才完整：**指标**回答「持续的、按比例的」问题\n（错误率、延迟分位数、饱和度），代价是采样间隔之间的事看不见；\n**日志**回答「这一次具体发生了什么」，代价是量大且没有聚合；\n**链路追踪**回答「这一次请求在哪一跳慢了」，代价是采样率与埋点成本。\n拿指标去查单次请求、拿日志去算错误率，都是用错了工具。\n\n告警上有一条经验值得记：**告的应该是症状，不是原因**。\n「错误率超过 5%」是症状，用户感受得到；「某个 Pod 内存高」是原因，\n而且高内存不一定有影响。按原因告警的系统会在半夜叫醒一个人，\n让他去看一个用户根本没感觉的指标 —— 几次之后就没人看告警了。\n",
+          "en": "This scenario is worth practising because it falls **between the blind spots**:\nthe process is alive (probes pass), the logs are clean (a 5xx is a normal\nresponse, not a crash), and no pod restarted (`kubectl get` is all green). The\nthree signals people reach for first all say \"fine\", and only a proportional\nmetric shows the problem.\n\nThree signal types cover different ground and only work together. **Metrics**\nanswer sustained, proportional questions (error rate, latency quantiles,\nsaturation) at the cost of blindness between scrapes. **Logs** answer what\nhappened in one specific case, at the cost of volume and no aggregation.\n**Traces** answer which hop was slow for one request, at the cost of sampling and\ninstrumentation. Using metrics to investigate a single request, or logs to\ncompute an error rate, is using the wrong tool.\n\nOne rule of thumb about alerting: **alert on symptoms, not causes**. \"Error rate\nabove 5%\" is a symptom users feel; \"this pod uses a lot of memory\" is a cause,\nand high memory may have no effect at all. Alerting on causes wakes someone at\n3am to look at a number no user noticed, and after a few of those nobody reads\nthe alerts any more.\n"
+        },
+        "primer": {
+          "zh": "`Prometheus` 是**拉**模型：它按配置找到一批目标，每隔一段时间（默认 15 秒）去每个目标的 `/metrics` 上采一次。数据模型很小：一条`序列`由指标名加一组标签唯一确定，值按时间点存。这个模型带来两个直接后果：两次采样之间发生的事看不见（只活十秒的 Pod 可能一个点都没有），以及目标挂掉之后它此前的指标还会在图上停留一个回看窗口（默认五分钟）才消失。\n\n在 Kubernetes 里，采集配置写成 `ServiceMonitor`：按标签选中一批 Service，去它们后面的 Pod 上拉。这里有个**两层选择器**的坑：Prometheus 实例自己有一个 `serviceMonitorSelector`，先由它选中 ServiceMonitor，再由 ServiceMonitor 的 `selector` 选中 Service。少配任何一层的结果都是一条指标都采不到，而两个对象看起来都完全正常。`up` 这个指标是 Prometheus 自己合成的，不来自目标，它是判断「采不采得到」的第一手依据。\n\n`PromQL` 里最要紧的区分是 `counter` 与 `gauge`。counter 只增不减（请求总数、错误总数），直接看它的值没有意义，要用 `rate(x[5m])` 求每秒增量；gauge 可以上下浮动（内存、队列长度），直接看瞬时值。错误率是**两个 rate 相除**：`sum(rate(errors[5m])) by (job) / sum(rate(total[5m])) by (job)`。两侧必须聚合到同一组标签上，否则配不上，表达式返回空，而返回空的告警永远不会触发，也不会报错。另外比较运算符是`过滤`不是求布尔值：`up == 0` 返回的是那些确实为 0 的序列。\n\n告警规则写在 `PrometheusRule` 里，`expr` 加 `for`。`for` 的意思是「条件持续成立这么久才真的告警」，中间处于 `pending`；条件一旦不成立就整条清掉，所以抖动不会累积。两条实践值得记：一是 apiserver 收 PrometheusRule 时**不校验表达式**，写错了照样收下，所以上线前要 `promtool check rules` 加 `promtool query instant` 各跑一遍；二是`告症状不告原因`：「错误率超过 5%」用户感受得到，「某个 Pod 内存高」不一定有影响，按原因告警的系统很快就没人看了。",
+          "en": "`Prometheus` is a **pull** model: it discovers a set of targets and scrapes `/metrics` on each at a fixed interval, 15 seconds by default. The data model is tiny: a `series` is identified by a metric name plus a set of labels, with values stored per timestamp. Two consequences follow directly. Anything happening between scrapes is invisible, so a pod that lived ten seconds may contribute no samples at all. And after a target dies, its earlier metrics linger for one lookback window (five minutes by default) before disappearing.\n\nIn Kubernetes the scrape config is a `ServiceMonitor`: select Services by label, scrape the pods behind them. There is a **two-selector** trap here: the Prometheus instance has its own `serviceMonitorSelector` which picks ServiceMonitors, and each ServiceMonitor has a `selector` which picks Services. Missing either layer collects nothing, while both objects look perfectly healthy. The `up` metric is synthesised by Prometheus rather than coming from the target, which makes it the first thing to check when nothing appears.\n\nThe distinction that matters most in `PromQL` is `counter` versus `gauge`. A counter only increases (requests served, errors returned) and its raw value means little; use `rate(x[5m])` for per-second increase. A gauge moves both ways (memory, queue depth) and is read directly. An error rate is **one rate divided by another**: `sum(rate(errors[5m])) by (job) / sum(rate(total[5m])) by (job)`. Both sides must be aggregated to the same label set or they will not match and the expression returns nothing, and an alert whose expression returns nothing never fires and never complains. Note also that comparison operators `filter` rather than produce booleans: `up == 0` returns the series that really are zero.\n\nAlerting rules live in a `PrometheusRule` as an `expr` plus a `for`. The `for` means the condition must hold that long before the alert really fires, staying `pending` meanwhile, and the whole thing clears the moment the condition stops holding, so blips do not accumulate. Two practices worth keeping: the apiserver does **not validate expressions** when accepting a PrometheusRule, so run `promtool check rules` and `promtool query instant` before shipping; and `alert on symptoms, not causes`, because users feel \"error rate above 5%\" while \"this pod uses a lot of memory\" may mean nothing, and cause-based alerting quickly stops being read."
         }
       }
     ]
