@@ -41,6 +41,8 @@ async function attempt(project: EngineeringProject, stage: ProjectStage, solve: 
 
   const world = buildWorld({
     ...(worldSpec ?? {}),
+    // 关卡级的世界覆盖，浅合并 —— 集群关卡靠它把卡数从 1 提到 8
+    ...(gpu.world ?? {}),
     ...(gpu.sharedBytesPerBlock ? { sharedBytesPerBlock: gpu.sharedBytesPerBlock } : {}),
     machine: {
       ...(worldSpec?.machine ?? {}),
