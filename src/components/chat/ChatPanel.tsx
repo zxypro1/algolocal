@@ -125,6 +125,32 @@ export default function ChatPanel({
     viewport.scrollTop = viewport.scrollHeight;
   }, [messages]);
 
+  /**
+   * 尺寸或内容高度变了也要重新贴底。
+   *
+   * 工作台里这栏的宽度是可以拖的，一拖内容重排、总高度变，原来贴着底部的视图
+   * 就浮到中间去了 —— 看起来像「消息没滚到底」。同样只在**本来就贴着底**时才动，
+   * 用户正在往回翻历史时拖分隔条不会被拽走。
+   *
+   * **要盯的是内容那一层，不只是视口。** 只观察视口的话，回调在视口尺寸变化的
+   * 那一帧就跑了，而此时里面的文字还没重新折行；等它折完，总高度又长了一截，
+   * 于是又不贴底了。实测拖宽左栏（对话变窄、文字折行变多）必现，
+   * 而后续几次拖动反而正常 —— 因为那时高度已经稳定。观察内容元素就没有这个时序问题。
+   */
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || typeof ResizeObserver === 'undefined') return;
+    const stickToBottom = () => {
+      if (!pinnedRef.current) return;
+      viewport.scrollTop = viewport.scrollHeight;
+    };
+    const observer = new ResizeObserver(stickToBottom);
+    observer.observe(viewport);
+    const content = viewport.firstElementChild;
+    if (content) observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
+
   const submit = () => {
     const text = input.trim();
     if (!text || isStreaming) return;
@@ -137,9 +163,20 @@ export default function ChatPanel({
   const canRetry = !isStreaming && (Boolean(error) || Boolean(lastMessage?.error));
 
   return (
-    <Stack gap={0} style={{ flex: 1, minHeight: 0 }}>
+    /*
+     * 高度要同时应付两种父容器。
+     *
+     * 弹窗形态（AIChatDialog / EngineeringChat）把它放进一个 `display: flex` 的
+     * 列容器里，`flex: 1` 就够了。但工作台形态放进的是 Mantine 的 `Tabs.Panel` ——
+     * **那是个 `display: block` 的 div**，`flex` 在里面是死的，于是整个面板
+     * 缩到内容高度：实测 Panel 有 580px，面板只有 313px，输入框下面空了 267px。
+     *
+     * 所以两条都写上：`height: 100%` 管住块级父容器，`flex: 1` 管住弹性父容器。
+     * 弹性容器里 `flex-basis: 0%` 会盖掉 `height`，两者不打架。
+     */
+    <Stack gap={0} style={{ flex: 1, minHeight: 0, height: '100%', width: '100%' }}>
       <ScrollArea
-        style={{ flex: 1, padding: 16 }}
+        style={{ flex: 1, minHeight: 0, padding: 16 }}
         viewportRef={viewportRef}
         onScrollPositionChange={handleScroll}
       >

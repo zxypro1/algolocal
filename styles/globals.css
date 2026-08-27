@@ -381,8 +381,19 @@ a {
  * 而我们要的正是"最小内容宽度不能超过面板"。
  */
 .panel-scroll {
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  /*
+   * `break-word` 而不是 `anywhere`。
+   *
+   * 当初写 `anywhere` 是因为视口内层是 `display: table`、宽度由内容决定，
+   * 必须让长单词参与「最小内容宽度」的计算才不会把面板顶开。
+   * 上面那条把它改回 `display: block` + `min-width: 0` 之后，**宽度是外面定死的**，
+   * 最小内容宽度不再有话语权 —— 于是可以换成只在「这个词自己一行都放不下」时才断。
+   *
+   * 差别在观感上很实在：`compute-sanitizer`、`vecAdd<<<4, 256>>>`、
+   * `gpu.comm.bytesByLink.ib` 这些不再被从中间劈开。
+   * 实测 464 个测量点，换成 break-word 之后横向溢出仍然是 0。
+   */
+  overflow-wrap: break-word;
   /*
    * `text-spacing-trim: space-all` 关掉全角标点的挤压。
    *
@@ -431,6 +442,126 @@ a {
 .panel-scroll svg[id^='mermaid-'] {
   max-width: 100%;
   height: auto;
+}
+
+/* ------------------------------------------------------------------
+ * 左栏的正文排版
+ *
+ * 三个实战工作台（code / ops / gpu）的左栏都挂 `.panel-scroll`，
+ * 所以这一段一改三边同时生效 —— 观感一致是靠共用这个类保证的，不是靠各自对齐。
+ *
+ * 这一栏的内容形态很固定：中英混排的说明文字、`##` 小节标题（一关平均六个）、
+ * 无序列表、对照表、命令行代码块。下面每一条都是冲着其中一样去的。
+ * ------------------------------------------------------------------ */
+
+/*
+ * 行距。
+ *
+ * 1.75 而不是 Latin 惯用的 1.5~1.6：中文是全高方块字，没有西文的升部降部留白，
+ * 同样的行距看上去要挤得多。窄栏里一行只有十几个字，行距不够时眼睛很容易串行。
+ */
+.panel-scroll li {
+  line-height: 1.75;
+}
+
+/*
+ * 列表的缩进。
+ *
+ * 浏览器默认 `padding-inline-start: 40px`。左栏拖到最窄时正文只有 216px，
+ * 40px 等于把 18% 的行长喂给了缩进，而这一栏的列表几乎都是「通关标准」那种短句，
+ * 本来就不需要深缩进。1.5em（24px）够把项目符号和正文分开了。
+ */
+.panel-scroll ul,
+.panel-scroll ol {
+  padding-inline-start: 1.5em;
+  margin-block: 0.6em;
+}
+
+/* 列表项之间留一点空隙，一条一条读得开 */
+.panel-scroll li + li {
+  margin-top: 0.35em;
+}
+
+/*
+ * 标题。
+ *
+ * Mantine 的 `Title order={1}` 是 34px —— 那是给整页正文用的尺寸，
+ * 放进 300px 出头的窄栏里像块广告牌。这里按栏宽重新定尺：层级主要靠**间距**
+ * 和 `##` 底下那条分隔线表达，字号只拉开一点点。
+ *
+ * `##` 单独给一条底线：一关平均六个小节，长文里没有视觉分隔的话，
+ * 滚起来是一整片灰色的字，找不到「这一段讲完了」的位置。
+ */
+.panel-scroll h1 {
+  font-size: 1.25rem;
+  line-height: 1.4;
+  margin-top: 1.6em;
+  margin-bottom: 0.6em;
+}
+
+.panel-scroll h2 {
+  font-size: 1.12rem;
+  line-height: 1.4;
+  margin-top: 1.5em;
+  margin-bottom: 0.55em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+.panel-scroll h3 {
+  font-size: 1rem;
+  line-height: 1.45;
+  margin-top: 1.3em;
+  margin-bottom: 0.45em;
+}
+
+.panel-scroll h4,
+.panel-scroll h5,
+.panel-scroll h6 {
+  font-size: 0.94rem;
+  margin-top: 1.1em;
+  margin-bottom: 0.4em;
+}
+
+/*
+ * 行内代码。
+ *
+ * 这一栏里行内代码密度很高（变量名、指标名、命令），所以要**一眼能和正文分开**、
+ * 但又不能抢戏。给一点横向内边距和圆角就够，字号压到 0.88em 让它和中文的
+ * 视觉重量持平 —— 等宽字体在同样 font-size 下看着比中文大一号。
+ */
+/*
+ * 选择器要钉在 Mantine 的 Code 组件上，**不能写成 `:not(pre) > code`**。
+ * react-syntax-highlighter 渲染出来的结构是 `pre > div > code`，
+ * 那个 code 的父节点是 div 不是 pre，于是 `:not(pre) > code` 会把它一起命中 ——
+ * 代码块的字号被压成 0.88em，还平白多出一圈内边距和圆角。
+ * 行内代码走的是 MarkdownRenderer 里的 `<Code>`，认它的类名最准。
+ */
+.panel-scroll .mantine-Code-root {
+  padding: 0.1em 0.34em;
+  border-radius: 3px;
+  font-size: 0.88em;
+}
+
+/*
+ * 表格。
+ *
+ * 对照表在窄栏里最吃宽度。字号收一点、单元格内边距收一点，
+ * 换来的是同样宽度下少折几行 —— 折行越多，表格越难横着读。
+ */
+.panel-scroll table {
+  font-size: 0.86em;
+}
+
+.panel-scroll th,
+.panel-scroll td {
+  padding: 4px 8px;
+  line-height: 1.55;
+}
+
+/* 代码块和上下文之间留出空隙，别和段落黏在一起 */
+.panel-scroll pre {
+  margin-block: 0.8em;
 }
 
 /* 编辑器左侧栏的断点标记。条件断点/日志断点用空心圆区分开。 */
