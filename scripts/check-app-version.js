@@ -88,6 +88,37 @@ function checkAppVersion(distDir, expectedVersion) {
   return { ok: problems.length === 0, checked, problems };
 }
 
+/**
+ * 产物文件名里的版本号。
+ *
+ * `.app` 的 Info.plist 只有 macOS 有；Windows 与 Linux 那边同样可能被写死
+ * （`artifactName` 现在用的是 `${version}`，但它和 bundleShortVersion 一样是
+ * 一行随时可以改成字面量的配置）。文件名是这三个平台唯一都有、且外部可见的版本载体，
+ * 所以顺带钉住它。
+ *
+ * **和 .app 不同，这里「一个都没有」不算失败**：`electron-builder --dir` 只出
+ * 目录不出安装包，那是正常的。区别在于 .app 在 macOS 上必然存在，而安装包不是。
+ */
+const ARTIFACT_EXTENSIONS = ['.dmg', '.zip', '.exe', '.AppImage', '.deb', '.rpm'];
+
+function checkArtifactNames(distDir, expectedVersion) {
+  if (!fs.existsSync(distDir)) return { ok: true, checked: [], problems: [] };
+  const problems = [];
+  const checked = [];
+  for (const entry of fs.readdirSync(distDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    if (!ARTIFACT_EXTENSIONS.some((ext) => entry.name.endsWith(ext))) continue;
+    checked.push(entry.name);
+    if (!entry.name.includes(expectedVersion)) {
+      problems.push(
+        `产物文件名 ${entry.name} 里没有 package.json 的版本号 ${expectedVersion}。` +
+        `多半是 electron-builder.config.js 的 artifactName 被写死了。`
+      );
+    }
+  }
+  return { ok: problems.length === 0, checked, problems };
+}
+
 function main() {
   const distDir = process.argv[2] || path.join(__dirname, '..', 'dist');
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
@@ -98,17 +129,25 @@ function main() {
     return;
   }
 
-  const { ok, checked, problems } = checkAppVersion(distDir, pkg.version);
-  for (const item of checked) {
+  const bundles = checkAppVersion(distDir, pkg.version);
+  for (const item of bundles.checked) {
     console.log(`check-app-version: ${path.basename(item.app)} -> ${item.short}`);
   }
-  if (!ok) {
+
+  const names = checkArtifactNames(distDir, pkg.version);
+
+  const problems = [...bundles.problems, ...names.problems];
+  if (problems.length > 0) {
+    // 先报错再说数量。反过来写会先打出一句「都对」，紧接着又列出错误 ——
+    // 出问题的那一刻恰恰是最不该让日志自相矛盾的时候。
     for (const p of problems) console.error(`::error::check-app-version: ${p}`);
     process.exit(1);
   }
-  console.log(`check-app-version: ${checked.length} 个产物的版本号都是 ${pkg.version}`);
+  const bundleNote = `${bundles.checked.length} 个 .app`;
+  const nameNote = names.checked.length > 0 ? `、${names.checked.length} 个安装包文件名` : '';
+  console.log(`check-app-version: ${bundleNote}${nameNote} 的版本号都是 ${pkg.version}`);
 }
 
 if (require.main === module) main();
 
-module.exports = { checkAppVersion, findAppBundles, readPlistKey };
+module.exports = { checkAppVersion, checkArtifactNames, findAppBundles, readPlistKey };

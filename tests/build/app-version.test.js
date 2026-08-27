@@ -12,7 +12,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { checkAppVersion, findAppBundles } = require('../../scripts/check-app-version');
+const { checkAppVersion, checkArtifactNames, findAppBundles } = require('../../scripts/check-app-version');
 
 /** 造一个只有 Info.plist 的假 .app —— 检查读的就是这个文件 */
 function makeFakeApp(root, name, shortVersion) {
@@ -94,6 +94,42 @@ describe('找 .app 这件事本身', () => {
     fs.mkdirSync(inner, { recursive: true });
     // 顶层那个先命中就不再往里钻
     expect(findAppBundles(tmp)).toEqual([path.join(tmp, 'mac-arm64', 'AlgoLocal.app')]);
+  });
+});
+
+describe('安装包文件名里的版本号', () => {
+  it('文件名带版本号就通过', () => {
+    fs.writeFileSync(path.join(tmp, 'AlgoLocal-0.17.2-macOS-arm64.dmg'), 'x');
+    fs.writeFileSync(path.join(tmp, 'AlgoLocal-0.17.2-Windows-Setup.exe'), 'x');
+    const result = checkArtifactNames(tmp, '0.17.2');
+    expect(result.ok).toBe(true);
+    expect(result.checked).toHaveLength(2);
+  });
+
+  it('**文件名停在旧版本就拦下来** —— Windows / Linux 那边没有 Info.plist 可查，只能靠它', () => {
+    fs.writeFileSync(path.join(tmp, 'AlgoLocal-0.16.1-Linux.AppImage'), 'x');
+    const result = checkArtifactNames(tmp, '0.17.2');
+    expect(result.ok).toBe(false);
+    expect(result.problems[0]).toContain('0.16.1');
+  });
+
+  it('六种产物后缀都认', () => {
+    for (const ext of ['dmg', 'zip', 'exe', 'AppImage', 'deb', 'rpm']) {
+      fs.writeFileSync(path.join(tmp, `AlgoLocal-0.17.2-x.${ext}`), 'x');
+    }
+    expect(checkArtifactNames(tmp, '0.17.2').checked).toHaveLength(6);
+  });
+
+  it('**一个安装包都没有时不算失败** —— --dir 只出目录不出安装包，那是正常的', () => {
+    const result = checkArtifactNames(tmp, '0.17.2');
+    expect(result.ok).toBe(true);
+    expect(result.checked).toEqual([]);
+  });
+
+  it('不看无关文件（latest.yml、blockmap 之类）', () => {
+    fs.writeFileSync(path.join(tmp, 'latest-mac.yml'), 'x');
+    fs.writeFileSync(path.join(tmp, 'AlgoLocal-0.16.1-macOS.dmg.blockmap'), 'x');
+    expect(checkArtifactNames(tmp, '0.17.2').ok).toBe(true);
   });
 });
 
