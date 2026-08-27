@@ -44,6 +44,20 @@ function bytes(value: number): string {
   return `${value} B`;
 }
 
+/**
+ * 数字排版。
+ *
+ * 整数原样，小数最多四位。理由不只是好看：模拟周期打成 `8.583259701492537`
+ * 会给出一种「这个数精确到 10^-15」的暗示，而它下一行就写着「没有真卡校准」——
+ * 两句话互相矛盾的时候，模型信哪一句是没法预期的。
+ * 门槛的实测值同理：`0.9705882352941176` 里有用的信息只有前几位。
+ */
+function n(value: number): string {
+  if (!Number.isFinite(value)) return String(value);
+  if (Number.isInteger(value)) return String(value);
+  return String(Number(value.toFixed(4)));
+}
+
 const OP_TEXT: Record<string, string> = {
   lte: '≤', gte: '≥', lt: '<', gt: '>', eq: '=',
 };
@@ -59,7 +73,7 @@ function gateLine(
   const mark = gate.passed ? '✓' : '✗';
   const unit = gate.unit ? ` ${gate.unit}` : '';
   const op = OP_TEXT[gate.op] ?? gate.op;
-  const head = `  ${mark} ${gate.label} [${gate.metric}] ${zh ? '要求' : 'requires'} ${op} ${gate.target}${unit}，${zh ? '实测' : 'measured'} ${gate.actual}${unit}`;
+  const head = `  ${mark} ${gate.label} [${gate.metric}] ${zh ? '要求' : 'requires'} ${op} ${n(gate.target)}${unit}，${zh ? '实测' : 'measured'} ${n(gate.actual)}${unit}`;
   if (gate.passed) return head;
 
   // 还差多少：比值比差值好读 —— 「超出 2.1 倍」比「超出 4.93」更能指方向
@@ -140,7 +154,7 @@ export function buildGpuContext(
       context.gates.map((gate) => {
         const op = OP_TEXT[gate.op] ?? gate.op;
         const unit = gate.unit ? ` ${gate.unit}` : '';
-        return `  · ${pick(gate.label, language) || gate.metric} [${gate.metric}] ${op} ${gate.value}${unit}`;
+        return `  · ${pick(gate.label, language) || gate.metric} [${gate.metric}] ${op} ${n(gate.value)}${unit}`;
       }).join('\n')
     );
   }
@@ -181,7 +195,7 @@ export function buildGpuContext(
       `${zh ? '显存峰值' : 'Peak device memory'}: ${bytes(profile.memoryPeakBytes)}`,
       `${zh ? '算术强度' : 'Arithmetic intensity'}: ${profile.arithmeticIntensity.toFixed(3)} FLOP/byte`,
       // 周期数放最后并且带上警告：它是估的，不能当绝对值用
-      `${zh ? '模拟周期' : 'Simulated cycles'}: ${profile.cycles}${profile.bottleneck ? `, ${zh ? '瓶颈' : 'bottleneck'} ${profile.bottleneck}` : ''} — ${zh ? '**只能同关相对比较，没有真卡校准，不要当绝对性能**' : '**relative comparison within this stage only; not calibrated against real hardware**'}`,
+      `${zh ? '模拟周期' : 'Simulated cycles'}: ${n(profile.cycles)}${profile.bottleneck ? `, ${zh ? '瓶颈' : 'bottleneck'} ${profile.bottleneck}` : ''} — ${zh ? '**只能同关相对比较，没有真卡校准，不要当绝对性能**' : '**relative comparison within this stage only; not calibrated against real hardware**'}`,
     ];
     sections.push(`## ${zh ? '剖析计量（上次运行）' : 'Profile counters (last run)'}\n${lines.join('\n')}`);
   }

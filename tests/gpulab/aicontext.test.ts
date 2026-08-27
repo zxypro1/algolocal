@@ -179,6 +179,19 @@ describe('门槛摘要 —— 这个场景最关键的一段上下文', () => {
     expect(text).toContain('2.10');
   });
 
+  it('**数字不打成 16 位小数** —— 下一行写着「没有真卡校准」，上一行却精确到 10^-15，模型信哪句都不对', () => {
+    const noisy = report({
+      gates: [{
+        gate: { metric: 'gpu.warp.activeLaneRatio', op: 'gte', value: 0.9, label: { zh: '活跃 lane 占比', en: 'active lanes' } },
+        actual: 0.9705882352941176,
+        passed: true,
+      }],
+    });
+    const text = buildGpuContext({ report: summarizeGpuReport(noisy) } as never, 'zh');
+    expect(text).toContain('0.9706');
+    expect(text).not.toContain('0.9705882352941176');
+  });
+
   it('没跑过验收时用关卡声明的门槛，不至于什么都不知道', () => {
     const text = buildGpuContext({
       gates: [{ metric: 'gpu.memory.readBytes', op: 'lte', value: 1024, unit: 'B' }],
