@@ -720,3 +720,36 @@ export interface OpsReview {
   strengths: string[];
   nextSteps: string[];
 }
+
+/* ------------------------------------------------------------------
+ * GPU 复盘
+ *
+ * 又是一套维度，理由和 ops 一样：评的东西不同。
+ * 代码形态评「这段代码能不能合」，ops 评「这一关他是怎么操作过来的」，
+ * GPU 这边评的是**优化本身**：他有没有先量再改、改动是不是冲着瓶颈去的、
+ * 结果还对不对、以及 —— 最要紧的一条 —— 门槛是真的优化过去的，
+ * 还是把问题规模改小、把 kernel 掏空之类蒙过去的。
+ * ------------------------------------------------------------------ */
+
+export const GPU_DIMENSION_KEYS = [
+  'optimization', 'measurement', 'correctness', 'legitimacy', 'understanding',
+] as const;
+
+export type GpuDimensionKey = (typeof GPU_DIMENSION_KEYS)[number];
+
+export interface GpuReviewIssue {
+  title: string;
+  severity: 'blocker' | 'major' | 'minor' | 'nit';
+  /** 出问题的地方：一段 kernel 代码、一个计量、或者一条命令 */
+  where?: string;
+  detail: string;
+  suggestion?: string;
+}
+
+export interface GpuReview {
+  summary: string;
+  dimensions: Array<{ key: GpuDimensionKey; score: number; comment: string }>;
+  issues: GpuReviewIssue[];
+  strengths: string[];
+  nextSteps: string[];
+}

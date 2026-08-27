@@ -683,5 +683,38 @@
     "title": "This section could not be displayed",
     "body": "The project data is malformed, so this part of the page failed to render. The rest of the app is still usable.",
     "retry": "Try again"
+  },
+  "gpulab": {
+    "chat": {
+      "tab": "AI assistant",
+      "title": "Optimisation assistant",
+      "empty": "I can see your current kernel source, the measured value of every gate from the last run, the sectors and bank conflicts on the profile panel, and the commands you recently ran. When a counter is off target, ask — I will connect \"which number is wrong\" to \"which lines cause it\". You do the editing; I do not touch the code.",
+      "placeholder": "Ask about this stage… (Enter to send, Shift+Enter for a new line)",
+      "prompts": {
+        "gateShortfall": "Which gate is off, and by how much?",
+        "whyFailing": "What is the failing test case asserting?",
+        "lastError": "Why did the last command fail?",
+        "whereToLook": "Where in the source should I look now?",
+        "explainStage": "What exactly am I optimising in this stage?"
+      }
+    },
+    "review": {
+      "title": "AI review",
+      "subtitle": "Judges how you optimised, not whether the gate went green",
+      "request": "Request review",
+      "running": "Reviewing…",
+      "empty": "Come here after finishing a stage (or when stuck). The AI reads your source and the commands you ran: was the change aimed at the real bottleneck, did you measure before changing, is the result still correct, and did the gate pass through real optimisation or a shortcut.",
+      "issues": "Worth fixing",
+      "strengths": "Done well",
+      "nextSteps": "Next steps",
+      "noWorld": "The device is not ready yet — wait for the terminal before requesting a review.",
+      "dimensions": {
+        "optimization": "Optimisation",
+        "measurement": "Measure first",
+        "correctness": "Correctness kept",
+        "legitimacy": "Gate legitimacy",
+        "understanding": "Understanding"
+      }
+    }
   }
 }

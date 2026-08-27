@@ -16,7 +16,7 @@ import {
 } from '@mantine/core';
 import {
   IconAlertTriangle, IconChartHistogram, IconCpu, IconFileCode,
-  IconPlayerPlay, IconRefresh, IconSitemap, IconTerminal2,
+  IconPlayerPlay, IconRefresh, IconRobot, IconSitemap, IconTerminal2,
 } from '@tabler/icons-react';
 import { useMantineColorScheme } from '@mantine/core';
 import Editor from '@monaco-editor/react';
@@ -25,6 +25,8 @@ import MarkdownRenderer from '../MarkdownRenderer';
 import ErrorBoundary from '../ErrorBoundary';
 import { RunReportPanel } from '../engineering/ResultPanels';
 import WorkbenchSplit from '../workbench/WorkbenchSplit';
+import GpuChat from './GpuChat';
+import GpuReview from './GpuReview';
 import { useGpuWorkspace } from '../../hooks/useGpuWorkspace';
 import { runGpuStage } from '../../lib/gpulab/lab';
 import { resolveTranspiler } from '../../lib/engineering/transpile';
@@ -145,6 +147,25 @@ export default function GpuWorkspace({ session, registerClearResults }: GpuWorks
     // 同一份内容也写进草稿，刷新页面之后还在
     if (stage?.gpu?.files?.[activePath] !== undefined) handleFileChange(activePath, value);
   }, [activePath, gpu, stage?.gpu, handleFileChange]);
+
+  /**
+   * 学员当前的源码，喂给 AI 的那一份。
+   *
+   * 从 vfs 现读而不是用 stage 里那份原始内容 —— 他在编辑器里改过、
+   * 在终端里 `cp` 出来的，都要算数。挂在 revision 上：写盘和敲命令都会 +1。
+   */
+  const aiSources = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const path of gpu.sourcePaths) {
+      try {
+        out[path] = gpu.readFile(path);
+      } catch {
+        /* 文件被删掉了就跳过 */
+      }
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gpu.sourcePaths, gpu.revision, gpu.generation, gpu.status]);
 
   const registerInsert = useCallback((insert: ((command: string) => void) | null) => {
     insertRef.current = insert;
@@ -295,6 +316,7 @@ export default function GpuWorkspace({ session, registerClearResults }: GpuWorks
                   <Tabs.Tab value="result" fz="xs">
                     验收{report ? ` · ${report.totals.passed}/${report.totals.total}` : ''}
                   </Tabs.Tab>
+                  <Tabs.Tab value="review" fz="xs">复盘</Tabs.Tab>
                 </Tabs.List>
                 <Tabs.Panel value="goal" style={{ flex: 1, minHeight: 0 }}>
                   <ScrollArea h="100%" type="auto" p="sm" className="panel-scroll">
@@ -337,6 +359,30 @@ export default function GpuWorkspace({ session, registerClearResults }: GpuWorks
                       : <Text size="xs" c="dimmed">还没跑过验收</Text>}
                   </ScrollArea>
                 </Tabs.Panel>
+                {/*
+                  复盘放左栏而不是右栏：右栏是干活的地方（终端、IDE、剖析），
+                  左栏是读长文的地方，而复盘正是一篇要从头读到尾的长文。同 ops。
+                */}
+                <Tabs.Panel value="review" style={{ flex: 1, minHeight: 0 }}>
+                  <ScrollArea h="100%" type="auto" p="sm" className="panel-scroll">
+                    <ErrorBoundary fallback={renderPanelError}>
+                      <GpuReview
+                        projectTitle={project.title}
+                        projectSummary={project.summary}
+                        stageTitle={stage.title}
+                        stageGoal={stage.goal}
+                        stageIndex={stageIndex}
+                        stageCount={project.stages.length}
+                        checklist={stage.checklist}
+                        gates={stage.gates}
+                        world={gpu.world}
+                        history={gpu.history}
+                        sources={aiSources}
+                        report={report}
+                      />
+                    </ErrorBoundary>
+                  </ScrollArea>
+                </Tabs.Panel>
               </Tabs>
             )}
             right={(
@@ -363,6 +409,9 @@ export default function GpuWorkspace({ session, registerClearResults }: GpuWorks
                       集群
                     </Tabs.Tab>
                   )}
+                  <Tabs.Tab value="chat" fz="xs" leftSection={<IconRobot size={13} />}>
+                    AI 助手
+                  </Tabs.Tab>
                 </Tabs.List>
 
                 <Tabs.Panel value="terminal" style={{ flex: 1, minHeight: 0 }}>
@@ -445,6 +494,25 @@ export default function GpuWorkspace({ session, registerClearResults }: GpuWorks
                     </ErrorBoundary>
                   </Tabs.Panel>
                 )}
+
+                <Tabs.Panel value="chat" style={{ flex: 1, minHeight: 0 }}>
+                  <ErrorBoundary fallback={renderPanelError}>
+                    <GpuChat
+                      projectTitle={project.title}
+                      projectSummary={project.summary}
+                      stageTitle={stage.title}
+                      stageGoal={stage.goal}
+                      stageIndex={stageIndex}
+                      stageCount={project.stages.length}
+                      checklist={stage.checklist}
+                      gates={stage.gates}
+                      world={gpu.world}
+                      history={gpu.history}
+                      sources={aiSources}
+                      report={report}
+                    />
+                  </ErrorBoundary>
+                </Tabs.Panel>
 
               </Tabs>
             )}
