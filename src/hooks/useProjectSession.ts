@@ -13,6 +13,8 @@ import {
   applyDrafts,
   availableLanguages,
   buildStageFiles,
+  labDraftKey,
+  labFilesOf,
   projectView,
   pruneDrafts,
   toFileMap,
@@ -271,6 +273,19 @@ export function useProjectSession({
   pristineRef.current = pristine;
 
   /**
+   * path -> 草稿键。
+   *
+   * 累积工作区的文件用裸路径，实战关卡的文件用 `关卡id::路径`
+   * （理由见 WorkspaceFile.draftKey）。工作台调 handleFileChange 时只给路径，
+   * 键在这里查出来 —— 免得每个工作台各自拼一遍、拼法还可能不一致。
+   */
+  const draftKeyRef = useRef<(path: string) => string>((path) => path);
+  draftKeyRef.current = (path: string) => {
+    const match = stageFiles.find((file) => file.path === path);
+    return match?.draftKey ?? path;
+  };
+
+  /**
    * 改一个文件。
    *
    * 落盘安排放在 setState **外面**：updater 必须是纯函数，React 可能重复执行它，
@@ -282,14 +297,15 @@ export function useProjectSession({
       const current = progressRef.current;
       if (!current) return;
 
+      const key = draftKeyRef.current(path);
       const drafts = { ...current.drafts };
       if (pristineRef.current[path] === content) {
         // 改回原样就不该再算作草稿，否则这个文件会一直挂着「已修改」
-        if (drafts[path] === undefined) return;
-        delete drafts[path];
+        if (drafts[key] === undefined) return;
+        delete drafts[key];
       } else {
-        if (drafts[path] === content) return;
-        drafts[path] = content;
+        if (drafts[key] === content) return;
+        drafts[key] = content;
       }
 
       const next = { ...current, drafts };
@@ -333,10 +349,11 @@ export function useProjectSession({
   const handleResetFile = useCallback(
     (path: string) => {
       const current = progressRef.current;
-      if (!current || current.drafts[path] === undefined) return;
+      const key = draftKeyRef.current(path);
+      if (!current || current.drafts[key] === undefined) return;
 
       const drafts = { ...current.drafts };
-      delete drafts[path];
+      delete drafts[key];
       // 还原是一个明确动作，直接落盘，别留在防抖队列里
       persist({ ...current, drafts });
     },
@@ -354,11 +371,16 @@ export function useProjectSession({
      * 「本关的文件」会把前几关写的实现一起删掉 —— 在第 4 关点一下「重置本关」，
      * 第 1、2、3 关的代码从内存和 localStorage 一起消失，且不可撤销。
      */
-    const stagePaths = new Set(
+    const stageKeys = new Set<string>(
       (stage.starterFiles || []).filter((file) => !file.readonly).map((file) => file.path)
     );
+    // 实战关卡的文件不在 starterFiles 里，键也带着关卡 id —— 不加这一段，
+    // 在 ops / gpu 关卡点「重置本关」会一个文件都还原不了
+    for (const path of Object.keys(labFilesOf(stage))) {
+      stageKeys.add(labDraftKey(stage.id, path));
+    }
     const drafts = Object.fromEntries(
-      Object.entries(current.drafts).filter(([path]) => !stagePaths.has(path))
+      Object.entries(current.drafts).filter(([key]) => !stageKeys.has(key))
     );
     clearResults('report');
     persist({ ...current, drafts });

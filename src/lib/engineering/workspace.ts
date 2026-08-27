@@ -77,7 +77,44 @@ export function buildStageFiles(project: EngineeringProject, stageIndex: number)
     (stage.starterFiles || []).forEach(push);
   });
 
+  /*
+   * 实战关卡（ops / gpu）的文件不在 `starterFiles` 里，而在 `stage.ops.files` /
+   * `stage.gpu.files` —— 那是「机器磁盘上的初始内容」，形状是 path -> content。
+   *
+   * **不收进来的话草稿就恢复不了。** 两个工作台都是这么找草稿的：
+   *
+   *   const draft = files.find((file) => file.path === path);
+   *   out[path] = draft?.content ?? content;
+   *
+   * `files` 里从来没有这些路径，`find` 永远返回 undefined，于是永远回退到初始内容 ——
+   * 学员改的 kernel / manifest 切走再切回来就变回原样。
+   *
+   * 只收**当前这一关**的，不像 starterFiles 那样累积：每一关的世界是各自重建的，
+   * 把上一关的文件也铺进来只会让编辑器里多出这一关根本不存在的东西。
+   */
+  const current = (project.stages || [])[stageIndex];
+  for (const [path, content] of Object.entries(labFilesOf(current))) {
+    push({ path, content, draftKey: labDraftKey(current!.id, path) });
+  }
+
   return files;
+}
+
+/** 一关的实战文件（机器磁盘上的初始内容）。code 形态没有这一项，返回空对象 */
+export function labFilesOf(stage: ProjectStage | undefined): Record<string, string> {
+  if (!stage) return {};
+  const lab = stage as ProjectStage & { ops?: { files?: Record<string, string> }; gpu?: { files?: Record<string, string> } };
+  return { ...(lab.ops?.files ?? {}), ...(lab.gpu?.files ?? {}) };
+}
+
+/**
+ * 实战文件的草稿键。
+ *
+ * 带上关卡 id，因为同一个路径在不同关卡是不同的练习（见 WorkspaceFile.draftKey）。
+ * 分隔符用 `::`：关卡 id 是 kebab-case，文件路径里也不会出现它。
+ */
+export function labDraftKey(stageId: string, path: string): string {
+  return `${stageId}::${path}`;
 }
 
 /** 用户草稿覆盖初始内容；只读文件永远使用工程给定的版本 */
@@ -86,11 +123,12 @@ export function applyDrafts(
   drafts: Record<string, string> | undefined
 ): WorkspaceFile[] {
   if (!drafts) return files;
-  return files.map((file) =>
-    file.readonly || drafts[file.path] === undefined
+  return files.map((file) => {
+    const key = file.draftKey ?? file.path;
+    return file.readonly || drafts[key] === undefined
       ? file
-      : { ...file, content: drafts[file.path] }
-  );
+      : { ...file, content: drafts[key] };
+  });
 }
 
 /** 提交给运行器 / AI 评审的「用户代码」，不含只读的基础设施文件 */
@@ -118,9 +156,18 @@ export function allProjectFiles(project: EngineeringProject): Record<string, str
   collect(project.files);
   for (const stage of project.stages || []) {
     collect(stage.starterFiles);
-    // ops 关卡的文件放在 stage.ops.files 里（机器磁盘上的 manifest / 脚本），
-    // 不收进来的话它们的草稿会在下次载入时被当成孤儿清掉，等于白改
+    /*
+     * 实战关卡的文件放在 stage.ops.files / stage.gpu.files 里
+     * （机器磁盘上的 manifest、kernel 源码），一并收进来 ——
+     * 这个函数的契约是「这个工程有的全部文件」，少一类就不成立。
+     *
+     * **注意别再把草稿的清理逻辑挂在这上面。** 曾经是那样的：ops 这一行的旧注释
+     * 写着「不收进来草稿会被当成孤儿清掉」，而 gpu 那一行漏了整整一个工作台，
+     * 于是 CUDA 关卡改的 kernel 每次载入都被清空。现在实战文件的草稿键带关卡 id，
+     * 由 pruneDrafts 里的 labKnown 单独比对，不再走这里。
+     */
     for (const [path, content] of Object.entries(stage.ops?.files ?? {})) files[path] = content;
+    for (const [path, content] of Object.entries(stage.gpu?.files ?? {})) files[path] = content;
   }
 
   for (const variant of Object.values(project.variants || {})) {
@@ -147,16 +194,50 @@ export function pruneDrafts(
   if (!drafts) return {};
 
   const known = allProjectFiles(project);
+
+  /*
+   * 实战关卡的键是 `关卡id::路径`，要按那一关自己的初始内容比。
+   * 用 allProjectFiles 里那份（同名路径的最后一关）比会得出错误结论：
+   * 在第 9 关把 sgemm.cu 改成第 13 关的样子，草稿会被当成「和初始内容一样」丢掉。
+   */
+  const labKnown: Record<string, string> = {};
+  for (const stage of project.stages || []) {
+    for (const [path, content] of Object.entries(labFilesOf(stage))) {
+      labKnown[labDraftKey(stage.id, path)] = content;
+    }
+  }
+
   const cleaned: Record<string, string> = {};
 
-  for (const [path, content] of Object.entries(drafts)) {
-    const original = known[path];
+  for (const [key, content] of Object.entries(drafts)) {
+    const original = key.includes('::') ? labKnown[key] : known[key];
     if (original === undefined) continue;
     if (original === content) continue;
-    cleaned[path] = content;
+    /*
+     * 旧版本把实战文件按裸路径存过。那些草稿从来没有被读回去过
+     * （两个工作台的恢复路径当时都是坏的），所以丢掉它们对学员是无感的；
+     * 留着反而会在 localStorage 里越积越多。
+     */
+    if (!key.includes('::') && !isCumulativeFile(project, key)) continue;
+    cleaned[key] = content;
   }
 
   return cleaned;
+}
+
+/** 这个路径是不是「累积工作区」里的文件（project.files 或某一关的 starterFiles） */
+function isCumulativeFile(project: EngineeringProject, path: string): boolean {
+  if ((project.files || []).some((file) => file.path === path)) return true;
+  for (const stage of project.stages || []) {
+    if ((stage.starterFiles || []).some((file) => file.path === path)) return true;
+  }
+  for (const variant of Object.values(project.variants || {})) {
+    if ((variant?.files || []).some((file) => file.path === path)) return true;
+    for (const stage of variant?.stages || []) {
+      if ((stage.starterFiles || []).some((file) => file.path === path)) return true;
+    }
+  }
+  return false;
 }
 
 /**
