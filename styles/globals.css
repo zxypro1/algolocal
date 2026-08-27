@@ -371,6 +371,60 @@ a {
   overflow-x: auto;
 }
 
+/*
+ * 长单词与长 URL。
+ *
+ * 中文段落自己会换行，但 `--kv-cache-dtype-skip-layers` 这种带连字符的长标识、
+ * 门槛指标名（`gpu.comm.bytesByLink.ib`）、以及正文里的长 URL 都是一个"词"，
+ * 不给断点的话它会把整段撑成一行。`anywhere` 而不是 `break-word`：
+ * 后者只在这一行放不下时才断，前者会参与最小内容宽度的计算 ——
+ * 而我们要的正是"最小内容宽度不能超过面板"。
+ */
+.panel-scroll {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  /*
+   * `text-spacing-trim: space-all` 关掉全角标点的挤压。
+   *
+   * 默认的 `normal` 会把 `（`　`）` 这类全角标点压掉半个字宽，**但只压在断行测量上，
+   * 画出来的行盒还是原宽**。于是出现一种没法靠任何换行属性救回来的溢出：
+   * 「原子操作次数 ≤ 128（4096 / 32）」这一行，浏览器按 236px 算判定放得下，
+   * 实际画成 244px —— 两个全角括号各差 4px。宽度落在这条缝里时（第 5 关 300px 左右）
+   * 面板就多出 8px 横向滚动，而 break-all / line-break: anywhere 全都无效，
+   * 因为浏览器根本不认为需要断。
+   *
+   * 关掉挤压之后测量和绘制对上了，同一行在 236px 处正常折成两行。
+   * 代价是全角标点保持满宽，CJK 排版略松一点 —— 用一点观感换掉一类量不准的溢出。
+   */
+  text-spacing-trim: space-all;
+}
+
+/*
+ * 表格。
+ *
+ * Markdown 表格没有宽度上限，列一多就把面板顶开。这里让它在自己的容器里横向滚 ——
+ * 容器由 MarkdownRenderer 包出来（见那边的 table 渲染器）。
+ * 这条兜底是给不经过那个渲染器的表格用的（比如面板自己写的 <Table>）。
+ */
+.panel-scroll table {
+  max-width: 100%;
+}
+
+/*
+ * mermaid 图的兜底。
+ *
+ * 实测 mermaid 自己就带 `width="100%"` 加上行内的 `max-width`（等于图的固有宽度），
+ * 所以默认配置下它本来就会跟着面板缩，这条规则量下来是零改变。留着是防
+ * `useMaxWidth: false` —— 那种配置下 SVG 会拿到固定像素宽，窄面板会被直接顶开。
+ *
+ * **选择器必须钉死在 mermaid 的产物上**：写成 `.panel-scroll svg` 会一并命中
+ * 左栏里的 Tabler 图标，`height: auto` 会盖掉它们的 height 属性。
+ */
+.panel-scroll svg[id^='mermaid-'] {
+  max-width: 100%;
+  height: auto;
+}
+
 /* 编辑器左侧栏的断点标记。条件断点/日志断点用空心圆区分开。 */
 .algolocal-bp::before {
   content: '';

@@ -108,7 +108,19 @@ const MarkdownRendererBase: React.FC<MarkdownRendererProps> = ({ content, stream
           </SyntaxHighlighter>
         );
       }
-      
+
+      /*
+       * 没标语言的围栏（``` 直接跟内容）走下面的行内分支。
+       *
+       * **不能在这里判 `!inline` 然后渲染成块级** —— react-markdown 新版
+       * 不再传 `inline` 属性，于是行内代码也会走进那条分支，
+       * 结果是把 <pre> 渲染进 <p>，DOM 嵌套非法（React 会告警，
+       * 浏览器会把 <p> 提前闭合，段落排版直接乱掉）。
+       *
+       * 宽度约束交给 CSS：react-markdown 会把围栏包成 <pre><code>，
+       * 而 `.panel-scroll pre` 已经给了 max-width + overflow-x（见 globals.css）。
+       */
+
       // Inline code
       return (
         <Code {...props}>
@@ -117,12 +129,29 @@ const MarkdownRendererBase: React.FC<MarkdownRendererProps> = ({ content, stream
       );
     },
     
-    // Custom table renderer using Mantine Table
+    /*
+     * 表格。
+     *
+     * 外面包一层**自己横向滚动**的容器：markdown 表格没有宽度上限，
+     * 列一多（gpulab 那几关的对照表有五六列）就会把整个说明面板顶开，
+     * 而面板被顶开之后旁边的段落会被视口裁掉半句话。
+     *
+     * `minWidth: 'min-content'` 是关键的一半：不给的话表格会被压到每个字
+     * 一行，读起来比横向滚还糟。让它保持"内容最小宽度"，超出的部分滚。
+     */
     table({ children }: any) {
       return (
-        <Table striped highlightOnHover withTableBorder withColumnBorders>
-          {children}
-        </Table>
+        <Box style={{ maxWidth: '100%', overflowX: 'auto' }}>
+          <Table
+            striped
+            highlightOnHover
+            withTableBorder
+            withColumnBorders
+            style={{ minWidth: 'min-content' }}
+          >
+            {children}
+          </Table>
+        </Box>
       );
     },
     
