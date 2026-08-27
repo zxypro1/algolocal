@@ -404,10 +404,18 @@ a {
  *
  * Markdown 表格没有宽度上限，列一多就把面板顶开。这里让它在自己的容器里横向滚 ——
  * 容器由 MarkdownRenderer 包出来（见那边的 table 渲染器）。
- * 这条兜底是给不经过那个渲染器的表格用的（比如面板自己写的 <Table>）。
+ * `max-width` 这条兜底是给不经过那个渲染器的表格用的（比如面板自己写的 <Table>）。
+ *
+ * **单元格里要把上面那条 `anywhere` 收回来。** `anywhere` 会参与最小内容宽度的计算，
+ * 于是表格的 min-content 变成「每列一个字符」，列宽被压到极限、Latin 单词从中间断开
+ * （第 29 关那张四列表实测把 `prefill` 断成 `prefi` + `ll`，首列只有 32px）。
+ * 换成 `break-word`：只有单词自己一行都放不下时才断，min-content 回到「最长的那个词」，
+ * 同一张表首列 51px、`prefill` 完整。真放不下的时候还有外面那层容器横向滚兜底。
  */
 .panel-scroll table {
   max-width: 100%;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 /*

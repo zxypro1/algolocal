@@ -136,8 +136,12 @@ const MarkdownRendererBase: React.FC<MarkdownRendererProps> = ({ content, stream
      * 列一多（gpulab 那几关的对照表有五六列）就会把整个说明面板顶开，
      * 而面板被顶开之后旁边的段落会被视口裁掉半句话。
      *
-     * `minWidth: 'min-content'` 是关键的一半：不给的话表格会被压到每个字
-     * 一行，读起来比横向滚还糟。让它保持"内容最小宽度"，超出的部分滚。
+     * `minWidth: 'min-content'` 是关键的一半：让表格保持"内容最小宽度"，
+     * 超出的部分在这层容器里滚，而不是把面板顶开。
+     *
+     * 注意它得配合 globals.css 里 `.panel-scroll table` 那条才有意义 ——
+     * 面板整体开了 `overflow-wrap: anywhere`，若不在单元格里收回来，
+     * min-content 会退化成「每列一个字符」，这个 `min-width` 就等于没写。
      */
     table({ children }: any) {
       return (
