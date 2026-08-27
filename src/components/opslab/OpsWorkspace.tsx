@@ -303,6 +303,12 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
           * 现在终端、IDE、拓扑并列成 tab —— 同一时刻只看一样东西，
           * 每样都占满整个右栏，而不是四块互相挤。
           */}
+        {/*
+          左栏的每一页都挂 `panel-scroll`（见 globals.css）。
+          Mantine 的 ScrollArea 视口内层是 display: table，会收缩包裹到最宽的那个子元素 ——
+          说明里有一个宽代码块，整页的段落就都按那个宽度排，于是左栏出现横向滚动条、
+          文字被裁掉半句。panel-scroll 把它改回 block，宽内容各自横向滚。
+        */}
         <WorkbenchSplit
           storageKey={SPLIT_KEY}
           collapseLabel="展开任务栏"
@@ -317,7 +323,7 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                 <Tabs.Tab value="review" fz="xs">复盘</Tabs.Tab>
               </Tabs.List>
               <Tabs.Panel value="goal" style={{ flex: 1, minHeight: 0 }}>
-                <ScrollArea h="100%" type="auto" p="sm">
+                <ScrollArea h="100%" type="auto" p="sm" className="panel-scroll">
                   <MarkdownRenderer content={pick(stage.goal)} />
                   {(stage.checklist ?? []).length > 0 && (
                     <Stack gap={4} mt="md">
@@ -330,12 +336,12 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                 </ScrollArea>
               </Tabs.Panel>
               <Tabs.Panel value="primer" style={{ flex: 1, minHeight: 0 }}>
-                <ScrollArea h="100%" type="auto" p="sm">
+                <ScrollArea h="100%" type="auto" p="sm" className="panel-scroll">
                   <MarkdownRenderer content={pick(stage.primer)} />
                 </ScrollArea>
               </Tabs.Panel>
               <Tabs.Panel value="result" style={{ flex: 1, minHeight: 0 }}>
-                <ScrollArea h="100%" type="auto" p="sm">
+                <ScrollArea h="100%" type="auto" p="sm" className="panel-scroll">
                   {report
                     ? <RunReportPanel report={report} />
                     : <Text size="xs" c="dimmed">还没跑过验收</Text>}
@@ -346,7 +352,7 @@ export default function OpsWorkspace({ session, registerClearResults }: OpsWorks
                 * 把 replicas 调成 0 也能让 CrashLoopBackOff 消失。
                 */}
               <Tabs.Panel value="review" style={{ flex: 1, minHeight: 0 }}>
-                <ScrollArea h="100%" type="auto" p="sm">
+                <ScrollArea h="100%" type="auto" p="sm" className="panel-scroll">
                   <ErrorBoundary fallback={renderPanelError}>
                     <OpsReview
                       key={reviewKey}
