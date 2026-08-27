@@ -683,5 +683,38 @@
     "title": "这部分内容无法显示",
     "body": "项目数据有问题，这一块渲染失败了。应用的其余部分仍然可用。",
     "retry": "重试"
+  },
+  "gpulab": {
+    "chat": {
+      "tab": "AI 助手",
+      "title": "优化助手",
+      "empty": "我看得到你当前的 kernel 源码、上次验收每条门槛的实测值、剖析面板上的扇区数与 bank 冲突、以及终端里最近敲的命令。指标没到线就问，我帮你把「哪个数不对」对到「源码的哪几行」上 —— 代码由你自己改，我不碰。",
+      "placeholder": "问一个关于当前这一关的问题…（Enter 发送，Shift+Enter 换行）",
+      "prompts": {
+        "gateShortfall": "没到线的那条门槛，差在哪儿？",
+        "whyFailing": "验收没过的那条用例在检查什么？",
+        "lastError": "上一条命令为什么报错？",
+        "whereToLook": "现在该往源码的哪儿看？",
+        "explainStage": "这一关到底要我优化什么？"
+      }
+    },
+    "review": {
+      "title": "AI 复盘",
+      "subtitle": "评的是你怎么优化的，不是门槛过没过",
+      "request": "让 AI 复盘",
+      "running": "复盘中…",
+      "empty": "跑完一关（或者卡住了）之后来这里。AI 会顺着你的源码和敲过的命令看一遍：改动是不是冲着瓶颈去的、有没有先量再改、结果还对不对，以及门槛是真优化过去的还是钻空子过去的。",
+      "issues": "值得改的地方",
+      "strengths": "做得好的地方",
+      "nextSteps": "下一步",
+      "noWorld": "设备还没就绪，先等终端起来再复盘。",
+      "dimensions": {
+        "optimization": "优化思路",
+        "measurement": "先量再改",
+        "correctness": "正确性保持",
+        "legitimacy": "门槛的成色",
+        "understanding": "机制理解"
+      }
+    }
   }
 }

@@ -11,6 +11,9 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CommandRecord } from '../lib/labkit/machine';
+
+/** 哪些扩展名算「源码」，值得出现在 IDE 里（nvcc 产出的 bench 二进制不算） */
+const SOURCE_EXTENSIONS = ['.cu', '.cuh', '.h', '.hpp', '.c', '.cc', '.cpp'];
 import { buildWorld, type GpuWorld, type GpuWorldSpec } from '../lib/gpulab/lab';
 import type { GpuStageSpec } from '../lib/engineering/types';
 
@@ -137,13 +140,33 @@ export function useGpuWorkspace(options: UseGpuWorkspaceOptions): GpuWorkspaceSt
     setGeneration((value) => value + 1);
   }, []);
 
+  /**
+   * IDE 里能打开的文件。
+   *
+   * 曾经只取关卡声明的那份清单，并且钉在 stageKey 上 —— 于是学员在终端里
+   * `cp reduce.cu backup.cu` 建出来的文件，IDE 里**永远看不到**。
+   * ops 那边的文件树是机器磁盘的实时投影（`vfs.toFileMap('/root')` 挂在 revision 上），
+   * 这里对齐同一个语义。
+   *
+   * 只是不能整份端上来：nvcc 会往磁盘写一个真的 `bench` 可执行文件
+   * （见 lab/cli.ts），把它塞进 Monaco 没有意义。所以按扩展名筛一遍源码。
+   */
   const sourcePaths = useMemo(() => {
     const declared = options.stage?.bench?.sources ?? options.world?.bench?.sources ?? [];
     const fromFiles = Object.keys(options.stage?.files ?? {});
-    // 声明过的源文件排在前面，其余（头文件之类）跟在后面
-    return [...new Set([...declared, ...fromFiles])];
+    const live: string[] = [];
+    try {
+      const cwd = world?.machine.cwd ?? '/root';
+      for (const path of Object.keys(world?.machine.vfs.toFileMap(cwd) ?? {})) {
+        if (SOURCE_EXTENSIONS.some((ext) => path.endsWith(ext))) live.push(path);
+      }
+    } catch {
+      /* 世界还没起来就只有声明的那些 */
+    }
+    // 声明过的源文件排在前面，其余（头文件、学员自己建的）跟在后面
+    return [...new Set([...declared, ...fromFiles, ...live.sort()])];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stageKey]);
+  }, [stageKey, world, revision]);
 
   // 提示符跟着 cwd 走，所以要挂在 revision 上重算
   // eslint-disable-next-line react-hooks/exhaustive-deps
