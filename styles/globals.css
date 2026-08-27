@@ -530,7 +530,14 @@ a {
  * 但又不能抢戏。给一点横向内边距和圆角就够，字号压到 0.88em 让它和中文的
  * 视觉重量持平 —— 等宽字体在同样 font-size 下看着比中文大一号。
  */
-.panel-scroll :not(pre) > code {
+/*
+ * 选择器要钉在 Mantine 的 Code 组件上，**不能写成 `:not(pre) > code`**。
+ * react-syntax-highlighter 渲染出来的结构是 `pre > div > code`，
+ * 那个 code 的父节点是 div 不是 pre，于是 `:not(pre) > code` 会把它一起命中 ——
+ * 代码块的字号被压成 0.88em，还平白多出一圈内边距和圆角。
+ * 行内代码走的是 MarkdownRenderer 里的 `<Code>`，认它的类名最准。
+ */
+.panel-scroll .mantine-Code-root {
   padding: 0.1em 0.34em;
   border-radius: 3px;
   font-size: 0.88em;
