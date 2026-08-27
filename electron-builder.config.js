@@ -188,8 +188,16 @@ module.exports = {
     gatekeeperAssess: false,
     entitlements: 'build/entitlements.mac.plist',
     entitlementsInherit: 'build/entitlements.mac.plist',
-    bundleVersion: '1',
-    bundleShortVersion: '0.16.1',
+    /*
+     * 这里**不要**写 bundleVersion / bundleShortVersion。
+     *
+     * 曾经硬编码成 '1' 与 '0.16.1'，于是 package.json 一路涨到 0.17.1、
+     * 产物文件名与官网都对，唯独 macOS 包的 Info.plist 一直停在 0.16.1 ——
+     * 「关于」面板和访达显示的都是三个版本之前的号，没人发现。
+     *
+     * 不写这两个键，electron-builder 就从 package.json 的 version 推导。
+     * scripts/check-app-version.js 会在打包后断言两者一致，别再手写回来。
+     */
     fileAssociations: [
       {
         ext: 'algo',

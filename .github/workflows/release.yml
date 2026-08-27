@@ -182,6 +182,13 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      # v0.17.0 与 v0.17.1 两次都把 Info.plist 停在 0.16.1 的包发了出去 ——
+      # 配置里手写了一行 bundleShortVersion，package.json 涨了三个版本它都不动。
+      # 产物文件名、Release、官网全对，只有「关于」面板不对，所以没人发现。
+      # 这一步在签名校验之前先把版本号钉住：对不上就当场失败，别再发出去。
+      - name: Verify packaged version matches package.json
+        run: node scripts/check-app-version.js
+
       # v0.5.0 曾经把一个签名损坏的包发出去：electron-builder 跳过签名后，
       # 包里只剩 Electron 二进制自带的 linker ad-hoc 签名，而它已经描述不了被改写过的
       # bundle。macOS 15+ 对这种情况的判定是 "revoked"，直接当成恶意软件丢进废纸篓。
