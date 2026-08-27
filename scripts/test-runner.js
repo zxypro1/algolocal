@@ -60,6 +60,18 @@ class TestRunner {
         name: 'Desktop Menus',
         file: 'tests/desktop',
         description: 'Application and context menus, including the edit roles that ⌘V depends on'
+      },
+      // tests/build 与 tests/trace 一直存在，却从来没进过这张表 ——
+      // 写了不跑等于没写。补进来的时候三个文件都是绿的。
+      {
+        name: 'Build Artifacts',
+        file: 'tests/build',
+        description: 'Bundle-level failure detection and the packaged app version check that keeps Info.plist in step with package.json'
+      },
+      {
+        name: 'Trace Instrumentation',
+        file: 'tests/trace',
+        description: 'Execution trace instrumentation and step navigation'
       }
     ];
   }
