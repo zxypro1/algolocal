@@ -208,10 +208,15 @@ const MarkdownRendererBase: React.FC<MarkdownRendererProps> = ({ content, stream
       );
     },
     
-    // Custom paragraph renderer
+    /*
+     * 段落。
+     *
+     * 1.75 而不是 1.6：中文是全高方块字，没有西文的升部降部撑开行间，
+     * 同样的数值看上去要挤一档。这里改了对聊天气泡同样生效 —— 那边也是中英混排。
+     */
     p({ children }: any) {
       return (
-        <Text mb="sm" style={{ lineHeight: 1.6 }}>
+        <Text mb="sm" style={{ lineHeight: 1.75 }}>
           {children}
         </Text>
       );
@@ -220,13 +225,20 @@ const MarkdownRendererBase: React.FC<MarkdownRendererProps> = ({ content, stream
     // Custom blockquote renderer
     blockquote({ children }: any) {
       return (
-        <Paper 
-          p="md" 
-          withBorder 
-          style={{ 
-            borderLeft: '4px solid #339af0',
+        /*
+         * 引用块。
+         *
+         * 原本左边框是写死的 `#339af0`：主题色换了它不跟着换，暗色下那条蓝也偏亮。
+         * 改成主题变量，并且去掉外框只留左边这一竖 —— 引用是「插进正文的一段话」，
+         * 四面都描边会让它看起来像一个独立的卡片，打断阅读。
+         */
+        <Paper
+          p="sm"
+          style={{
+            borderLeft: '3px solid var(--mantine-color-blue-filled)',
+            borderRadius: 0,
             backgroundColor: colorScheme === 'dark' ? 'var(--mantine-color-dark-6)' : 'var(--mantine-color-gray-0)',
-            color: colorScheme === 'dark' ? 'var(--mantine-color-gray-1)' : undefined
+            color: colorScheme === 'dark' ? 'var(--mantine-color-gray-1)' : undefined,
           }}
         >
           {children}
