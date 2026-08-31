@@ -2846,6 +2846,26 @@ const primers = {
         'One more engineering note: **MoE is bottlenecked by communication, not compute**. Experts sit on different devices and every layer performs two all-to-all exchanges. Capacity factors, expert-parallel topologies and dedicated communication libraries all revolve around this.'
       )
     ),
+    'muon': t(
+      p(
+        'AdamW 把每个参数单独看：各自估一个步长，彼此无关。这个假设对一维参数成立，但一个权重`矩阵`不是一堆无关的数,它有奇异值谱，而梯度矩阵往往被少数几个方向主导。',
+        '沿着这样的梯度走一步，等于在少数几个方向上走得很远、其余方向几乎没动。`Muon` 的想法是：把动量矩阵`正交化`之后再更新,让所有方向的步长拉平。',
+        '真正的正交化要做 SVD（`G = UΣVᵀ` 之后取 `UVᵀ`），而 SVD 在 GPU 上慢、也不好并行。Muon 用一个只含矩阵乘的`五次迭代`（Newton,Schulz）逼近它,矩阵乘是 GPU 最擅长的事。',
+        '有个反直觉的地方：**那几个系数不是为了收敛到精确解调的**，而是为了「五步之内把奇异值挤进大致 0.7 到 1.3 之间」。所以迭代完 `XᵀX` 离单位阵还差不少,这是正常的，不是没收敛。Muon 需要的只是各方向步长差不多，不需要精确正交。',
+        '`只有矩阵参数走 Muon`。一维参数根本没有奇异值谱这回事；嵌入表虽然是二维的，但它的每一行是一个独立的 token，行与行之间没有那种矩阵结构。这两类继续走 Adam。「一个优化器管所有参数」本来就不是必须的,按参数的结构分组，是 Muon 带来的更普遍的一个想法。',
+        '实际收益有两面。**省显存**：AdamW 每个参数存两块状态，Muon 只存一块动量，而矩阵占模型的绝大多数。**花算力**：每步每个矩阵要做十几次矩阵乘,在大模型上占比不大，在小模型上很明显，Muon 靠更少的步数赢回来。',
+        'Muon 是 2024 年底出来的，2026 年已经在生产里：Kimi K2 与 GLM-5 都在用。它也带来了新问题,训练更快的同时更容易把注意力的 logits 推大，于是有了配套的 QK 裁剪。'
+      ),
+      p(
+        'AdamW treats each parameter separately, estimating a step size independently of the rest. That assumption holds for 1-D parameters, but a weight `matrix` is not a pile of unrelated numbers,it has a singular value spectrum, and gradient matrices are usually dominated by a few directions.',
+        'Stepping along such a gradient means moving far in a few directions and barely at all in the others. `Muon`\'s idea is to `orthogonalise` the momentum matrix before updating,levelling the step size across directions.',
+        'True orthogonalisation needs an SVD (`G = UΣVᵀ`, then `UVᵀ`), and SVD is slow on GPUs and hard to parallelise. Muon approximates it with a `quintic iteration` (Newton-Schulz) made only of matrix multiplies,which is what GPUs do best.',
+        'One counter-intuitive detail: **the coefficients are not tuned to converge to the exact answer**, but to squeeze singular values into roughly 0.7 to 1.3 within five steps. So `XᵀX` remains noticeably away from the identity afterwards,that is correct, not unconverged. Muon needs comparable steps across directions, not exact orthogonality.',
+        '`Only matrix parameters use Muon`. A 1-D parameter has no singular value spectrum at all; an embedding table is two-dimensional but each row is an independent token, carrying none of that matrix structure. Both stay on Adam. That one optimiser need not cover every parameter is itself the more general idea Muon contributed,group parameters by their structure.',
+        'The practical payoff has two sides. **Memory**: AdamW stores two state tensors per parameter while Muon keeps one momentum, and matrices are the vast majority of a model. **Compute**: each step runs a dozen-odd matmuls per matrix,minor at large scale, conspicuous at small scale, where Muon wins back by needing fewer steps.',
+        'Muon appeared in late 2024 and is in production by 2026: Kimi K2 and GLM-5 both use it. It also brought a new problem,training faster while pushing attention logits upward, which is why it ships alongside QK clipping.'
+      )
+    ),
   },
 };
 
