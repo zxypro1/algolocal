@@ -108,3 +108,12 @@ fill_causal_valid = _B.fill_causal_valid
 sample_token = _B.sample_token
 argmax_row = _B.argmax_row
 copy_at = _B.copy_at
+
+# ---- 训练日志 ----
+log_step = _B.log_step
+log_scalar = _B.log_scalar
+log_sample = _B.log_sample
+log_attention = _B.log_attention
+log_histogram = _B.log_histogram
+log_report = _B.log_report
+log_clear = _B.log_clear

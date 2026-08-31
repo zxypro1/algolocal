@@ -125,20 +125,36 @@ describe('train 形态：平台接线', () => {
   });
 
   /*
-   * 面板可以是空的，但不能是**看起来做完了**的空。
+   * 这条用例的意思随着实现在变，但**问的一直是同一件事**：
+   * 界面上呈现的能力，和底下真有的能力，对不对得上。
+   *
+   * 第 1 片时它查的是「没做的面板要明说自己没做」（那时运行时还没接）。
+   * 第 7 片运行时接上了，于是反过来查：**真的接上了，没有留着空壳**。
    * gpulab 那次能滑到发版，正是因为「没做」在界面上不产生任何信号。
    */
-  it('还没接上的面板明说自己在等什么', () => {
+  it('运行时真的接上了 —— 不是一个空壳', () => {
+    const source = readFileSync(
+      join(ROOT, 'src', 'components', 'llmlab', 'TrainWorkspace.tsx'), 'utf8'
+    );
+    // 判定跑得起来
+    expect(source).toContain('runTrainStage(');
+    expect(source).toContain('useTrainWorkspace(');
+    // 三块面板接的是真组件，不是 Pending
+    for (const panel of ['TrainingPanel', 'TensorPanel', 'SamplePanel']) {
+      expect(source).toMatch(new RegExp(`const ${panel} = dynamic\\(`));
+      expect(source).toContain(`<${panel}`);
+    }
+    // 终端接的是真终端
+    expect(source).toContain('<WorkbenchTerminal');
+    // 验收按钮在世界没起来之前仍然要禁用 —— 点了没反应比灰着更糟
+    expect(source).toMatch(/disabled=\{train\.status !== 'ready'\}/);
+  });
+
+  it('剩下没接的那块（AI 助手）仍然明说自己在等什么', () => {
     const source = readFileSync(
       join(ROOT, 'src', 'components', 'llmlab', 'TrainWorkspace.tsx'), 'utf8'
     );
     expect(source).toContain('还没接上');
-    expect(source).toContain('Python 运行时未接入');
-    // 验收按钮在运行时接进来之前必须是禁用的，不能点了没反应。
-    // 正则写得松一点：这条查的是「有没有 disabled」，不该被一次换行改动搞红
-    // `[^>]*` 在这里不行：属性里嵌着 `<IconPlayerPlay ... />`，自己带 `>`
-    expect(source).toMatch(/<Button[\s\S]{0,200}?\sdisabled[\s>]/);
-    // 判定运行时还没有 —— 有了就该把上面那个 disabled 一起去掉
-    expect(source).not.toContain('runTrainStage(');
+    expect(source).toMatch(/value="chat"[\s\S]{0,400}?<Pending/);
   });
 });

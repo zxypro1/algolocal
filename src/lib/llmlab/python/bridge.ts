@@ -18,6 +18,7 @@
  * 禁用算子的调用次数一条都漏不掉，而且学员在 Python 里绕不过去。
  */
 import type { Runtime } from '../bridge';
+import { histogramOf } from '../bridge';
 import type { DType, Tensor, TensorRole } from '../bridge';
 
 /** 暴露给 Python 的那张表。方法名用蛇形，和 Python 那边读起来一致 */
@@ -75,6 +76,15 @@ export interface PythonBridge {
   argmax_row(logits: number, row: number, vocab: number): number;
   /** 把 src 的一段拷进 dst 的某个偏移处 —— KV cache 的追加就是它 */
   copy_at(dst: number, dstOff: number, src: number, srcOff: number, n: number): void;
+
+  /* ---- 训练日志：学员在训练循环里调，面板实时画 ---- */
+  log_step(step: number, loss: number, lr: number, gradNorm: number, valLoss: number, tokens: number): void;
+  log_scalar(name: string, step: number, value: number): void;
+  log_sample(step: number, group: string, text: string, logprobs: number[], reward: number, advantage: number): void;
+  log_attention(step: number, layer: number, head: number, probs: number, batch: number, heads: number, seqLen: number, tokens: string[]): void;
+  log_histogram(step: number, name: string, tensor: number): void;
+  log_report(key: string, json: string): void;
+  log_clear(): void;
   /* ---- 阶段标记：门槛要分开读前向 / 反向 / 优化器的 FLOPs ---- */
   phase(name: string): void;
   add_tokens(n: number): void;
@@ -120,7 +130,7 @@ function normalFiller(seed: number) {
 }
 
 export function createPythonBridge(rt: Runtime): PythonBridge {
-  const { arena, ops, meter } = rt;
+  const { arena, ops, meter, log } = rt;
   const T = (id: number): Tensor => arena.get(id);
 
   return {
@@ -316,6 +326,42 @@ export function createPythonBridge(rt: Runtime): PythonBridge {
       const v = arena.view(st);
       for (let i = 0; i < n; i++) d[dstOff + i] = v[srcOff + i];
     },
+
+    log_step(step, loss, lr, gradNorm, valLoss, tokens) {
+      log.step({ step, loss, lr, gradNorm, valLoss, tokens });
+    },
+    log_scalar: (name, step, value) => log.scalar(name, step, value),
+    log_sample(step, group, text, logprobs, reward, advantage) {
+      log.sample({ step, group, text, logprobs: Array.from(logprobs ?? []), reward, advantage });
+    },
+    /*
+     * 只取一个 (batch=0, layer, head) 的切片。
+     *
+     * 整块 [B, H, S, S] 搬到 JS 是几十万个数，而面板一次只画一张图 ——
+     * 在这里切比在面板里切省掉一次跨语言的大搬运。
+     */
+    log_attention(step, layer, head, probs, batch, heads, seqLen, tokens) {
+      const view = arena.view(T(probs));
+      const base = ((0 * heads + head) * seqLen) * seqLen;
+      const slice = new Array<number>(seqLen * seqLen);
+      for (let i = 0; i < seqLen * seqLen; i++) slice[i] = view[base + i];
+      log.attentionSnapshot({
+        step, layer, head, seqLen, probs: slice, tokens: Array.from(tokens ?? []),
+      });
+      void batch;
+    },
+    log_histogram(step, name, tensor) {
+      const t = T(tensor);
+      log.histogram(histogramOf(arena.view(t), name, step));
+    },
+    log_report(key, json) {
+      try {
+        log.report(key, JSON.parse(json));
+      } catch {
+        log.report(key, json);
+      }
+    },
+    log_clear: () => log.clear(),
 
     argmax_row(logits, row, vocab) {
       const view = arena.view(T(logits));

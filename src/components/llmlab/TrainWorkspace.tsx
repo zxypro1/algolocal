@@ -7,34 +7,55 @@
  * 面板之间不发消息（同 ops / gpu 的定论）。终端里 `python train.py` 之后，
  * 训练面板上的曲线变了，不是因为终端通知了它，而是两边看的是同一个世界。
  *
- * ## 这一片做到哪
+ * ## 为什么分发是第一个 commit
  *
- * **分发已经接通，Python 运行时还没接。** 这是有意的顺序：
- * design/llmlab.md 第五节最后一段把它写成了硬规矩 —— gpulab 那次
- * 29 关全做完、测试全绿、包都发了，才发现工作台一行没写。
- * 所以这次先让「点进去有东西」成立，再往里填。
- *
- * 现在能用的：任务 / 背景 / 验收 / 复盘四页，以及 **IDE 真的能改文件、
- * 草稿真的存得住**（走 `stage.train.files` + `handleFileChange`）。
- * 还没接的三块面板各自明说自己在等什么，而不是渲染一块空白。
+ * design/llmlab.md 第五节把它写成了硬规矩 —— gpulab 那次 29 关全做完、
+ * 测试全绿、包都发了，才发现工作台一行没写。所以这个项目的顺序反过来：
+ * 先让「点进去有东西」成立（第 1 片），再往里填运行时（第 7 片）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import {
-  Alert, AppShell, Badge, Button, Code, Group, List,
-  ScrollArea, Select, Stack, Tabs, Text, Tooltip,
+  Alert, AppShell, Badge, Button, Code, Group, List, Loader,
+  ScrollArea, Select, Stack, Tabs, Text, Tooltip, ActionIcon,
 } from '@mantine/core';
 import {
-  IconChartLine, IconFileCode, IconInfoCircle, IconMessages,
-  IconPlayerPlay, IconRobot, IconTable, IconTerminal2,
+  IconAlertTriangle, IconChartLine, IconFileCode, IconInfoCircle, IconMessages,
+  IconPlayerPlay, IconRefresh, IconRobot, IconTable, IconTerminal2,
 } from '@tabler/icons-react';
 import { useMantineColorScheme } from '@mantine/core';
 import Editor from '@monaco-editor/react';
 import { AppHeader, HEADER_HEIGHT } from '../AppHeader';
 import MarkdownRenderer from '../MarkdownRenderer';
+import ErrorBoundary from '../ErrorBoundary';
 import { RunReportPanel } from '../engineering/ResultPanels';
 import WorkbenchSplit from '../workbench/WorkbenchSplit';
+import { useTrainWorkspace } from '../../hooks/useTrainWorkspace';
+import { runTrainStage } from '../../lib/llmlab/lab';
+import { resolveTranspiler } from '../../lib/engineering/transpile';
 import type { ProjectSession, ResultScope } from '../../hooks/useProjectSession';
 import type { StageRunReport } from '../../lib/engineering/types';
+
+const WorkbenchTerminal = dynamic(() => import('../workbench/WorkbenchTerminal'), { ssr: false });
+const TrainingPanel = dynamic(() => import('./TrainingPanel'), { ssr: false });
+const TensorPanel = dynamic(() => import('./TensorPanel'), { ssr: false });
+const SamplePanel = dynamic(() => import('./SamplePanel'), { ssr: false });
+
+const BANNER = [
+  '\x1b[1mllmlab\x1b[0m —— 一台装着 Python 与 nanotorch 的开发机',
+  '',
+  '  `python train.py` 跑你的脚本，`ls` / `cat` 看看盘上有什么。',
+  '  敲 `help` 看这个终端支持哪些命令。',
+  '',
+].join('\r\n');
+
+function renderPanelError(error: Error) {
+  return (
+    <Alert color="red" icon={<IconAlertTriangle size={16} />} m="sm">
+      <Text size="xs">这块面板炸了：{error.message}</Text>
+    </Alert>
+  );
+}
 
 export interface TrainWorkspaceProps {
   session: ProjectSession;
@@ -75,8 +96,31 @@ export default function TrainWorkspace({ session, registerClearResults }: TrainW
   const { project, stage, stageIndex, progress, pick, files, handleFileChange, goToStage } = session;
 
   const [report, setReport] = useState<StageRunReport | null>(null);
+  const [running, setRunning] = useState(false);
   const [rightTab, setRightTab] = useState('ide');
   const [activePath, setActivePath] = useState<string | null>(null);
+  const insertRef = useRef<((command: string) => void) | null>(null);
+
+  const worldSpec = project?.workspace?.kind === 'train' ? project.workspace.world : undefined;
+
+  /** 草稿：把这一关涉及的源文件铺到虚拟文件系统上 */
+  const stageFiles = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const [path, content] of Object.entries(stage?.train?.files ?? {})) {
+      const draft = files.find((file) => file.path === path);
+      out[path] = draft?.content ?? content;
+    }
+    return out;
+    // 只在换关卡时重算：之后编辑器直接写虚拟文件系统，不该把世界重建掉
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage?.id]);
+
+  const train = useTrainWorkspace({
+    world: worldSpec,
+    stage: stage?.train,
+    stageKey: `${project?.id ?? ''}:${stage?.id ?? ''}`,
+    files: stageFiles,
+  });
 
   /** 这一关摆在机器磁盘上的文件 —— IDE 的文件列表 */
   const stagePaths = useMemo(
@@ -139,8 +183,68 @@ export default function TrainWorkspace({ session, registerClearResults }: TrainW
 
   const handleEditorChange = useCallback((value?: string) => {
     if (!activePath || value === undefined) return;
+    // 同时写两处：虚拟文件系统（终端与判定读它）与草稿（刷新之后还在）
+    train.writeFile(activePath, value);
     handleFileChange(activePath, value);
-  }, [activePath, handleFileChange]);
+  }, [activePath, handleFileChange, train]);
+
+  const registerInsert = useCallback((insert: ((command: string) => void) | null) => {
+    insertRef.current = insert;
+  }, []);
+
+  /**
+   * 把一条命令填进终端 —— **只是填进去，不替他回车**。
+   * 和 ops / gpu 一个规矩：命令是学员自己敲下去的。
+   */
+  const insertCommand = useCallback((command: string) => {
+    selectRightTab('terminal');
+    insertRef.current?.(command);
+  }, [selectRightTab]);
+
+  const handleVerify = useCallback(async () => {
+    if (!train.world || !stage) return;
+    setRunning(true);
+    try {
+      const specs = stage.specs ?? [];
+      const transpile = await resolveTranspiler(
+        Object.fromEntries(specs.map((spec) => [spec.path, spec.content]))
+      );
+      train.world.rt.forbid((stage.train?.forbidden ?? []) as never[]);
+      const outcome = await runTrainStage({
+        world: train.world,
+        specs,
+        gates: stage.gates ?? [],
+        transpile,
+      });
+      setReport(outcome);
+      session.recordAttempt({
+        stageId: stage.id,
+        passed: outcome.status === 'passed',
+        passedCases: outcome.totals.passed,
+        totalCases: outcome.totals.total,
+        gatesPassed: outcome.gates.every((gate) => gate.passed),
+        score: outcome.totals.total
+          ? Math.round((outcome.totals.passed / outcome.totals.total) * 100)
+          : 0,
+      });
+    } catch (error) {
+      setReport({
+        status: 'error',
+        totals: { total: 0, passed: 0, failed: 0 },
+        cases: [], gates: [],
+        metrics: {
+          virtualElapsedMs: 0, maxConcurrency: 0, concurrencyTimeline: [],
+          requests: { total: 0, ok: 0, failed: 0, throttled: 0, retries: 0, duplicated: 0, byUrl: {} },
+          samples: [], counters: {},
+        },
+        console: [],
+        wallClockMs: 0,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setRunning(false);
+    }
+  }, [train, stage, session]);
 
   if (!project || !stage) return null;
 
@@ -158,12 +262,28 @@ export default function TrainWorkspace({ session, registerClearResults }: TrainW
             <Badge variant="light" color="gray" size="sm">
               第 {stageIndex + 1} 关 · {pick(stage.title)}
             </Badge>
-            <Badge variant="light" color="orange" size="sm">Python 运行时未接入</Badge>
-            <Tooltip label="Pyodide 与 nanotorch 还没接进来，验收暂时跑不了">
-              <Button size="xs" leftSection={<IconPlayerPlay size={14} />} disabled>
-                验收
-              </Button>
+            {train.status === 'ready' && (
+              <Badge variant="light" color="teal" size="sm">
+                {train.log.steps.length > 0 ? `${train.log.steps.length} 步` : 'nanotorch 就绪'}
+              </Badge>
+            )}
+            {train.status === 'booting' && (
+              <Badge variant="light" color="gray" size="sm">正在起 Python…</Badge>
+            )}
+            <Tooltip label="重置这台机器（会清掉训练日志）">
+              <ActionIcon variant="subtle" color="gray" onClick={train.reboot} aria-label="重置世界">
+                <IconRefresh size={16} />
+              </ActionIcon>
             </Tooltip>
+            <Button
+              size="xs"
+              leftSection={<IconPlayerPlay size={14} />}
+              loading={running}
+              disabled={train.status !== 'ready'}
+              onClick={handleVerify}
+            >
+              验收
+            </Button>
           </Group>
         }
       />
@@ -270,15 +390,21 @@ export default function TrainWorkspace({ session, registerClearResults }: TrainW
                 </Tabs.List>
 
                 <Tabs.Panel value="terminal" style={{ flex: 1, minHeight: 0 }}>
-                  <Pending
-                    title="终端"
-                    waitingFor="Pyodide 装配（虚拟 FS、模块注入、stdout 转发）"
-                    willShow={[
-                      `python ${entry} —— 真的跑学员写的训练脚本`,
-                      'python -m nanotorch.gradcheck —— fp64 那一遍梯度检验',
-                      'ls / head / cat —— 复用 labkit 的 shell 与 coreutils',
-                    ]}
-                  />
+                  {train.status === 'ready' ? (
+                    <WorkbenchTerminal
+                      key={`${stage.id}:${train.generation}`}
+                      prompt={train.prompt}
+                      onCommand={train.runCommand}
+                      banner={BANNER}
+                      registerInsert={registerInsert}
+                    />
+                  ) : (
+                    <Group justify="center" p="xl">
+                      {train.status === 'error'
+                        ? <Alert color="red" title="Python 没起来"><Text size="xs">{train.error}</Text></Alert>
+                        : <Stack align="center" gap="xs"><Loader size="sm" /><Text size="xs" c="dimmed">正在装配 Python 与算子核…</Text></Stack>}
+                    </Group>
+                  )}
                 </Tabs.Panel>
 
                 <Tabs.Panel value="ide" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
@@ -299,6 +425,15 @@ export default function TrainWorkspace({ session, registerClearResults }: TrainW
                           style={{ minWidth: 220 }}
                           allowDeselect={false}
                         />
+                        <Tooltip label="把运行命令填进终端（要你自己回车）">
+                          <Button
+                            size="compact-xs"
+                            variant="light"
+                            onClick={() => insertCommand(`python ${(activePath ?? entry).replace(/^\/lab\//, '')}`)}
+                          >
+                            运行
+                          </Button>
+                        </Tooltip>
                       </Group>
                       <div style={{ flex: 1, minHeight: 0 }}>
                         <Editor
@@ -321,39 +456,30 @@ export default function TrainWorkspace({ session, registerClearResults }: TrainW
                 </Tabs.Panel>
 
                 <Tabs.Panel value="train" style={{ flex: 1, minHeight: 0 }}>
-                  <Pending
-                    title="训练"
-                    waitingFor="WASM 算子核 + JS 桥的计量层"
-                    willShow={[
-                      'loss 曲线（训练 / 验证双线），以及第 2 关那条 bigram 基线',
-                      '学习率、梯度范数、每步 token 数',
-                      '每条门槛的实时值与目标值',
-                    ]}
-                  />
+                  <ErrorBoundary fallback={renderPanelError}>
+                    <TrainingPanel
+                      log={train.log}
+                      baselines={train.world?.baselines}
+                      gates={report?.gates}
+                      revision={train.revision}
+                    />
+                  </ErrorBoundary>
                 </Tabs.Panel>
 
                 <Tabs.Panel value="tensor" style={{ flex: 1, minHeight: 0 }}>
-                  <Pending
-                    title="张量"
-                    waitingFor="nanotorch 的前向与 JS 桥的张量视图"
-                    willShow={[
-                      '注意力热图（选层选头）—— 因果掩码写错时右上三角会亮',
-                      '激活与梯度直方图、逐层范数',
-                      '参数量与显存分解（嵌入 / 注意力 / MLP / 优化器状态 / 激活）',
-                    ]}
-                  />
+                  <ErrorBoundary fallback={renderPanelError}>
+                    <TensorPanel
+                      log={train.log}
+                      metrics={train.world?.rt.metrics()}
+                      revision={train.revision}
+                    />
+                  </ErrorBoundary>
                 </Tabs.Panel>
 
                 <Tabs.Panel value="samples" style={{ flex: 1, minHeight: 0 }}>
-                  <Pending
-                    title="样例"
-                    waitingFor="采样与 KV cache（第 8 关）"
-                    willShow={[
-                      '生成样例，token 按 logprob 着色',
-                      'SFT 前后对比、偏好对（chosen / rejected）与 reward',
-                      'GRPO 的一组 rollout，每条带 reward 与 advantage，组内均值画在旁边',
-                    ]}
-                  />
+                  <ErrorBoundary fallback={renderPanelError}>
+                    <SamplePanel log={train.log} revision={train.revision} />
+                  </ErrorBoundary>
                 </Tabs.Panel>
 
                 {/*

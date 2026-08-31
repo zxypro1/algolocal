@@ -102,13 +102,43 @@ random.seed(0)
 sys.setrecursionlimit(10000)
 `;
 
+/**
+ * 拿到 `loadPyodide` —— 浏览器与 Node 走的是**两份不同的东西**。
+ *
+ * **浏览器：从 `indexURL` 取我们自己发布的那份 `pyodide.mjs`，不走打包器。**
+ * 直接写 `import('pyodide')` 的话，webpack 会把那个 npm 包卷进客户端 bundle，
+ * 而它的入口 import 了 `node:path` —— 构建当场失败
+ * （`Module not found: Can't resolve 'node:path'`）。
+ *
+ * 就算能构建也不该那么做：包里那份 `pyodide.asm.mjs` 有 1.25MB，
+ * 而同一个文件我们已经拷进 `public/llmlab/pyodide/` 了，
+ * 打包等于把它塞进 bundle 再下载第二遍。
+ *
+ * `webpackIgnore` 让打包器原样留下这条 import：浏览器在运行时
+ * 拿到的是 `/llmlab/pyodide/pyodide.mjs`，正是我们发布的那一份。
+ *
+ * Node（测试、以及将来可能的服务端预热）走 npm 包，那边没有打包器。
+ */
+async function loadPyodideModule(indexURL: string) {
+  if (typeof window !== 'undefined') {
+    return import(/* webpackIgnore: true */ `${indexURL}pyodide.mjs`) as Promise<{
+      loadPyodide: (opts?: PyodideConfig) => Promise<PyodideAPI>;
+    }>;
+  }
+  // 用变量而不是字面量：字面量会被打包器静态分析到，而这一支本来就不该进 bundle
+  const name = 'pyodide';
+  return import(/* webpackIgnore: true */ name) as Promise<{
+    loadPyodide: (opts?: PyodideConfig) => Promise<PyodideAPI>;
+  }>;
+}
+
 export async function loadPythonRuntime(options: LoadPythonOptions): Promise<PythonRuntime> {
   const { indexURL } = options;
   if (!indexURL) {
     throw new Error('loadPythonRuntime 需要 indexURL —— 不给默认值是为了杜绝走 CDN');
   }
 
-  const loader = options.loader ?? (() => import('pyodide'));
+  const loader = options.loader ?? (() => loadPyodideModule(indexURL));
   const { loadPyodide } = await loader();
 
   let stdout = '';
