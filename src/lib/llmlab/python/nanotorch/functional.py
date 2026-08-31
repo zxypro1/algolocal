@@ -89,6 +89,33 @@ def linear(x, weight):
     return out
 
 
+def scale(x, factor):
+    """乘一个标量常数。对应 PyTorch 里的 `x * factor`。
+
+    残差缩放（`1/sqrt(2L)`）、loss 的梯度累积除以 micro-batch 数，
+    用的都是它。乘常数的导数就是乘同一个常数,反向里没有别的东西。
+    """
+    out = Tensor(x.shape, x.dtype, name="scale")
+    B.copy(out.handle, x.handle, x.numel)
+    B.scale_inplace(out.handle, float(factor), out.numel)
+    out.requires_grad = x.requires_grad
+
+    def backward():
+        go = out.grad
+        if go is None:
+            return
+        # 不能就地改 go —— 它可能被别的分支共享。先抄一份再缩放。
+        tmp = Tensor(x.shape, x.dtype, name="scale.grad")
+        B.copy(tmp.handle, go.handle, tmp.numel)
+        B.scale_inplace(tmp.handle, float(factor), tmp.numel)
+        B.add_inplace(x.ensure_grad().handle, tmp.handle, tmp.numel)
+
+    if out.requires_grad:
+        out._backward = backward
+        out._parents = (x,)
+    return out
+
+
 def rms_norm(x, weight, eps=1e-5):
     """沿最后一维做 RMSNorm。对应 `torch.nn.functional.rms_norm`。"""
     rows, d = _rows(x.shape)
@@ -478,3 +505,23 @@ def quantize_(x, dtype):
 def count_nonfinite(x):
     """有多少个 NaN / inf。训练炸了的第一手证据。"""
     return B.count_nonfinite(x.handle, x.numel)
+
+
+def norm(x):
+    """L2 范数 `sqrt(Σ x²)`。
+
+    它是个**观测量**，不进计算图 —— 返回的是普通的 float，不是 Tensor。
+    看残差流有没有爆、梯度有没有消失，第一个要看的就是它。
+    """
+    return B.sumsq(x.handle, x.numel) ** 0.5
+
+
+def rms(x):
+    """均方根 `sqrt(mean(x²))`。同样是观测量。
+
+    比 L2 范数更适合跨层比较 —— 它不随元素个数变。
+    「第 8 层的激活是第 1 层的几倍」问的就是这个数。
+    """
+    if x.numel == 0:
+        return 0.0
+    return (B.sumsq(x.handle, x.numel) / x.numel) ** 0.5

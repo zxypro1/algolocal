@@ -2548,6 +2548,76 @@ const primers = {
         'With `n_kv_head = n_head` GQA degenerates to ordinary multi-head; with `n_kv_head = 1` it is MQA (multi-query attention), which saves the most but visibly costs quality. Values between 2 and 8 are the usual compromise.'
       )
     ),
+    'rope': t(
+      p(
+        '注意力本身对顺序一无所知。把一句话的词打乱重排，注意力算出来的结果只是跟着换个位置,它看不出「谁在前谁在后」。所以位置信息必须另外喂进去。',
+        '早期做法是`绝对位置编码`：给第 0 个位置配一个向量、第 1 个配另一个，加到词向量上。它能用，但有个硬伤,训练时只见过 0..1023 这些位置，第 1024 个位置的编码从没见过，模型到那里就废了。',
+        '`RoPE`（旋转位置编码）换了个思路：不加，而是`转`。把每个头的维度两两配对当成复平面上的点，第 p 个位置就整体转 p·θ 的角度。',
+        '妙处在于点积。两个向量各自转过 i·θ 和 j·θ 之后再做点积，结果只跟 `i − j` 有关,转的绝对角度抵消掉了。于是注意力天然看到的是`相对距离`，而不是绝对下标。',
+        '不同的维度对配不同的频率：低维转得快，管相邻几个位置；高维转得慢，管几百上千的尺度。合起来像一把刻度从毫米到米的复合尺子。频率的底数叫 `base`，原论文取 10000,把它调大再微调一小段，就是今天把上下文从几千拉到十万的常规手段。',
+        'RoPE 只转`查询`和`键`,分数是它们算出来的，位置该影响的是「看哪里」。`值`不转：值是取回来的内容，内容不该带着位置跑。'
+      ),
+      p(
+        'Attention itself knows nothing about order. Shuffle a sentence and its outputs merely move with the tokens,it cannot tell what came first. Position has to be supplied separately.',
+        'The early approach was `absolute position embeddings`: a vector for position 0, another for position 1, added to the token embedding. It works, with one hard limitation,training only ever saw positions 0..1023, so position 1024 has an embedding the model never learned, and everything breaks there.',
+        '`RoPE` (rotary position embedding) takes another route: it rotates instead of adding. Pair up the dimensions of each head as points on the complex plane, and rotate position p by an angle of p·θ.',
+        'The trick is in the dot product. Rotate two vectors by i·θ and j·θ, take their dot product, and the result depends only on `i − j`,the absolute angles cancel. Attention therefore sees `relative distance` rather than absolute indices.',
+        'Different dimension pairs get different frequencies: low dimensions rotate fast and cover neighbours; high dimensions rotate slowly and cover hundreds or thousands of positions. Together they form a ruler graduated from millimetres to metres. The frequency base is called `base`, and the original paper used 10000,enlarging it and fine-tuning briefly is the standard way today to stretch context from thousands to a hundred thousand.',
+        'RoPE rotates only `queries` and `keys`,they produce the scores, and position should shape where to look. `Values` are left alone: a value is the content fetched, and content should not carry a position with it.'
+      )
+    ),
+    'rmsnorm-prenorm': t(
+      p(
+        '深网络训不动的经典原因是激活的量级失控:一层放大一点，二十层之后就是几个数量级。`归一化`是把每层的输入重新拉回一个固定的尺度。',
+        '`LayerNorm` 的做法是减均值、除标准差，再乘一个可学的增益、加一个可学的偏置。`RMSNorm` 砍掉了减均值和偏置，只除均方根 `sqrt(mean(x²))`。省下大约 7% 的开销，效果基本持平,Llama 之后这就是默认。',
+        '一个能拿来验证的推论：给输入整体加一个常数，LayerNorm 的输出不变（均值被减掉了），RMSNorm 的输出会变。写错了哪一个，这个性质会当场告诉你。',
+        '归一化`放在哪`比用哪一种更要紧。`post-norm` 是 `norm(x + f(x))`,归一化挡在残差通路上；`pre-norm` 是 `x + f(norm(x))`,残差是一条干净的恒等通路，梯度可以不经任何缩放地从输出回到输入。原始 Transformer 用的是前者，需要精心设计的 warmup 才训得动；今天基本都是后者。',
+        'pre-norm 的代价是残差流会随深度变大:每层往上加一份，L 层之后大约是 `sqrt(1 + L·σ²)`。把每层输出乘 `1/sqrt(2L)` 就能把它压回与深度无关,GPT-2 起就是这么初始化的，一行代码，但没有它，深模型的前几百步会明显更难走。'
+      ),
+      p(
+        'The classic reason deep networks fail to train is activation scale running away: each layer amplifies a little, and twenty layers later you are orders of magnitude off. `Normalisation` pulls every layer input back to a fixed scale.',
+        '`LayerNorm` subtracts the mean, divides by the standard deviation, then applies a learned gain and a learned bias. `RMSNorm` drops the mean subtraction and the bias, dividing only by the root mean square `sqrt(mean(x²))`. About 7% cheaper at essentially the same quality,the default since Llama.',
+        'One consequence is directly testable: add a constant to the whole input and LayerNorm is unchanged (the mean was subtracted away) while RMSNorm moves. Whichever one you meant to write, this property tells you which one you actually wrote.',
+        '`Where` normalisation sits matters more than which one you pick. `post-norm` is `norm(x + f(x))`,normalisation blocks the residual path. `pre-norm` is `x + f(norm(x))`,the residual stays a clean identity, and gradients travel from output to input without passing through any scaling. The original Transformer used the former and needed a carefully tuned warmup to train at all; today almost everything uses the latter.',
+        'Pre-norm costs you a residual stream that grows with depth: each layer adds a share, so after L layers the scale is about `sqrt(1 + L·σ²)`. Multiplying each layer output by `1/sqrt(2L)` flattens that back to depth-independent,how GPT-2 has initialised from the start. One line, but without it the first few hundred steps of a deep model are visibly harder.'
+      )
+    ),
+    'swiglu-block': t(
+      p(
+        '一层 Transformer 由两块组成：注意力负责`在位置之间搬运信息`，前馈网络负责`对每个位置各自做变换`。注意力是横着看的，前馈是竖着看的,少了任何一块，模型都会明显变弱。',
+        '前馈网络的参数其实是大头。一层里注意力约 `4·dim²`，前馈约 `8·dim²`,三分之二的参数在这块看着最平平无奇的地方。',
+        '传统写法是 `down(gelu(up(x)))`，隐藏维取 `4·dim`。`SwiGLU` 改成三个矩阵：`gate` 和 `up` 各投影一次，`silu(gate) · up` 逐元素相乘，再 `down` 投回去。多出来的那条`门控`路让网络能学「这一维要不要通过」，而不只是「通过多少」。',
+        '三个矩阵要是都按 `4·dim` 开，参数就比原来多 50%。Llama 的解法是把隐藏维乘 `2/3` 再向上取到 8 或 256 的倍数,参数量持平，效果更好。取整不是洁癖：矩阵乘的分块和张量核心按 8/16/32 对齐，一个不对齐的宽度会掉进慢路径。',
+        '整层的形状是两条 pre-norm 残差:`x = x + attn(norm1(x))`，然后 `x = x + mlp(norm2(x))`。把两条支路的出口权重清零，整层就应该是`恒等映射`,这是检查残差接对没接对最利落的办法。',
+        '还有一个值得记住的数：一次前向大约是 `2N` 次浮点运算每 token（N 是参数量），反向约两倍，一个训练步合计约 `6N`。所有的算力预算都从这个式子开始算。'
+      ),
+      p(
+        'A Transformer layer has two halves: attention `moves information between positions`, and the feed-forward network `transforms each position on its own`. Attention looks sideways, the FFN looks down,drop either and the model gets visibly weaker.',
+        'Most parameters actually live in the FFN. Per layer, attention costs about `4·dim²` and the feed-forward about `8·dim²`,two thirds of the parameters sit in the least glamorous part.',
+        'The classic form is `down(gelu(up(x)))` with a hidden width of `4·dim`. `SwiGLU` uses three matrices instead: project through `gate` and `up`, multiply `silu(gate) · up` elementwise, then project back with `down`. That extra `gating` path lets the network learn whether a dimension should pass at all, not merely how much.',
+        'Three matrices at `4·dim` each would cost 50% more parameters. Llama scales the width by `2/3` and rounds up to a multiple of 8 or 256,parameter count holds while quality improves. The rounding is not fastidiousness: matmul tiling and tensor cores align to 8/16/32, and an unaligned width falls onto a slow path.',
+        'A whole layer is two pre-norm residuals: `x = x + attn(norm1(x))` then `x = x + mlp(norm2(x))`. Zero the output weights of both branches and the layer must become the `identity`,the cleanest way to check that the residuals are wired correctly.',
+        'One more number worth keeping: a forward pass costs roughly `2N` floating-point operations per token (N being the parameter count), the backward about twice that, so a training step is about `6N`. Every compute budget starts from this formula.'
+      )
+    ),
+    'sampling-kvcache': t(
+      p(
+        '训练时整段序列一次算完,因果掩码保证第 t 个位置只看得见前面。生成时不行：第 t 个 token 还不存在，必须先采出来才能往下走。这就是`自回归解码`。',
+        '朴素的写法是每生成一个 token 就把整段前缀重新跑一遍。第 t 步是 O(t)，生成 n 个是 `O(n²)`。生成 1000 个 token 要做的工作是生成 100 个的一百倍,这不是慢一点，这是不能用。',
+        '关键的观察是：前面那些位置的`键`和`值`，每一步算出来的都一模一样。既然一样，存下来就好。这就是 `KV cache`,每步只算新来的那一个位置的 k/v，追加进缓存，然后对缓存里全部位置做注意力。每步 O(1)，全程 O(n)。',
+        '代价是显存。缓存的大小是 `2 · 层数 · batch · 序列长 · kv头数 · 头维 · 位宽`,一个 70B 模型在长上下文、大 batch 下，缓存能比权重本身还大。GQA 减 kv 头数、量化减位宽、分页分配减碎片，这三条都是冲着它去的。',
+        '带缓存和不带缓存算的是同一个函数，所以结果应当`逐位相同`。对不上通常是三件事：RoPE 的位置没跟着已生成长度走、因果掩码忘了传偏移、往缓存里追加时 batch 之间串了位。这三个错都不报异常,生成出来的东西照样像句子。',
+        '采样这一侧，`temperature` 缩放 logits（越小越确定），`top-k` 只留概率最高的 k 个，`top-p` 留累计概率到 p 的那些。三者叠加的顺序是先 k 后 p,和 HuggingFace 一致。要能重放，采样必须确定性：同一份 logits 加同一个 seed 必须给同一个 token，概率相同的候选按 id 排序。'
+      ),
+      p(
+        'Training computes the whole sequence at once,the causal mask keeps position t from seeing ahead. Generation cannot: token t does not exist yet and must be sampled before anything can follow. That is `autoregressive decoding`.',
+        'The naive approach reruns the entire prefix for each new token. Step t costs O(t), so n tokens cost `O(n²)`. Generating 1000 tokens is a hundred times the work of generating 100,not somewhat slower, but unusable.',
+        'The key observation is that the `keys` and `values` of earlier positions come out identical at every step. Since they are identical, store them. That is the `KV cache`: compute k/v only for the new position, append, and attend over everything the cache holds. O(1) per step, O(n) overall.',
+        'The cost is memory. The cache is `2 · layers · batch · length · kv_heads · head_dim · width`,on a 70B model with long context and large batches it can exceed the weights themselves. GQA cuts head count, quantisation cuts width, and paged allocation cuts fragmentation; all three target this.',
+        'Cached and uncached decoding compute the same function, so results must be `bit-identical`. Mismatches are usually one of three things: RoPE positions not following the generated length, a forgotten offset on the causal mask, or appends that cross batch boundaries. None of them raises an error,the output still reads like language.',
+        'On the sampling side, `temperature` scales the logits (lower is more deterministic), `top-k` keeps the k most probable tokens, and `top-p` keeps the smallest set reaching cumulative probability p. They stack k first, then p,matching HuggingFace. For replay to work sampling must be deterministic: the same logits and seed must give the same token, with ties broken by id.'
+      )
+    ),
   },
 };
 
