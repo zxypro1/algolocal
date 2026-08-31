@@ -510,7 +510,7 @@ export interface GpuStageSpec {
  */
 export interface TrainWorkspaceSpec {
   kind: 'train';
-  world?: import('../llmlab/lab').TrainWorldSpec;
+  world?: import('../llmlab/lab/spec').TrainWorldSpec;
 }
 
 /**
@@ -522,7 +522,7 @@ export interface TrainStageSpec {
   /** 进入本关时往机器磁盘上放的文件（一般是几个 .py） */
   files?: Record<string, string>;
   /** 这一关的世界覆盖，浅合并到项目级的世界上（换档位、换语料、换数据集） */
-  world?: Partial<import('../llmlab/lab').TrainWorldSpec>;
+  world?: Partial<import('../llmlab/lab/spec').TrainWorldSpec>;
   /** 「运行」按钮跑哪个脚本。不写就沿用世界里的 */
   entry?: string;
   /**

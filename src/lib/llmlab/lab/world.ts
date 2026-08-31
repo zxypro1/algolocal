@@ -1,88 +1,128 @@
 /**
- * train 形态的世界：语料、分词器、模型档位、超参、数据集、检查点
+ * train 形态的世界：装配与运行时
  *
  * 沿用 ops / gpu 的定论：**世界写在项目上，关卡只写增量**。
- * 这个文件目前只有「世界长什么样」的类型声明 —— 装配它的运行时
- * （Pyodide + nanotorch + WASM 算子核）在后面几片里接进来。
- *
- * 类型先落地是有意的：`ProjectStage.train` 与 `TrainWorkspaceSpec` 都要引用它，
- * 而工作台的分发这一片就要接通（见 design/llmlab.md 第五节最后一段）。
+ * 一个世界 = 一个算子核运行时 + 一个 Python 会话 + 语料 / 词表 / 数据集，
+ * 工作台的每块面板和判定读的都是**同一个**世界 —— 学员在编辑器里改过、
+ * 在终端里跑过的东西必须算数。
  */
+import type { Runtime } from '../bridge';
+import { createRuntime, createRuntimeAsync } from '../bridge';
+import { createTrainSession, type TrainSession } from '../python';
+import type { LoadPythonOptions } from '../python';
+import {
+  charVocab, encodeChars, entropyBaselines, templatedEnglish,
+  type Baselines, type CharVocab,
+} from './corpus';
 
-/** 模型档位。判定档约 15 万参数，探索档约 40 万 —— 数字与依据见 design/llmlab.md「训练规模的天花板」 */
-export interface TrainArchSpec {
-  dModel: number;
-  nLayer: number;
-  /** 查询头数 */
-  nHead: number;
-  /** 键值头数。等于 nHead 就是 MHA，小于就是 GQA */
-  nKvHead: number;
-  /** 前馈的中间维度（SwiGLU 有三个 d×hidden 的矩阵） */
-  hidden: number;
-  /** 上下文长度 */
-  blockSize: number;
-  vocabSize: number;
-  /** RoPE 的底数，默认 10000 */
-  ropeBase?: number;
+export type {
+  TrainArchSpec, TrainCorpusSpec, TrainHParams,
+  TrainMachineSpec, TrainTokenizerSpec, TrainWorldSpec,
+} from './spec';
+
+import type { TrainWorldSpec } from './spec';
+
+/** 装配好的世界 */
+export interface TrainWorld {
+  readonly rt: Runtime;
+  readonly session: TrainSession;
+  /** 语料的原文，按名字取 */
+  readonly corpus: Record<string, string>;
+  /** 主语料的字符词表 —— 第 2 关之前用它，之后换成 BPE */
+  readonly vocab: CharVocab;
+  /** 主语料编码之后的 token 序列 */
+  readonly tokens: Int32Array;
+  /** 留出集的起点。之前是训练集，之后是验证集 */
+  readonly holdoutAt: number;
+  /** 三条基线。**第 16 关那条门槛的分母就是 bigram** */
+  readonly baselines: Baselines;
+  readonly spec: TrainWorldSpec;
+  /** 世界改过几次 —— 面板的投影挂在这个数上重算 */
+  revision: number;
 }
+
+export interface BuildWorldOptions {
+  /** 算子核的 wasm 字节 */
+  wasmBytes: BufferSource;
+  /** Pyodide 的加载参数 */
+  python: LoadPythonOptions;
+  /** 项目级世界 + 关卡增量，浅合并之后的结果 */
+  spec?: TrainWorldSpec;
+  /** 同步建（Node / Worker）还是异步建（浏览器主线程） */
+  sync?: boolean;
+}
+
+const DEFAULT_CORPUS_BYTES = 60_000;
+const DEFAULT_HOLDOUT = 0.1;
 
 /**
- * 训练超参。
+ * 把关卡增量浅合并到项目级世界上。
  *
- * **这一整块是只读的，学员改不了。** 门槛规矩二：学习效果类门槛成立的前提是
- * 种子、数据、超参、步数全部由平台固定 —— 否则「loss 降到 1.45 以下」
- * 只要把步数调到十倍就过了。
+ * `machine.files` 要**深合并一层**：关卡放的起始代码不该把项目级的
+ * 只读基础设施文件冲掉。其余字段整块覆盖 —— 换档位、换语料都是整块换的。
  */
-export interface TrainHParams {
-  seed: number;
-  batchSize: number;
-  steps: number;
-  learningRate: number;
-  warmupSteps?: number;
-  weightDecay?: number;
-  gradClip?: number;
-  betas?: [number, number];
+export function mergeWorldSpec(
+  base: TrainWorldSpec | undefined,
+  patch: Partial<TrainWorldSpec> | undefined
+): TrainWorldSpec {
+  if (!base) return (patch ?? {}) as TrainWorldSpec;
+  if (!patch) return base;
+  return {
+    ...base,
+    ...patch,
+    machine: {
+      ...(base.machine ?? {}),
+      ...(patch.machine ?? {}),
+      files: { ...(base.machine?.files ?? {}), ...(patch.machine?.files ?? {}) },
+    },
+  };
 }
 
-/** 语料：项目自带的文本，按名字取 */
-export interface TrainCorpusSpec {
-  /** 名字 → 磁盘上的路径 */
-  files: Record<string, string>;
-  /** 留出集占比，用于算验证 loss */
-  holdoutRatio?: number;
-}
+export async function buildWorld(options: BuildWorldOptions): Promise<TrainWorld> {
+  const spec = options.spec ?? {};
+  const rt = options.sync === false
+    ? await createRuntimeAsync(options.wasmBytes)
+    : createRuntime(options.wasmBytes);
 
-/** 分词器：第 1 关之后各关都用平台这一份，保证起点一致 */
-export interface TrainTokenizerSpec {
-  kind: 'char' | 'bpe';
-  vocabSize: number;
-  /** BPE 的 merge 表落在磁盘的哪里（由平台生成） */
-  mergesPath?: string;
-}
+  const session = await createTrainSession(rt, options.python);
 
-/** 一台装着 Python 与 nanotorch 的开发机 */
-export interface TrainMachineSpec {
-  /** 开局盘上就有的文件 */
-  files?: Record<string, string>;
-  /** 提示符，默认 `~ $` */
-  prompt?: string;
-}
-
-export interface TrainWorldSpec {
-  machine?: TrainMachineSpec;
-  corpus?: TrainCorpusSpec;
-  tokenizer?: TrainTokenizerSpec;
-  arch?: TrainArchSpec;
-  hparams?: TrainHParams;
-  /**
-   * 随项目发布的预训练检查点：名字 → `public/llmlab/` 下的文件名。
-   *
-   * 后训练那 9 关都要一个已经会说话的模型做起点，现场训一遍是纯浪费 ——
-   * 现实里也没有人为了做 SFT 先重新预训练一遍。
+  /*
+   * 语料。世界里没写就生成一份默认的 ——
+   * 前几关（分词器、基线）需要的正是这份文本，而不是某个具体项目的内容。
    */
-  checkpoints?: Record<string, string>;
-  /** 数据集：名字 → 磁盘路径（SFT 指令集、偏好对、可验证任务集、评测集） */
-  datasets?: Record<string, string>;
-  /** 「运行」按钮默认跑哪个脚本 */
-  entry?: string;
+  const corpus: Record<string, string> = { ...(spec.corpus?.files ?? {}) };
+  if (Object.keys(corpus).length === 0) {
+    corpus['corpus.txt'] = templatedEnglish(DEFAULT_CORPUS_BYTES);
+  }
+  const mainName = Object.keys(corpus).sort()[0];
+  const text = corpus[mainName];
+
+  const vocab = charVocab(text);
+  const tokens = encodeChars(text, vocab);
+  const ratio = spec.corpus?.holdoutRatio ?? DEFAULT_HOLDOUT;
+  const holdoutAt = Math.floor(tokens.length * (1 - ratio));
+
+  /*
+   * 基线只在**训练集**上统计。
+   *
+   * 在全量上统计的话，bigram 基线会偷看到验证集 —— 于是「模型打穿了 bigram」
+   * 这件事被系统性地变难，而难的原因和模型无关。这个错很隐蔽，
+   * 因为两个数看起来都很合理。
+   */
+  const baselines = entropyBaselines(tokens.subarray(0, holdoutAt), vocab.size);
+
+  // 把语料与只读文件铺到 Python 的虚拟文件系统上
+  for (const [name, content] of Object.entries(corpus)) {
+    session.writeFile(`data/${name}`, content);
+  }
+  for (const [path, content] of Object.entries(spec.machine?.files ?? {})) {
+    session.writeFile(path, content);
+  }
+  for (const [name, content] of Object.entries(spec.datasets ?? {})) {
+    session.writeFile(`data/${name}`, content);
+  }
+
+  return {
+    rt, session, corpus, vocab, tokens, holdoutAt, baselines, spec, revision: 0,
+  };
 }
