@@ -32,6 +32,8 @@ export interface PythonBridge {
   set_f(id: number, values: ArrayLike<number>): void;
   get_f(id: number, count: number): number[];
   item(id: number, index: number): number;
+  /** 写单个元素。梯度检验一次只动一个数，整块重写太慢 */
+  set_item(id: number, index: number, value: number): void;
   fill(id: number, value: number): void;
   /** 用确定性 RNG 填正态分布 —— 初始化放在 JS 侧，Python 里逐元素写会慢 300 倍 */
   fill_normal(id: number, seed: number, std: number): void;
@@ -148,6 +150,9 @@ export function createPythonBridge(rt: Runtime): PythonBridge {
     set_i32(id, values) {
       const view = arena.i32(T(id));
       for (let i = 0; i < values.length; i++) view[i] = values[i];
+    },
+    set_item(id, index, value) {
+      arena.view(T(id))[index] = value;
     },
     set_f(id, values) {
       const view = arena.view(T(id));
