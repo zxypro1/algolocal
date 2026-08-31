@@ -2516,6 +2516,38 @@ const primers = {
         'One more thing is mandatory: `smoothing`. The held-out set will contain pairs the training split never saw, and without smoothing the probability is zero, the logarithm is negative infinity, and the baseline is unusable. We use add-one smoothing: `p(b|a) = (count(a,b) + 1) / (count(a) + V)`, and note that the denominator is smoothed too.'
       )
     ),
+    'causal-attention': t(
+      p(
+        '注意力回答一个很具体的问题：预测第 t 个位置时，前面每个位置各应该占多大权重。做法是给每个位置算三样东西,`查询`（query）、`键`（key）、`值`（value），都是同一个向量乘不同的权重矩阵得到的。',
+        '第 i 个位置的查询和第 j 个位置的键做点积，得到一个`分数`,它衡量「i 有多想看 j」。分数除以 `sqrt(head_dim)` 之后过 softmax 变成一组和为 1 的权重，再拿这组权重去对所有位置的值做加权求和。这就是全部。',
+        '除以 `sqrt(head_dim)` 不是装饰。点积的方差随维度线性增长，不缩放的话 softmax 很快进入饱和区：一个位置拿到接近 1 的权重、其余接近 0，梯度也就跟着消失。缩放让分数的方差回到 1 附近。',
+        '`因果掩码`是自回归模型的命门：预测第 t 个位置时只许看 `0..t`，看到 `t+1` 就是看到了答案。漏掉它的模型训练 loss 会明显更低、曲线更漂亮，而生成时一个字都对不上,这个错在任何 loss 曲线上都看不出来。',
+        '掩码有两种做法。一种是给被掩的分数加一个很大的负数，softmax 之后它们接近 0；另一种是让它们根本不参与 softmax，于是概率是`硬 0`。我们用后者:因果性要靠「改未来、看现在有没有变」来验，而逐位比较容不下 1e-30 这样的残留。'
+      ),
+      p(
+        'Attention answers a specific question: when predicting position t, how much weight should each earlier position get? Each position produces three things,a `query`, a `key` and a `value`, all obtained by multiplying the same vector by different weight matrices.',
+        'The query at position i dotted with the key at position j gives a `score` measuring how much i wants to look at j. Divide the scores by `sqrt(head_dim)`, push them through softmax to get weights summing to 1, and take the weighted sum of all values. That is the whole mechanism.',
+        'The `sqrt(head_dim)` division is not decoration. Dot-product variance grows linearly with dimension, and without scaling softmax saturates quickly: one position takes nearly all the weight, the rest take almost none, and gradients vanish with them. Scaling brings the score variance back near 1.',
+        'The `causal mask` is what makes an autoregressive model work: predicting position t may look at `0..t` only, and seeing `t+1` means seeing the answer. A model that omits it has a visibly lower training loss and a prettier curve while generating nothing usable,and no loss curve reveals this.',
+        'There are two ways to mask. One adds a large negative number to the masked scores so softmax pushes them near zero; the other excludes them from softmax entirely so the probability is a `hard zero`. We use the latter: causality is verified by changing the future and checking that the present is bit-identical, and a bit-exact comparison has no room for a 1e-30 remainder.'
+      )
+    ),
+    'multi-head-gqa': t(
+      p(
+        '一个头只能表达一种「看哪里」的模式。`多头注意力`把维度切成几份，每份各算一套查询/键/值，各自注意各自的东西，最后把结果拼起来再过一个输出投影。切分是免费的:总的计算量和一个大头一样，但表达能力强得多。',
+        '`head_dim = dim // n_head`。八个头、每个 64 维的模型，和一个 512 维的单头，浮点运算量相同。',
+        '`GQA`（分组查询注意力）动的是键和值:让若干个查询头**共用**一套键值。查询头仍然是 8 个，键值头可以只有 2 个,每 4 个查询头共享一份 kv。',
+        '这么做的理由在推理侧。解码时每生成一个 token 都要读一遍整个 `KV cache`，而 cache 的大小正比于键值头数。8 个头减到 2 个，cache 就小 4 倍,在解码这种访存瓶颈的场景里是实打实的加速，而质量几乎没掉。Llama 2 70B 起就是这么配的。',
+        '`n_kv_head = n_head` 时 GQA 退化成普通多头；`n_kv_head = 1` 时叫 MQA（多查询注意力），省得最多但质量掉得也明显。2 到 8 之间是常见的折中。'
+      ),
+      p(
+        'A single head can express only one pattern of "where to look". `Multi-head attention` splits the dimension into groups, computes a separate query/key/value set for each, lets each attend independently, then concatenates and applies an output projection. The split is free: total compute matches one large head, while expressiveness is much greater.',
+        '`head_dim = dim // n_head`. Eight heads of 64 dimensions each cost the same floating-point work as one head of 512.',
+        '`GQA` (grouped-query attention) changes the keys and values: several query heads **share** one key/value set. There can still be 8 query heads while only 2 key/value heads exist,every 4 query heads share one KV set.',
+        'The reason lives on the inference side. Decoding reads the entire `KV cache` for every generated token, and the cache scales with the number of key/value heads. Going from 8 to 2 makes it four times smaller,a real speedup in a memory-bound regime, at almost no quality cost. Llama 2 70B onward ships this configuration.',
+        'With `n_kv_head = n_head` GQA degenerates to ordinary multi-head; with `n_kv_head = 1` it is MQA (multi-query attention), which saves the most but visibly costs quality. Values between 2 and 8 are the usual compromise.'
+      )
+    ),
   },
 };
 
