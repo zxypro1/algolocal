@@ -106,6 +106,100 @@ def gemm(a, b, m, n, k, mode="nn", dtype=None):
     return out
 
 
+def mul(a, b):
+    """逐元素相乘。对应 PyTorch 里的 `a * b`。
+
+    反向是对称的：`da = b·go`，`db = a·go`。
+    """
+    assert a.shape == b.shape, f"相乘的两边形状要一致：{a.shape} vs {b.shape}"
+    n = a.numel
+    out = Tensor(a.shape, a.dtype, name="mul")
+    B.mul(a.handle, b.handle, out.handle, n)
+
+    def backward():
+        go = out.grad
+        if go is None:
+            return
+        if a.requires_grad:
+            tmp = Tensor(a.shape, a.dtype, name="dmul.a")
+            B.mul(b.handle, go.handle, tmp.handle, n)
+            B.add_inplace(a.ensure_grad().handle, tmp.handle, n)
+        if b.requires_grad:
+            tmp = Tensor(b.shape, b.dtype, name="dmul.b")
+            B.mul(a.handle, go.handle, tmp.handle, n)
+            B.add_inplace(b.ensure_grad().handle, tmp.handle, n)
+
+    out.requires_grad = is_grad_enabled() and (a.requires_grad or b.requires_grad)
+    if out.requires_grad:
+        out._backward = backward
+        out._parents = (a, b)
+    return out
+
+
+def row_scale(x, coef, rows, dim):
+    """每一行乘一个自己的系数：`out[r][c] = x[r][c] · coef[r]`。
+
+    「一行一个标量」这个形状在后训练里到处都是 ——
+    MoE 的路由权重、SFT 的样本掩码、GRPO 的优势加权。
+    用逐元素乘也能做，代价是先摊出一块 `[rows, dim]` 的广播；
+    这里直接给算子，省掉那一块。
+    """
+    out = Tensor(x.shape, x.dtype, name="row_scale")
+    B.row_scale(x.handle, coef.handle, out.handle, rows, dim)
+
+    def backward():
+        go = out.grad
+        if go is None:
+            return
+        if x.requires_grad:
+            tmp = Tensor(x.shape, x.dtype, name="drow_scale.x")
+            B.row_scale(go.handle, coef.handle, tmp.handle, rows, dim)
+            B.add_inplace(x.ensure_grad().handle, tmp.handle, x.numel)
+        if coef.requires_grad:
+            B.row_scale_bwd_s(go.handle, x.handle, coef.ensure_grad().handle, rows, dim)
+
+    out.requires_grad = is_grad_enabled() and (x.requires_grad or coef.requires_grad)
+    if out.requires_grad:
+        out._backward = backward
+        out._parents = (x, coef)
+    return out
+
+
+def gather(table, idx, rows, dim):
+    """按行取：`out[i] = table[idx[i]]`。对应 `torch.index_select` / `x[idx]`。
+
+    和 `embedding` 是同一个算子 —— 区别只在**语义**：
+    嵌入表是参数，而这里 `table` 常常是激活（MoE 把 token 分给专家就是这么取的）。
+    反向都是散射累加。
+    """
+    return embedding(table, idx, rows, dim)
+
+
+def scatter_add(src, idx, rows, dim, out_rows):
+    """散射累加：`out[idx[i]] += src[i]`。对应 `torch.index_add_`。
+
+    MoE 把各个专家算完的结果放回原位靠它。**是累加不是覆盖** ——
+    top-k > 1 时同一个 token 会从好几个专家那里各收一份。
+    """
+    out = Tensor((out_rows, dim), src.dtype, name="scatter_add")
+    out.fill_(0.0)
+    B.embed_bwd(src.handle, idx.handle, out.handle, rows, dim)
+
+    def backward():
+        go = out.grad
+        if go is None or not src.requires_grad:
+            return
+        tmp = Tensor((rows, dim), src.dtype, name="dscatter")
+        B.embed_fwd(go.handle, idx.handle, tmp.handle, rows, dim)
+        B.add_inplace(src.ensure_grad().handle, tmp.handle, rows * dim)
+
+    out.requires_grad = is_grad_enabled() and src.requires_grad
+    if out.requires_grad:
+        out._backward = backward
+        out._parents = (src,)
+    return out
+
+
 def linear(x, weight):
     """y = x @ weight。
 

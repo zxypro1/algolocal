@@ -9126,6 +9126,1167 @@ const STAGE_RECOMPUTE = {
   ),
 };
 
+/** 第 19 关的训练套件：一条恒定学习率下的学习曲线 */
+const KIT_SCALE_PY = code`
+  """平台给的训练套件。这一关不写模型也不写训练循环 ——
+  要写的是**拿曲线去拟合幂律**这一步。
+
+  \`dim=32, n_layer=2, n_head=4, n_kv_head=2, hidden=88\`，batch 8 × seq 32。
+  学习率**恒定**：余弦退火后期 loss 掉得快是学习率在降，
+  拿那段去拟合会把指数拟大。数据轴的曲线必须在恒定学习率下取。
+  """
+  import math
+  import nanotorch as nt
+  from nanotorch import nn, functional as F
+
+  D, L, H, KV, HID, B, S = 32, 2, 4, 2, 88, 8, 32
+
+
+  def build_tables(n, head_dim, base=10000.0):
+      half = head_dim // 2
+      cos = nt.zeros((n, half), role="data", name="rope.cos")
+      sin = nt.zeros((n, half), role="data", name="rope.sin")
+      cv, sv = [], []
+      for p in range(n):
+          for i in range(half):
+              th = p * (base ** (-2.0 * i / head_dim))
+              cv.append(math.cos(th))
+              sv.append(math.sin(th))
+      cos.set_(cv)
+      sin.set_(sv)
+      return cos, sin
+
+
+  class Norm(nn.Module):
+      def __init__(self, dim):
+          super().__init__()
+          self.weight = nt.parameter((dim,), None, 0.0, "g")
+
+      def forward(self, x):
+          return F.rms_norm(x, self.weight, 1e-5)
+
+
+  class Attn(nn.Module):
+      def __init__(self, dim, nh, nkv, seed, max_seq=64):
+          super().__init__()
+          self.nh, self.nkv, self.hd = nh, nkv, dim // nh
+          hd = self.hd
+          self.wq = nt.parameter((dim, nh * hd), seed + 1, dim ** -0.5, "wq")
+          self.wk = nt.parameter((dim, nkv * hd), seed + 2, dim ** -0.5, "wk")
+          self.wv = nt.parameter((dim, nkv * hd), seed + 3, dim ** -0.5, "wv")
+          self.wo = nt.parameter((nh * hd, dim), seed + 4, (nh * hd) ** -0.5, "wo")
+          self._cos, self._sin = build_tables(max_seq, hd)
+
+      def forward(self, x, b, s):
+          hd = self.hd
+          q = F.linear(x, self.wq)
+          k = F.linear(x, self.wk)
+          v = F.linear(x, self.wv)
+          q = F.rope(q, self._cos, self._sin, b, s, self.nh, hd)
+          k = F.rope(k, self._cos, self._sin, b, s, self.nkv, hd)
+          sc = F.attn_scores(q, k, b, s, s, self.nh, self.nkv, hd)
+          pr = F.softmax(sc, b * self.nh * s, s, F.causal_valid(b, self.nh, s))
+          o = F.attn_apply(pr, v, b, s, s, self.nh, self.nkv, hd,
+                           out_shape=(b * s, self.nh * hd))
+          return F.linear(o, self.wo)
+
+
+  class Mlp(nn.Module):
+      def __init__(self, dim, hid, seed):
+          super().__init__()
+          self.wg = nt.parameter((dim, hid), seed + 1, dim ** -0.5, "wg")
+          self.wu = nt.parameter((dim, hid), seed + 2, dim ** -0.5, "wu")
+          self.wd = nt.parameter((hid, dim), seed + 3, hid ** -0.5, "wd")
+
+      def forward(self, x):
+          return F.linear(F.swiglu(F.linear(x, self.wg), F.linear(x, self.wu)), self.wd)
+
+
+  class Block(nn.Module):
+      def __init__(self, dim, nh, nkv, hid, seed, nl):
+          super().__init__()
+          self.n1, self.at = Norm(dim), Attn(dim, nh, nkv, seed)
+          self.n2, self.mp = Norm(dim), Mlp(dim, hid, seed + 40)
+          self.sc = (2.0 * nl) ** -0.5
+
+      def forward(self, x, b, s):
+          x = F.add(x, F.scale(self.at(self.n1(x), b, s), self.sc))
+          return F.add(x, F.scale(self.mp(self.n2(x)), self.sc))
+
+
+  class LM(nn.Module):
+      def __init__(self, vocab, seed=1):
+          super().__init__()
+          self.vocab = vocab
+          self.embed = nt.parameter((vocab, D), seed, D ** -0.5, "embed")
+          self.blocks = nn.ModuleList([
+              Block(D, H, KV, HID, seed + 100 * (i + 1), L) for i in range(L)
+          ])
+          self.nf = Norm(D)
+
+      def forward(self, idx, tgt, b, s):
+          rows = b * s
+          x = F.embedding(self.embed, idx, rows, D)
+          for blk in self.blocks:
+              x = blk(x, b, s)
+          x = self.nf(x)
+          return F.cross_entropy(F.linear_tied(x, self.embed, rows, D, self.vocab),
+                                 tgt, rows, self.vocab)
+
+
+  train_tokens = []
+
+
+  def sample_batch(tokens, step, batch, seq):
+      state = (step * 1103515245 + 12345) & 0x7fffffff
+      idx, tgt = [], []
+      for _ in range(batch):
+          state = (state * 1103515245 + 12345) & 0x7fffffff
+          off = state % (len(tokens) - seq - 1)
+          idx.extend(tokens[off:off + seq])
+          tgt.extend(tokens[off + 1:off + seq + 1])
+      return idx, tgt
+
+
+  def constant_lr_curve(steps, lr):
+      """恒定学习率跑一条曲线，返回每一步的 loss。"""
+      vocab = max(train_tokens) + 1
+      m = LM(vocab, seed=1)
+      opt = nt.optim.AdamW(m.parameters(), lr=lr, betas=(0.9, 0.95),
+                           weight_decay=0.1, grad_clip=1.0)
+      idx = nt.zeros((B * S,), role="data", name="idx")
+      tgt = nt.zeros((B * S,), role="data", name="tgt")
+      hist = []
+      base = nt.mark()
+      for st in range(1, steps + 1):
+          nt.release(base)
+          bi, bt = sample_batch(train_tokens, st, B, S)
+          idx.set_int_(bi)
+          tgt.set_int_(bt)
+          opt.zero_grad()
+          nt.phase("forward")
+          loss = m(idx, tgt, B, S)
+          nt.phase("other")
+          loss.backward()
+          opt.step(lr=lr)
+          hist.append(loss.value)
+      nt.release(base)
+      return hist
+`;
+
+/* ================================================================== */
+/* 第 19 关：缩放定律                                                   */
+/* ================================================================== */
+
+const STAGE_SCALING = {
+  id: 'scaling-laws',
+  title: t('缩放定律 —— 用小档预测大档', 'Scaling laws — predicting the large run from small ones'),
+  goal: t(
+    code`
+      训一个大模型很贵，而**贵的东西不能靠试**。缩放定律的用处就在这里：
+      跑几个便宜的小档，拟合出规律，**预测一个还没跑过的档位**,
+      然后才决定要不要花那笔钱。
+
+      在 \`scaling.py\` 里实现拟合与外推：
+
+      \`\`\`python
+      def fit_power_law(points):
+          """points 是 [(D, L), ...]。返回 (log_b, beta)，使得 L ≈ exp(log_b) · D^(−beta)。
+
+          在 log-log 上做最小二乘 —— 幂律取对数之后是一条直线。"""
+
+      def predict(fit, d):
+          """按拟合出来的律，预测在 d 处的 loss。"""
+      \`\`\`
+
+      ## 幂律取对数是直线
+
+      \`\`\`
+      L = B · D^(−β)
+      log L = log B − β · log D
+      \`\`\`
+
+      于是「拟合幂律」就是「在 log-log 上拟合一条直线」,
+      最小二乘的闭式解两行就写完：
+
+      \`\`\`
+      β  = −Σ(x−x̄)(y−ȳ) / Σ(x−x̄)²        其中 x = log D, y = log L
+      log B = ȳ + β·x̄
+      \`\`\`
+
+      **别用普通的线性回归直接拟 (D, L)。** 幂律在线性坐标下是一条曲线，
+      直线拟合它会在两端都偏，而外推正是在端点外面。
+
+      ## 这一关走数据轴
+
+      Chinchilla 那套式子有两根轴：参数量 \`N\` 和数据量 \`D\`。
+      这一关拟合的是**数据轴**,固定一个模型，看 loss 随「看过多少 token」怎么降。
+
+      为什么不走参数轴？因为**参数轴的缩放律要求每个档位都单独调好超参**。
+      这个项目实测过：同一个学习率、同样的步数，四个宽度跑出来是
+
+      \`\`\`
+      dim=16  loss 1.379      dim=32  loss 1.081
+      dim=24  loss 1.220      dim=48  loss 1.201      dim=64  loss 1.709
+      \`\`\`
+
+      **大的反而更差** —— 不是缩放律不成立，是最优学习率随宽度变，
+      而我们给所有档位用了同一个。这正是 \`µP\`（最大更新参数化）要解决的问题：
+      让超参在宽度之间可迁移，缩放律才拟合得出来。
+      数据轴没有这个麻烦,同一个模型、同一套超参，只是训得久一点。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | 拟合 | 4 个点上的 log 残差 RMS ≤ **0.04** |
+      | **外推** | 预测 2.3 倍数据量处的 loss，相对误差 ≤ **0.15** |
+      | 指数 | 拟合出的 \`β\` ≥ **0.15**（真的在降，不是一条平线） |
+      | 方向 | 数据翻倍，预测的 loss 必须**更低** |
+
+      参考实现拿前 4 个点（D 从 1.8 万到 6 万）预测 D = 13.6 万处的 loss：
+      **预测 0.982，实际 1.021，相对误差 3.9%**。
+      比最后一个拟合点远 2.3 倍、比第一个远 7.6 倍，误差 4% ——
+      这就是为什么大模型敢在跑之前就定预算。
+    `,
+    code`
+      Training a large model is expensive, and **expensive things cannot be found by trial**.
+      That is what scaling laws are for: run a few cheap small configurations, fit the trend,
+      **predict a configuration nobody has run**, and only then decide whether to spend.
+
+      Implement the fit and the extrapolation in \`scaling.py\`:
+
+      \`\`\`python
+      def fit_power_law(points):
+          """points is [(D, L), ...]. Returns (log_b, beta) such that
+          L ≈ exp(log_b) · D^(−beta).
+
+          Least squares in log-log — a power law is a straight line there."""
+
+      def predict(fit, d):
+          """Predict the loss at d under the fitted law."""
+      \`\`\`
+
+      ## A power law is a line in log-log
+
+      \`\`\`
+      L = B · D^(−β)
+      log L = log B − β · log D
+      \`\`\`
+
+      So "fit a power law" means "fit a line in log-log", and the closed-form least squares
+      is two lines of code:
+
+      \`\`\`
+      β  = −Σ(x−x̄)(y−ȳ) / Σ(x−x̄)²        with x = log D, y = log L
+      log B = ȳ + β·x̄
+      \`\`\`
+
+      **Do not run ordinary linear regression on (D, L) directly.** A power law is curved in
+      linear coordinates, a straight fit misses at both ends, and extrapolation happens
+      exactly beyond those ends.
+
+      ## This stage uses the data axis
+
+      Chinchilla's formulation has two axes: parameters \`N\` and data \`D\`. This stage fits
+      the **data axis** — fix a model and watch the loss fall as it sees more tokens.
+
+      Why not the parameter axis? Because **a parameter-axis law requires hyperparameters
+      tuned per configuration**. This project measured it: same learning rate, same step
+      count, four widths give
+
+      \`\`\`
+      dim=16  loss 1.379      dim=32  loss 1.081
+      dim=24  loss 1.220      dim=48  loss 1.201      dim=64  loss 1.709
+      \`\`\`
+
+      **Bigger is worse** — not because scaling laws fail, but because the optimal learning
+      rate moves with width and we used one rate for all. That is precisely the problem
+      \`µP\` (maximal update parameterisation) solves: make hyperparameters transfer across
+      widths so the law can be fitted at all. The data axis has no such trouble — same
+      model, same hyperparameters, simply trained longer.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | Fit | RMS log-residual over 4 points <= **0.04** |
+      | **Extrapolation** | Predict the loss at 2.3x the data, within **0.15** relative |
+      | Exponent | Fitted \`β\` >= **0.15** (genuinely decreasing, not flat) |
+      | Direction | Doubling the data must predict a **lower** loss |
+
+      The reference fits the first 4 points (D from 18k to 60k) and predicts D = 136k:
+      **0.982 predicted against 1.021 actual, 3.9% relative error** — 2.3x beyond the last
+      fitted point and 7.6x beyond the first. Extrapolating that far at 4% error is why
+      large runs can commit to a budget before starting.
+    `
+  ),
+  checklist: [
+    t('在 log-log 上做最小二乘，不是在线性坐标上',
+      'Least squares in log-log, not in linear coordinates'),
+    t('拟合残差足够小', 'The fit residual is small'),
+    t('外推到 2.3 倍数据量，误差在 15% 以内',
+      'Extrapolating 2.3x stays within 15%'),
+    t('预测的方向是对的：数据越多 loss 越低',
+      'The direction is right: more data predicts a lower loss'),
+  ],
+  hints: [
+    t('闭式解就够了：β = −Σ(x−x̄)(y−ȳ)/Σ(x−x̄)²，不用迭代优化。',
+      'The closed form suffices: β = −Σ(x−x̄)(y−ȳ)/Σ(x−x̄)²; no iterative optimisation.'),
+    t('math.log / math.exp 就行，不需要张量。',
+      'math.log and math.exp are enough; no tensors involved.'),
+    t('返回的是 (log_b, beta)，predict 里再 exp 回去。',
+      'Return (log_b, beta) and exponentiate back inside predict.'),
+  ],
+  pitfalls: [
+    t(code`
+      **在线性坐标上拟直线。** 幂律在线性坐标下是一条凸曲线，
+      直线拟合它会在两端都偏 —— 而**外推恰恰发生在端点外面**，
+      于是误差在你最需要它准的地方最大。
+      内插看起来还行，这让这个错更难发现。
+    `, code`
+      **Fitting a line in linear coordinates.** A power law is convex there, so a straight
+      fit misses at both ends — and **extrapolation happens precisely beyond those ends**,
+      making the error largest exactly where accuracy matters most. Interpolation still looks
+      acceptable, which makes the mistake harder to notice.
+    `),
+    t(code`
+      **拿一条正在被学习率调度改变的曲线去拟合。** 余弦退火后期 loss 掉得快，
+      那是学习率在降，不是数据在起作用。拟出来的 \`β\` 会偏大，外推到更远处偏得更多。
+      数据轴的曲线要在**恒定学习率**下取,这一关的曲线就是这么跑的。
+    `, code`
+      **Fitting a curve that a learning-rate schedule is still bending.** Loss falls quickly
+      late in a cosine decay because the rate is dropping, not because data is helping. The
+      fitted \`β\` comes out too large and the extrapolation drifts further the further you
+      go. A data-axis curve must be measured at a **constant learning rate**, which is how
+      this stage's curve was produced.
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_SCALE_PY,
+      'scaling.py': code`
+        """第 19 关：拟合幂律，外推到没跑过的档位。"""
+        import math
+
+
+        def fit_power_law(points):
+            """points 是 [(D, L), ...]。返回 (log_b, beta)，L ≈ exp(log_b) · D^(−beta)。"""
+            # TODO: 取 log 之后做最小二乘
+            return (0.0, 0.0)
+
+
+        def predict(fit, d):
+            """按拟合出来的律预测 d 处的 loss。"""
+            # TODO
+            return 0.0
+
+
+        if __name__ == "__main__":
+            pts = [(1000, 1.0), (2000, 0.8), (4000, 0.64), (8000, 0.512)]
+            f = fit_power_law(pts)
+            print("beta = %.4f" % f[1])
+            print("预测 D=16000 ->", round(predict(f, 16000), 4), "（该是 0.41 上下）")
+      `,
+    },
+    referenceFiles: {
+      'scaling.py': code`
+        """第 19 关的参考实现。"""
+        import math
+
+
+        def fit_power_law(points):
+            # 幂律取对数是直线：log L = log B − β·log D。
+            # **不能在线性坐标上拟** —— 幂律在那里是曲线，直线会在两端都偏，
+            # 而外推恰恰发生在端点外面
+            xs = [math.log(d) for d, _ in points]
+            ys = [math.log(l) for _, l in points]
+            n = len(points)
+            mx = sum(xs) / n
+            my = sum(ys) / n
+            num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+            den = sum((x - mx) ** 2 for x in xs)
+            slope = num / den if den != 0 else 0.0
+            log_b = my - slope * mx
+            # 斜率是 −β，所以 β = −slope
+            return (log_b, -slope)
+
+
+        def predict(fit, d):
+            log_b, beta = fit
+            return math.exp(log_b - beta * math.log(d))
+
+
+        if __name__ == "__main__":
+            pts = [(1000, 1.0), (2000, 0.8), (4000, 0.64), (8000, 0.512)]
+            f = fit_power_law(pts)
+            print("beta = %.4f" % f[1])
+            print("预测 D=16000 ->", round(predict(f, 16000), 4), "（该是 0.41 上下）")
+      `,
+    },
+  },
+  specs: [
+    spec('scaling.spec.ts', code`
+      ${LAB}
+
+      /**
+       * 平台跑一条**恒定学习率**下的学习曲线，切出 6 个采样点。
+       * 恒定学习率是必要的：余弦退火后期 loss 掉得快是学习率在降，
+       * 拿那段去拟合会把 β 拟大。
+       */
+      function curve() {
+        lab.py(\`
+      import sys, json, math
+      sys.path.insert(0, "/lab")
+      import importlib, kit, scaling
+      importlib.reload(kit)
+      importlib.reload(scaling)
+      import nanotorch as nt
+      from nanotorch import functional as F
+      \`);
+        const toks = lab.world.tokens();
+        lab.py('kit.train_tokens = ' + JSON.stringify([...toks.slice(0, lab.world.holdoutAt())]));
+        const hist = JSON.parse(String(lab.py(\`
+      if "_curve" not in globals():
+          _curve = kit.constant_lr_curve(560, 0.02)
+      json.dumps(_curve)
+      \`)));
+        const win = (end) => {
+          const a = hist.slice(Math.max(0, end - 20), end);
+          return a.reduce((x, c) => x + c, 0) / a.length;
+        };
+        const marks = [70, 105, 157, 236, 354, 531];
+        return marks.map((m) => ({ d: m * kit_batch() * kit_seq(), l: win(m) }));
+      }
+      function kit_batch() { return Number(lab.py('kit.B')); }
+      function kit_seq() { return Number(lab.py('kit.S')); }
+
+      describe('缩放定律', () => {
+        it('学习曲线是单调下降的 —— 幂律的前提', () => {
+          const pts = curve();
+          console.log(pts.map((p) => 'D=' + p.d + ' L=' + p.l.toFixed(4)).join('  '));
+          for (let i = 1; i < pts.length; i++) {
+            expect(pts[i].l).toBeLessThan(pts[i - 1].l);
+          }
+          lab.publish('scaling.points', pts.length);
+        });
+
+        it('4 个点上的 log 残差 RMS ≤ 0.04', () => {
+          const pts = curve();
+          const fit = JSON.parse(String(lab.py(
+            'json.dumps(list(scaling.fit_power_law(' + JSON.stringify(pts.slice(0, 4).map((p) => [p.d, p.l])) + ')))'
+          )));
+          const [logB, beta] = fit;
+          let sq = 0;
+          for (const p of pts.slice(0, 4)) {
+            const pred = Math.exp(logB - beta * Math.log(p.d));
+            sq += Math.pow(Math.log(pred) - Math.log(p.l), 2);
+          }
+          const rms = Math.sqrt(sq / 4);
+          console.log('log_b = ' + logB.toFixed(4) + '，β = ' + beta.toFixed(4)
+            + '，残差 RMS ' + rms.toExponential(2));
+          lab.publish('scaling.fitResidual', rms);
+          lab.publish('scaling.exponent', beta);
+          expect(rms).toBeLessThan(0.04);
+          expect(beta).toBeGreaterThan(0.15);
+        });
+
+        /*
+         * 这一关的全部意义：拿便宜的小档去预测一个没跑过的大档。
+         * 前 4 个点覆盖 D 从 1.8 万到 6 万，要预测的是 13.6 万 ——
+         * 比最后一个拟合点远 2.3 倍，比第一个远 7.6 倍。
+         */
+        it('外推到 2.3 倍数据量，相对误差 ≤ 0.15', () => {
+          const pts = curve();
+          const fitPts = pts.slice(0, 4);
+          const target = pts[pts.length - 1];
+          const predicted = Number(lab.py(
+            'scaling.predict(scaling.fit_power_law('
+            + JSON.stringify(fitPts.map((p) => [p.d, p.l])) + '), ' + target.d + ')'
+          ));
+          const rel = Math.abs(predicted - target.l) / target.l;
+          console.log(
+            '拟合用的 D ' + fitPts[0].d + ' ~ ' + fitPts[3].d
+            + '，要预测的 D ' + target.d + '（' + (target.d / fitPts[3].d).toFixed(1) + ' 倍）'
+          );
+          console.log(
+            '预测 ' + predicted.toFixed(4) + '，实际 ' + target.l.toFixed(4)
+            + '，相对误差 ' + (rel * 100).toFixed(2) + '%'
+          );
+          lab.publish('scaling.predictionRelError', rel);
+          expect(rel).toBeLessThan(0.15);
+        });
+
+        it('数据翻倍，预测的 loss 更低', () => {
+          const pts = curve();
+          const arg = JSON.stringify(pts.slice(0, 4).map((p) => [p.d, p.l]));
+          const at = (d) => Number(lab.py('scaling.predict(scaling.fit_power_law(' + arg + '), ' + d + ')'));
+          const a = at(100000);
+          const b2 = at(200000);
+          console.log('D=1e5 预测 ' + a.toFixed(4) + '，D=2e5 预测 ' + b2.toFixed(4));
+          lab.publish('scaling.direction', b2 < a ? 1 : 0);
+          expect(b2).toBeLessThan(a);
+          // 幂律：翻倍之后的比值该是 2^(−β)，和拟合出来的 β 对得上
+          const beta = Number(lab.py('scaling.fit_power_law(' + arg + ')[1]'));
+          expect(Math.abs(b2 / a - Math.pow(2, -beta))).toBeLessThan(1e-9);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.scaling.fitResidual', op: 'lte', value: 0.04,
+      zh: '拟合点上的 log 残差 RMS', en: 'RMS log-residual over the fitted points',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.scaling.predictionRelError', op: 'lte', value: 0.15,
+      zh: '外推到 2.3 倍数据量的相对误差', en: 'relative error extrapolating 2.3x',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.scaling.exponent', op: 'gte', value: 0.15,
+      zh: '拟合出的指数 β', en: 'fitted exponent β', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.scaling.direction', op: 'eq', value: 1,
+      zh: '数据翻倍时预测的 loss 更低', en: 'doubling the data predicts a lower loss',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness'],
+  extension: t(
+    code`
+      Chinchilla 那篇（2022）的结论是**参数量和数据量要一起涨**：
+      给定算力预算 \`C ≈ 6ND\`，最优配比大约是 \`D ≈ 20N\` token/参数。
+      在那之前的模型普遍**训得太少**,GPT-3 的 175B 只喂了 300B token，
+      按这个配比应该是 3.5T。
+
+      2026 年这个配比在实践中被推得远高于 20：
+      Llama 3 的 8B 训了 15T token（\`D/N ≈ 1875\`），
+      因为「训练一次、推理无数次」——**推理成本正比于 N 而不是 D**，
+      所以为了省推理，人们愿意在训练上超额投入。
+      Chinchilla 最优的是「这一次训练的 loss」，不是「部署之后的总成本」。
+
+      另一件事：**外推要谨慎**。缩放律在拟合区间附近很准，
+      跨几个数量级之后会遇到没被建模的东西 —— 数据枯竭、
+      架构在某个尺度上的行为变化、以及那个绕不开的不可约损失 \`E\`。
+      这一关外推了 2.3 倍，误差 4%；外推 1000 倍就完全是另一回事了。
+    `,
+    code`
+      The Chinchilla paper (2022) concluded that **parameters and data should grow
+      together**: for a compute budget \`C ≈ 6ND\`, the optimum sits near \`D ≈ 20N\` tokens
+      per parameter. Models before it were generally **undertrained** — GPT-3's 175B saw
+      300B tokens where this ratio calls for 3.5T.
+
+      By 2026 practice pushes that ratio far past 20: Llama 3's 8B trained on 15T tokens
+      (\`D/N ≈ 1875\`), because you train once and infer forever — **inference cost scales
+      with N, not D** — so people overspend on training to save on serving. Chinchilla
+      optimises the loss of one training run, not total cost after deployment.
+
+      One more caution: **extrapolate carefully**. Scaling laws are accurate near the fitted
+      range and run into unmodelled effects several orders of magnitude out — data
+      exhaustion, architectural behaviour changing with scale, and the irreducible loss
+      \`E\` that no amount of data removes. This stage extrapolates 2.3x at 4% error;
+      extrapolating 1000x is an entirely different proposition.
+    `
+  ),
+};
+
+/* ================================================================== */
+/* 第 20 关：MoE                                                       */
+/* ================================================================== */
+
+const STAGE_MOE = {
+  id: 'moe',
+  title: t('MoE —— 参数变多，每个 token 的算力不变', 'MoE — more parameters, same compute per token'),
+  goal: t(
+    code`
+      稠密模型里，每个 token 都要过一遍**全部**参数。\`MoE\` 把一个大前馈换成
+      \`n_expert\` 个小的，每个 token 只走其中 \`top_k\` 个 ——
+      **参数量涨了 \`n_expert / top_k\` 倍，而每个 token 的算力不变。**
+
+      在 \`moe.py\` 里实现路由与稀疏执行：
+
+      \`\`\`python
+      def route(probs, n_token, n_expert, top_k):
+          """每个 token 挑 top_k 个专家。返回 (expert_ids, weights)，
+          两个都是长度 n_token*top_k 的列表；weights 在 top_k 内归一化。"""
+
+      def capacity_assign(expert_ids, n_token, n_expert, top_k, capacity):
+          """按容量分配。每个专家最多收 capacity 个，超出的丢掉。
+          返回 (keep, dropped) —— keep 是 [(token, expert, weight_index), ...]。"""
+
+      def load_balance_loss(probs, expert_ids, n_token, n_expert, top_k):
+          """Switch Transformer 的辅助损失：n_expert · Σ_i f_i · P_i。"""
+
+      class MoEMlp(nn.Module):
+          def forward(self, x, n_token):
+              """按专家 gather 出 token -> 各自算 -> 乘路由权重 -> scatter 回原位。"""
+      \`\`\`
+
+      ## 路由：谁去哪
+
+      路由器是一个小线性层，把每个 token 映射到 \`n_expert\` 个分数，softmax 之后
+      取最大的 \`top_k\` 个。权重要在这 \`top_k\` 个里**重新归一化**,
+      不归一化的话，路由器的置信度会直接缩放这一层的输出量级。
+
+      ## 容量：为什么要丢
+
+      专家的负载是不均的。真实实现给每个专家一个**容量上限**
+      \`capacity = capacity_factor · n_token · top_k / n_expert\`,
+      超出的 (token, 专家) 对被**丢掉**（那个 token 就少走一个专家）。
+
+      为什么不干脆不设上限？因为在真实的分布式实现里，每个专家在一张卡上，
+      **通信的缓冲区必须是定长的**。容量就是那个缓冲区的大小。
+      这不是算法上的选择，是工程上的约束,而它反过来影响了算法
+      （于是才有了负载均衡损失）。
+
+      ## 负载均衡损失
+
+      不加干预的话路由器会**塌**：所有 token 都去同一个专家，其余的永远学不到东西。
+      Switch Transformer 的做法是加一个辅助损失：
+
+      \`\`\`
+      aux = n_expert · Σ_i  f_i · P_i
+        f_i = 分给专家 i 的 token 比例（用 top-1 数）
+        P_i = 路由器给专家 i 的平均概率
+      \`\`\`
+
+      两个都均匀时 \`aux = 1\`；越集中它越大。它可导的那一半是 \`P_i\`,
+      \`f_i\` 是数出来的、不可导，这个不对称是有意的。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | 参数量 | 总量与激活量都**恰好等于解析式**，且激活量 < 总量 |
+      | **真的稀疏** | 前馈 FLOPs / **同参数量**的稠密前馈 ≤ **0.6**（= top_k / n_expert） |
+      | 容量宽松时 | 丢弃 = **0** |
+      | 容量收紧时 | 丢弃 **> 0**（容量真的在起作用，不是摆设） |
+      | 辅助损失 | 与参考公式差 ≤ 1e-6 |
+    `,
+    code`
+      In a dense model every token passes through **all** parameters. \`MoE\` replaces one
+      large feed-forward with \`n_expert\` smaller ones and routes each token through
+      \`top_k\` of them — **parameters grow by \`n_expert / top_k\` while per-token compute
+      stays the same.**
+
+      Implement routing and sparse execution in \`moe.py\`:
+
+      \`\`\`python
+      def route(probs, n_token, n_expert, top_k):
+          """Pick top_k experts per token. Returns (expert_ids, weights), both of
+          length n_token*top_k; weights are renormalised within the top_k."""
+
+      def capacity_assign(expert_ids, n_token, n_expert, top_k, capacity):
+          """Assign under a capacity limit. Each expert accepts at most capacity
+          entries; the rest are dropped. Returns (keep, dropped) where keep is
+          [(token, expert, weight_index), ...]."""
+
+      def load_balance_loss(probs, expert_ids, n_token, n_expert, top_k):
+          """Switch Transformer's auxiliary loss: n_expert · Σ_i f_i · P_i."""
+
+      class MoEMlp(nn.Module):
+          def forward(self, x, n_token):
+              """Gather each expert's tokens -> compute -> apply routing weights
+              -> scatter back."""
+      \`\`\`
+
+      ## Routing: who goes where
+
+      The router is a small linear layer mapping each token to \`n_expert\` scores; softmax
+      and take the largest \`top_k\`. Weights must be **renormalised within those top_k** —
+      otherwise the router's confidence directly scales this layer's output magnitude.
+
+      ## Capacity: why anything gets dropped
+
+      Expert load is uneven. Real implementations cap each expert at
+      \`capacity = capacity_factor · n_token · top_k / n_expert\`, and (token, expert) pairs
+      beyond it are **dropped** — that token simply visits one fewer expert.
+
+      Why cap at all? Because in a real distributed implementation each expert lives on one
+      device and **the communication buffer must be a fixed size**. Capacity is that buffer.
+      It is not an algorithmic choice but an engineering constraint — one that then shapes
+      the algorithm, which is where the load-balancing loss comes from.
+
+      ## The load-balancing loss
+
+      Left alone the router **collapses**: every token goes to one expert and the rest never
+      learn anything. Switch Transformer adds an auxiliary loss:
+
+      \`\`\`
+      aux = n_expert · Σ_i  f_i · P_i
+        f_i = fraction of tokens assigned to expert i (counted by top-1)
+        P_i = the router's mean probability for expert i
+      \`\`\`
+
+      Both uniform gives \`aux = 1\`; concentration raises it. Only \`P_i\` is
+      differentiable — \`f_i\` is counted and has no gradient, and that asymmetry is
+      deliberate.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | Parameters | Total and active both **exactly** the formula, with active < total |
+      | **Genuinely sparse** | FFN FLOPs over a dense FFN with the **same parameters** <= **0.6** (= top_k / n_expert) |
+      | Loose capacity | Dropped = **0** |
+      | Tight capacity | Dropped **> 0** (capacity actually binds) |
+      | Auxiliary loss | Within 1e-6 of the reference formula |
+    `
+  ),
+  checklist: [
+    t('top_k 内的权重重新归一化', 'Weights are renormalised within the top_k'),
+    t('容量上限真的在起作用', 'The capacity limit actually binds'),
+    t('用 gather / scatter_add 真的做稀疏执行', 'Sparse execution really uses gather / scatter_add'),
+    t('辅助损失对得上 Switch 的公式', 'The auxiliary loss matches the Switch formula'),
+  ],
+  hints: [
+    t('F.gather(x, idx, n, dim) 按行取，F.scatter_add(src, idx, n, dim, out_rows) 放回去。',
+      'F.gather(x, idx, n, dim) takes rows; F.scatter_add(src, idx, n, dim, out_rows) puts them back.'),
+    t('F.row_scale(y, w, rows, dim) 给每一行乘自己的路由权重。',
+      'F.row_scale(y, w, rows, dim) multiplies each row by its own routing weight.'),
+    t('scatter_add 是累加 —— top_k > 1 时同一个 token 会收到好几份，正好该加起来。',
+      'scatter_add accumulates, which is exactly right when top_k > 1 gives a token several contributions.'),
+  ],
+  pitfalls: [
+    t(code`
+      **top_k 的权重不归一化。** 直接拿 softmax 出来的两个概率当权重，
+      它们加起来是 0.6 还是 0.95 取决于路由器有多确信 ——
+      于是**这一层的输出量级跟着路由器的置信度飘**。
+      训练早期路由器接近均匀，输出被压小；后期变确信，输出又变大。
+      不报错，只是把一个本来不该有的动态量引进了残差流。
+    `, code`
+      **Not renormalising the top_k weights.** Using the raw softmax probabilities means
+      their sum is 0.6 or 0.95 depending on how confident the router is — so **this layer's
+      output magnitude drifts with router confidence**. Early in training the router is near
+      uniform and outputs are suppressed; later it sharpens and they grow. Nothing errors; a
+      spurious dynamic has simply been injected into the residual stream.
+    `),
+    t(code`
+      **scatter 写成覆盖而不是累加。** top_k = 2 时每个 token 有两个专家的贡献，
+      覆盖的话只剩后写的那一个 —— **等效于 top_k = 1，而参数量还是按 2 算的**。
+      loss 照样降，只是这一层白花了一半的算力。
+    `, code`
+      **Writing scatter as assignment instead of accumulation.** At top_k = 2 each token has
+      two expert contributions; assignment keeps only the last — **effectively top_k = 1
+      while the parameter budget still assumes 2**. The loss still falls; half this layer's
+      compute is simply wasted.
+    `),
+  ],
+  train: {
+    files: {
+      'moe.py': code`
+        """第 20 关：MoE 的路由、容量与稀疏执行。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import nn, functional as F
+
+
+        def route(probs, n_token, n_expert, top_k):
+            """probs 是长度 n_token*n_expert 的列表。返回 (expert_ids, weights)。"""
+            # TODO: 每个 token 取概率最大的 top_k 个，权重在 top_k 内归一化
+            return [], []
+
+
+        def capacity_assign(expert_ids, n_token, n_expert, top_k, capacity):
+            """返回 (keep, dropped)。keep 是 [(token, expert, k), ...]。"""
+            # TODO: 按顺序分配，每个专家最多收 capacity 个
+            return [], 0
+
+
+        def load_balance_loss(probs, expert_ids, n_token, n_expert, top_k):
+            """n_expert · Σ_i f_i · P_i。"""
+            # TODO
+            return 0.0
+
+
+        class MoEMlp(nn.Module):
+            def __init__(self, dim, hidden, n_expert, top_k, seed, capacity_factor=2.0):
+                super().__init__()
+                self.dim, self.hidden = dim, hidden
+                self.n_expert, self.top_k = n_expert, top_k
+                self.capacity_factor = capacity_factor
+                self.router = nt.parameter((dim, n_expert), seed, dim ** -0.5, "router")
+                self.wg = nn.ParameterList([
+                    nt.parameter((dim, hidden), seed + 10 * (e + 1) + 1, dim ** -0.5, "wg")
+                    for e in range(n_expert)
+                ])
+                self.wu = nn.ParameterList([
+                    nt.parameter((dim, hidden), seed + 10 * (e + 1) + 2, dim ** -0.5, "wu")
+                    for e in range(n_expert)
+                ])
+                self.wd = nn.ParameterList([
+                    nt.parameter((hidden, dim), seed + 10 * (e + 1) + 3, hidden ** -0.5, "wd")
+                    for e in range(n_expert)
+                ])
+                self.last_load = []
+                self.last_dropped = 0
+                self.last_aux = 0.0
+
+            def forward(self, x, n_token):
+                # TODO: 路由 -> 容量分配 -> 逐专家 gather / 算 / 乘权重 / scatter 回去
+                return x
+
+
+        if __name__ == "__main__":
+            m = MoEMlp(16, 32, 4, 2, seed=3)
+            x = nt.zeros((8, 16), role="data").normal_(1, 1.0)
+            y = m(x, 8)
+            print("输出形状", y.shape, "丢弃", m.last_dropped, "负载", m.last_load)
+      `,
+    },
+    referenceFiles: {
+      'moe.py': code`
+        """第 20 关的参考实现。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import nn, functional as F
+
+
+        def route(probs, n_token, n_expert, top_k):
+            expert_ids, weights = [], []
+            for t in range(n_token):
+                row = probs[t * n_expert:(t + 1) * n_expert]
+                # 按概率降序；同分的按专家号排，保证确定性
+                order = sorted(range(n_expert), key=lambda e: (-row[e], e))[:top_k]
+                total = sum(row[e] for e in order)
+                for e in order:
+                    expert_ids.append(e)
+                    # **在 top_k 内重新归一化** —— 不归一化的话这一层的输出量级
+                    # 会跟着路由器的置信度飘
+                    weights.append(row[e] / total if total > 0 else 1.0 / top_k)
+            return expert_ids, weights
+
+
+        def capacity_assign(expert_ids, n_token, n_expert, top_k, capacity):
+            used = [0] * n_expert
+            keep, dropped = [], 0
+            for t in range(n_token):
+                for k in range(top_k):
+                    e = expert_ids[t * top_k + k]
+                    if used[e] < capacity:
+                        used[e] += 1
+                        keep.append((t, e, k))
+                    else:
+                        # 容量满了就丢。真实实现里容量就是通信缓冲区的大小，
+                        # 定长是工程约束，不是算法选择
+                        dropped += 1
+            return keep, dropped
+
+
+        def load_balance_loss(probs, expert_ids, n_token, n_expert, top_k):
+            # f_i：按 top-1 数，分给专家 i 的 token 比例（数出来的，不可导）
+            counts = [0] * n_expert
+            for t in range(n_token):
+                counts[expert_ids[t * top_k]] += 1
+            f = [c / n_token for c in counts]
+            # P_i：路由器给专家 i 的平均概率（可导的那一半）
+            p = [0.0] * n_expert
+            for t in range(n_token):
+                for e in range(n_expert):
+                    p[e] += probs[t * n_expert + e]
+            p = [v / n_token for v in p]
+            return n_expert * sum(fi * pi for fi, pi in zip(f, p))
+
+
+        class MoEMlp(nn.Module):
+            def __init__(self, dim, hidden, n_expert, top_k, seed, capacity_factor=2.0):
+                super().__init__()
+                self.dim, self.hidden = dim, hidden
+                self.n_expert, self.top_k = n_expert, top_k
+                self.capacity_factor = capacity_factor
+                self.router = nt.parameter((dim, n_expert), seed, dim ** -0.5, "router")
+                self.wg = nn.ParameterList([
+                    nt.parameter((dim, hidden), seed + 10 * (e + 1) + 1, dim ** -0.5, "wg")
+                    for e in range(n_expert)
+                ])
+                self.wu = nn.ParameterList([
+                    nt.parameter((dim, hidden), seed + 10 * (e + 1) + 2, dim ** -0.5, "wu")
+                    for e in range(n_expert)
+                ])
+                self.wd = nn.ParameterList([
+                    nt.parameter((hidden, dim), seed + 10 * (e + 1) + 3, hidden ** -0.5, "wd")
+                    for e in range(n_expert)
+                ])
+                self.last_load = []
+                self.last_dropped = 0
+                self.last_aux = 0.0
+
+            def forward(self, x, n_token):
+                logits = F.linear(x, self.router)
+                probs_t = F.softmax(logits, n_token, self.n_expert)
+                probs = probs_t.tolist()
+
+                expert_ids, weights = route(probs, n_token, self.n_expert, self.top_k)
+                capacity = int(math.ceil(
+                    self.capacity_factor * n_token * self.top_k / self.n_expert
+                ))
+                keep, dropped = capacity_assign(
+                    expert_ids, n_token, self.n_expert, self.top_k, capacity
+                )
+                self.last_dropped = dropped
+                self.last_aux = load_balance_loss(
+                    probs, expert_ids, n_token, self.n_expert, self.top_k
+                )
+
+                out = nt.zeros((n_token, self.dim), x.dtype, name="moe.out")
+                load = [0] * self.n_expert
+                for e in range(self.n_expert):
+                    mine = [(t, k) for (t, ee, k) in keep if ee == e]
+                    load[e] = len(mine)
+                    if not mine:
+                        continue
+                    rows = len(mine)
+                    idx = nt.zeros((rows,), role="data", name="moe.idx")
+                    idx.set_int_([t for t, _ in mine])
+                    # 只把分给这个专家的 token 取出来算 —— 稀疏就稀疏在这里
+                    xe = F.gather(x, idx, rows, self.dim)
+                    ye = F.linear(
+                        F.swiglu(F.linear(xe, self.wg[e]), F.linear(xe, self.wu[e])),
+                        self.wd[e]
+                    )
+                    w = nt.zeros((rows,), x.dtype, role="data", name="moe.w")
+                    w.set_([weights[t * self.top_k + k] for t, k in mine])
+                    ye = F.row_scale(ye, w, rows, self.dim)
+                    # 累加不是覆盖：top_k > 1 时一个 token 会收到好几份
+                    out = F.add(out, F.scatter_add(ye, idx, rows, self.dim, n_token))
+                self.last_load = load
+                return out
+
+
+        if __name__ == "__main__":
+            m = MoEMlp(16, 32, 4, 2, seed=3)
+            x = nt.zeros((8, 16), role="data").normal_(1, 1.0)
+            y = m(x, 8)
+            print("输出形状", y.shape, "丢弃", m.last_dropped, "负载", m.last_load)
+      `,
+    },
+  },
+  specs: [
+    spec('moe.spec.ts', code`
+      ${LAB}
+
+      const DIM = 16, HIDDEN = 32, N_EXPERT = 4, TOP_K = 2, N_TOKEN = 32;
+
+      function setup() {
+        lab.py(\`
+      import sys, json, math
+      sys.path.insert(0, "/lab")
+      import importlib, moe
+      importlib.reload(moe)
+      import nanotorch as nt
+      from nanotorch import functional as F
+
+      def _build(cf):
+          m = moe.MoEMlp(\${DIM}, \${HIDDEN}, \${N_EXPERT}, \${TOP_K}, seed=3, capacity_factor=cf)
+          x = nt.zeros((\${N_TOKEN}, \${DIM}), role="data").normal_(17, 1.0)
+          return m, x
+      \`);
+      }
+
+      describe('MoE', () => {
+        it('参数量：总量与激活量都等于解析式，激活 < 总量', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _m, _x = _build(2.0)
+      json.dumps({"total": _m.num_parameters(),
+                  "router": _m.router.numel,
+                  "perExpert": _m.wg[0].numel + _m.wu[0].numel + _m.wd[0].numel})
+      \`)));
+          const perExpert = 3 * DIM * HIDDEN;
+          const total = DIM * N_EXPERT + N_EXPERT * perExpert;
+          // 激活参数：路由器 + top_k 个专家
+          const active = DIM * N_EXPERT + TOP_K * perExpert;
+          console.log(
+            '总参数 ' + r.total + '（解析式 ' + total + '），'
+            + '每个专家 ' + r.perExpert + '，激活 ' + active
+            + '，激活 / 总量 = ' + (active / total).toFixed(3)
+          );
+          lab.publish('params.total', r.total);
+          lab.publish('params.active', active);
+          expect(r.total).toBe(total);
+          expect(r.perExpert).toBe(perExpert);
+          expect(active).toBeLessThan(total);
+        });
+
+        /*
+         * 「真的稀疏」不能靠声明，要靠数。
+         * 把 MoE 前馈的 FLOPs 和「同样宽度的稠密前馈」比一比 ——
+         * top_k=2 / n_expert=4，比值该在 0.5 上下。
+         */
+        it('前馈的 FLOPs 只有稠密等价的一半上下', () => {
+          setup();
+          const before = lab.metrics().flops.total;
+          lab.py('_m, _x = _build(2.0)\\n_y = _m(_x, ' + N_TOKEN + ')');
+          const moeFlops = lab.metrics().flops.total - before;
+
+          /*
+           * 稠密等价 = **同样参数量**的稠密前馈，所以 hidden 要乘 n_expert。
+           * 拿同样 hidden 的稠密去比是错的：top_k=2 的 MoE 做的是它的两倍工作。
+           * MoE 省的是「同样多的参数，更少的算力」，不是「更少的参数」。
+           */
+          const b2 = lab.metrics().flops.total;
+          lab.py(\`
+      _hd = \${HIDDEN * N_EXPERT}
+      _wg = nt.parameter((\${DIM}, _hd), 1, 0.02, "wg")
+      _wu = nt.parameter((\${DIM}, _hd), 2, 0.02, "wu")
+      _wd = nt.parameter((_hd, \${DIM}), 3, 0.02, "wd")
+      _d = F.linear(F.swiglu(F.linear(_x, _wg), F.linear(_x, _wu)), _wd)
+      \`);
+          const denseFlops = lab.metrics().flops.total - b2;
+          const ratio = moeFlops / denseFlops;
+          console.log(
+            'MoE 前馈 ' + moeFlops + ' FLOPs，同参数量的稠密前馈 ' + denseFlops
+            + '，比值 ' + ratio.toFixed(3) + '（top_k/n_expert = '
+            + (TOP_K / N_EXPERT).toFixed(2) + '，另外还有路由器与 gather/scatter）'
+          );
+          lab.publish('flops.moeOverDense', ratio);
+          expect(ratio).toBeLessThan(0.6);
+          // 太低说明专家根本没被调用
+          expect(ratio).toBeGreaterThan(0.2);
+        });
+
+        /*
+         * 容量两个方向都要验：宽松时一个不丢，收紧时必须丢。
+         * 只验前者的话，「根本没实现容量」也能过。
+         */
+        it('容量宽松时不丢，收紧时真的丢', () => {
+          setup();
+          const loose = JSON.parse(String(lab.py(\`
+      _m, _x = _build(2.0)
+      _y = _m(_x, \${N_TOKEN})
+      json.dumps({"dropped": _m.last_dropped, "load": _m.last_load})
+      \`)));
+          const tight = JSON.parse(String(lab.py(\`
+      _m2, _x2 = _build(0.35)
+      _y2 = _m2(_x2, \${N_TOKEN})
+      json.dumps({"dropped": _m2.last_dropped, "load": _m2.last_load})
+      \`)));
+          const maxLoad = Math.max(...loose.load);
+          const meanLoad = loose.load.reduce((a, c) => a + c, 0) / N_EXPERT;
+          const imbalance = maxLoad / meanLoad;
+          console.log(
+            '宽松（cf=2.0）：丢弃 ' + loose.dropped + '，负载 ' + JSON.stringify(loose.load)
+            + '，最大 / 平均 = ' + imbalance.toFixed(3)
+          );
+          console.log('收紧（cf=0.35）：丢弃 ' + tight.dropped + '，负载 ' + JSON.stringify(tight.load));
+          lab.publish('expert.droppedTokens', loose.dropped);
+          lab.publish('expert.dropsUnderTightCapacity', tight.dropped);
+          lab.publish('expert.loadImbalance', imbalance);
+          expect(loose.dropped).toBe(0);
+          expect(tight.dropped).toBeGreaterThan(0);
+          // 每个 token 走 top_k 个专家，总分配数要对得上
+          expect(loose.load.reduce((a, c) => a + c, 0)).toBe(N_TOKEN * TOP_K);
+        });
+
+        it('辅助损失对得上 Switch 的公式，且均匀时等于 1', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _m, _x = _build(2.0)
+      _y = _m(_x, \${N_TOKEN})
+      _logits = F.linear(_x, _m.router)
+      _probs = F.softmax(_logits, \${N_TOKEN}, \${N_EXPERT}).tolist()
+      _ids, _w = moe.route(_probs, \${N_TOKEN}, \${N_EXPERT}, \${TOP_K})
+
+      # 完全均匀的对照：概率与分配都均匀，aux 该正好是 1
+      _uniform = [1.0 / \${N_EXPERT}] * (\${N_TOKEN} * \${N_EXPERT})
+      _uids = [(t + k) % \${N_EXPERT} for t in range(\${N_TOKEN}) for k in range(\${TOP_K})]
+      json.dumps({"aux": _m.last_aux, "probs": _probs, "ids": _ids,
+                  "uniform": moe.load_balance_loss(_uniform, _uids, \${N_TOKEN}, \${N_EXPERT}, \${TOP_K})})
+      \`)));
+
+          // 平台侧照公式重算一遍
+          const counts = new Array(N_EXPERT).fill(0);
+          for (let t = 0; t < N_TOKEN; t++) counts[r.ids[t * TOP_K]] += 1;
+          const p = new Array(N_EXPERT).fill(0);
+          for (let t = 0; t < N_TOKEN; t++)
+            for (let e = 0; e < N_EXPERT; e++) p[e] += r.probs[t * N_EXPERT + e];
+          let ref = 0;
+          for (let e = 0; e < N_EXPERT; e++) ref += (counts[e] / N_TOKEN) * (p[e] / N_TOKEN);
+          ref *= N_EXPERT;
+
+          console.log(
+            'aux ' + r.aux.toFixed(6) + '，参考 ' + ref.toFixed(6)
+            + '；完全均匀时 ' + r.uniform.toFixed(6) + '（该是 1）'
+          );
+          lab.publish('expert.auxLossError', Math.abs(r.aux - ref));
+          expect(Math.abs(r.aux - ref)).toBeLessThan(1e-6);
+          expect(Math.abs(r.uniform - 1)).toBeLessThan(1e-9);
+          // 真实路由不可能正好均匀，所以 aux 该 > 1
+          expect(r.aux).toBeGreaterThan(1);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.flops.moeOverDense', op: 'lte', value: 0.6,
+      zh: 'MoE 前馈与稠密等价的 FLOPs 比', en: 'MoE FFN FLOPs over the dense equivalent',
+      dimension: 'efficiency',
+    }),
+    gate({
+      metric: 'llm.expert.droppedTokens', op: 'eq', value: 0,
+      zh: '容量宽松时丢弃的分配数', en: 'assignments dropped under loose capacity',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.expert.dropsUnderTightCapacity', op: 'gte', value: 1,
+      zh: '容量收紧时丢弃的分配数（容量真的在起作用）',
+      en: 'assignments dropped under tight capacity (capacity actually binds)',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.expert.auxLossError', op: 'lte', value: 1e-6,
+      zh: '辅助损失与参考公式的差', en: 'auxiliary loss versus the reference formula',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness', 'efficiency'],
+  extension: t(
+    code`
+      DeepSeek-V3 的配置是**总参数 671B、激活 37B** —— 18 倍的稀疏度。
+      它在这一关的基础上多了两件事：
+
+      **共享专家。** 留一两个专家**所有 token 都过**，专门吃那些通用的模式，
+      让被路由的专家去学各自专门的东西。DeepSeekMoE 的主要贡献之一。
+
+      **无辅助损失的均衡。** 辅助损失有个副作用:它是在和主损失抢梯度，
+      逼着路由器为了均衡去做一些不利于建模的选择。
+      DeepSeek-V3 换成了一个**只调偏置不进梯度**的做法：
+      给每个专家的路由分数加一个可调的偏置，谁超载就把谁的偏置调低。
+      这样均衡完全不打扰主损失。
+
+      还有一条工程上的：**MoE 的瓶颈是通信不是计算**。
+      专家分布在不同的卡上，每一层都要做两次 all-to-all（发过去、收回来）。
+      容量因子、专家并行的拓扑、以及 DeepEP 这类通信库，都是围着这件事转的。
+      这也是为什么容量必须是定长的 —— 变长缓冲区在集合通信里没法用。
+    `,
+    code`
+      DeepSeek-V3 runs **671B total parameters with 37B active** — 18x sparsity. Beyond what
+      this stage builds, it adds two things:
+
+      **Shared experts.** One or two experts that **every token passes through**, absorbing
+      the generic patterns so routed experts can specialise. One of DeepSeekMoE's main
+      contributions.
+
+      **Balancing without an auxiliary loss.** The auxiliary loss has a side effect: it
+      competes with the main loss for gradient, pushing the router toward choices that
+      balance load at the expense of modelling. DeepSeek-V3 replaced it with a
+      **bias-only, gradient-free** scheme: add a tunable bias to each expert's routing
+      score and lower it whenever that expert is overloaded. Balancing then never disturbs
+      the main objective.
+
+      And an engineering note: **MoE is bottlenecked by communication, not compute**.
+      Experts sit on different devices, so every layer performs two all-to-all exchanges
+      (send out, gather back). Capacity factors, expert-parallel topologies and libraries
+      like DeepEP all revolve around this. It is also why capacity must be a fixed size —
+      variable-length buffers are unusable in collective communication.
+    `
+  ),
+};
+
 /* ------------------------------------------------------------------ */
 
 module.exports = {
@@ -9353,6 +10514,6 @@ module.exports = {
     STAGE_ROPE, STAGE_NORM, STAGE_BLOCK, STAGE_KVCACHE,
     STAGE_MANUAL_BWD, STAGE_ENGINE, STAGE_MODEL_BWD, STAGE_ADAMW,
     STAGE_SCHEDULE, STAGE_CLIP, STAGE_PACKING, STAGE_PRETRAIN,
-    STAGE_AMP, STAGE_RECOMPUTE,
+    STAGE_AMP, STAGE_RECOMPUTE, STAGE_SCALING, STAGE_MOE,
   ],
 };
