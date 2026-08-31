@@ -10287,6 +10287,682 @@ const STAGE_MOE = {
   ),
 };
 
+/* ================================================================== */
+/* 第 21 关：Muon                                                      */
+/* ================================================================== */
+
+const STAGE_MUON = {
+  id: 'muon',
+  title: t('Muon —— 把更新正交化', 'Muon — orthogonalising the update'),
+  goal: t(
+    code`
+      AdamW 把每个参数**单独**看：各自估一个步长，彼此无关。
+      但一个权重**矩阵**不是一堆无关的数,它有奇异值谱，而梯度矩阵往往
+      被少数几个方向主导。沿着这样的矩阵走一步，等于在少数几个方向上走得很远、
+      其余方向几乎没动。
+
+      \`Muon\` 换了个做法：把动量矩阵**正交化**之后再更新 ——
+      让所有方向的步长拉平。在 \`muon.py\` 里实现它：
+
+      \`\`\`python
+      def newton_schulz(g, rows, cols, steps=5):
+          """把 g 近似正交化。返回一个新张量，不动 g。"""
+
+      class Muon:
+          """矩阵参数走 Muon，其余（嵌入表、一维参数）走 AdamW。"""
+          def __init__(self, named_params, lr=0.03, momentum=0.95, ...):
+          def zero_grad(self):
+          def step(self, lr=None):
+      \`\`\`
+
+      ## Newton–Schulz：不做 SVD 的正交化
+
+      真正的正交化要做 SVD（\`G = UΣVᵀ\` 之后取 \`UVᵀ\`），而 SVD 在 GPU 上很慢，
+      也不好并行。Muon 用一个只含矩阵乘的**五次迭代**逼近它：
+
+      \`\`\`
+      X ← G / ‖G‖_F                    先归一化，让奇异值落进收敛域
+      重复 5 次：
+          A ← X Xᵀ                     （行少于列时；否则用 XᵀX，见下）
+          B ← b·A + c·A²
+          X ← a·X + B X
+      (a, b, c) = (3.4445, −4.7750, 2.0315)
+      \`\`\`
+
+      **这三个系数不是为了收敛到精确解调的，是为了「五步之内把奇异值挤进
+      大致 [0.7, 1.3]」调的。** 所以 \`XᵀX\` 离单位阵还差得挺远 ——
+      本关实测最大偏差约 **0.39**，而这是**正常的**，不是没收敛。
+      Muon 需要的只是「各方向步长差不多」，不需要精确正交。
+
+      ## 高矮两种形状
+
+      \`A = X Xᵀ\` 是 \`[rows, rows]\`,矩阵很「宽」时这块比 \`X\` 还大。
+      所以要按短边来：
+
+      \`\`\`
+      rows ≤ cols:  A = X Xᵀ  [r,r]，  X ← a·X + B X
+      rows >  cols: A = Xᵀ X  [c,c]，  X ← a·X + X B
+      \`\`\`
+
+      两条是同一个迭代，只是把乘法放在另一边。\`F.gemm\` 的
+      \`"nt"\` / \`"tn"\` / \`"nn"\` 正好够用,**不需要显式转置**。
+
+      ## 谁走 Muon，谁不走
+
+      **只有矩阵参数走 Muon。** 嵌入表和一维参数（norm 的增益）继续走 AdamW：
+
+      - 一维参数根本没有「奇异值谱」这回事,正交化对它没有意义
+      - 嵌入表虽然是二维的，但它的每一行是一个独立的 token，
+        行与行之间没有那种「矩阵」的结构;实践中把它交给 Adam 更好
+
+      这不是实现上的偷懒，是 Muon 论文与所有生产实现的一致做法。
+
+      ## 更新还要按形状缩放
+
+      正交化之后的 \`X\` 每个方向的量级都是 1，于是更新的 Frobenius 范数
+      正比于 \`sqrt(min(rows, cols))\`。为了让不同形状的矩阵步长可比，
+      要再乘一个 \`sqrt(max(1, rows/cols))\`。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | 正交化 | \`\\|XᵀX − I\\|\` 最大 ≤ **0.6**（五步的 NS 就该在这个量级） |
+      | 有效 | 谱最宽的那个形状上，偏差降到正交化之前的 **1/5 以下** |
+      | 分工 | 矩阵参数走 Muon，嵌入与一维走 AdamW,两边的个数都要对 |
+      | **效果** | 同模型、同数据、同步数下，Muon 的 loss ≤ AdamW 的 **0.95 倍** |
+
+      最后一条是这一关唯一的效果类门槛，而它是**结构性比较**：
+      两边除了优化器什么都一样。参考实现 300 步之后
+      **AdamW 1.081，Muon 0.920,比值 0.851**。
+    `,
+    code`
+      AdamW treats every parameter **separately**: each gets its own step size, independent
+      of the rest. But a weight **matrix** is not a pile of unrelated numbers — it has a
+      singular value spectrum, and gradient matrices are usually dominated by a few
+      directions. Stepping along such a matrix means moving far in a few directions and
+      barely at all in the others.
+
+      \`Muon\` takes another route: **orthogonalise** the momentum matrix before updating, so
+      every direction gets a comparable step. Implement it in \`muon.py\`:
+
+      \`\`\`python
+      def newton_schulz(g, rows, cols, steps=5):
+          """Approximately orthogonalise g. Returns a new tensor, leaving g alone."""
+
+      class Muon:
+          """Matrix parameters use Muon; everything else (embeddings, 1-D) uses AdamW."""
+          def __init__(self, named_params, lr=0.03, momentum=0.95, ...):
+          def zero_grad(self):
+          def step(self, lr=None):
+      \`\`\`
+
+      ## Newton–Schulz: orthogonalisation without an SVD
+
+      True orthogonalisation needs an SVD (\`G = UΣVᵀ\`, then take \`UVᵀ\`), and SVD is slow
+      on GPUs and hard to parallelise. Muon approximates it with a **quintic iteration**
+      made only of matrix multiplies:
+
+      \`\`\`
+      X ← G / ‖G‖_F                    normalise so singular values land in the basin
+      repeat 5 times:
+          A ← X Xᵀ                     (when rows <= cols; otherwise XᵀX, see below)
+          B ← b·A + c·A²
+          X ← a·X + B X
+      (a, b, c) = (3.4445, −4.7750, 2.0315)
+      \`\`\`
+
+      **Those coefficients are not tuned to converge to the exact answer; they are tuned to
+      squeeze singular values into roughly [0.7, 1.3] within five steps.** So \`XᵀX\` stays
+      noticeably away from the identity — this stage measures a maximum deviation around
+      **0.39**, and that is **correct**, not unconverged. Muon only needs comparable steps
+      across directions, not exact orthogonality.
+
+      ## Tall and wide
+
+      \`A = X Xᵀ\` is \`[rows, rows]\`, which for a wide matrix is larger than \`X\` itself.
+      So work along the short side:
+
+      \`\`\`
+      rows <= cols:  A = X Xᵀ  [r,r],  X ← a·X + B X
+      rows >  cols:  A = Xᵀ X  [c,c],  X ← a·X + X B
+      \`\`\`
+
+      Both are the same iteration with the multiplication on the other side. \`F.gemm\`'s
+      \`"nt"\` / \`"tn"\` / \`"nn"\` cover it — **no explicit transpose needed**.
+
+      ## Who uses Muon and who does not
+
+      **Only matrix parameters.** Embeddings and 1-D parameters (normalisation gains) stay
+      on AdamW:
+
+      - a 1-D parameter has no singular value spectrum at all, so orthogonalising it is
+        meaningless
+      - an embedding table is two-dimensional, but each row is an independent token and the
+        rows carry none of that matrix structure; in practice Adam does better there
+
+      This is not implementation laziness but what the Muon paper and every production
+      implementation do.
+
+      ## The update is also scaled by shape
+
+      After orthogonalisation every direction of \`X\` has magnitude 1, so the update's
+      Frobenius norm scales with \`sqrt(min(rows, cols))\`. To make steps comparable across
+      shapes, multiply by \`sqrt(max(1, rows/cols))\`.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | Orthogonalisation | max \`\\|XᵀX − I\\|\` <= **0.6** (five NS steps belong at this scale) |
+      | Effective | On the widest-spectrum shape, deviation falls below **1/5** of before |
+      | Split | Matrices on Muon, embeddings and 1-D on AdamW, with both counts correct |
+      | **Result** | Same model, data and steps: Muon's loss <= **0.95x** AdamW's |
+
+      That last row is the only outcome gate here, and it is a **structural comparison**:
+      the two runs differ in nothing but the optimiser. The reference measures
+      **AdamW 1.081 against Muon 0.920 after 300 steps — a ratio of 0.851.**
+    `
+  ),
+  checklist: [
+    t('Newton–Schulz 按短边选形状，不做显式转置',
+      'Newton-Schulz picks the shape by the short side, with no explicit transpose'),
+    t('动量缓冲是就地更新的', 'The momentum buffer is updated in place'),
+    t('嵌入表与一维参数走 AdamW', 'Embeddings and 1-D parameters use AdamW'),
+    t('同预算下 loss 低于 AdamW', 'Lower loss than AdamW at the same budget'),
+  ],
+  hints: [
+    t('F.gemm(x, x, r, r, c, "nt") 是 X Xᵀ；F.gemm(x, x, c, c, r, "tn") 是 Xᵀ X。',
+      'F.gemm(x, x, r, r, c, "nt") is X Xᵀ; F.gemm(x, x, c, c, r, "tn") is Xᵀ X.'),
+    t('F.scale_ 是就地的，F.scale 会新建一块 —— 动量缓冲要用前者。',
+      'F.scale_ is in place while F.scale allocates; the momentum buffer needs the former.'),
+    t('矩阵的判据是 len(p.shape) == 2 且不是嵌入表。',
+      'A matrix means len(p.shape) == 2 and not the embedding table.'),
+  ],
+  pitfalls: [
+    t(code`
+      **动量缓冲用赋值而不是就地更新。** \`self._m[i] = F.add(self._m[i], g)\`
+      建的是一个**新的激活张量**,它落在训练循环那个 mark 之后，
+      第二步的 release 把它推平，第三步读到的是一块已经回收的显存。
+      报出来的错是「没有 id 为 24995 的张量」。
+      优化器状态必须一直是同一块内存,这是它和激活最根本的区别。
+    `, code`
+      **Assigning to the momentum buffer instead of updating it in place.**
+      \`self._m[i] = F.add(self._m[i], g)\` builds a **new activation tensor**; it lands
+      after the training loop's mark, step two's release wipes it, and step three reads
+      reclaimed memory. The error reads "no tensor with id 24995". Optimiser state must stay
+      the same block of memory — that is what most fundamentally separates it from an
+      activation.
+    `),
+    t(code`
+      **把嵌入表也交给 Muon。** 跑得通，训练也不会炸,只是效果变差。
+      嵌入表的每一行是一个独立的 token，行与行之间没有「矩阵」的那种结构，
+      正交化等于在一个不存在的结构上做手术。
+      这个错没有任何报错信号，只有 A/B 跑一遍才看得出来。
+    `, code`
+      **Handing the embedding table to Muon as well.** It runs and training does not break;
+      results merely get worse. Each row of an embedding table is an independent token and
+      the rows carry none of the matrix structure, so orthogonalising operates on a structure
+      that is not there. Nothing signals this error; only an A/B run reveals it.
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_SCALE_PY,
+      'muon.py': code`
+        """第 21 关：Muon。矩阵参数正交化之后再更新。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import functional as F
+        from nanotorch.tensor import Tensor
+        from nanotorch import _bridge as B
+
+        NS_A, NS_B, NS_C = 3.4445, -4.7750, 2.0315
+
+
+        def newton_schulz(g, rows, cols, steps=5):
+            """近似正交化。返回新张量，不动 g。"""
+            # TODO: 先按 Frobenius 范数归一化，再迭代 steps 次
+            #       rows <= cols 用 X Xᵀ 与 B X；否则用 Xᵀ X 与 X B
+            return g.detach()
+
+
+        class Muon:
+            def __init__(self, named_params, lr=0.03, momentum=0.95,
+                         weight_decay=0.1, grad_clip=1.0, ns_steps=5):
+                self.matrix, self.other = [], []
+                for name, p in named_params:
+                    # TODO: 二维且不是嵌入表 -> matrix；其余 -> other
+                    self.other.append(p)
+                self.lr, self.momentum = lr, momentum
+                self.weight_decay, self.grad_clip = weight_decay, grad_clip
+                self.ns_steps = ns_steps
+                # TODO: 每个矩阵参数一块动量缓冲，角色 optimizer
+                self._m = []
+                self.adam = nt.optim.AdamW(self.other, lr=lr, betas=(0.9, 0.95),
+                                           weight_decay=weight_decay, grad_clip=0.0)
+                for p in self.matrix:
+                    p.ensure_grad()
+
+            def zero_grad(self):
+                for p in self.matrix:
+                    p.zero_grad()
+                self.adam.zero_grad()
+
+            def grad_norm(self):
+                total = 0.0
+                for p in self.matrix + self.other:
+                    if p.grad is not None:
+                        total += F.sumsq(p.grad)
+                return total ** 0.5
+
+            def step(self, lr=None):
+                nt.phase("optimizer")
+                # TODO: 全局裁剪 -> 每个矩阵：更新动量 -> 正交化 -> 形状缩放 ->
+                #       解耦衰减 -> 减到参数上；最后 self.adam.step(lr)
+                nt.phase("other")
+                return 0.0
+
+
+        if __name__ == "__main__":
+            g = nt.zeros((8, 4), role="data").normal_(3, 1.0)
+            x = newton_schulz(g, 8, 4)
+            print("正交化之后的 Frobenius 范数", round(F.sumsq(x) ** 0.5, 4))
+      `,
+    },
+    referenceFiles: {
+      'muon.py': code`
+        """第 21 关的参考实现。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import functional as F
+        from nanotorch.tensor import Tensor
+        from nanotorch import _bridge as B
+
+        NS_A, NS_B, NS_C = 3.4445, -4.7750, 2.0315
+
+
+        def newton_schulz(g, rows, cols, steps=5):
+            # 先归一化：三个系数是在「奇异值已经在 1 附近」的前提下调出来的
+            x = g.detach()
+            F.scale_(x, 1.0 / ((F.sumsq(x) ** 0.5) + 1e-7))
+            for _ in range(steps):
+                # 按短边选形状 —— 宽矩阵上 X Xᵀ 比 X 本身还大
+                if rows <= cols:
+                    a = F.gemm(x, x, rows, rows, cols, "nt")     # X Xᵀ  [r,r]
+                    aa = F.gemm(a, a, rows, rows, rows, "nn")
+                else:
+                    a = F.gemm(x, x, cols, cols, rows, "tn")     # Xᵀ X  [c,c]
+                    aa = F.gemm(a, a, cols, cols, cols, "nn")
+                F.scale_(a, NS_B)
+                F.scale_(aa, NS_C)
+                b = F.add(a, aa)                                  # bA + cA²
+                if rows <= cols:
+                    bx = F.gemm(b, x, rows, cols, rows, "nn")     # B X
+                else:
+                    bx = F.gemm(x, b, rows, cols, cols, "nn")     # X B
+                F.scale_(x, NS_A)
+                x = F.add(x, bx)
+            return x
+
+
+        class Muon:
+            def __init__(self, named_params, lr=0.03, momentum=0.95,
+                         weight_decay=0.1, grad_clip=1.0, ns_steps=5):
+                self.matrix, self.other = [], []
+                for name, p in named_params:
+                    # 只有矩阵走 Muon。嵌入表虽然是二维的，但它的每一行是一个
+                    # 独立的 token，行与行之间没有那种「矩阵」的结构
+                    if len(p.shape) == 2 and "embed" not in name:
+                        self.matrix.append(p)
+                    else:
+                        self.other.append(p)
+                self.lr, self.momentum = lr, momentum
+                self.weight_decay, self.grad_clip = weight_decay, grad_clip
+                self.ns_steps = ns_steps
+                self._m = [Tensor(p.shape, p.dtype, role="optimizer", name="muon.m")
+                           for p in self.matrix]
+                for t in self._m:
+                    t.fill_(0.0)
+                self.adam = nt.optim.AdamW(self.other, lr=lr, betas=(0.9, 0.95),
+                                           weight_decay=weight_decay, grad_clip=0.0)
+                for p in self.matrix:
+                    p.ensure_grad()
+
+            def zero_grad(self):
+                for p in self.matrix:
+                    p.zero_grad()
+                self.adam.zero_grad()
+
+            def grad_norm(self):
+                total = 0.0
+                for p in self.matrix + self.other:
+                    if p.grad is not None:
+                        total += F.sumsq(p.grad)
+                return total ** 0.5
+
+            def step(self, lr=None):
+                nt.phase("optimizer")
+                rate = self.lr if lr is None else lr
+                norm = self.grad_norm()
+                scale = 1.0
+                if self.grad_clip > 0 and norm > self.grad_clip:
+                    scale = self.grad_clip / norm
+
+                for i, p in enumerate(self.matrix):
+                    rows, cols = p.shape[0], p.shape[1]
+                    g = p.grad.detach()
+                    F.scale_(g, scale)
+
+                    # 动量**就地**更新。写成 self._m[i] = F.add(...) 的话，
+                    # 新建的是一个激活张量，第二步就被 release 推平了
+                    mbuf = self._m[i]
+                    F.scale_(mbuf, self.momentum)
+                    B.add_inplace(mbuf.handle, g.handle, mbuf.numel)
+                    # Nesterov：正交化的是「往前看一步」的那个方向
+                    look = F.add(g, F.scale(mbuf, self.momentum))
+
+                    u = newton_schulz(look, rows, cols, self.ns_steps)
+                    # 正交化之后每个方向的量级都是 1，所以按形状再缩一次，
+                    # 不同形状的矩阵步长才可比
+                    F.scale_(u, rate * max(1.0, rows / cols) ** 0.5)
+                    # 解耦权重衰减：直接作用在参数上，不进更新方向
+                    if self.weight_decay > 0:
+                        F.scale_(p, 1.0 - rate * self.weight_decay)
+                    F.scale_(u, -1.0)
+                    B.add_inplace(p.handle, u.handle, p.numel)
+
+                self.adam.step(lr=rate)
+                nt.phase("other")
+                return norm
+
+
+        if __name__ == "__main__":
+            g = nt.zeros((8, 4), role="data").normal_(3, 1.0)
+            x = newton_schulz(g, 8, 4)
+            print("正交化之后的 Frobenius 范数", round(F.sumsq(x) ** 0.5, 4))
+      `,
+    },
+  },
+  specs: [
+    spec('muon.spec.ts', code`
+      ${LAB}
+
+      const STEPS = 300, PEAK = 0.03;
+
+      function setup() {
+        lab.py(\`
+      import sys, json, math
+      sys.path.insert(0, "/lab")
+      import importlib, kit, muon
+      importlib.reload(kit)
+      importlib.reload(muon)
+      import nanotorch as nt
+      from nanotorch import functional as F
+      \`);
+        const toks = lab.world.tokens();
+        lab.py('kit.train_tokens = ' + JSON.stringify([...toks.slice(0, lab.world.holdoutAt())]));
+        lab.py(\`
+      def _ortho_error(rows, cols):
+          """|XᵀX − I| 的最大元素。正交化之前的同一个 G 也量一遍，作为对照。
+
+          **对照要用一个奇异值谱很宽的矩阵**：随机高斯矩阵归一化之后
+          本来就已经接近正交了，拿它当对照的话，NS 看起来「什么也没做」。
+          这里给每一列乘一个跨两个数量级的系数，把谱拉开。
+          """
+          g = nt.zeros((rows, cols), role="data").normal_(31, 1.0)
+          vals = g.tolist()
+          for i in range(rows):
+              for j in range(cols):
+                  vals[i * cols + j] *= 0.01 ** (j / max(1, cols - 1))
+          g.set_(vals)
+          short = min(rows, cols)
+
+          def dev(x):
+              if rows <= cols:
+                  a = F.gemm(x, x, rows, rows, cols, "nt")
+              else:
+                  a = F.gemm(x, x, cols, cols, rows, "tn")
+              v = a.tolist()
+              w = 0.0
+              for i in range(short):
+                  for j in range(short):
+                      w = max(w, abs(v[i * short + j] - (1.0 if i == j else 0.0)))
+              return w
+
+          raw = g.detach()
+          F.scale_(raw, (short ** 0.5) / ((F.sumsq(raw) ** 0.5) + 1e-7))
+          before = dev(raw)
+          after = dev(muon.newton_schulz(g, rows, cols, 5))
+          return {"before": before, "after": after}
+
+
+      def _train(which, steps, peak):
+          vocab = max(kit.train_tokens) + 1
+          m = kit.LM(vocab, seed=1)
+          if which == "muon":
+              opt = muon.Muon(m.named_parameters(), lr=peak)
+          else:
+              opt = nt.optim.AdamW(m.parameters(), lr=peak, betas=(0.9, 0.95),
+                                   weight_decay=0.1, grad_clip=1.0)
+          idx = nt.zeros((kit.B * kit.S,), role="data", name="idx")
+          tgt = nt.zeros((kit.B * kit.S,), role="data", name="tgt")
+          hist = []
+          base = nt.mark()
+          w = max(1, steps // 20)
+          for st in range(1, steps + 1):
+              nt.release(base)
+              bi, bt = kit.sample_batch(kit.train_tokens, st, kit.B, kit.S)
+              idx.set_int_(bi)
+              tgt.set_int_(bt)
+              opt.zero_grad()
+              nt.phase("forward")
+              loss = m(idx, tgt, kit.B, kit.S)
+              nt.phase("other")
+              loss.backward()
+              if st <= w:
+                  lr = peak * st / w
+              else:
+                  pr = (st - w) / max(1, steps - w)
+                  lr = peak * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * pr)))
+              opt.step(lr=lr)
+              hist.append(loss.value)
+          nt.release(base)
+          out = {"last": sum(hist[-20:]) / 20}
+          if which == "muon":
+              out["matrix"] = len(opt.matrix)
+              out["other"] = len(opt.other)
+          return out
+      \`);
+      }
+
+      describe('Muon', () => {
+        /*
+         * 五步的 Newton–Schulz **不收敛到精确正交** —— 那三个系数是为了
+         * 「五步之内把奇异值挤进大致 [0.7, 1.3]」调的。
+         * 所以这一条既要求它有效（比归一化之后好一个量级），
+         * 又不要求它精确（0.6 的界）。
+         */
+        it('高矮两种形状都正交化得动', () => {
+          setup();
+          const shapes = [[32, 32], [32, 88], [88, 32], [64, 16]];
+          let worstAfter = 0;
+          let hardest = null;
+          for (const [r, c] of shapes) {
+            const e = JSON.parse(String(lab.py('json.dumps(_ortho_error(' + r + ', ' + c + '))')));
+            console.log(
+              r + 'x' + c + '：正交化前 ' + e.before.toFixed(4)
+              + '，之后 ' + e.after.toFixed(4) + '，降到 ' + (e.after / e.before).toFixed(3)
+            );
+            worstAfter = Math.max(worstAfter, e.after);
+            if (!hardest || e.before > hardest.before) hardest = { ...e, r, c };
+          }
+          /*
+           * 「降了多少」只在**谱确实很宽**的那个形状上问才有意义。
+           * 归一化之后的宽矩阵在它的短边上本来就已经接近正交了（实测 0.89），
+           * 拿它当对照会得出「NS 没做什么」这个错误结论 ——
+           * 不是 NS 不行，是那个对照本身就没偏多少。
+           */
+          const ratio = hardest.after / hardest.before;
+          console.log(
+            '谱最宽的是 ' + hardest.r + 'x' + hardest.c
+            + '（正交化前 ' + hardest.before.toFixed(3) + '），降到 ' + ratio.toFixed(3)
+          );
+          lab.publish('muon.orthoError', worstAfter);
+          lab.publish('muon.orthoImprovement', ratio);
+          expect(worstAfter).toBeLessThan(0.6);
+          // 对照本身要够偏，否则这一条问的不是同一个问题
+          expect(hardest.before).toBeGreaterThan(2);
+          expect(ratio).toBeLessThan(0.2);
+        });
+
+        it('矩阵走 Muon，嵌入与一维走 AdamW', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _vocab = max(kit.train_tokens) + 1
+      _m = kit.LM(_vocab, seed=1)
+      _opt = muon.Muon(_m.named_parameters(), lr=\${PEAK})
+      _named = [(n, list(p.shape)) for n, p in _m.named_parameters()]
+      json.dumps({"matrix": len(_opt.matrix), "other": len(_opt.other), "named": _named})
+      \`)));
+
+          // 平台侧照规则数一遍
+          let expectMatrix = 0, expectOther = 0;
+          for (const [name, shape] of r.named) {
+            if (shape.length === 2 && !name.includes('embed')) expectMatrix += 1;
+            else expectOther += 1;
+          }
+          console.log(
+            '参数张量共 ' + r.named.length + ' 个：Muon ' + r.matrix
+            + '（该是 ' + expectMatrix + '），AdamW ' + r.other + '（该是 ' + expectOther + '）'
+          );
+          lab.publish('muon.matrixParams', r.matrix);
+          lab.publish('muon.adamParams', r.other);
+          expect(r.matrix).toBe(expectMatrix);
+          expect(r.other).toBe(expectOther);
+          expect(r.matrix).toBeGreaterThan(0);
+          expect(r.other).toBeGreaterThan(0);
+        });
+
+        /*
+         * 唯一的效果类门槛，而且是结构性比较：
+         * 同一个模型、同一份数据、同样的步数与调度，只有优化器不同。
+         */
+        it('同预算下 loss 低于 AdamW 的 0.95 倍', () => {
+          setup();
+          const adamw = JSON.parse(String(lab.py('json.dumps(_train("adamw", ' + STEPS + ', ' + PEAK + '))')));
+          const muonR = JSON.parse(String(lab.py('json.dumps(_train("muon", ' + STEPS + ', ' + PEAK + '))')));
+          const ratio = muonR.last / adamw.last;
+          console.log(
+            STEPS + ' 步之后：AdamW ' + adamw.last.toFixed(4)
+            + '，Muon ' + muonR.last.toFixed(4) + '，比值 ' + ratio.toFixed(4)
+            + '（Muon 管着 ' + muonR.matrix + ' 个矩阵，其余 ' + muonR.other + ' 个走 AdamW）'
+          );
+          lab.publish('loss.muonOverAdamW', ratio);
+          expect(Number.isFinite(muonR.last)).toBe(true);
+          expect(ratio).toBeLessThan(0.95);
+        });
+
+        it('动量缓冲跨步存活 —— 优化器状态不是激活', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _vocab = max(kit.train_tokens) + 1
+      _m2 = kit.LM(_vocab, seed=1)
+      _o2 = muon.Muon(_m2.named_parameters(), lr=\${PEAK})
+      _ids = [t.handle for t in _o2._m]
+      _idx = nt.zeros((kit.B * kit.S,), role="data")
+      _tgt = nt.zeros((kit.B * kit.S,), role="data")
+      _base = nt.mark()
+      for _s in range(3):
+          nt.release(_base)
+          _bi, _bt = kit.sample_batch(kit.train_tokens, _s + 1, kit.B, kit.S)
+          _idx.set_int_(_bi); _tgt.set_int_(_bt)
+          _o2.zero_grad()
+          _l = _m2(_idx, _tgt, kit.B, kit.S)
+          _l.backward()
+          _o2.step(lr=\${PEAK})
+      # 三步之后动量缓冲还是原来那几块，而且非零
+      _same = [t.handle for t in _o2._m] == _ids
+      _nonzero = sum(1 for t in _o2._m if F.sumsq(t) > 0)
+      json.dumps({"same": _same, "nonzero": _nonzero, "count": len(_o2._m)})
+      \`)));
+          console.log(
+            '三步之后：动量缓冲还是原来那几块 ' + r.same
+            + '，非零的 ' + r.nonzero + ' / ' + r.count
+          );
+          lab.publish('muon.momentumPersisted', r.same && r.nonzero === r.count ? 1 : 0);
+          expect(r.same).toBe(true);
+          expect(r.nonzero).toBe(r.count);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.muon.orthoError', op: 'lte', value: 0.6,
+      zh: '正交化之后 |XᵀX − I| 的最大元素', en: 'max |XᵀX − I| after orthogonalisation',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.muon.orthoImprovement', op: 'lte', value: 0.2,
+      zh: '正交化之后与之前的偏差比', en: 'deviation after orthogonalisation over before',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.muon.momentumPersisted', op: 'eq', value: 1,
+      zh: '动量缓冲跨步存活且非零', en: 'the momentum buffer survives steps and is non-zero',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.loss.muonOverAdamW', op: 'lte', value: 0.95,
+      zh: '同预算下 Muon 与 AdamW 的 loss 比', en: "Muon's loss over AdamW's at the same budget",
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness', 'efficiency'],
+  extension: t(
+    code`
+      Muon 是 2024 年底出来的，2026 年已经在生产里了：**Kimi K2 与 GLM-5 都在用**。
+      Moonshot 的 \`Muon Clip\` 在它上面加了一层 QK 裁剪,
+      Muon 让训练更快，但也更容易把注意力的 logits 推大，两件事要一起解决。
+
+      有几点值得记住：
+
+      **它省的是显存。** AdamW 每个参数要存 \`m\` 和 \`v\` 两块；
+      Muon 只有一块动量。矩阵参数占模型的绝大多数，所以优化器状态少了差不多一半。
+
+      **它花的是算力。** 每一步每个矩阵要做 5 轮、每轮 3 次矩阵乘。
+      相对于前向反向的 \`6N\`，这部分在大模型上占比不大（矩阵乘的形状是
+      \`[r,c]\` 而不是 \`[batch·seq, c]\`），但在小模型上很明显 ——
+      这一关里 Muon 每步比 AdamW 慢，而它靠更少的步数赢回来。
+
+      **它不是万能的。** 嵌入、一维参数、以及（在很多实现里）输出头都仍然走 Adam。
+      「一个优化器管所有参数」这件事本身就不是必须的,
+      按参数的**结构**分组，是 Muon 带来的更普遍的一个想法。
+    `,
+    code`
+      Muon appeared in late 2024 and is in production by 2026: **Kimi K2 and GLM-5 both use
+      it**. Moonshot's \`Muon Clip\` layers QK clipping on top — Muon trains faster but also
+      pushes attention logits upward, and the two need solving together.
+
+      A few things worth keeping:
+
+      **It saves memory.** AdamW stores \`m\` and \`v\` per parameter; Muon keeps only a
+      momentum. Matrix parameters are the vast majority of a model, so optimiser state drops
+      by roughly half.
+
+      **It spends compute.** Each step runs 5 rounds of 3 matmuls per matrix. Against the
+      \`6N\` of forward and backward this is minor at large scale (the matmuls are
+      \`[r,c]\`-shaped rather than \`[batch·seq, c]\`), but conspicuous at small scale — in
+      this stage Muon's steps are slower than AdamW's and it wins by needing fewer of them.
+
+      **It is not universal.** Embeddings, 1-D parameters and (in many implementations) the
+      output head stay on Adam. That one optimiser need not cover every parameter is itself
+      the more general idea Muon contributed: group parameters by their **structure**.
+    `
+  ),
+};
+
 /* ------------------------------------------------------------------ */
 
 module.exports = {
@@ -10514,6 +11190,6 @@ module.exports = {
     STAGE_ROPE, STAGE_NORM, STAGE_BLOCK, STAGE_KVCACHE,
     STAGE_MANUAL_BWD, STAGE_ENGINE, STAGE_MODEL_BWD, STAGE_ADAMW,
     STAGE_SCHEDULE, STAGE_CLIP, STAGE_PACKING, STAGE_PRETRAIN,
-    STAGE_AMP, STAGE_RECOMPUTE, STAGE_SCALING, STAGE_MOE,
+    STAGE_AMP, STAGE_RECOMPUTE, STAGE_SCALING, STAGE_MOE, STAGE_MUON,
   ],
 };
