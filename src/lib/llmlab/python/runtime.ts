@@ -41,8 +41,17 @@ export interface PythonRuntime {
    */
   run(code: string): unknown;
   runAsync(code: string): Promise<unknown>;
-  /** 往 Python 的全局命名空间里塞一个对象（算子桥就是这么进去的） */
+  /** 往 Python 的全局命名空间里塞一个对象 */
   setGlobal(name: string, value: unknown): void;
+  /**
+   * 把一个 JS 对象注册成 Python 里的模块（算子桥就是这么进去的）。
+   *
+   * 为什么不是 `setGlobal` + `import js`：`js` 那条路看的是 **globalThis**，
+   * 而同一个进程里可能同时活着好几个运行时（判定、参考解、对照组各一个），
+   * 挂在 globalThis 上它们会互相覆盖 —— 表现是「另一个会话的算子核被用了」，
+   * 而计量还记在自己头上。`registerJsModule` 是每个实例各一份的。
+   */
+  registerModule(name: string, value: object): void;
   getGlobal(name: string): unknown;
   /** 往虚拟文件系统里写一个文件（nanotorch 的源码、学员的脚本） */
   writeFile(path: string, content: string): void;
@@ -126,6 +135,7 @@ export async function loadPythonRuntime(options: LoadPythonOptions): Promise<Pyt
     run(code) { return py.runPython(code); },
     runAsync(code) { return py.runPythonAsync(code); },
     setGlobal(name, value) { py.globals.set(name, value); },
+    registerModule(name, value) { py.registerJsModule(name, value); },
     getGlobal(name) { return py.globals.get(name); },
     writeFile(path, content) {
       const dir = path.slice(0, path.lastIndexOf('/'));

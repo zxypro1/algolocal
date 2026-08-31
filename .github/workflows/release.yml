@@ -104,6 +104,11 @@ jobs:
       - name: Rebuild and compare
         run: bash scripts/build-llmlab-kernels.sh --check
 
+      # nanotorch 的 .py 会被嵌进一个生成的 TS 模块。改了 .py 忘了重新生成，
+      # 表现同样是「代码看着是新的、跑的是旧的」，而且不报任何错。
+      - name: Check nanotorch sources are in sync
+        run: node scripts/build-nanotorch.js --check
+
   # 构建 macOS 版本
   build-macos:
     name: Build macOS

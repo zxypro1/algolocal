@@ -130,15 +130,49 @@ export class Arena {
    * `view()` 会报一个说得清的错，而不是安静地读到别人的数据。
    */
   release(mark: number): void {
+    /*
+     * **长期张量落在 mark 之后 = mark 取早了。**
+     *
+     * 参数、梯度、优化器状态、以及语料这类常驻数据都该在取 mark 之前分配好，
+     * 之后每步 release 掉的只有激活。搞反了的表现极其难查：
+     * 下一步用到那个张量时报「没有 id 为 N 的张量」，而 N 是个没有来历的数字，
+     * 现场离出错的原因（mark 取在了哪一行）已经很远了。
+     *
+     * 所以这里当场拦下来，并且说清是哪一个张量、什么角色。
+     * 这是我自己在写竖切时踩的第一个坑：AdamW 的梯度是懒分配的，
+     * 于是它们落在了 mark 之后，第二步就被推平了。
+     */
+    for (const t of this.live.values()) {
+      if (t.off >= mark && t.role !== 'activation') {
+        throw new Error(
+          `release 会丢掉长期张量「${t.name || `#${t.id}`}」（角色 ${t.role}）——` +
+          'mark 取早了。参数 / 梯度 / 优化器状态 / 常驻数据都要在 mark 之前分配好，' +
+          '每步只 release 激活。'
+        );
+      }
+    }
     for (const [id, t] of this.live) {
       if (t.off >= mark) {
         this.live.delete(id);
         this.cur -= t.bytes;
         this.roleBytes[t.role] -= t.bytes;
-        if (t.role === 'activation') this.curAct -= t.bytes;
+        this.curAct -= t.bytes;   // 走到这里的必然是 activation（上面已拦下其余角色）
       }
     }
     this.kernels.reset(mark);
+  }
+
+  /**
+   * 按 id 取张量。
+   *
+   * Python 侧只拿得到 id（一个整数）—— 真正的数留在 wasm 内存里，
+   * 不跨语言边界搬。所以那一层的每次调用都从这里换回张量。
+   * 取不到就是用了一个已经 release 掉的 id，报得清清楚楚。
+   */
+  get(id: number): Tensor {
+    const t = this.live.get(id);
+    if (!t) throw new Error(`没有 id 为 ${id} 的张量（可能已经被 release 了）`);
+    return t;
   }
 
   view(t: Tensor): Float32Array | Float64Array {
