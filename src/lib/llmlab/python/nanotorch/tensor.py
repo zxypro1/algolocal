@@ -147,6 +147,9 @@ class Tensor:
         而那件事在这个项目里没有用到，不如不做，省得学员以为它能用。
         """
         assert self.numel == 1, "backward() 只能从标量出发（一般是 loss）"
+        # 起点的梯度是 1：d(loss)/d(loss)。和 PyTorch 一样每次都重新播种，
+        # 不是「有就不动」—— 上一步残留的值会让这一步的梯度整体偏掉。
+        self.ensure_grad().fill_(1.0)
         topo = []
         seen = set()
 
@@ -166,18 +169,62 @@ class Tensor:
         B.phase("other")
 
 
+# ---- 记不记带 ----
+#
+# 和 PyTorch 一样是个全局开关，做成栈是因为它要能嵌套。
+# 三个地方要用它：评测（不建带就不占显存）、生成（同理）、
+# 以及 `autograd.Function.forward` 里面 —— 自定义算子的前向**本身不该被记**，
+# 记了的话反向会走两遍：一遍是引擎按 tape 走的，一遍是你自己写的。
+_GRAD_ENABLED = [True]
+
+
+def is_grad_enabled():
+    return _GRAD_ENABLED[-1]
+
+
+class no_grad:
+    """`with nt.no_grad():` —— 里面的算子不挂反向。
+
+    对应 `torch.no_grad()`。评测循环、生成循环都该套上它：
+    不建带就不会为了反向留住每一层的激活，显存差出好几倍。
+    """
+
+    def __enter__(self):
+        _GRAD_ENABLED.append(False)
+        return self
+
+    def __exit__(self, *exc):
+        _GRAD_ENABLED.pop()
+        return False
+
+
+class enable_grad:
+    """`with nt.enable_grad():` —— 在 no_grad 里面临时打开。对应 `torch.enable_grad()`。"""
+
+    def __enter__(self):
+        _GRAD_ENABLED.append(True)
+        return self
+
+    def __exit__(self, *exc):
+        _GRAD_ENABLED.pop()
+        return False
+
+
 def zeros(shape, dtype="f32", role="activation", name="", requires_grad=False):
     t = Tensor(shape, dtype, role, name, requires_grad=requires_grad)
     t.fill_(0.0)
     return t
 
 
-def parameter(shape, seed=None, std=0.02, name=""):
+def parameter(shape, seed=None, std=0.02, name="", dtype="f32"):
     """一个要被优化的张量。
 
     `std=0` 表示常数 1 起步（norm 的增益就是这么初始化的）。
+
+    `dtype="f64"` 是给**梯度检验**用的：中心差分要在 f64 上做，
+    fp32 下一个完全正确的反向也会量出 5e-2 的相对误差 —— 噪声比信号大。
     """
-    t = Tensor(shape, "f32", role="param", name=name, requires_grad=True)
+    t = Tensor(shape, dtype, role="param", name=name, requires_grad=True)
     if std == 0 or seed is None:
         t.fill_(1.0)
     else:

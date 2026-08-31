@@ -13,7 +13,7 @@ import { createPythonBridge } from './bridge';
 import { loadPythonRuntime, type PythonRuntime, type LoadPythonOptions } from './runtime';
 import { NANOTORCH_SOURCES, NANOTORCH_HASH } from './sources.generated';
 
-export { loadPythonRuntime, NANOTORCH_HASH };
+export { loadPythonRuntime, NANOTORCH_HASH, NANOTORCH_SOURCES };
 export type { PythonRuntime, LoadPythonOptions };
 export { createPythonBridge } from './bridge';
 export type { PythonBridge } from './bridge';

@@ -2618,6 +2618,42 @@ const primers = {
         'On the sampling side, `temperature` scales the logits (lower is more deterministic), `top-k` keeps the k most probable tokens, and `top-p` keeps the smallest set reaching cumulative probability p. They stack k first, then p,matching HuggingFace. For replay to work sampling must be deterministic: the same logits and seed must give the same token, with ties broken by id.'
       )
     ),
+    'manual-backward': t(
+      p(
+        '前向把输入变成 loss，反向回答一个问题：**每个参数动一点点，loss 会动多少**。这个「多少」就是梯度,有了它，优化器才知道往哪个方向调。',
+        '链式法则说的是：一条计算链上的导数是各段导数的乘积。反向传播就是把这句话组织成一次从后往前的遍历,每个算子只需要知道「拿到我输出的梯度，怎么算出我输入的梯度」，不需要知道自己身处什么模型。这种局部性是整个深度学习框架能存在的原因。',
+        '矩阵乘的反向值得手推一次。`y = x @ W` 里，`dx = dy @ Wᵀ`，`dW = xᵀ @ dy`。不用背,看形状就能定：`dx` 必须和 `x` 同形，能凑出这个形状的乘法只有一种。',
+        '交叉熵的反向是整套里最漂亮的。softmax 和交叉熵单独求导都很啰嗦，合起来之后中间的东西全部消掉，只剩 `(预测概率 − 真实概率) / 样本数`。这也是真实框架总把这两步融在一个算子里的原因,不只是快，还避免了中间那块 `[样本数, 词表大小]` 的显存。',
+        '`ctx` 是前向留给反向的口袋。它存在的理由是显存：**没被存进去的中间结果可以立刻扔掉**。一个只存了必要几样的实现，和一个把什么都留着的实现，在大模型上差的是能不能跑得起来。',
+        '还有一件容易忽略的事：`backward` 收到的 `grad_output` 不一定是 1。从 loss 出发时它是 1，但这个算子放进更深的图里、或者用了梯度累积之后就不是了。忘了乘它的实现，在最简单的场景下一切正常。'
+      ),
+      p(
+        'The forward pass turns inputs into a loss; the backward pass answers one question: **if each parameter moves a little, how much does the loss move**. That "how much" is the gradient, and it is what tells the optimiser which way to go.',
+        'The chain rule says the derivative along a chain is the product of the per-step derivatives. Backpropagation organises that into a single pass from the end backwards,each operator only needs to know how to turn the gradient of its output into the gradient of its input, without knowing what model it sits in. That locality is why deep learning frameworks can exist at all.',
+        'The matmul backward is worth deriving once. For `y = x @ W`, `dx = dy @ Wᵀ` and `dW = xᵀ @ dy`. There is nothing to memorise: shapes decide it, since `dx` must match `x` and only one product produces that shape.',
+        'The cross-entropy backward is the prettiest result here. Differentiating softmax and cross-entropy separately is tedious; together everything in the middle cancels and only `(predicted probability − true probability) / count` remains. That is also why real frameworks fuse the two into one operator,not merely for speed, but to avoid materialising a `[count, vocab]` intermediate.',
+        '`ctx` is the pocket the forward leaves for the backward. It exists for memory: **anything not saved can be discarded immediately**. On a large model the difference between saving only what is needed and saving everything is the difference between running and not.',
+        'One more thing that is easy to miss: the `grad_output` a `backward` receives is not always 1. It is 1 when you start from the loss, but not once the operator sits deeper in a graph or gradient accumulation is in play. An implementation that forgets to multiply it behaves perfectly in the simplest case.'
+      )
+    ),
+    'autograd-engine': t(
+      p(
+        '每个算子都知道自己那一步的反向之后，还缺一个`调度`：谁先算、谁后算、谁的梯度什么时候算齐。这就是自动微分引擎干的事,十几行代码，但顺序错了不会报错，只会给出偏小的梯度。',
+        '前向的每一步都在偷偷记账：算出来的张量记着「我是谁算出来的」（parents）和「怎么把梯度散回去」（backward 函数）。这张记账本叫`带`（tape），反向就是倒着读它一遍。',
+        '关键约束是：一个节点要往上散梯度之前，它自己的梯度必须**已经攒齐**,所有用到它的下游都得先算完。满足这个约束的顺序就是`拓扑序`，而后序遍历天然给出一个。',
+        '分水岭是`菱形图`:同一个中间结果被两处用到。这时它的梯度是两条路的**和**。一个在遍历时没有去重的实现，会把这个节点的 backward 调两次，梯度正好翻倍,而在一条直链上完全正常。所以「只在链上验过」是不够的。',
+        '播种也别忘：起点的梯度是 1，因为 `d(loss)/d(loss) = 1`。少了这一步整张图的梯度全是 0,不报错，表现和「学习率设成了 0」一模一样。',
+        '你写的这十几行就是 PyTorch autograd 的骨架。真实的那个多了跨线程的依赖计数、`retain_graph`、钩子、以及对不需要梯度的子图的剪枝,骨架是一样的。'
+      ),
+      p(
+        'Once every operator knows its own backward step, one thing is still missing: `scheduling`,who goes first, who goes last, and when a gradient is complete. That is what an autograd engine does. It is a dozen lines, and getting the order wrong raises no error; it simply produces gradients that are too small.',
+        'Every forward step quietly keeps a ledger: each resulting tensor records who produced it (its parents) and how to scatter gradients back (its backward function). That ledger is the `tape`, and the backward pass reads it in reverse.',
+        'The key constraint is that a node may only scatter once its own gradient is **complete**,every downstream user must have finished. An order satisfying that is a `topological order`, and a post-order traversal produces one for free.',
+        'The dividing line is the `diamond`: one intermediate used in two places. Its gradient is the **sum** of both paths. A traversal without deduplication calls that node backward twice and doubles the gradient,while behaving perfectly on a straight chain. Testing only on a chain is not enough.',
+        'Do not forget to seed: the root gradient is 1, because `d(loss)/d(loss) = 1`. Without it every gradient in the graph stays zero,no error, and symptoms identical to setting the learning rate to zero.',
+        'The dozen lines you write here are the skeleton of PyTorch autograd. The real one adds cross-thread dependency counting, `retain_graph`, hooks, and pruning of subgraphs that need no gradient,the skeleton is the same.'
+      )
+    ),
   },
 };
 

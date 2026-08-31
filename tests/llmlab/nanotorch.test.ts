@@ -11,13 +11,13 @@
  * 那段 Python 就在下面，是完整的、没有删节的 —— 它长什么样，
  * 学员在第 16 关要写的就是什么样。
  */
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { execFileSync } from 'child_process';
 import { createRuntime, type Runtime } from '../../src/lib/llmlab/bridge';
 import {
   createTrainSession, installNanotorch, loadPythonRuntime,
-  NANOTORCH_HASH, type TrainSession,
+  NANOTORCH_HASH, NANOTORCH_SOURCES, type TrainSession,
 } from '../../src/lib/llmlab/python';
 
 const ROOT = join(__dirname, '..', '..');
@@ -138,8 +138,13 @@ describe('生成物的新鲜度', () => {
     ).not.toThrow();
   });
 
-  it('指纹是六个源文件算出来的', () => {
+  it('指纹是全部源文件算出来的', () => {
     expect(NANOTORCH_HASH).toHaveLength(16);
+    // 数量对不上说明新加的 .py 没进生成物 —— 那种情况下 import 会在浏览器里才炸
+    const names = readdirSync(join(ROOT, 'src', 'lib', 'llmlab', 'python', 'nanotorch'))
+      .filter((n) => n.endsWith('.py'));
+    const embedded = Object.keys(NANOTORCH_SOURCES).map((k) => k.replace(/^nanotorch\//, ''));
+    expect(embedded.sort()).toEqual(names.sort());
   });
 });
 
@@ -219,6 +224,144 @@ class M(nn.Module):
 
 M().num_parameters()
 `)).toBe(12);
+  });
+
+  /*
+   * `F.gemm` 的三种转置模式。写自定义算子的反向全靠它，
+   * **一旦某个模式的 m/n/k 对错了，梯度会静静地错掉**，
+   * 而形状检查未必拦得住（方阵上尤其拦不住）。
+   * 所以这里用非方阵，并逐元素对着手算的结果比。
+   */
+  it('F.gemm 的 nn / nt / tn 三种模式都算对了', () => {
+    const out = session.py.run(`
+import json
+import nanotorch as nt
+from nanotorch import functional as F
+
+# A: 2x3, B: 3x2
+a = nt.zeros((2, 3), role="data"); a.set_([1, 2, 3, 4, 5, 6])
+b = nt.zeros((3, 2), role="data"); b.set_([1, 2, 3, 4, 5, 6])
+nn_ = F.gemm(a, b, 2, 2, 3, "nn").tolist()
+
+# nt: A[2,3] @ B[2,3]^T -> [2,2]
+c = nt.zeros((2, 3), role="data"); c.set_([1, 0, 0, 0, 1, 0])
+nt_ = F.gemm(a, c, 2, 2, 3, "nt").tolist()
+
+# tn: A[2,3]^T @ B[2,2] -> [3,2]
+d = nt.zeros((2, 2), role="data"); d.set_([1, 0, 0, 1])
+tn_ = F.gemm(a, d, 3, 2, 2, "tn").tolist()
+
+json.dumps({"nn": nn_, "nt": nt_, "tn": tn_})
+`) as string;
+    const r = JSON.parse(out);
+    // [[1,2,3],[4,5,6]] @ [[1,2],[3,4],[5,6]] = [[22,28],[49,64]]
+    expect(r.nn).toEqual([22, 28, 49, 64]);
+    // [[1,2,3],[4,5,6]] @ [[1,0,0],[0,1,0]]^T = [[1,2],[4,5]]
+    expect(r.nt).toEqual([1, 2, 4, 5]);
+    // [[1,2,3],[4,5,6]]^T @ I = [[1,4],[2,5],[3,6]]
+    expect(r.tn).toEqual([1, 4, 2, 5, 3, 6]);
+  });
+
+  /*
+   * `no_grad` 里不建带。这不是省一点点 —— 评测和生成循环里，
+   * **建带意味着每一层的激活都要留到反向**，显存差出好几倍。
+   */
+  it('no_grad 里的算子不挂反向，出了作用域又恢复', () => {
+    const out = session.py.run(`
+import json
+import nanotorch as nt
+from nanotorch import functional as F
+
+x = nt.parameter((2, 2), 1, 0.02)
+inside = None
+with nt.no_grad():
+    y = F.linear(x, x)
+    inside = [y.requires_grad, nt.is_grad_enabled()]
+z = F.linear(x, x)
+json.dumps({"inside": inside, "after": [z.requires_grad, nt.is_grad_enabled()]})
+`) as string;
+    const r = JSON.parse(out);
+    expect(r.inside).toEqual([false, false]);
+    expect(r.after).toEqual([true, true]);
+  });
+
+  /*
+   * `autograd.Function`：自己写的反向要真的被引擎调到，而且是**累加**进去的。
+   *
+   * 这一条用一个**分叉**的图：同一个 x 走两条自定义算子再相加。
+   * 反向如果是赋值而不是累加，第二条会把第一条的梯度盖掉 ——
+   * 单链的表达式上完全看不出来，只有分叉才暴露。
+   */
+  it('autograd.Function 的反向被调到，而且梯度是累加的', () => {
+    const out = session.py.run(`
+import json
+import nanotorch as nt
+from nanotorch import functional as F
+
+class Twice(nt.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        return F.scale(x, 2.0)
+    @staticmethod
+    def backward(ctx, go):
+        return F.scale(go, 2.0)
+
+class Thrice(nt.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        return F.scale(x, 3.0)
+    @staticmethod
+    def backward(ctx, go):
+        return F.scale(go, 3.0)
+
+x = nt.parameter((4,), None, 0.0)          # 全 1
+x.set_([1.0, 2.0, 3.0, 4.0])
+y = F.add(Twice.apply(x), Thrice.apply(x))  # y = 5x，分叉
+# 直接给 y 灌一份全 1 的梯度，倒着走
+g = y.ensure_grad(); g.set_([1.0, 1.0, 1.0, 1.0])
+topo, seen = [], set()
+def visit(t):
+    if id(t) in seen: return
+    seen.add(id(t))
+    for p in t._parents: visit(p)
+    topo.append(t)
+visit(y)
+for t in reversed(topo):
+    if t._backward is not None:
+        t._backward()
+
+json.dumps({"fwd": y.tolist(), "grad": x.grad.tolist()})
+`) as string;
+    const r = JSON.parse(out);
+    expect(r.fwd).toEqual([5, 10, 15, 20]);
+    // 2 + 3 = 5，两条分支各加各的
+    expect(r.grad).toEqual([5, 5, 5, 5]);
+  });
+
+  /*
+   * `forward` 跑在 no_grad 里 —— 所以里面调 `F.linear` 也不会挂上内建的反向。
+   * 挂了的话反向会走两遍（引擎一遍、你的 backward 一遍），梯度正好翻倍，
+   * 而这个错在梯度检验里表现为「差了整整一倍」，很容易被误读成学习率的问题。
+   */
+  it('Function.forward 里的内建算子不会额外挂一份反向', () => {
+    expect(session.py.run(`
+import nanotorch as nt
+from nanotorch import functional as F
+
+class Id(nt.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        y = F.scale(x, 1.0)
+        # forward 内部产生的中间量不该带 parents
+        return y
+    @staticmethod
+    def backward(ctx, go):
+        return go
+
+x = nt.parameter((2,), None, 0.0)
+y = Id.apply(x)
+len(y._parents)
+`)).toBe(1);
   });
 
   /*

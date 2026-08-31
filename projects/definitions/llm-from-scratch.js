@@ -3761,6 +3761,1008 @@ const STAGE_KVCACHE = {
   ),
 };
 
+/* ================================================================== */
+/* 第 9 关：手写一个算子的反向                                          */
+/* ================================================================== */
+
+const STAGE_MANUAL_BWD = {
+  id: 'manual-backward',
+  title: t('手写反向 —— 矩阵乘与交叉熵', 'Backward by hand — matmul and cross-entropy'),
+  goal: t(
+    code`
+      在 \`mygrad.py\` 里写两个自定义算子，**前向和反向都自己来**。
+      形状照 \`torch.autograd.Function\`：
+
+      \`\`\`python
+      class LinearFn(nt.autograd.Function):
+          @staticmethod
+          def forward(ctx, x, w):
+              ctx.save_for_backward(x, w)
+              return F.linear(x, w)
+
+          @staticmethod
+          def backward(ctx, grad_output):
+              x, w = ctx.saved_tensors
+              return dx, dw          # 顺序对着 forward 里的张量参数
+      \`\`\`
+
+      \`forward\` 跑在 \`no_grad\` 里，所以你在里面调 \`F.linear\` 也**不会**挂上
+      内建的反向 —— 挂了的话反向会走两遍（引擎一遍、你的 \`backward\` 一遍），
+      梯度正好翻倍。PyTorch 里这件事同样是自动的，只是藏得更深。
+
+      ## 矩阵乘的反向
+
+      \`y = x @ W\`，\`x\` 是 \`[rows, din]\`，\`W\` 是 \`[din, dout]\`。链式法则给出：
+
+      \`\`\`
+      dx = dy @ Wᵀ        [rows, din]
+      dW = xᵀ @ dy        [din, dout]
+      \`\`\`
+
+      记住形状怎么对上就够了：**两个下标里，被消掉的那个是求和的维度。**
+      \`F.gemm(a, b, m, n, k, mode)\` 有 \`"nn"\` / \`"nt"\` / \`"tn"\` 三种模式,
+      名字照 BLAS 来，真的 cuBLAS 就是这三个转置标志：
+
+      \`\`\`python
+      dx = F.gemm(dy, w, rows, din, dout, "nt")     # dy @ Wᵀ
+      dw = F.gemm(x, dy, din, dout, rows, "tn")     # xᵀ @ dy
+      \`\`\`
+
+      ## 交叉熵的反向
+
+      这是整套里最漂亮的一个结果。softmax 加交叉熵合起来求导，
+      中间那一大堆全消掉了，只剩：
+
+      \`\`\`
+      dlogits = (softmax(logits) − onehot(targets)) / rows
+      \`\`\`
+
+      「预测的概率减去真实的概率」—— 就这么一句。
+      这也是为什么真实框架总把 softmax 和交叉熵**融在一个算子里**：
+      分开算不但慢，还要在中间存一个 \`[rows, vocab]\` 的雅可比。
+
+      \`F.softmax\` 与 \`F.one_hot\` 都有了。别忘了乘上游传下来的 \`grad_output\` ——
+      虽然从 loss 出发时它就是 1，但**写对了才叫写对了**，
+      到第 11 关整模型反向、第 19 关梯度累积时它就不再是 1 了。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | 梯度检验 | **f64 中心差分**，最大相对误差 ≤ 2e-3 |
+      | 抽样量 | 至少 16 个元素（2 个张量 × 8 点） |
+      | 前向 | loss 与内建实现差 ≤ 1e-12 |
+      | 不退化 | 梯度不能几乎全是 0 |
+
+      ## 为什么梯度检验必须在 f64 上做
+
+      中心差分是 \`(f(x+h) − f(x−h)) / 2h\`。分子是两个几乎相等的数相减,
+      **灾难性抵消**，有效位数直接掉一大截。
+
+      fp32 只有 24 位尾数（约 7 位十进制）。抵消掉 4~5 位之后剩不下什么，
+      于是一个**完全正确**的反向也会量出 5e-2 量级的相对误差。
+      这个项目在实现阶段实测过这一条：同一份反向，f32 下 4.99e-2，f64 下 1.47e-5。
+
+      所以这一关的张量是 \`dtype="f64"\` 建的。**梯度检验挂了先看精度，再看代码。**
+    `,
+    code`
+      Write two custom operators in \`mygrad.py\`, **forward and backward both by hand**,
+      shaped like \`torch.autograd.Function\`:
+
+      \`\`\`python
+      class LinearFn(nt.autograd.Function):
+          @staticmethod
+          def forward(ctx, x, w):
+              ctx.save_for_backward(x, w)
+              return F.linear(x, w)
+
+          @staticmethod
+          def backward(ctx, grad_output):
+              x, w = ctx.saved_tensors
+              return dx, dw          # ordered like forward's tensor arguments
+      \`\`\`
+
+      \`forward\` runs under \`no_grad\`, so calling \`F.linear\` inside it does **not**
+      attach the built-in backward — if it did, the backward would run twice (once by the
+      engine, once by yours) and gradients would come out exactly doubled. PyTorch does the
+      same thing, just less visibly.
+
+      ## The backward of a matmul
+
+      For \`y = x @ W\` with \`x\` at \`[rows, din]\` and \`W\` at \`[din, dout]\`, the chain
+      rule gives:
+
+      \`\`\`
+      dx = dy @ Wᵀ        [rows, din]
+      dW = xᵀ @ dy        [din, dout]
+      \`\`\`
+
+      Remembering how the shapes line up is enough: **the index that cancels is the summed
+      dimension.** \`F.gemm(a, b, m, n, k, mode)\` offers \`"nn"\` / \`"nt"\` / \`"tn"\`,
+      named after BLAS — real cuBLAS has exactly these three transpose flags:
+
+      \`\`\`python
+      dx = F.gemm(dy, w, rows, din, dout, "nt")     # dy @ Wᵀ
+      dw = F.gemm(x, dy, din, dout, rows, "tn")     # xᵀ @ dy
+      \`\`\`
+
+      ## The backward of cross-entropy
+
+      This is the prettiest result in the whole set. Differentiate softmax together with
+      cross-entropy and everything in the middle cancels, leaving:
+
+      \`\`\`
+      dlogits = (softmax(logits) − onehot(targets)) / rows
+      \`\`\`
+
+      "Predicted probability minus true probability" — that is all of it. It is also why
+      real frameworks **fuse** softmax and cross-entropy into one operator: splitting them
+      is slower and forces a \`[rows, vocab]\` Jacobian into memory.
+
+      \`F.softmax\` and \`F.one_hot\` are available. Do not forget to multiply by the
+      incoming \`grad_output\`: it happens to be 1 when you start from the loss, but
+      **correct means correct** — by stage 11 and by gradient accumulation in stage 19 it
+      is no longer 1.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | Gradient check | **f64 central differences**, max relative error ≤ 2e-3 |
+      | Samples | At least 16 elements (2 tensors x 8 points) |
+      | Forward | Loss within 1e-12 of the built-in |
+      | Non-degenerate | Gradients must not be almost entirely zero |
+
+      ## Why the gradient check must run in f64
+
+      A central difference is \`(f(x+h) − f(x−h)) / 2h\`. The numerator subtracts two nearly
+      equal numbers — **catastrophic cancellation** — and loses a large chunk of the
+      significant digits.
+
+      fp32 has a 24-bit mantissa, roughly 7 decimal digits. Cancel four or five of them and
+      little remains, so a **perfectly correct** backward still measures a relative error
+      around 5e-2. This project measured exactly that during implementation: the same
+      backward gives 4.99e-2 in f32 and 1.47e-5 in f64.
+
+      That is why this stage builds its tensors with \`dtype="f64"\`. **When a gradient check
+      fails, suspect precision before you suspect the code.**
+    `
+  ),
+  checklist: [
+    t('LinearFn 的 dx 与 dw 形状都对', 'LinearFn produces dx and dw with the right shapes'),
+    t('CrossEntropyFn 的 dlogits = (p − onehot) / rows',
+      'CrossEntropyFn computes dlogits = (p - onehot) / rows'),
+    t('乘上了上游传下来的 grad_output', 'The incoming grad_output is multiplied in'),
+    t('f64 下的梯度检验通过', 'The f64 gradient check passes'),
+  ],
+  hints: [
+    t('ctx.save_for_backward(...) 存的东西在 ctx.saved_tensors 里按原顺序取回来。',
+      'What ctx.save_for_backward(...) stores comes back from ctx.saved_tensors in order.'),
+    t('非张量参数（rows / vocab）直接挂在 ctx 上就行：ctx.rows = rows。',
+      'Non-tensor arguments (rows / vocab) can just live on ctx: ctx.rows = rows.'),
+    t('backward 要给每个张量参数返回一份梯度，不需要的位置返回 None。',
+      'backward returns one gradient per tensor argument; return None where none is needed.'),
+  ],
+  pitfalls: [
+    t(code`
+      **忘了乘 \`grad_output\`。** 从 loss 出发时它是 1，所以这一关**照样能过**
+      前向和一部分检验 —— 直到这个算子被放进更深的图里，
+      上游传下来的不再是 1，梯度就整体错了一个因子。
+      这一关的用例专门用一个不为 1 的 \`grad_output\` 再验一遍。
+    `, code`
+      **Forgetting to multiply by \`grad_output\`.** Starting from the loss it equals 1, so
+      this stage would otherwise pass — right up until the operator sits deeper in a graph,
+      the incoming gradient is no longer 1, and every gradient is off by a factor. The
+      hidden cases re-check with a \`grad_output\` that is deliberately not 1.
+    `),
+    t(code`
+      **\`gemm\` 的 m / n / k 写反。** 方阵上完全看不出来:形状检查过得去，
+      数值也不离谱，只是梯度是转置过的。非方阵上才会报错，
+      而等你发现时已经训了半天。这一关用的是 6×5×4 三个都不相等的形状。
+    `, code`
+      **Swapping \`gemm\`'s m / n / k.** On square matrices nothing shows: shapes check out,
+      the numbers look plausible, and the gradient is merely transposed. Only non-square
+      shapes raise an error, by which point you have been training for a while. This stage
+      uses 6x5x4, all different.
+    `),
+  ],
+  train: {
+    files: {
+      'mygrad.py': code`
+        """第 9 关：手写矩阵乘与交叉熵的反向。"""
+        import nanotorch as nt
+        from nanotorch import functional as F
+
+
+        class LinearFn(nt.autograd.Function):
+            """y = x @ w。x 是 [rows, din]，w 是 [din, dout]。"""
+
+            @staticmethod
+            def forward(ctx, x, w):
+                ctx.save_for_backward(x, w)
+                return F.linear(x, w)
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                x, w = ctx.saved_tensors
+                # TODO: dx = dy @ wᵀ，dw = xᵀ @ dy
+                #       F.gemm(a, b, m, n, k, mode) 的 mode 是 "nn" / "nt" / "tn"
+                return None, None
+
+
+        class CrossEntropyFn(nt.autograd.Function):
+            """softmax + 交叉熵，返回平均 loss。"""
+
+            @staticmethod
+            def forward(ctx, logits, targets, rows, vocab):
+                ctx.save_for_backward(logits, targets)
+                ctx.rows, ctx.vocab = rows, vocab
+                return F.cross_entropy(logits, targets, rows, vocab)
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                logits, targets = ctx.saved_tensors
+                # TODO: dlogits = (softmax(logits) − onehot(targets)) / rows
+                #       再乘上游的 grad_output（它是个标量张量，用 .item() 读）
+                #       targets 不需要梯度，返回 None
+                return None, None
+
+
+        if __name__ == "__main__":
+            R, DIN, DOUT = 6, 5, 4
+            x = nt.parameter((R, DIN), 3, 0.5, "x", dtype="f64")
+            w = nt.parameter((DIN, DOUT), 7, 0.5, "w", dtype="f64")
+            tgt = nt.zeros((R,), role="data")
+            tgt.set_int_([0, 1, 2, 3, 1, 2])
+            loss = CrossEntropyFn.apply(LinearFn.apply(x, w), tgt, R, DOUT)
+            loss.backward()
+            print("loss %.6f" % loss.value)
+            print("dx 前几个", [round(v, 6) for v in x.grad.tolist()[:4]])
+      `,
+    },
+    referenceFiles: {
+      'mygrad.py': code`
+        """第 9 关的参考实现。"""
+        import nanotorch as nt
+        from nanotorch import functional as F
+
+
+        class LinearFn(nt.autograd.Function):
+            @staticmethod
+            def forward(ctx, x, w):
+                ctx.save_for_backward(x, w)
+                return F.linear(x, w)
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                x, w = ctx.saved_tensors
+                rows, din = x.shape[0], x.shape[1]
+                dout = w.shape[1]
+                # dx = dy @ wᵀ：消掉的是 dout
+                dx = F.gemm(grad_output, w, rows, din, dout, "nt")
+                # dw = xᵀ @ dy：消掉的是 rows
+                dw = F.gemm(x, grad_output, din, dout, rows, "tn")
+                return dx, dw
+
+
+        class CrossEntropyFn(nt.autograd.Function):
+            @staticmethod
+            def forward(ctx, logits, targets, rows, vocab):
+                ctx.save_for_backward(logits, targets)
+                ctx.rows, ctx.vocab = rows, vocab
+                return F.cross_entropy(logits, targets, rows, vocab)
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                logits, targets = ctx.saved_tensors
+                rows, vocab = ctx.rows, ctx.vocab
+                p = F.softmax(logits, rows, vocab)
+                hot = F.one_hot(targets, rows, vocab, dtype=logits.dtype)
+                # 「预测的概率减去真实的概率」—— softmax 与交叉熵合起来求导的全部结果
+                diff = F.add(p, F.scale(hot, -1.0))
+                dlogits = F.scale(diff, grad_output.item(0) / rows)
+                # targets 是下标，不求导
+                return dlogits, None
+
+
+        if __name__ == "__main__":
+            R, DIN, DOUT = 6, 5, 4
+            x = nt.parameter((R, DIN), 3, 0.5, "x", dtype="f64")
+            w = nt.parameter((DIN, DOUT), 7, 0.5, "w", dtype="f64")
+            tgt = nt.zeros((R,), role="data")
+            tgt.set_int_([0, 1, 2, 3, 1, 2])
+            loss = CrossEntropyFn.apply(LinearFn.apply(x, w), tgt, R, DOUT)
+            loss.backward()
+            print("loss %.6f" % loss.value)
+            print("dx 前几个", [round(v, 6) for v in x.grad.tolist()[:4]])
+      `,
+    },
+  },
+  specs: [
+    spec('mygrad.spec.ts', code`
+      ${LAB}
+
+      const R = 6, DIN = 5, DOUT = 4;
+
+      function setup() {
+        lab.py(\`
+      import sys, json
+      sys.path.insert(0, "/lab")
+      import importlib, mygrad
+      importlib.reload(mygrad)
+      import nanotorch as nt
+      from nanotorch import functional as F
+
+      R, DIN, DOUT = \${R}, \${DIN}, \${DOUT}
+      # f64：中心差分要在 f64 上做，f32 的抵消噪声比信号还大
+      _x = nt.parameter((R, DIN), 3, 0.5, "x", dtype="f64")
+      _w = nt.parameter((DIN, DOUT), 7, 0.5, "w", dtype="f64")
+      _tgt = nt.zeros((R,), role="data", name="tgt")
+      _tgt.set_int_([0, 1, 2, 3, 1, 2])
+
+      def _set(vals):
+          _x.set_(vals[:R * DIN])
+          _w.set_(vals[R * DIN:])
+
+      def _loss_only():
+          with nt.no_grad():
+              y = mygrad.LinearFn.apply(_x, _w)
+              return mygrad.CrossEntropyFn.apply(y, _tgt, R, DOUT).value
+
+      def _run():
+          _x.zero_grad()
+          _w.zero_grad()
+          y = mygrad.LinearFn.apply(_x, _w)
+          loss = mygrad.CrossEntropyFn.apply(y, _tgt, R, DOUT)
+          loss.backward()
+          return loss.value
+      \`);
+      }
+
+      describe('手写反向', () => {
+        it('前向和内建实现对得上', () => {
+          setup();
+          const mine = Number(lab.py('_loss_only()'));
+          const builtin = Number(lab.py(\`
+      with nt.no_grad():
+          _y = F.linear(_x, _w)
+          _b = F.cross_entropy(_y, _tgt, R, DOUT).value
+      _b
+      \`));
+          console.log('自己写的 ' + mine.toFixed(12) + '，内建 ' + builtin.toFixed(12));
+          lab.publish('loss.forwardError', Math.abs(mine - builtin));
+          expect(Math.abs(mine - builtin)).toBeLessThan(1e-12);
+        });
+
+        /*
+         * f64 中心差分。**这一条是这一关的全部** ——
+         * 反向写错了，前向照样跑得通、loss 照样是个正常的数。
+         */
+        it('f64 梯度检验：最大相对误差 ≤ 2e-3', () => {
+          setup();
+          const loss = Number(lab.py('_run()'));
+          const gx = JSON.parse(String(lab.py('json.dumps(_x.grad.tolist())')));
+          const gw = JSON.parse(String(lab.py('json.dumps(_w.grad.tolist())')));
+          const x0 = JSON.parse(String(lab.py('json.dumps(_x.tolist())')));
+          const w0 = JSON.parse(String(lab.py('json.dumps(_w.tolist())')));
+
+          const values = Float64Array.from([...x0, ...w0]);
+          const evalLoss = () => Number(lab.py('_set(' + JSON.stringify([...values]) + '); _loss_only()'));
+
+          const report = lab.probe.gradCheck([
+            { name: 'x', values: values.subarray(0, R * DIN), grad: Float64Array.from(gx) },
+            { name: 'w', values: values.subarray(R * DIN), grad: Float64Array.from(gw) },
+          ], evalLoss);
+
+          console.log(
+            'loss ' + loss.toFixed(6) + '；最大相对误差 ' + report.maxRelError.toExponential(2)
+            + '（最差在 ' + report.worstTensor + '），抽了 ' + report.checkedElements + ' 个元素'
+          );
+          lab.publish('grad.maxRelError', report.maxRelError);
+          lab.publish('grad.checkedElements', report.checkedElements);
+          expect(report.maxRelError).toBeLessThan(2e-3);
+          expect(report.checkedElements).toBeGreaterThanOrEqual(16);
+        });
+
+        /*
+         * 一个「backward 返回全 0」的实现，在相对误差上未必红得干净。
+         * 直接查非零比例，把退化的实现挡在外面。
+         */
+        it('梯度不是几乎全零', () => {
+          setup();
+          lab.py('_run()');
+          const gx = JSON.parse(String(lab.py('json.dumps(_x.grad.tolist())')));
+          const gw = JSON.parse(String(lab.py('json.dumps(_w.grad.tolist())')));
+          const all = [...gx, ...gw];
+          const nonZero = all.filter((v) => v !== 0).length / all.length;
+          console.log('非零比例 ' + (nonZero * 100).toFixed(1) + '%');
+          lab.publish('grad.nonZeroFraction', nonZero);
+          expect(nonZero).toBeGreaterThan(0.9);
+        });
+
+        /*
+         * 上游传下来的梯度不是 1 的时候，结果要按比例缩放。
+         * 忘了乘 grad_output 的实现在「从 loss 出发」时完全正常,
+         * 只有这一条能把它抓出来。
+         */
+        it('grad_output 不是 1 时，梯度按比例缩放', () => {
+          setup();
+          const scaled = JSON.parse(String(lab.py(\`
+      _x.zero_grad(); _w.zero_grad()
+      _y = mygrad.LinearFn.apply(_x, _w)
+      _loss = mygrad.CrossEntropyFn.apply(_y, _tgt, R, DOUT)
+      # 手动播一个 3.0 的种子，而不是 backward() 默认的 1.0
+      _g = _loss.ensure_grad(); _g.set_([3.0])
+      _topo, _seen = [], set()
+      def _visit(t):
+          if id(t) in _seen: return
+          _seen.add(id(t))
+          for p in t._parents: _visit(p)
+          _topo.append(t)
+      _visit(_loss)
+      for _t in reversed(_topo):
+          if _t._backward is not None: _t._backward()
+      json.dumps(_x.grad.tolist())
+      \`)));
+          const base = JSON.parse(String(lab.py(\`
+      _x.zero_grad(); _w.zero_grad()
+      _run()
+      json.dumps(_x.grad.tolist())
+      \`)));
+
+          let worst = 0;
+          for (let i = 0; i < base.length; i++) {
+            worst = Math.max(worst, Math.abs(scaled[i] - 3 * base[i]));
+          }
+          console.log('种子 3.0 与 3×（种子 1.0）的最大差 ' + worst.toExponential(2));
+          lab.publish('grad.upstreamScaleError', worst);
+          expect(worst).toBeLessThan(1e-12);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.grad.maxRelError', op: 'lte', value: 2e-3,
+      zh: 'f64 中心差分的最大相对误差', en: 'max relative error of the f64 central-difference check',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.grad.checkedElements', op: 'gte', value: 16,
+      zh: '抽查的元素数', en: 'elements sampled by the gradient check', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.grad.nonZeroFraction', op: 'gte', value: 0.9,
+      zh: '梯度里非零的比例', en: 'fraction of non-zero gradient entries', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.grad.upstreamScaleError', op: 'lte', value: 1e-12,
+      zh: '上游梯度不为 1 时的缩放误差', en: 'error when the incoming gradient is not 1',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness'],
+  extension: t(
+    code`
+      真实框架里，**softmax 与交叉熵是融在一起的**（\`F.cross_entropy\` 收的是
+      logits 不是概率）。理由有两个：一是省掉中间那块 \`[rows, vocab]\`,
+      在 vocab 15 万的模型上，batch 一大它就是好几个 GB；
+      二是数值稳定,分开算要先 exp 再 log，融在一起可以用 log-sum-exp 的形式，
+      不会在中间溢出。
+
+      你刚写的 \`(p − onehot) / rows\` 就是融合之后的那一个式子。
+      2026 年这块还在继续融：Liger-Kernel 这类实现把 lm_head 的矩阵乘
+      也一起融进去，分块地算 logits 和 loss，**峰值显存降一大半**,
+      对长上下文的后训练来说这不是优化，是能不能跑的问题。
+    `,
+    code`
+      In real frameworks **softmax and cross-entropy are fused** (\`F.cross_entropy\` takes
+      logits, not probabilities). Two reasons: it avoids materialising the
+      \`[rows, vocab]\` intermediate, which at a 150k vocabulary and a large batch is several
+      GB; and it is numerically stabler, since the fused form uses log-sum-exp instead of
+      exponentiating and then taking a log.
+
+      The \`(p − onehot) / rows\` you just wrote is exactly the fused expression. Fusion keeps
+      going in 2026: implementations like Liger-Kernel pull the lm_head matmul in as well,
+      computing logits and loss in chunks and **roughly halving peak memory** — for
+      long-context post-training that is not an optimisation but a precondition.
+    `
+  ),
+};
+
+/* ================================================================== */
+/* 第 10 关：自动微分引擎                                               */
+/* ================================================================== */
+
+const STAGE_ENGINE = {
+  id: 'autograd-engine',
+  title: t('自动微分引擎 —— 那条带是怎么倒着走的', 'The autograd engine — how the tape runs backwards'),
+  goal: t(
+    code`
+      在 \`engine.py\` 里自己写一遍反向传播的调度：
+
+      \`\`\`python
+      def backward(root):
+          """从一个标量出发，把整张图的梯度算出来。"""
+      \`\`\`
+
+      **这一关不许调用 \`Tensor.backward()\`** —— 用例会把它换成一个当场报错的桩。
+
+      ## 你手上有什么
+
+      每个张量上挂着两样东西，前面几关的算子已经把它们填好了：
+
+      \`\`\`python
+      t._parents     # 一个元组：算出 t 的那几个输入
+      t._backward    # 一个函数：把 t 的梯度散给它的 parents（不收参数）
+      \`\`\`
+
+      \`t._backward()\` 读的是 \`t.grad\`，写的是 \`t._parents\` 各自的 \`.grad\`,
+      **累加**进去，不是赋值。所以你要做的只有三件事：
+
+      1. 给起点播种：\`root.grad = 1\`（\`d(loss)/d(loss)\`）
+      2. 排出一个**拓扑序**
+      3. **倒着**走一遍，每个节点的 \`_backward\` 调**恰好一次**
+
+      ## 为什么必须是拓扑序
+
+      \`t._backward()\` 要求 \`t.grad\` 已经**攒齐**了 —— 所有用到 \`t\` 的下游都得先算完。
+      顺序错了不会报错，只会算出一个偏小的梯度：某个下游的贡献还没加上就先散出去了。
+
+      \`\`\`
+            x
+           / \\
+          a   b        ← a 和 b 都用了 x
+           \\ /
+            y
+      \`\`\`
+
+      这张**菱形**图是分水岭。\`x\` 要等 \`a\` 和 \`b\` 都算完才轮到它。
+      而如果你的实现在 DFS 里没有去重，\`x._backward\` 会被调两次,
+      梯度**正好翻倍**，而这在单链的表达式上完全看不出来。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | 数值 | 与内建引擎的结果差 ≤ 1e-9（f64） |
+      | **菱形图** | 同一个中间量被用两次时梯度要相加 |
+      | **每个节点恰好一次** | \`_backward\` 的最大调用次数 = 1 |
+      | 没抄近路 | 没调 \`Tensor.backward()\` |
+
+      「每个节点恰好一次」是这一关最锋利的一条:它不看数值，只数调用。
+      一个「多调了一次」的实现在某些图上数值碰巧还对得上，
+      但这条门槛不会放过它。
+
+      ## 一句题外话
+
+      你写的这十几行，就是 PyTorch \`autograd\` 引擎的骨架。
+      真实的那个多了：跨线程的依赖计数（不是一次性排好拓扑序，
+      而是每个节点记着「还有几个下游没来」）、\`retain_graph\`、
+      钩子、以及对不需要梯度的子图的剪枝。骨架是一样的。
+    `,
+    code`
+      Write the backward-pass scheduler yourself in \`engine.py\`:
+
+      \`\`\`python
+      def backward(root):
+          """Given a scalar, compute gradients across the whole graph."""
+      \`\`\`
+
+      **This stage forbids \`Tensor.backward()\`** — the hidden cases replace it with a stub
+      that raises.
+
+      ## What you have
+
+      Every tensor carries two things, already filled in by the operators from earlier
+      stages:
+
+      \`\`\`python
+      t._parents     # a tuple: the inputs that produced t
+      t._backward    # a function: scatter t's gradient to its parents (takes no arguments)
+      \`\`\`
+
+      \`t._backward()\` reads \`t.grad\` and writes into each parent's \`.grad\`,
+      **accumulating** rather than assigning. So there are only three things to do:
+
+      1. Seed the root: \`root.grad = 1\` (\`d(loss)/d(loss)\`)
+      2. Produce a **topological order**
+      3. Walk it **backwards**, calling each node's \`_backward\` **exactly once**
+
+      ## Why the order has to be topological
+
+      \`t._backward()\` requires \`t.grad\` to be **complete** — every downstream user of \`t\`
+      must have finished first. Getting this wrong raises nothing; it just produces a
+      gradient that is too small, because one downstream contribution had not arrived yet.
+
+      \`\`\`
+            x
+           / \\
+          a   b        ← both a and b use x
+           \\ /
+            y
+      \`\`\`
+
+      This **diamond** is the dividing line. \`x\` must wait for both \`a\` and \`b\`. And if
+      your DFS does not deduplicate, \`x._backward\` runs twice and the gradient comes out
+      **exactly doubled** — invisible on any single-chain expression.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | Numerics | Within 1e-9 of the built-in engine (f64) |
+      | **Diamond graph** | Gradients add when an intermediate is used twice |
+      | **Exactly once per node** | Maximum \`_backward\` call count = 1 |
+      | No shortcut | \`Tensor.backward()\` is not called |
+
+      "Exactly once per node" is the sharpest gate here: it ignores values and counts calls.
+      An implementation that calls one node twice can still land on the right numbers for
+      some graphs; this gate does not let it through.
+
+      ## An aside
+
+      The dozen lines you are writing are the skeleton of PyTorch's \`autograd\` engine. The
+      real one adds cross-thread dependency counting (rather than one precomputed
+      topological order, each node tracks how many downstream users remain),
+      \`retain_graph\`, hooks, and pruning of subgraphs that need no gradient. The skeleton
+      is the same.
+    `
+  ),
+  checklist: [
+    t('给起点播了 1 的种子', 'The root is seeded with 1'),
+    t('拓扑序排对了', 'The topological order is correct'),
+    t('每个节点的 _backward 恰好调一次', "Each node's _backward runs exactly once"),
+    t('菱形图上梯度是相加的', 'Gradients add on the diamond graph'),
+  ],
+  hints: [
+    t('DFS 里用 id(t) 去重 —— 张量没实现 __hash__ 的语义，别拿它当 set 的元素。',
+      'Deduplicate by id(t) in the DFS; tensors do not carry set-friendly hashing semantics.'),
+    t('后序遍历得到的就是拓扑序：先递归 parents，再把自己放进列表。',
+      'A post-order walk gives the topological order: recurse into parents first, then append.'),
+    t('叶子节点的 _backward 是 None，跳过就行。',
+      'Leaf nodes have _backward set to None; just skip them.'),
+  ],
+  pitfalls: [
+    t(code`
+      **DFS 没去重。** 菱形图上 \`x._backward\` 被调两次，梯度正好翻倍。
+      而单链的表达式（\`a -> b -> c -> loss\`）上完全正常 ——
+      如果你只拿一条链验过，这个错会一路活到整模型那一关。
+    `, code`
+      **A DFS without deduplication.** On a diamond, \`x._backward\` runs twice and the
+      gradient doubles, while a single chain (\`a -> b -> c -> loss\`) behaves perfectly. If
+      you only tested a chain, this survives all the way to the full-model stage.
+    `),
+    t(code`
+      **忘了播种。** \`root.grad\` 是 None 的话，第一个 \`_backward\` 什么都不做,
+      整张图的梯度全是 0。不报错，只是模型不学。
+      这个错的表现和「学习率是 0」一模一样，很容易查错方向。
+    `, code`
+      **Forgetting to seed.** With \`root.grad\` still None the first \`_backward\` does
+      nothing and every gradient in the graph stays zero. No error, just a model that does
+      not learn — indistinguishable from a zero learning rate, which sends you looking in
+      the wrong place.
+    `),
+  ],
+  train: {
+    forbidden: [],
+    files: {
+      'engine.py': code`
+        """第 10 关：自己写反向传播的调度。
+
+        不许调用 Tensor.backward()。
+        """
+        import nanotorch as nt
+
+
+        def backward(root):
+            """从标量 root 出发，把整张图的梯度算出来。"""
+            assert root.numel == 1, "backward 只能从标量出发"
+            # TODO: 1) 播种 root.grad = 1
+            #       2) 排一个拓扑序（后序遍历 _parents，用 id() 去重）
+            #       3) 倒着走，每个节点的 _backward 调恰好一次
+            return None
+
+
+        if __name__ == "__main__":
+            from nanotorch import functional as F
+            x = nt.parameter((4, 4), 1, 0.5, "x", dtype="f64")
+            w = nt.parameter((4, 4), 2, 0.5, "w", dtype="f64")
+            tgt = nt.zeros((4,), role="data")
+            tgt.set_int_([0, 1, 2, 3])
+            # 菱形：x 走两条路
+            y = F.add(F.linear(x, w), F.scale(x, 0.5))
+            loss = F.cross_entropy(y, tgt, 4, 4)
+            backward(loss)
+            print("dx 前几个", [round(v, 6) for v in (x.grad.tolist()[:4] if x.grad else [])])
+      `,
+    },
+    referenceFiles: {
+      'engine.py': code`
+        """第 10 关的参考实现。"""
+        import nanotorch as nt
+
+
+        def backward(root):
+            assert root.numel == 1, "backward 只能从标量出发"
+
+            # 1) 播种。d(loss)/d(loss) = 1 —— 少了这一步整张图的梯度全是 0
+            root.ensure_grad().fill_(1.0)
+
+            # 2) 拓扑序。后序遍历：先把 parents 排完，再把自己接在后面。
+            #    用 id() 去重 —— 菱形图里同一个节点会从两条路各来一次，
+            #    不去重的话它的 _backward 会被调两遍，梯度正好翻倍。
+            topo = []
+            seen = set()
+
+            def visit(t):
+                if id(t) in seen:
+                    return
+                seen.add(id(t))
+                for p in t._parents:
+                    visit(p)
+                topo.append(t)
+
+            visit(root)
+
+            # 3) 倒着走。倒着的理由：一个节点要等所有下游都把自己那份加完，
+            #    它的 grad 才是完整的，这时候才轮到它往上散。
+            for t in reversed(topo):
+                if t._backward is not None:
+                    t._backward()
+            return topo
+
+
+        if __name__ == "__main__":
+            from nanotorch import functional as F
+            x = nt.parameter((4, 4), 1, 0.5, "x", dtype="f64")
+            w = nt.parameter((4, 4), 2, 0.5, "w", dtype="f64")
+            tgt = nt.zeros((4,), role="data")
+            tgt.set_int_([0, 1, 2, 3])
+            y = F.add(F.linear(x, w), F.scale(x, 0.5))
+            loss = F.cross_entropy(y, tgt, 4, 4)
+            backward(loss)
+            print("dx 前几个", [round(v, 6) for v in x.grad.tolist()[:4]])
+      `,
+    },
+  },
+  specs: [
+    spec('engine.spec.ts', code`
+      ${LAB}
+
+      const N = 4;
+
+      /**
+       * 建一张**菱形**图：x 同时喂给 linear 和 scale，两条路再汇合。
+       * which 决定用学员的引擎还是内建的。
+       */
+      function build(which) {
+        lab.py(\`
+      import sys, json
+      sys.path.insert(0, "/lab")
+      import importlib, engine
+      importlib.reload(engine)
+      import nanotorch as nt
+      from nanotorch import functional as F
+
+      N = \${N}
+      _x = nt.parameter((N, N), 1, 0.5, "x", dtype="f64")
+      _w = nt.parameter((N, N), 2, 0.5, "w", dtype="f64")
+      _tgt = nt.zeros((N,), role="data")
+      _tgt.set_int_([0, 1, 2, 3])
+
+      def _graph():
+          global _y
+          _x.zero_grad(); _w.zero_grad()
+          # 菱形：_x 走两条路，汇合之后进 loss
+          _y = F.add(F.linear(_x, _w), F.scale(_x, 0.5))
+          return F.cross_entropy(_y, _tgt, N, N)
+      \`);
+
+        if (which === 'student') {
+          lab.py(\`
+      _loss = _graph()
+      _visits = {}
+      def _wrap(t, seen=None):
+          seen = seen if seen is not None else set()
+          if id(t) in seen: return
+          seen.add(id(t))
+          for p in t._parents: _wrap(p, seen)
+          if t._backward is not None:
+              _orig = t._backward
+              def _counted(_t=t, _o=_orig):
+                  _visits[id(_t)] = _visits.get(id(_t), 0) + 1
+                  _o()
+              t._backward = _counted
+      _wrap(_loss)
+
+      # 换掉内建的 backward —— 这一关要自己走，不许转手
+      def _forbidden(self, *a, **k):
+          raise RuntimeError("这一关不许调用 Tensor.backward()")
+      _saved = nt.Tensor.backward
+      nt.Tensor.backward = _forbidden
+      try:
+          engine.backward(_loss)
+      finally:
+          nt.Tensor.backward = _saved
+      \`);
+        } else {
+          lab.py('_loss = _graph()\\n_loss.backward()\\n_visits = {}');
+        }
+
+        return {
+          loss: Number(lab.py('_loss.value')),
+          gx: JSON.parse(String(lab.py('json.dumps(_x.grad.tolist() if _x.grad else [])'))),
+          gw: JSON.parse(String(lab.py('json.dumps(_w.grad.tolist() if _w.grad else [])'))),
+          maxVisits: Number(lab.py('max(_visits.values()) if _visits else 0')),
+          nodes: Number(lab.py('len(_visits)')),
+        };
+      }
+
+      describe('自动微分引擎', () => {
+        it('菱形图上的梯度和内建引擎一致', () => {
+          const mine = build('student');
+          const ref = build('builtin');
+          expect(mine.gx.length).toBe(N * N);
+          expect(ref.gx.length).toBe(N * N);
+
+          let worst = 0;
+          for (let i = 0; i < ref.gx.length; i++)
+            worst = Math.max(worst, Math.abs(mine.gx[i] - ref.gx[i]));
+          for (let i = 0; i < ref.gw.length; i++)
+            worst = Math.max(worst, Math.abs(mine.gw[i] - ref.gw[i]));
+
+          console.log(
+            'loss ' + mine.loss.toFixed(9) + '；与内建引擎的最大差 ' + worst.toExponential(2)
+          );
+          lab.publish('grad.engineError', worst);
+          expect(worst).toBeLessThan(1e-9);
+        });
+
+        /*
+         * 这一条不看数值，只数调用。
+         * 一个「DFS 没去重」的实现会把菱形的分叉点调两次 —— 梯度正好翻倍，
+         * 而它在单链上完全正常。
+         */
+        it('每个节点的 _backward 恰好调一次', () => {
+          const mine = build('student');
+          console.log('走过 ' + mine.nodes + ' 个节点，最多的那个调了 ' + mine.maxVisits + ' 次');
+          lab.publish('grad.maxVisits', mine.maxVisits);
+          lab.publish('grad.visitedNodes', mine.nodes);
+          // 菱形图至少有 linear / scale / add / cross_entropy 四个有反向的节点
+          expect(mine.nodes).toBeGreaterThanOrEqual(4);
+          expect(mine.maxVisits).toBe(1);
+        });
+
+        /*
+         * f64 中心差分。和内建一致还不够 —— 万一两边错得一样呢。
+         * 这一条对的是数学，不是另一份实现。
+         */
+        it('f64 梯度检验：最大相对误差 ≤ 2e-3', () => {
+          const mine = build('student');
+          const x0 = JSON.parse(String(lab.py('json.dumps(_x.tolist())')));
+          const w0 = JSON.parse(String(lab.py('json.dumps(_w.tolist())')));
+          lab.py(\`
+      def _set(vals):
+          _x.set_(vals[:N * N])
+          _w.set_(vals[N * N:])
+
+      def _loss_only():
+          with nt.no_grad():
+              _y = F.add(F.linear(_x, _w), F.scale(_x, 0.5))
+              return F.cross_entropy(_y, _tgt, N, N).value
+      \`);
+          const values = Float64Array.from([...x0, ...w0]);
+          const evalLoss = () => Number(lab.py('_set(' + JSON.stringify([...values]) + '); _loss_only()'));
+
+          const report = lab.probe.gradCheck([
+            { name: 'x', values: values.subarray(0, N * N), grad: Float64Array.from(mine.gx) },
+            { name: 'w', values: values.subarray(N * N), grad: Float64Array.from(mine.gw) },
+          ], evalLoss);
+
+          console.log(
+            '最大相对误差 ' + report.maxRelError.toExponential(2)
+            + '（最差在 ' + report.worstTensor + '）'
+          );
+          lab.publish('grad.maxRelError', report.maxRelError);
+          expect(report.maxRelError).toBeLessThan(2e-3);
+        });
+
+        /*
+         * 分叉点的梯度必须是两条路之和。
+         *
+         * 拆的时候要**固定 dL/dy** —— 直接把某条支路清零再重跑 loss 是不对的：
+         * 交叉熵是非线性的，改了 y 就改了 dL/dy，三次跑的根本不是同一个数。
+         * 所以这里先从学员那次反向里取出 dL/dy，再拿**同一份** dL/dy
+         * 分别喂给两条支路，最后看两份之和对不对得上。
+         */
+        it('分叉点的梯度等于两条路各自梯度之和（dL/dy 固定）', () => {
+          build('student');
+          const both = JSON.parse(String(lab.py('json.dumps(_x.grad.tolist())')));
+
+          const parts = JSON.parse(String(lab.py(\`
+      # 学员那次反向留下的 dL/dy —— 两条支路共用它（add 的反向就是原样分发）
+      _G = list(_y.grad.tolist())
+
+      def _one(make):
+          _x.zero_grad()
+          _out = make()
+          _g = _out.ensure_grad(); _g.set_(_G)
+          _out._backward()
+          return list(_x.grad.tolist())
+
+      _a = _one(lambda: F.linear(_x, _w))
+      _b = _one(lambda: F.scale(_x, 0.5))
+      json.dumps({"a": _a, "b": _b})
+      \`)));
+
+          let worst = 0;
+          for (let i = 0; i < both.length; i++)
+            worst = Math.max(worst, Math.abs(both[i] - (parts.a[i] + parts.b[i])));
+          console.log('菱形 vs 两条支路之和，最大差 ' + worst.toExponential(2));
+          lab.publish('grad.diamondError', worst);
+          expect(worst).toBeLessThan(1e-9);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.grad.engineError', op: 'lte', value: 1e-9,
+      zh: '与内建引擎的最大差', en: 'max difference from the built-in engine', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.grad.maxVisits', op: 'eq', value: 1,
+      zh: '单个节点 _backward 的最大调用次数', en: 'maximum _backward calls on any node',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.grad.maxRelError', op: 'lte', value: 2e-3,
+      zh: 'f64 中心差分的最大相对误差', en: 'max relative error of the f64 central-difference check',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.grad.diamondError', op: 'lte', value: 1e-9,
+      zh: '菱形图与两条单链之和的差', en: 'diamond graph versus the sum of two single chains',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness'],
+  extension: t(
+    code`
+      你写的是**一次性排好拓扑序**的版本。PyTorch 真实的引擎换了个等价的做法：
+      每个节点记一个「还有几个下游没来」的计数，计数归零才把它推进就绪队列。
+      好处是**能多线程跑** —— 就绪队列上的节点彼此独立。
+
+      另外两件真实引擎必须处理、这里回避掉的事：
+
+      **图默认用完就拆。** \`backward()\` 之后中间量就释放了，
+      再调一次会报 \`Trying to backward through the graph a second time\`。
+      要留就得 \`retain_graph=True\`,而这是显存泄漏最常见的来源之一。
+
+      **不需要梯度的子图要剪掉。** 冻结的层、\`no_grad\` 里的分支，
+      引擎不会为它们建节点。微调一个大模型时，这一步剪掉的往往是绝大部分。
+    `,
+    code`
+      You wrote the version that **precomputes one topological order**. PyTorch's real
+      engine uses an equivalent alternative: each node counts how many downstream users
+      remain, and enters a ready queue when that count hits zero. The advantage is
+      **multi-threading** — nodes in the ready queue are independent.
+
+      Two more things real engines must handle and this one sidesteps:
+
+      **The graph is freed after use.** After \`backward()\` the intermediates are released
+      and a second call raises \`Trying to backward through the graph a second time\`.
+      Keeping it requires \`retain_graph=True\` — one of the most common sources of memory
+      leaks.
+
+      **Subgraphs that need no gradient are pruned.** Frozen layers and branches inside
+      \`no_grad\` never get nodes at all. When fine-tuning a large model, that prunes the
+      vast majority of the graph.
+    `
+  ),
+};
+
 /* ------------------------------------------------------------------ */
 
 module.exports = {
@@ -3986,5 +4988,6 @@ module.exports = {
   stages: [
     STAGE_BPE, STAGE_BASELINE, STAGE_ATTENTION, STAGE_MHA,
     STAGE_ROPE, STAGE_NORM, STAGE_BLOCK, STAGE_KVCACHE,
+    STAGE_MANUAL_BWD, STAGE_ENGINE,
   ],
 };

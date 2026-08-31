@@ -37,6 +37,11 @@ export interface PythonBridge {
   fill_normal(id: number, seed: number, std: number): void;
   /** RoPE 的 cos/sin 表，同理 */
   fill_rope(cosId: number, sinId: number, blockSize: number, headDim: number, base: number): void;
+  /**
+   * one-hot。同理放在 JS 侧：Python 里逐元素写 rows×vocab 个数，
+   * 在真实的 batch 上（16×16×vocab）比整个前向还慢。
+   */
+  fill_one_hot(outId: number, idxId: number, rows: number, vocab: number): void;
   /* ---- 算子 ---- */
   gemm_nn(a: number, b: number, c: number, M: number, N: number, K: number): void;
   gemm_tn_acc(a: number, b: number, c: number, M: number, N: number, K: number): void;
@@ -162,6 +167,18 @@ export function createPythonBridge(rt: Runtime): PythonBridge {
       const view = arena.view(t);
       const gen = normalFiller(seed);
       for (let i = 0; i < t.count; i++) view[i] = gen() * std;
+    },
+    fill_one_hot(outId, idxId, rows, vocab) {
+      const out = arena.view(T(outId));
+      const idx = arena.i32(T(idxId));
+      out.fill(0);
+      for (let r = 0; r < rows; r++) {
+        const t = idx[r];
+        if (t < 0 || t >= vocab) {
+          throw new Error(`one_hot 的第 ${r} 个下标是 ${t}，不在 [0, ${vocab}) 里`);
+        }
+        out[r * vocab + t] = 1;
+      }
     },
     fill_rope(cosId, sinId, blockSize, headDim, base) {
       const half = headDim / 2;
