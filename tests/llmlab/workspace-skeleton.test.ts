@@ -134,7 +134,11 @@ describe('train 形态：平台接线', () => {
     );
     expect(source).toContain('还没接上');
     expect(source).toContain('Python 运行时未接入');
-    // 验收按钮在运行时接进来之前必须是禁用的，不能点了没反应
-    expect(source).toMatch(/leftSection=\{<IconPlayerPlay size=\{14\} \/>\} disabled/);
+    // 验收按钮在运行时接进来之前必须是禁用的，不能点了没反应。
+    // 正则写得松一点：这条查的是「有没有 disabled」，不该被一次换行改动搞红
+    // `[^>]*` 在这里不行：属性里嵌着 `<IconPlayerPlay ... />`，自己带 `>`
+    expect(source).toMatch(/<Button[\s\S]{0,200}?\sdisabled[\s>]/);
+    // 判定运行时还没有 —— 有了就该把上面那个 disabled 一起去掉
+    expect(source).not.toContain('runTrainStage(');
   });
 });

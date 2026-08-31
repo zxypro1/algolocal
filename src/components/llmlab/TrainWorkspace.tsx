@@ -18,14 +18,14 @@
  * 草稿真的存得住**（走 `stage.train.files` + `handleFileChange`）。
  * 还没接的三块面板各自明说自己在等什么，而不是渲染一块空白。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert, AppShell, Badge, Button, Code, Group, List,
   ScrollArea, Select, Stack, Tabs, Text, Tooltip,
 } from '@mantine/core';
 import {
   IconChartLine, IconFileCode, IconInfoCircle, IconMessages,
-  IconPlayerPlay, IconTable, IconTerminal2,
+  IconPlayerPlay, IconRobot, IconTable, IconTerminal2,
 } from '@tabler/icons-react';
 import { useMantineColorScheme } from '@mantine/core';
 import Editor from '@monaco-editor/react';
@@ -121,12 +121,21 @@ export default function TrainWorkspace({ session, registerClearResults }: TrainW
    * 优先取草稿（`files` 里那份，键是 `关卡id::路径`，由 buildStageFiles 铺好），
    * 没有草稿才回退到关卡的初始内容 —— 少了这一步，学员切走再切回来
    * 改的东西就没了（#108 修的就是这个）。
+   *
+   * **只在换文件 / 换关卡时重读，之后内容由 Monaco 自己维护**（同 GpuWorkspace）。
+   * 把 `files` 放进依赖的话，每敲一个字都会重算出一个新的 `value` 喂回去 ——
+   * 而草稿的写入是攒批的，回来的那一份可能比编辑器里的旧一拍，光标会跳。
+   * 所以这里用 ref 读最新的一份，依赖只留「该重读了」的那两个信号。
    */
+  const filesRef = useRef(files);
+  filesRef.current = files;
+
   const editorValue = useMemo(() => {
     if (!activePath) return '';
-    const draft = files.find((file) => file.path === activePath);
+    const draft = filesRef.current.find((file) => file.path === activePath);
     return draft?.content ?? stage?.train?.files?.[activePath] ?? '';
-  }, [activePath, files, stage?.train?.files]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePath, stage?.id]);
 
   const handleEditorChange = useCallback((value?: string) => {
     if (!activePath || value === undefined) return;
@@ -213,6 +222,14 @@ export default function TrainWorkspace({ session, registerClearResults }: TrainW
                         ))}
                       </Stack>
                     )}
+                    {(stage.hints ?? []).length > 0 && (
+                      <Stack gap={4} mt="md">
+                        <Text size="xs" fw={600} c="dimmed">提示</Text>
+                        {(stage.hints ?? []).map((item, index) => (
+                          <Text key={index} size="xs" c="dimmed">· {pick(item)}</Text>
+                        ))}
+                      </Stack>
+                    )}
                     {(stage.pitfalls ?? []).length > 0 && (
                       <Stack gap={6} mt="md">
                         <Text size="xs" fw={600} c="dimmed">常见坑</Text>
@@ -249,6 +266,7 @@ export default function TrainWorkspace({ session, registerClearResults }: TrainW
                   <Tabs.Tab value="train" fz="xs" leftSection={<IconChartLine size={13} />}>训练</Tabs.Tab>
                   <Tabs.Tab value="tensor" fz="xs" leftSection={<IconTable size={13} />}>张量</Tabs.Tab>
                   <Tabs.Tab value="samples" fz="xs" leftSection={<IconMessages size={13} />}>样例</Tabs.Tab>
+                  <Tabs.Tab value="chat" fz="xs" leftSection={<IconRobot size={13} />}>AI 助手</Tabs.Tab>
                 </Tabs.List>
 
                 <Tabs.Panel value="terminal" style={{ flex: 1, minHeight: 0 }}>
@@ -334,6 +352,23 @@ export default function TrainWorkspace({ session, registerClearResults }: TrainW
                       '生成样例，token 按 logprob 着色',
                       'SFT 前后对比、偏好对（chosen / rejected）与 reward',
                       'GRPO 的一组 rollout，每条带 reward 与 advantage，组内均值画在旁边',
+                    ]}
+                  />
+                </Tabs.Panel>
+
+                {/*
+                  AI 助手与复盘（左栏那一页）跟 ops / gpu 是同一套，
+                  但喂给它的上下文得是 train 世界的 —— 模型档位、loss 曲线、
+                  梯度检验的结果。世界还没有，所以这里先明说，而不是先摆一个
+                  拿不到上下文的聊天框。
+                */}
+                <Tabs.Panel value="chat" style={{ flex: 1, minHeight: 0 }}>
+                  <Pending
+                    title="AI 助手"
+                    waitingFor="train 世界（`@llm/lab`）—— 助手要读得到档位、指标与训练历史"
+                    willShow={[
+                      '带上当前关卡、门槛、学员代码与最近一次训练结果的对话',
+                      '左栏还会多一页「复盘」，和 ops / gpu 一样是一篇从头读到尾的长文',
                     ]}
                   />
                 </Tabs.Panel>
