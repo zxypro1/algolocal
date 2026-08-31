@@ -17,3 +17,7 @@ public/opslab/wasm_exec.js
 .opslab-build/
 # wasi-sdk 的下载与解压目录（约 180MB）。算子核产物本身是入库的，见 design/llmlab.md
 .llmlab-build/
+# Pyodide 的运行时资产由 copy-lab-assets.js 从 node_modules 拷过来（13.5MB），
+# 和 labkit / gpulab 的 wasm 一样是构建产物，不进仓库。
+# 注意**不要**顺手写成 public/llmlab/*：算子核 llmlab-kernels.wasm 是入库的。
+public/llmlab/pyodide/

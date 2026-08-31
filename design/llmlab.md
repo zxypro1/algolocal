@@ -931,7 +931,8 @@ gpulab 那份文档里「移动，不抽象」那条论证在这里原样成立�
 | 1 | 平台接线与工作台分发：`WorkspaceKind` 加 `'train'`、`TrainWorkspaceSpec` / `TrainStageSpec`、`LabMetrics.llm`、草稿路径认 `stage.train.files`、分发页接上 `TrainWorkspace`（六块面板骨架，IDE 真能改文件）、原型入库、`tests/llmlab` 进测试清单 | ✅ |
 | 2 | WASM 算子核（C + clang）与构建链：25 个算子 × f32/f64 两份实例化、自写 exp/log、37KB 零 import 产物入库、`--check` 字节比对进 release.yml、打包白名单加闸门 | ✅ |
 | 3 | JS 桥（张量 / 竞技场 / 计量）+ **TS 参考 transformer**：整模型 f64 梯度检验最差 1.47e-5，归纳任务 800 步 loss 2.834 → 1.238（信息论地板 1.213），两遍训练逐位一致 | ✅ |
-| 4 | Pyodide 装配 + nanotorch 骨架 + **竖切：真训 300 步，一条门槛通过/失败** | — |
+| 4a | Pyodide 装配：本地资产（5 个文件 13.5MB）、离线、`PYTHONHASHSEED` 钉死、stdout、虚拟 FS、打包白名单 | ✅ |
+| 4b | nanotorch + **竖切：Python 里真训一个模型，一条门槛通过/失败** | — |
 
 **这一段的完成标准是「竖切跑通」，不是「组件写完」。**
 
@@ -972,3 +973,14 @@ loss 掉下来只可能来自注意力真的在工作。第 16 关那条「打�
 地板算成 1.294，比模型实际达到的 1.229 还高。一个「跑出来比理论极限还好」的结果
 本该立刻引起怀疑 —— 它确实引起了，然后发现是分母错了。
 **门槛的分母也要有人验**，不能只验分子。
+
+### 顺带发现：算法题那边的 Python 是走 CDN 的（第 4a 片）
+
+`src/hooks/useWasmExecutor.ts` 里给**算法题**用的 Python 执行器，
+是从 `cdn.jsdelivr.net` 现下 Pyodide 0.26.4 的。这与「100% 离线」的定位矛盾：
+断网时那个语言选项直接不可用。
+
+**不在这一片里顺手改** —— 它是另一个功能的路径，版本还要从 0.26 跳到 314
+（Python 3.12 → 3.14），得回归整个题库的 Python 参考解。已经单独记成一条待办。
+但值得写在这里：llmlab 把 Pyodide 打进包之后，那件事的成本从「引入一个 13.5MB 的依赖」
+降到了「改一个 indexURL」。

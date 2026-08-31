@@ -62,6 +62,14 @@ module.exports = {
     // 所以没有对应的 `!public/llmlab/*.wasm` 排除行 —— 那条排除是用来挡
     // 别人工作区遗留的旧产物的，而这个文件根本不会有旧版本躺在那儿。
     'public/llmlab/llmlab-kernels.wasm',
+    // Pyodide 的运行时（13.5MB）。这五个少一个 Python 都起不来，
+    // 而「起不来」的表现是学员点进关卡看到一个转不完的圈。
+    '!public/llmlab/pyodide/*',
+    'public/llmlab/pyodide/pyodide.mjs',
+    'public/llmlab/pyodide/pyodide.asm.mjs',
+    'public/llmlab/pyodide/pyodide.asm.wasm',
+    'public/llmlab/pyodide/python_stdlib.zip',
+    'public/llmlab/pyodide/pyodide-lock.json',
     'problems/**/*',
     'projects/**/*',
     'locales/**/*',
@@ -140,6 +148,13 @@ module.exports = {
     // 算子核也解包：`createKernels` 走的是同步的 `new WebAssembly.Module`，
     // 留在 asar 里要先整份读进内存。37KB 的代价不大，但没有理由不解。
     'public/llmlab/llmlab-kernels.wasm',
+    // Pyodide 同样解包：9.6MB 的 wasm 留在 asar 里，编译前要先整份读进内存，
+    // 启动慢一倍、峰值内存也翻倍（opslab 那个 142MB 的教训，量级小一点而已）。
+    'public/llmlab/pyodide/pyodide.mjs',
+    'public/llmlab/pyodide/pyodide.asm.mjs',
+    'public/llmlab/pyodide/pyodide.asm.wasm',
+    'public/llmlab/pyodide/python_stdlib.zip',
+    'public/llmlab/pyodide/pyodide-lock.json',
     'public/icon.png',
     'public/favicon.ico'
   ],

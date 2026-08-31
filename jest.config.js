@@ -35,5 +35,13 @@ module.exports = async () => {
   config.transformIgnorePatterns = (config.transformIgnorePatterns || []).map((pattern) =>
     pattern === '/node_modules/' ? '/node_modules/(?!@marcbachmann/)' : pattern
   )
+  /*
+   * Pyodide 的运行时资产被 copy-lab-assets.js 拷进了 public/，也就是**项目内**，
+   * 于是 jest 默认会去 transform 它们 —— 而 `pyodide.asm.mjs` 是一个正经的 ESM，
+   * 被 babel 转成 CJS 之后当场 `ReferenceError: exports is not defined`。
+   *
+   * 它们是别人编好的产物，不该被我们的 transform 碰。
+   */
+  config.transformIgnorePatterns.push('<rootDir>/public/llmlab/pyodide/')
   return config
 }
