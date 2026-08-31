@@ -6891,6 +6891,1115 @@ const STAGE_CLIP = {
   ),
 };
 
+/* ================================================================== */
+/* 第 15 关：数据打包与跨文档泄漏                                        */
+/* ================================================================== */
+
+const STAGE_PACKING = {
+  id: 'data-packing',
+  title: t('数据打包 —— 别让一篇看见另一篇', 'Packing the data — one document must not see another'),
+  goal: t(
+    code`
+      语料是一篇篇长短不一的文档，模型要的是定长的块。怎么把前者变成后者，
+      有两种做法，差别很大。
+
+      在 \`packing.py\` 里实现打包和掩码：
+
+      \`\`\`python
+      def pack(docs, block_size, eos_id):
+          """docs 是若干个 token 列表。返回 (blocks, doc_ids, stats)。
+
+          blocks:  [[block_size + 1 个 token], ...]   多一个是给目标位移用的
+          doc_ids: [[block_size 个编号], ...]         每个位置属于第几篇
+          stats:   {"padded": 填充的个数, "total": 总个数}
+          """
+
+      def attn_bias(doc_ids, batch, heads, seq, neg=-1e30):
+          """加性掩码，形状 (batch, heads, seq, seq)。
+
+          同一篇**且** j <= i 的位置是 0，其余是 neg。
+          对应 PyTorch 的 scaled_dot_product_attention(attn_mask=...)。"""
+      \`\`\`
+
+      ## 两种做法
+
+      **一篇一块，不够就填。** 简单，但这一关的语料里句子长度从 16 到 97 不等,
+      按 32 一块算，填充率超过 **30%**。三分之一的算力花在填充符上。
+
+      **拼成一条流再切。** 每篇末尾加一个 \`EOS\` 标出边界，全部首尾相接，
+      然后按 \`block_size\` 切开。填充率接近 **0**,只有最后那一块的尾巴。
+      代价是**一块里可能横跨两三篇**。
+
+      真实预训练用的都是第二种。填充率不是省一点点的问题:
+      30% 的填充意味着 30% 的算力、30% 的显存、30% 的时间白花。
+
+      ## 代价：跨文档泄漏
+
+      拼起来之后，第 5 个位置（属于第 1 篇）和第 20 个位置（属于第 2 篇）在同一块里。
+      因果掩码只管「不许看未来」，**它不知道文档边界** ——
+      于是第 2 篇的位置能看见第 1 篇的内容。
+
+      这件事的后果不是「错一点」，而是**模型学到了不存在的关系**。
+      两篇毫不相干的文档被当成上下文连在一起；训练 loss 甚至会更低
+      （信息更多了），而模型在真实使用中拿不到这种上下文。
+
+      所以要一个**块对角**的掩码：只有同一篇之间才允许注意。
+
+      \`\`\`
+          j:  0 1 2 | 3 4 5      ← 竖线是文档边界
+      i=0     ✓ · · | · · ·
+      i=1     ✓ ✓ · | · · ·
+      i=2     ✓ ✓ ✓ | · · ·
+      i=3     · · · | ✓ · ·      ← 第 2 篇的第一个位置只看得见自己
+      i=4     · · · | ✓ ✓ ·
+      i=5     · · · | ✓ ✓ ✓
+      \`\`\`
+
+      ## 为什么是加性掩码，不是 valid 长度
+
+      前面几关的因果掩码写成「每行能看到前多少个」—— 那是个**前缀长度**，
+      表达不了「从第 3 列到第 5 列」这种**区间**。
+      块对角掩码需要区间，所以换成加性掩码：把不许看的位置加上一个很大的负数，
+      softmax 之后它们是**硬 0**（\`exp\` 直接下溢）。
+
+      PyTorch 的 \`attn_mask\` 就是这个形式。两种表示各有各的用处 ——
+      前缀长度更省（一行一个整数），加性掩码更通用。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | 一个 token 不丢不重 | 拼出来的流与「逐篇加 EOS 首尾相接」逐个相同 |
+      | 填充率 | ≤ **2%**（一篇一块的对照是 30% 以上） |
+      | **跨文档泄漏** | 不同篇之间的注意力概率**恒为 0** |
+      | 因果性 | 未来位置的概率也恒为 0 |
+    `,
+    code`
+      A corpus is documents of varying length; a model wants fixed-length blocks. There are
+      two ways to get from one to the other, and they differ a lot.
+
+      Implement packing and masking in \`packing.py\`:
+
+      \`\`\`python
+      def pack(docs, block_size, eos_id):
+          """docs is a list of token lists. Returns (blocks, doc_ids, stats).
+
+          blocks:  [[block_size + 1 tokens], ...]   the extra one is for the target shift
+          doc_ids: [[block_size ids], ...]          which document each position belongs to
+          stats:   {"padded": padding count, "total": total count}
+          """
+
+      def attn_bias(doc_ids, batch, heads, seq, neg=-1e30):
+          """Additive mask of shape (batch, heads, seq, seq).
+
+          Zero where the documents match **and** j <= i, neg elsewhere.
+          Mirrors PyTorch's scaled_dot_product_attention(attn_mask=...)."""
+      \`\`\`
+
+      ## Two approaches
+
+      **One document per block, padded.** Simple, but sentence lengths here run from 16 to
+      97, so at a block size of 32 the padding rate exceeds **30%**. A third of the compute
+      goes into padding symbols.
+
+      **Concatenate into one stream, then cut.** Append an \`EOS\` to each document to mark
+      the boundary, join them end to end, and cut every \`block_size\` tokens. Padding drops
+      to nearly **zero** — only the final tail. The cost is that **a block may span two or
+      three documents**.
+
+      Real pretraining uses the second. Padding is not a minor saving: 30% padding means
+      30% of the compute, memory and time is wasted.
+
+      ## The cost: cross-document leakage
+
+      After concatenation, position 5 (document 1) and position 20 (document 2) sit in the
+      same block. The causal mask only enforces "no looking ahead"; **it knows nothing about
+      document boundaries** — so document 2 can see document 1.
+
+      The consequence is not "slightly wrong" but **a model that learns relationships which
+      do not exist**. Two unrelated documents get treated as one context; training loss may
+      even improve (more information), while at inference that context is never there.
+
+      So the mask has to be **block-diagonal**: attention only within a document.
+
+      \`\`\`
+          j:  0 1 2 | 3 4 5      <- the bar is a document boundary
+      i=0     ✓ · · | · · ·
+      i=1     ✓ ✓ · | · · ·
+      i=2     ✓ ✓ ✓ | · · ·
+      i=3     · · · | ✓ · ·      <- document 2's first position sees only itself
+      i=4     · · · | ✓ ✓ ·
+      i=5     · · · | ✓ ✓ ✓
+      \`\`\`
+
+      ## Why an additive mask rather than valid lengths
+
+      Earlier stages wrote the causal mask as "how many keys each row may see" — a
+      **prefix length**, which cannot express an **interval** like "columns 3 through 5".
+      Block-diagonal masking needs intervals, so it switches to an additive mask: add a
+      large negative number at forbidden positions and softmax turns them into **hard
+      zeros** (\`exp\` underflows).
+
+      PyTorch's \`attn_mask\` uses exactly this form. Both representations have their place:
+      prefix lengths are cheaper (one integer per row), additive masks are more general.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | No token lost or duplicated | The stream matches "each document plus EOS, concatenated" |
+      | Padding rate | <= **2%** (the one-per-block control exceeds 30%) |
+      | **Cross-document leakage** | Attention probability across documents is **exactly 0** |
+      | Causality | Future positions are exactly 0 as well |
+    `
+  ),
+  checklist: [
+    t('每篇末尾加 EOS，再首尾相接切块', 'Append EOS to each document, concatenate, then cut'),
+    t('doc_ids 标出每个位置属于第几篇', 'doc_ids records which document each position belongs to'),
+    t('掩码是块对角的：同一篇且 j ≤ i', 'The mask is block-diagonal: same document and j <= i'),
+    t('填充率降到 2% 以下', 'Padding falls below 2%'),
+  ],
+  hints: [
+    t('block 要 block_size + 1 个 token —— 多的那个是目标位移用的。',
+      'A block holds block_size + 1 tokens; the extra one covers the target shift.'),
+    t('doc_ids 只标前 block_size 个位置（查询能落在的那些）。',
+      'doc_ids covers only the first block_size positions, the ones a query can sit at.'),
+    t('掩码用 nt.zeros((batch, heads, seq, seq)) 建，再 set_ 一整个列表。',
+      'Build the mask with nt.zeros((batch, heads, seq, seq)) and set_ one flat list.'),
+  ],
+  pitfalls: [
+    t(code`
+      **拼起来了但没改掩码。** 这是最贵的一个错：填充率是降下去了，
+      而模型开始学两篇不相干文档之间的「关系」。训练 loss 甚至会更低 ——
+      上下文里多了信息 —— 而这些信息在真实使用时根本不存在。
+      **loss 变好反而是坏消息**，这一关的探针专门数跨文档的注意力概率。
+    `, code`
+      **Concatenating without changing the mask.** The most expensive mistake here: padding
+      drops, and the model starts learning "relationships" between unrelated documents.
+      Training loss may even improve — the context carries more information — information
+      that does not exist at inference. **A better loss is the bad news here**, and the
+      probe counts cross-document attention probability directly.
+    `),
+    t(code`
+      **用一个「很大的负数」而不是足够大的负数。** \`-1e4\` 在 fp32 里够了，
+      但如果分数本身也在几千的量级，掩掉的位置会留下一个非零的概率。
+      这一关要求**恒为 0**,\`-1e30\` 之后 \`exp\` 直接下溢，是真的 0，
+      而不是「小到看不见」。「小到看不见」在逐位比较里是过不去的。
+    `, code`
+      **Using "a large negative number" that is not large enough.** \`-1e4\` suffices in
+      fp32 until the scores themselves reach the thousands, at which point masked positions
+      keep a non-zero probability. This stage requires **exactly zero**: after \`-1e30\` the
+      \`exp\` underflows to a true zero rather than something merely invisible. "Invisibly
+      small" does not survive a bit-exact comparison.
+    `),
+  ],
+  train: {
+    files: {
+      'packing.py': code`
+        """第 15 关：文档打包与块对角掩码。"""
+        import nanotorch as nt
+        from nanotorch import functional as F
+
+
+        def pack(docs, block_size, eos_id):
+            """返回 (blocks, doc_ids, stats)。"""
+            # TODO: 每篇加 EOS -> 拼成一条流 -> 按 block_size 切
+            #       最后一块不够就用 eos_id 填，并把填了几个记进 stats["padded"]
+            return [], [], {"padded": 0, "total": 0}
+
+
+        def attn_bias(doc_ids, batch, heads, seq, neg=-1e30):
+            """加性掩码 (batch, heads, seq, seq)：同一篇且 j <= i 是 0，其余是 neg。"""
+            # TODO
+            return nt.zeros((batch, heads, seq, seq), role="data")
+
+
+        if __name__ == "__main__":
+            docs = [[1, 2, 3], [4, 5], [6, 7, 8, 9]]
+            blocks, ids, stats = pack(docs, 4, 0)
+            print("块", blocks)
+            print("文档编号", ids)
+            print("填充率", stats["padded"] / max(1, stats["total"]))
+      `,
+    },
+    referenceFiles: {
+      'packing.py': code`
+        """第 15 关的参考实现。"""
+        import nanotorch as nt
+        from nanotorch import functional as F
+
+
+        def pack(docs, block_size, eos_id):
+            # 每篇末尾加 EOS 标出边界，然后首尾相接成一条流。
+            # 不加 EOS 的话，模型没有任何信号知道一篇结束了
+            stream, owner = [], []
+            for d, doc in enumerate(docs):
+                for tok in doc:
+                    stream.append(tok)
+                    owner.append(d)
+                stream.append(eos_id)
+                owner.append(d)
+
+            # 切块。每块要 block_size + 1 个 token —— 多的那个给目标位移。
+            # 步长是 block_size，不是 block_size + 1：相邻两块的边界处
+            # 前一块的最后一个目标就是后一块的第一个输入
+            blocks, doc_ids = [], []
+            padded = 0
+            at = 0
+            while at + 1 < len(stream):
+                chunk = stream[at:at + block_size + 1]
+                ids = owner[at:at + block_size]
+                if len(chunk) < block_size + 1:
+                    need = block_size + 1 - len(chunk)
+                    chunk = chunk + [eos_id] * need
+                    padded += need
+                while len(ids) < block_size:
+                    # 填充位置归到一个不存在的文档里 —— 它谁也看不见，谁也看不见它
+                    ids.append(-1)
+                blocks.append(chunk)
+                doc_ids.append(ids)
+                at += block_size
+
+            return blocks, doc_ids, {"padded": padded, "total": len(blocks) * (block_size + 1)}
+
+
+        def attn_bias(doc_ids, batch, heads, seq, neg=-1e30):
+            flat = []
+            for b in range(batch):
+                ids = doc_ids[b]
+                row = []
+                for i in range(seq):
+                    for j in range(seq):
+                        # 块对角 + 因果：同一篇，且 j 不在 i 的未来
+                        ok = (j <= i) and (ids[i] == ids[j])
+                        row.append(0.0 if ok else neg)
+                # 所有头共用同一张掩码
+                for _ in range(heads):
+                    flat.extend(row)
+
+            out = nt.zeros((batch, heads, seq, seq), role="data", name="attn.bias")
+            out.set_(flat)
+            return out
+
+
+        if __name__ == "__main__":
+            docs = [[1, 2, 3], [4, 5], [6, 7, 8, 9]]
+            blocks, ids, stats = pack(docs, 4, 0)
+            print("块", blocks)
+            print("文档编号", ids)
+            print("填充率", stats["padded"] / max(1, stats["total"]))
+      `,
+    },
+  },
+  specs: [
+    spec('packing.spec.ts', code`
+      ${LAB}
+
+      const BLOCK = 64, HEADS = 2, HD = 8, EOS = 99;
+      const DOC_COUNT = 24;
+
+      /** 语料按句子切成「文档」，编码成 token */
+      function documents() {
+        const text = lab.world.corpus();
+        const sentences = text.split(/(?<=[.!?])\\s+/)
+          .map((s) => s.trim()).filter((s) => s.length > 0).slice(0, DOC_COUNT);
+        const vocab = lab.world.vocabSize();
+        // 直接用字符码点取模 —— 这一关不关心具体编码，只关心打包
+        return sentences.map((s) => [...s].map((c) => c.charCodeAt(0) % vocab));
+      }
+
+      function setup() {
+        lab.py(\`
+      import sys, json
+      sys.path.insert(0, "/lab")
+      import importlib, packing
+      importlib.reload(packing)
+      import nanotorch as nt
+      from nanotorch import functional as F
+      \`);
+        const docs = documents();
+        lab.py('_docs = ' + JSON.stringify(docs));
+        return docs;
+      }
+
+      describe('数据打包', () => {
+        it('一个 token 不丢不重，块的形状也对', () => {
+          const docs = setup();
+          const r = JSON.parse(String(lab.py(
+            '_blocks, _ids, _stats = packing.pack(_docs, ' + BLOCK + ', ' + EOS + ')\\n'
+            + 'json.dumps({"blocks": _blocks, "ids": _ids, "stats": _stats})'
+          )));
+
+          // 参考的流：逐篇加 EOS 首尾相接
+          const stream = [];
+          for (const d of docs) { stream.push(...d, EOS); }
+
+          // 把块按步长 BLOCK 拼回去，应当逐个等于原流（末尾的填充不算）
+          const rebuilt = [];
+          for (const blk of r.blocks) rebuilt.push(...blk.slice(0, BLOCK));
+          let same = 0;
+          for (let i = 0; i < stream.length && i < rebuilt.length; i++) {
+            if (stream[i] === rebuilt[i]) same += 1;
+          }
+          console.log(
+            '文档 ' + docs.length + ' 篇，流长 ' + stream.length
+            + '，切成 ' + r.blocks.length + ' 块 × ' + BLOCK
+            + '，对得上的位置 ' + same + ' / ' + Math.min(stream.length, rebuilt.length)
+          );
+          lab.publish('packing.tokensPreserved', same === Math.min(stream.length, rebuilt.length) ? 1 : 0);
+
+          expect(r.blocks.length).toBeGreaterThan(2);
+          for (const blk of r.blocks) expect(blk.length).toBe(BLOCK + 1);
+          for (const ids of r.ids) expect(ids.length).toBe(BLOCK);
+          expect(same).toBe(Math.min(stream.length, rebuilt.length));
+        });
+
+        it('填充率 ≤ 2%，而一篇一块的对照超过 30%', () => {
+          const docs = setup();
+          const stats = JSON.parse(String(lab.py(
+            '_b, _i, _s = packing.pack(_docs, ' + BLOCK + ', ' + EOS + ')\\njson.dumps(_s)'
+          )));
+          const ratio = stats.padded / stats.total;
+
+          // 对照：一篇一块，不够就填
+          let naivePad = 0, naiveTotal = 0;
+          for (const d of docs) {
+            const blocks = Math.ceil((d.length + 1) / BLOCK);
+            naiveTotal += blocks * BLOCK;
+            naivePad += blocks * BLOCK - (d.length + 1);
+          }
+          const naiveRatio = naivePad / naiveTotal;
+
+          console.log(
+            '拼流打包的填充率 ' + (ratio * 100).toFixed(2) + '%，'
+            + '一篇一块是 ' + (naiveRatio * 100).toFixed(1) + '%'
+          );
+          lab.publish('tokens.padRatio', ratio);
+          lab.publish('tokens.padRatioNaive', naiveRatio);
+          expect(ratio).toBeLessThan(0.02);
+          // 对照必须明显更差，否则这一关的前提不成立
+          expect(naiveRatio).toBeGreaterThan(0.25);
+        });
+
+        /*
+         * 这一关的核心。拼起来之后一块里横跨几篇，
+         * 因果掩码不知道文档边界 —— 掩码不改的话，第 2 篇能看见第 1 篇。
+         * 探针直接数跨文档的注意力概率，要求**恒为 0**。
+         */
+        it('跨文档的注意力概率恒为 0', () => {
+          setup();
+          const B = 4;
+          const r = JSON.parse(String(lab.py(\`
+      _blocks, _ids, _stats = packing.pack(_docs, \${BLOCK}, \${EOS})
+      _b, _h, _s, _hd = \${B}, \${HEADS}, \${BLOCK}, \${HD}
+      _use = _ids[:_b]
+
+      # 随便造一组 q / k，只看掩码起没起作用
+      _q = nt.zeros((_b * _s, _h * _hd), role="data").normal_(21, 1.0)
+      _k = nt.zeros((_b * _s, _h * _hd), role="data").normal_(22, 1.0)
+      _sc = F.attn_scores(_q, _k, _b, _s, _s, _h, _h, _hd)
+      _bias = packing.attn_bias(_use, _b, _h, _s)
+      _sc = F.add(_sc, _bias)
+      _probs = F.softmax(_sc, _b * _h * _s, _s)
+      json.dumps({"probs": _probs.tolist(), "ids": _use})
+      \`)));
+
+          const docIds = new Int32Array(B * BLOCK);
+          for (let b = 0; b < B; b++) {
+            for (let i = 0; i < BLOCK; i++) docIds[b * BLOCK + i] = r.ids[b][i];
+          }
+          const report = lab.probe.crossDocument(r.probs, docIds, B, HEADS, BLOCK);
+
+          // 未来位置也要是硬 0
+          let future = 0;
+          for (let b = 0; b < B; b++)
+            for (let h = 0; h < HEADS; h++)
+              for (let i = 0; i < BLOCK; i++)
+                for (let j = i + 1; j < BLOCK; j++) {
+                  if (r.probs[((b * HEADS + h) * BLOCK + i) * BLOCK + j] !== 0) future += 1;
+                }
+
+          const distinct = new Set(r.ids.flat()).size;
+          // 真正要紧的不是「出现了几篇」，而是「有几块横跨了边界」——
+          // 一块里只有一篇的话，块对角掩码和普通因果掩码没有区别，这条就白测了
+          const spanning = r.ids.filter((row) => new Set(row).size > 1).length;
+          console.log(
+            '这 ' + B + ' 块里出现了 ' + distinct + ' 个文档编号，'
+            + spanning + ' 块横跨了文档边界；'
+            + '查了 ' + report.checked + ' 对，跨文档还有概率的 ' + report.crossDocumentPairs + ' 对；'
+            + '未来位置非零的 ' + future + ' 个'
+          );
+          lab.publish('attention.crossDocumentPairs', report.crossDocumentPairs);
+          lab.publish('attention.futureLeakBits', future);
+
+          // 必须真的有块横跨了边界，否则上面那条是白测的
+          expect(spanning).toBeGreaterThanOrEqual(2);
+          expect(report.crossDocumentPairs).toBe(0);
+          expect(future).toBe(0);
+        });
+
+        it('每行概率和仍然是 1 —— 掩码没把整行掩没', () => {
+          setup();
+          const rows = JSON.parse(String(lab.py(\`
+      _blocks, _ids, _stats = packing.pack(_docs, \${BLOCK}, \${EOS})
+      _b, _h, _s, _hd = 4, \${HEADS}, \${BLOCK}, \${HD}
+      _q = nt.zeros((_b * _s, _h * _hd), role="data").normal_(21, 1.0)
+      _k = nt.zeros((_b * _s, _h * _hd), role="data").normal_(22, 1.0)
+      _sc = F.add(F.attn_scores(_q, _k, _b, _s, _s, _h, _h, _hd),
+                  packing.attn_bias(_ids[:_b], _b, _h, _s))
+      _p = F.softmax(_sc, _b * _h * _s, _s).tolist()
+      json.dumps([sum(_p[r * _s:(r + 1) * _s]) for r in range(_b * _h * _s)])
+      \`)));
+          let worst = 0;
+          for (const v of rows) worst = Math.max(worst, Math.abs(v - 1));
+          console.log('每行概率和与 1 的最大差 ' + worst.toExponential(2));
+          lab.publish('attention.probRowSumError', worst);
+          expect(worst).toBeLessThan(1e-6);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.packing.tokensPreserved', op: 'eq', value: 1,
+      zh: '打包之后 token 一个不丢不重', en: 'no token lost or duplicated by packing',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.tokens.padRatio', op: 'lte', value: 0.02,
+      zh: '填充率（一篇一块的对照超过 30%）', en: 'padding rate (the one-per-block control exceeds 30%)',
+      dimension: 'efficiency',
+    }),
+    gate({
+      metric: 'llm.attention.crossDocumentPairs', op: 'eq', value: 0,
+      zh: '跨文档还有注意力概率的位置对数', en: 'position pairs with cross-document attention',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.attention.futureLeakBits', op: 'eq', value: 0,
+      zh: '未来位置还有概率的个数', en: 'future positions with non-zero probability',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness', 'efficiency'],
+  extension: t(
+    code`
+      2026 年的预训练数据流水线里，打包只是最后一步。前面还有：
+      **去重**（MinHash / 精确子串），**质量过滤**（FineWeb-Edu 用一个小分类器
+      给「教育价值」打分，只留高分的），**去污染**（把评测集从训练集里挖掉）。
+      DCLM 与 Nemotron-CC 这些公开配方把这几步的消融做得很细,
+      同样的算力下，数据处理带来的提升往往比改模型结构大。
+
+      掩码这一侧还有个工程细节：块对角掩码让注意力矩阵变得**稀疏且规则**。
+      FlashAttention 从 2.x 起支持这种「变长序列」的接口（\`varlen\`），
+      直接跳过不需要算的块 —— 于是块对角掩码不但更正确，**还更快**。
+      我们这里是加性掩码的教学写法，算了再掩；真实实现是根本不算。
+    `,
+    code`
+      In a 2026 pretraining pipeline, packing is only the last step. Before it come
+      **deduplication** (MinHash or exact substring), **quality filtering** (FineWeb-Edu
+      scores "educational value" with a small classifier and keeps the top slice), and
+      **decontamination** (removing evaluation sets from the training data). Public recipes
+      like DCLM and Nemotron-CC ablate these carefully — at equal compute, data processing
+      often beats architectural changes.
+
+      On the masking side there is an engineering detail: a block-diagonal mask makes the
+      attention matrix **sparse and regular**. FlashAttention has supported this
+      variable-length interface (\`varlen\`) since 2.x, skipping blocks it does not need to
+      compute — so a block-diagonal mask is not only more correct but **faster**. What we
+      write here is the teaching form: compute then mask. Real implementations never
+      compute those entries at all.
+    `
+  ),
+};
+
+/* ================================================================== */
+/* 第 16 关：完整的预训练循环                                           */
+/* ================================================================== */
+
+/** 第 16 关的模型：和第 13/14 关同一套，只是按语料的字符表开 */
+const KIT16_PY = code`
+  """平台给的模型。和第 13/14 关是同一套，只是按语料的字符表开：
+  \`dim=64, n_layer=2, n_head=4, n_kv_head=2, hidden=176\`，
+  batch 8 × seq 32 = 每步 256 个 token。
+
+  这一关要写的是**外面那整条循环**。
+  """
+  import math
+  import nanotorch as nt
+  from nanotorch import nn, functional as F
+
+  D, L, H, KV, HID = 64, 2, 4, 2, 176
+
+
+  def build_tables(n, head_dim, base=10000.0):
+      half = head_dim // 2
+      cos = nt.zeros((n, half), role="data", name="rope.cos")
+      sin = nt.zeros((n, half), role="data", name="rope.sin")
+      cv, sv = [], []
+      for p in range(n):
+          for i in range(half):
+              th = p * (base ** (-2.0 * i / head_dim))
+              cv.append(math.cos(th))
+              sv.append(math.sin(th))
+      cos.set_(cv)
+      sin.set_(sv)
+      return cos, sin
+
+
+  class Norm(nn.Module):
+      def __init__(self, dim):
+          super().__init__()
+          self.weight = nt.parameter((dim,), None, 0.0, "g")
+
+      def forward(self, x):
+          return F.rms_norm(x, self.weight, 1e-5)
+
+
+  class Attn(nn.Module):
+      def __init__(self, dim, nh, nkv, seed, max_seq=64):
+          super().__init__()
+          self.nh, self.nkv, self.hd = nh, nkv, dim // nh
+          hd = self.hd
+          self.wq = nt.parameter((dim, nh * hd), seed + 1, dim ** -0.5, "wq")
+          self.wk = nt.parameter((dim, nkv * hd), seed + 2, dim ** -0.5, "wk")
+          self.wv = nt.parameter((dim, nkv * hd), seed + 3, dim ** -0.5, "wv")
+          self.wo = nt.parameter((nh * hd, dim), seed + 4, (nh * hd) ** -0.5, "wo")
+          self._cos, self._sin = build_tables(max_seq, hd)
+
+      def forward(self, x, b, s):
+          hd = self.hd
+          q = F.linear(x, self.wq)
+          k = F.linear(x, self.wk)
+          v = F.linear(x, self.wv)
+          q = F.rope(q, self._cos, self._sin, b, s, self.nh, hd)
+          k = F.rope(k, self._cos, self._sin, b, s, self.nkv, hd)
+          sc = F.attn_scores(q, k, b, s, s, self.nh, self.nkv, hd)
+          pr = F.softmax(sc, b * self.nh * s, s, F.causal_valid(b, self.nh, s))
+          o = F.attn_apply(pr, v, b, s, s, self.nh, self.nkv, hd,
+                           out_shape=(b * s, self.nh * hd))
+          return F.linear(o, self.wo)
+
+
+  class Mlp(nn.Module):
+      def __init__(self, dim, hid, seed):
+          super().__init__()
+          self.wg = nt.parameter((dim, hid), seed + 1, dim ** -0.5, "wg")
+          self.wu = nt.parameter((dim, hid), seed + 2, dim ** -0.5, "wu")
+          self.wd = nt.parameter((hid, dim), seed + 3, hid ** -0.5, "wd")
+
+      def forward(self, x):
+          return F.linear(F.swiglu(F.linear(x, self.wg), F.linear(x, self.wu)), self.wd)
+
+
+  class Block(nn.Module):
+      def __init__(self, dim, nh, nkv, hid, seed, nl):
+          super().__init__()
+          self.n1, self.at = Norm(dim), Attn(dim, nh, nkv, seed)
+          self.n2, self.mp = Norm(dim), Mlp(dim, hid, seed + 40)
+          self.sc = (2.0 * nl) ** -0.5
+
+      def forward(self, x, b, s):
+          x = F.add(x, F.scale(self.at(self.n1(x), b, s), self.sc))
+          return F.add(x, F.scale(self.mp(self.n2(x)), self.sc))
+
+
+  class LM(nn.Module):
+      def __init__(self, vocab, seed=1):
+          super().__init__()
+          self.vocab = vocab
+          self.embed = nt.parameter((vocab, D), seed, D ** -0.5, "embed")
+          self.blocks = nn.ModuleList([
+              Block(D, H, KV, HID, seed + 100 * (i + 1), L) for i in range(L)
+          ])
+          self.nf = Norm(D)
+
+      def forward(self, idx, tgt, b, s):
+          rows = b * s
+          x = F.embedding(self.embed, idx, rows, D)
+          for blk in self.blocks:
+              x = blk(x, b, s)
+          x = self.nf(x)
+          logits = F.linear_tied(x, self.embed, rows, D, self.vocab)
+          return F.cross_entropy(logits, tgt, rows, self.vocab)
+
+
+  # 平台灌进来：训练集与验证集的 token 序列
+  train_tokens = []
+  val_tokens = []
+`;
+
+const STAGE_PRETRAIN = {
+  id: 'pretraining-loop',
+  title: t('完整的预训练循环 —— 打穿 bigram 基线', 'The full pretraining loop — beating the bigram baseline'),
+  goal: t(
+    code`
+      前面十五关的零件到齐了。这一关在 \`pretrain.py\` 里把它们串成一条**完整的循环**，
+      在真语料上训到打穿基线。模型在 \`kit.py\` 里，其余都是你的。
+
+      \`\`\`python
+      def sample_batch(tokens, step, batch, seq):
+          """从 token 流里取一批 (idx, tgt)。tgt 是 idx 往后错一位。"""
+
+      def evaluate(model, tokens, batch, seq, n_batches=20):
+          """在验证集上算平均 loss。**必须在 no_grad 下跑。**"""
+
+      def train(model, tokens, val_tokens, steps, batch, seq,
+                peak_lr=0.03, warmup=None, clip=1.0, seed=1):
+          """完整的训练循环。返回 {"train": [...], "val": float}。"""
+      \`\`\`
+
+      ## 这条循环里有什么
+
+      \`\`\`
+      每步：取一批 -> zero_grad -> 前向 -> 反向 -> 裁剪 -> 按调度取 lr -> step
+      结束：在**留出集**上评一次
+      \`\`\`
+
+      七件事，前面各关分别做过。这一关的价值在于**它们必须同时对**,
+      任何一件错了，loss 曲线看起来都还是「在降」。
+
+      ## 评测必须在 \`no_grad\` 下
+
+      不加 \`no_grad\` 的评测也能算出正确的数,**它只是白白建了一整条反向的带**。
+      在这个小模型上你感觉不到；在真实尺度上，评测时建带意味着要为反向留住
+      每一层的激活，显存差好几倍,而评测本来是不需要反向的。
+
+      这一关**数得出来**：判定会记下评测过程里每个算子调用时
+      \`is_grad_enabled()\` 的值，要求全部是 False。
+
+      ## 基线
+
+      语料是字符级的，词表 50。三条基线（第 2 关算过）：
+
+      \`\`\`
+      均匀（什么都不学）    3.912
+      unigram（只看频率）   2.993
+      bigram（只看前一个）  2.144   ← 这一关的分母
+      \`\`\`
+
+      bigram 是**只看前一个字符**能做到的极限。打穿它意味着模型真的用上了
+      更长的上下文,这是「注意力在工作」最直接的证据。
+      参考实现 400 步之后验证集 loss 约 **1.60**，是 bigram 的 **0.75 倍**。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | 验证集 loss | ≤ **1.90** |
+      | 打穿 bigram | 验证 loss / bigram ≤ **0.85** |
+      | 确定性 | 同一个 seed 跑两遍，**逐位一致** |
+      | 评测没建带 | 评测过程里 \`is_grad_enabled()\` 为真的调用数 = **0** |
+
+      ## 为什么要有验证集
+
+      训练 loss 只说明「模型记住了训练数据」。这个模型只有 3.9 万参数、
+      语料 6 万个 token,过拟合是有可能的，而过拟合在训练 loss 上是看不出来的
+      （它只会一路降）。留出集是唯一能分开「学会了」和「背下来了」的东西。
+    `,
+    code`
+      Every piece from the previous fifteen stages is now available. This stage strings them
+      into a **complete loop** in \`pretrain.py\` and trains on the real corpus until it
+      beats the baseline. The model is in \`kit.py\`; everything else is yours.
+
+      \`\`\`python
+      def sample_batch(tokens, step, batch, seq):
+          """Take a batch (idx, tgt) from the token stream; tgt is idx shifted by one."""
+
+      def evaluate(model, tokens, batch, seq, n_batches=20):
+          """Mean loss on the validation set. **Must run under no_grad.**"""
+
+      def train(model, tokens, val_tokens, steps, batch, seq,
+                peak_lr=0.03, warmup=None, clip=1.0, seed=1):
+          """The full training loop. Returns {"train": [...], "val": float}."""
+      \`\`\`
+
+      ## What the loop contains
+
+      \`\`\`
+      each step: take a batch -> zero_grad -> forward -> backward -> clip
+                 -> pick lr from the schedule -> step
+      at the end: evaluate once on the **held-out** set
+      \`\`\`
+
+      Seven things, each covered by an earlier stage. The value here is that **they must all
+      be right at once** — get any one wrong and the loss curve still looks like it is
+      falling.
+
+      ## Evaluation must run under \`no_grad\`
+
+      Evaluating without \`no_grad\` still computes the right number; **it merely builds an
+      entire backward tape for nothing**. You will not feel it on this small model; at real
+      scale, building a tape during evaluation means keeping every layer's activations alive
+      for a backward pass that never comes — several times the memory.
+
+      This stage **counts it**: the hidden cases record \`is_grad_enabled()\` at every
+      operator call during evaluation and require all of them to be False.
+
+      ## Baselines
+
+      The corpus is character-level with a vocabulary of 50. Three baselines (computed back
+      in stage 2):
+
+      \`\`\`
+      uniform (nothing learned)     3.912
+      unigram (frequency only)      2.993
+      bigram (previous char only)   2.144   <- this stage's denominator
+      \`\`\`
+
+      Bigram is the ceiling for **looking at one previous character**. Beating it means the
+      model genuinely uses longer context — the most direct evidence that attention is
+      working. The reference reaches a validation loss of about **1.60** after 400 steps,
+      **0.75x** the bigram baseline.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | Validation loss | <= **1.90** |
+      | Beats bigram | validation / bigram <= **0.85** |
+      | Determinism | Two runs at the same seed are **bit-identical** |
+      | No tape during eval | Calls with \`is_grad_enabled()\` true during evaluation = **0** |
+
+      ## Why a validation set at all
+
+      Training loss only shows that the model memorised the training data. This model has
+      39k parameters against a 60k-token corpus — overfitting is possible, and it is
+      invisible in the training loss, which simply keeps falling. A held-out set is the only
+      thing that separates "learned" from "memorised".
+    `
+  ),
+  checklist: [
+    t('评测在 no_grad 下跑', 'Evaluation runs under no_grad'),
+    t('验证集 loss 打穿 bigram 基线', 'Validation loss beats the bigram baseline'),
+    t('同一个 seed 两遍逐位一致', 'Two runs at the same seed are bit-identical'),
+    t('训练用训练集，评测用留出集，两者不重叠',
+      'Training uses the training split and evaluation the held-out one, with no overlap'),
+  ],
+  hints: [
+    t('取批次的随机数要自己写一个确定性的 —— 用 step 当种子，别用全局状态。',
+      'Write your own deterministic sampler seeded by step; do not rely on global state.'),
+    t('模型、优化器、输入缓冲都要在 nt.mark() 之前建好，每步只 release 激活。',
+      'Build the model, optimiser and input buffers before nt.mark(); each step releases only activations.'),
+    t('warmup 不给的话取 max(1, steps // 20)。',
+      'When warmup is not given, use max(1, steps // 20).'),
+  ],
+  pitfalls: [
+    t(code`
+      **评测忘了 \`no_grad\`。** 数字完全正确,唯一的代价是白建了一整条带。
+      在这个小模型上你感觉不到，所以它能一路活到真实项目里，
+      在那里它表现为「评测的时候显存爆了」，而没人会想到是少了一行 \`with\`。
+    `, code`
+      **Forgetting \`no_grad\` during evaluation.** The numbers are perfectly correct; the
+      only cost is a tape built for nothing. You cannot feel it on this model, so it
+      survives into real projects, where it shows up as "evaluation runs out of memory" and
+      nobody suspects a missing \`with\` line.
+    `),
+    t(code`
+      **用训练集评测。** loss 会好看很多,而且随着训练变得越来越好看。
+      这条曲线唯一说明的是「模型记住了训练数据」，而这本来就是它该做的。
+      留出集是唯一能分开「学会了」和「背下来了」的东西。
+    `, code`
+      **Evaluating on the training set.** The loss looks much better, and keeps improving.
+      All that curve shows is that the model memorised its training data, which is what it
+      was asked to do. A held-out set is the only thing separating "learned" from
+      "memorised".
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT16_PY,
+      'pretrain.py': code`
+        """第 16 关：完整的预训练循环。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import functional as F
+        import kit
+
+
+        def sample_batch(tokens, step, batch, seq):
+            """从 token 流里取一批 (idx, tgt)。确定性:同一个 step 永远给同一批。"""
+            state = (step * 1103515245 + 12345) & 0x7fffffff
+            idx, tgt = [], []
+            for _ in range(batch):
+                state = (state * 1103515245 + 12345) & 0x7fffffff
+                off = state % (len(tokens) - seq - 1)
+                idx.extend(tokens[off:off + seq])
+                tgt.extend(tokens[off + 1:off + seq + 1])
+            return idx, tgt
+
+
+        def evaluate(model, tokens, batch, seq, n_batches=20):
+            """验证集上的平均 loss。**必须在 no_grad 下跑。**"""
+            # TODO
+            return 0.0
+
+
+        def train(model, tokens, val_tokens, steps, batch, seq,
+                  peak_lr=0.03, warmup=None, clip=1.0, seed=1):
+            """返回 {"train": [每步的 loss], "val": 最后的验证 loss}。"""
+            # TODO: 建优化器与输入缓冲 -> nt.mark() -> 每步：release / 取批 /
+            #       zero_grad / 前向 / 反向 / 按调度取 lr / step
+            #       最后在留出集上评一次
+            return {"train": [], "val": 0.0}
+
+
+        if __name__ == "__main__":
+            m = kit.LM(len(set(kit.train_tokens)) or 50)
+            print("参数量", m.num_parameters())
+      `,
+    },
+    referenceFiles: {
+      'pretrain.py': code`
+        """第 16 关的参考实现。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import functional as F
+        import kit
+
+
+        def sample_batch(tokens, step, batch, seq):
+            state = (step * 1103515245 + 12345) & 0x7fffffff
+            idx, tgt = [], []
+            for _ in range(batch):
+                state = (state * 1103515245 + 12345) & 0x7fffffff
+                off = state % (len(tokens) - seq - 1)
+                idx.extend(tokens[off:off + seq])
+                tgt.extend(tokens[off + 1:off + seq + 1])
+            return idx, tgt
+
+
+        def evaluate(model, tokens, batch, seq, n_batches=20):
+            idx = nt.zeros((batch * seq,), role="data", name="eval.idx")
+            tgt = nt.zeros((batch * seq,), role="data", name="eval.tgt")
+            total = 0.0
+            # no_grad：评测不需要反向，建带纯属白费。
+            # 这个模型上感觉不到，真实尺度上是好几倍的显存
+            with nt.no_grad():
+                mark = nt.mark()
+                for k in range(n_batches):
+                    nt.release(mark)
+                    bi, bt = sample_batch(tokens, 90000 + k, batch, seq)
+                    idx.set_int_(bi)
+                    tgt.set_int_(bt)
+                    total += model(idx, tgt, batch, seq).value
+            return total / n_batches
+
+
+        def train(model, tokens, val_tokens, steps, batch, seq,
+                  peak_lr=0.03, warmup=None, clip=1.0, seed=1):
+            if warmup is None:
+                warmup = max(1, steps // 20)
+            opt = nt.optim.AdamW(model.parameters(), lr=peak_lr, betas=(0.9, 0.95),
+                                 weight_decay=0.1, grad_clip=clip)
+            # 输入缓冲在 mark 之前建好 —— 它是常驻的，落在 mark 之后每步会被 release 拦下
+            idx = nt.zeros((batch * seq,), role="data", name="idx")
+            tgt = nt.zeros((batch * seq,), role="data", name="tgt")
+
+            hist = []
+            base = nt.mark()
+            for st in range(1, steps + 1):
+                nt.release(base)
+                bi, bt = sample_batch(tokens, seed * 100000 + st, batch, seq)
+                idx.set_int_(bi)
+                tgt.set_int_(bt)
+
+                opt.zero_grad()
+                nt.phase("forward")
+                loss = model(idx, tgt, batch, seq)
+                nt.phase("other")
+                loss.backward()
+
+                if st <= warmup:
+                    lr = peak_lr * st / warmup
+                else:
+                    p = (st - warmup) / max(1, steps - warmup)
+                    lr = peak_lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * p)))
+                opt.step(lr=lr)
+                hist.append(loss.value)
+
+            return {"train": hist, "val": evaluate(model, val_tokens, batch, seq)}
+
+
+        if __name__ == "__main__":
+            m = kit.LM(len(set(kit.train_tokens)) or 50)
+            print("参数量", m.num_parameters())
+      `,
+    },
+  },
+  specs: [
+    spec('pretrain.spec.ts', code`
+      ${LAB}
+
+      const STEPS = 400, BATCH = 8, SEQ = 32;
+
+      function setup() {
+        lab.py(\`
+      import sys, json
+      sys.path.insert(0, "/lab")
+      import importlib, kit, pretrain
+      importlib.reload(kit)
+      importlib.reload(pretrain)
+      import nanotorch as nt
+      from nanotorch import functional as F
+      \`);
+        const toks = lab.world.tokens();
+        const at = lab.world.holdoutAt();
+        lab.py('kit.train_tokens = ' + JSON.stringify([...toks.slice(0, at)]));
+        lab.py('kit.val_tokens = ' + JSON.stringify([...toks.slice(at)]));
+        return { vocab: lab.world.vocabSize(), trainLen: at, valLen: toks.length - at };
+      }
+
+      function run(seed) {
+        return JSON.parse(String(lab.py(\`
+      _m = kit.LM(\${lab.world.vocabSize()}, seed=1)
+      _r = pretrain.train(_m, kit.train_tokens, kit.val_tokens,
+                          \${STEPS}, \${BATCH}, \${SEQ}, seed=\${seed})
+      json.dumps({"first": _r["train"][:5], "last": _r["train"][-10:], "val": _r["val"],
+                  "params": _m.num_parameters()})
+      \`)));
+      }
+
+      describe('完整的预训练循环', () => {
+        it('训练集与验证集不重叠，模型是那个模型', () => {
+          const info = setup();
+          console.log(
+            '词表 ' + info.vocab + '，训练集 ' + info.trainLen
+            + ' 个 token，留出 ' + info.valLen + ' 个'
+          );
+          expect(info.trainLen).toBeGreaterThan(1000);
+          expect(info.valLen).toBeGreaterThan(1000);
+        });
+
+        it('400 步之后打穿 bigram 基线', () => {
+          setup();
+          const r = run(1);
+          const base = lab.world.baselines();
+          const ratio = r.val / base.bigram;
+          console.log(
+            '参数量 ' + r.params + '；训练 loss ' + (r.first.reduce((a, c) => a + c, 0) / 5).toFixed(4)
+            + ' -> ' + (r.last.reduce((a, c) => a + c, 0) / 10).toFixed(4)
+            + '；验证 ' + r.val.toFixed(4)
+          );
+          console.log(
+            '基线：均匀 ' + base.uniform.toFixed(3) + '，unigram ' + base.unigram.toFixed(3)
+            + '，bigram ' + base.bigram.toFixed(3) + '；验证 / bigram = ' + ratio.toFixed(3)
+          );
+          lab.publish('loss.val', r.val);
+          lab.publish('loss.vsBigram', ratio);
+          expect(r.val).toBeLessThan(1.9);
+          expect(ratio).toBeLessThan(0.85);
+          // 也要真的比 unigram 好 —— 打穿 bigram 才说明用上了长上下文
+          expect(r.val).toBeLessThan(base.unigram);
+        });
+
+        it('同一个 seed 跑两遍，逐位一致', () => {
+          setup();
+          const a = run(7);
+          const b2 = run(7);
+          let mismatches = 0;
+          for (let i = 0; i < a.first.length; i++) if (a.first[i] !== b2.first[i]) mismatches += 1;
+          for (let i = 0; i < a.last.length; i++) if (a.last[i] !== b2.last[i]) mismatches += 1;
+          if (a.val !== b2.val) mismatches += 1;
+          console.log(
+            '两遍的验证 loss ' + a.val + ' / ' + b2.val + '，对不上的位置 ' + mismatches + ' 个'
+          );
+          lab.publish('determinism.mismatches', mismatches);
+          expect(mismatches).toBe(0);
+        });
+
+        /*
+         * 评测必须在 no_grad 下。数字不带 no_grad 也是对的 ——
+         * 代价是白建一整条反向的带，而这在小模型上感觉不到。
+         * 所以直接数：评测过程里每次算子调用时 is_grad_enabled() 是什么。
+         */
+        it('评测过程里一次都没建带', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _m = kit.LM(\${lab.world.vocabSize()}, seed=1)
+      _seen = []
+      _orig = F.embedding
+
+      def _spy(*a, **k):
+          _seen.append(bool(nt.is_grad_enabled()))
+          return _orig(*a, **k)
+
+      F.embedding = _spy
+      try:
+          _v = pretrain.evaluate(_m, kit.val_tokens, \${BATCH}, \${SEQ}, 4)
+      finally:
+          F.embedding = _orig
+      json.dumps({"calls": len(_seen), "enabled": sum(1 for v in _seen if v), "val": _v})
+      \`)));
+          console.log(
+            '评测里调了 ' + r.calls + ' 次前向，其中建带的 ' + r.enabled
+            + ' 次；验证 loss ' + r.val.toFixed(4)
+          );
+          lab.publish('eval.gradEnabledCalls', r.enabled);
+          // 真的跑了才算数
+          expect(r.calls).toBeGreaterThanOrEqual(4);
+          expect(r.enabled).toBe(0);
+          expect(Number.isFinite(r.val)).toBe(true);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.loss.val', op: 'lte', value: 1.9,
+      zh: '留出集上的 loss', en: 'loss on the held-out set', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.loss.vsBigram', op: 'lte', value: 0.85,
+      zh: '验证 loss 与 bigram 基线的比', en: 'validation loss over the bigram baseline',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.determinism.mismatches', op: 'eq', value: 0,
+      zh: '同 seed 两遍对不上的位置数', en: 'positions differing between two runs at one seed',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.eval.gradEnabledCalls', op: 'eq', value: 0,
+      zh: '评测过程里建了带的调用数', en: 'calls that built a tape during evaluation',
+      dimension: 'efficiency',
+    }),
+  ],
+  focus: ['correctness', 'efficiency'],
+  extension: t(
+    code`
+      到这里，**预训练这条链是完整的**：分词、模型、反向、优化器、调度、裁剪、
+      数据打包、评测。真实项目里多出来的主要是规模带来的东西 ——
+      分布式（数据并行 / 张量并行 / 流水线并行）、检查点与断点续训、
+      以及一整套监控（梯度范数、激活范数、各层的更新比例）。
+
+      有一条经验值得记住：**训练崩了的时候，先看梯度范数的曲线**。
+      它比 loss 早得多地告诉你出了什么事,loss 尖峰的时候，
+      梯度范数往往已经涨了几十步了。
+
+      还有一件小事但很实在：**先跑一个「能过拟合一小批数据」的检查**。
+      拿 8 条样本训 200 步，loss 应该掉到接近 0。掉不下去说明模型或反向有 bug，
+      而这个检查只要几秒钟。在真正开跑之前做一次，能省掉很多天。
+    `,
+    code`
+      At this point **the pretraining chain is complete**: tokenisation, model, backward,
+      optimiser, schedule, clipping, data packing, evaluation. What real projects add is
+      mostly what scale demands — distribution (data, tensor and pipeline parallelism),
+      checkpointing and resumption, and a monitoring suite (gradient norms, activation
+      norms, per-layer update ratios).
+
+      One rule worth remembering: **when training breaks, look at the gradient-norm curve
+      first**. It tells you what happened long before the loss does — by the time a loss
+      spike appears, the gradient norm has usually been climbing for dozens of steps.
+
+      And a small but practical habit: **first run an "overfit a tiny batch" check**. Train
+      on 8 examples for 200 steps and the loss should approach zero. If it does not, the
+      model or the backward has a bug — and the check takes seconds. Doing it once before a
+      real run saves days.
+    `
+  ),
+};
+
 /* ------------------------------------------------------------------ */
 
 module.exports = {
@@ -7117,6 +8226,6 @@ module.exports = {
     STAGE_BPE, STAGE_BASELINE, STAGE_ATTENTION, STAGE_MHA,
     STAGE_ROPE, STAGE_NORM, STAGE_BLOCK, STAGE_KVCACHE,
     STAGE_MANUAL_BWD, STAGE_ENGINE, STAGE_MODEL_BWD, STAGE_ADAMW,
-    STAGE_SCHEDULE, STAGE_CLIP,
+    STAGE_SCHEDULE, STAGE_CLIP, STAGE_PACKING, STAGE_PRETRAIN,
   ],
 };
