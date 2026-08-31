@@ -16,7 +16,7 @@
 """
 
 from . import _bridge as B
-from .tensor import Tensor, zeros
+from .tensor import Tensor, zeros, is_grad_enabled
 
 
 def _rows(shape):
@@ -49,10 +49,60 @@ def add(a, b):
         if b.requires_grad:
             B.add_inplace(b.ensure_grad().handle, go.handle, n)
 
-    out.requires_grad = a.requires_grad or b.requires_grad
+    out.requires_grad = is_grad_enabled() and (a.requires_grad or b.requires_grad)
     if out.requires_grad:
         out._backward = backward
         out._parents = (a, b)
+    return out
+
+
+def one_hot(targets, rows, vocab, dtype="f32"):
+    """把一列 token id 摊成 `[rows, vocab]` 的 0/1 矩阵。
+
+    对应 `torch.nn.functional.one_hot`。交叉熵的反向要用它 ——
+    `dlogits = (softmax(logits) − onehot(targets)) / rows`。
+
+    **不挂反向**：下标不是连续量，对它求导没有意义。
+
+    角色是 `activation` 而不是 `data`：它是反向里每步现造现扔的中间量。
+    标成 `data` 的话，每步的 `release` 会撞上「不许丢长期张量」那条守卫 ——
+    训练循环第二步就当场报错。
+    """
+    out = Tensor((rows, vocab), dtype, name="one_hot")
+    B.fill_one_hot(out.handle, targets.handle, rows, vocab)
+    return out
+
+
+def gemm(a, b, m, n, k, mode="nn", dtype=None):
+    """裸的矩阵乘，**不挂反向**。写自定义算子的反向时用它。
+
+    三种模式的名字照 BLAS 来（PyTorch 的 linear 反向底下调的也是这三个）：
+
+    | mode | 算的是 | A 的形状 | B 的形状 | 结果 |
+    | --- | --- | --- | --- | --- |
+    | `"nn"` | `A @ B` | `[m, k]` | `[k, n]` | `[m, n]` |
+    | `"nt"` | `A @ Bᵀ` | `[m, k]` | `[n, k]` | `[m, n]` |
+    | `"tn"` | `Aᵀ @ B` | `[k, m]` | `[k, n]` | `[m, n]` |
+
+    于是 `y = x @ W` 的反向就是两行：
+
+        dx = gemm(dy, W, rows, din, dout, "nt")     # dy @ Wᵀ
+        dW = gemm(x, dy, din, dout, rows, "tn")     # xᵀ @ dy
+
+    这不是简化过的教学接口 —— 真的 cuBLAS 就是这三个转置标志。
+    """
+    dt = dtype or a.dtype
+    out = Tensor((m, n), dt, name="gemm." + mode)
+    if mode == "nn":
+        B.gemm_nn(a.handle, b.handle, out.handle, m, n, k)
+    elif mode == "nt":
+        B.gemm_nt(a.handle, b.handle, out.handle, m, n, k)
+    elif mode == "tn":
+        # 算子核那一版是累加的，所以先清零
+        out.fill_(0.0)
+        B.gemm_tn_acc(a.handle, b.handle, out.handle, k, n, m)
+    else:
+        raise ValueError(f"mode 只能是 nn / nt / tn，拿到 {mode!r}")
     return out
 
 
@@ -82,7 +132,7 @@ def linear(x, weight):
             B.gemm_nt(go.handle, weight.handle, tmp.handle, rows, din, dout)
             B.add_inplace(x.ensure_grad().handle, tmp.handle, x.numel)
 
-    out.requires_grad = x.requires_grad or weight.requires_grad
+    out.requires_grad = is_grad_enabled() and (x.requires_grad or weight.requires_grad)
     if out.requires_grad:
         out._backward = backward
         out._parents = (x, weight)
@@ -98,7 +148,7 @@ def scale(x, factor):
     out = Tensor(x.shape, x.dtype, name="scale")
     B.copy(out.handle, x.handle, x.numel)
     B.scale_inplace(out.handle, float(factor), out.numel)
-    out.requires_grad = x.requires_grad
+    out.requires_grad = is_grad_enabled() and (x.requires_grad)
 
     def backward():
         go = out.grad
@@ -134,7 +184,7 @@ def rms_norm(x, weight, eps=1e-5):
         if x.requires_grad:
             B.add_inplace(x.ensure_grad().handle, tmp.handle, x.numel)
 
-    out.requires_grad = x.requires_grad or weight.requires_grad
+    out.requires_grad = is_grad_enabled() and (x.requires_grad or weight.requires_grad)
     if out.requires_grad:
         out._backward = backward
         out._parents = (x, weight)
@@ -164,7 +214,7 @@ def swiglu(gate, up):
         if up.requires_grad:
             B.add_inplace(up.ensure_grad().handle, dup.handle, n)
 
-    out.requires_grad = gate.requires_grad or up.requires_grad
+    out.requires_grad = is_grad_enabled() and (gate.requires_grad or up.requires_grad)
     if out.requires_grad:
         out._backward = backward
         out._parents = (gate, up)
@@ -198,7 +248,7 @@ def rope(x, cos, sin, batch, seq, heads, head_dim):
     """
     B.rope_fwd(x.handle, cos.handle, sin.handle, batch, seq, heads, head_dim)
     out = Tensor(x.shape, x.dtype, name="rope", handle=x.handle)
-    out.requires_grad = x.requires_grad
+    out.requires_grad = is_grad_enabled() and (x.requires_grad)
 
     def backward():
         go = out.grad
@@ -252,7 +302,7 @@ def scaled_dot_product_attention(q, k, v, batch, seq, heads, kv_heads, head_dim)
         if v.requires_grad:
             B.add_inplace(v.ensure_grad().handle, dv.handle, v.numel)
 
-    out.requires_grad = q.requires_grad or k.requires_grad or v.requires_grad
+    out.requires_grad = is_grad_enabled() and (q.requires_grad or k.requires_grad or v.requires_grad)
     if out.requires_grad:
         out._backward = backward
         out._parents = (q, k, v)
@@ -271,7 +321,7 @@ def embedding(table, idx, rows, dim):
         # 散射累加：同一个 token 在一个 batch 里出现多次，梯度要加起来
         B.embed_bwd(go.handle, idx.handle, table.ensure_grad().handle, rows, dim)
 
-    out.requires_grad = table.requires_grad
+    out.requires_grad = is_grad_enabled() and (table.requires_grad)
     if out.requires_grad:
         out._backward = backward
         out._parents = (table,)
@@ -299,7 +349,7 @@ def linear_tied(x, table, rows, dim, vocab):
             B.gemm_nn(go.handle, table.handle, tmp.handle, rows, dim, vocab)
             B.add_inplace(x.ensure_grad().handle, tmp.handle, x.numel)
 
-    out.requires_grad = x.requires_grad or table.requires_grad
+    out.requires_grad = is_grad_enabled() and (x.requires_grad or table.requires_grad)
     if out.requires_grad:
         out._backward = backward
         out._parents = (x, table)
@@ -327,7 +377,7 @@ def cross_entropy(logits, targets, rows, vocab, mask=None):
         if logits.requires_grad:
             B.add_inplace(logits.ensure_grad().handle, d.handle, logits.numel)
 
-    loss.requires_grad = logits.requires_grad
+    loss.requires_grad = is_grad_enabled() and (logits.requires_grad)
     if loss.requires_grad:
         loss._backward = backward
         loss._parents = (logits,)
@@ -373,7 +423,7 @@ def attn_scores(q, k, batch, seq_q, seq_kv, heads, kv_heads, head_dim, scale=Non
         if k.requires_grad:
             B.add_inplace(k.ensure_grad().handle, dk.handle, k.numel)
 
-    out.requires_grad = q.requires_grad or k.requires_grad
+    out.requires_grad = is_grad_enabled() and (q.requires_grad or k.requires_grad)
     if out.requires_grad:
         out._backward = backward
         out._parents = (q, k)
@@ -415,7 +465,7 @@ def softmax(x, rows, cols, valid=None):
         if x.requires_grad:
             B.add_inplace(x.ensure_grad().handle, dx.handle, x.numel)
 
-    out.requires_grad = x.requires_grad
+    out.requires_grad = is_grad_enabled() and (x.requires_grad)
     if out.requires_grad:
         out._backward = backward
         out._parents = (x,)
@@ -442,7 +492,7 @@ def attn_apply(probs, v, batch, seq_q, seq_kv, heads, kv_heads, head_dim, out_sh
         if v.requires_grad:
             B.add_inplace(v.ensure_grad().handle, dv.handle, v.numel)
 
-    out.requires_grad = probs.requires_grad or v.requires_grad
+    out.requires_grad = is_grad_enabled() and (probs.requires_grad or v.requires_grad)
     if out.requires_grad:
         out._backward = backward
         out._parents = (probs, v)
@@ -476,7 +526,7 @@ def layer_norm(x, weight, bias, eps=1e-5):
         if x.requires_grad:
             B.add_inplace(x.ensure_grad().handle, dx.handle, x.numel)
 
-    out.requires_grad = x.requires_grad or weight.requires_grad
+    out.requires_grad = is_grad_enabled() and (x.requires_grad or weight.requires_grad)
     if out.requires_grad:
         out._backward = backward
         out._parents = (x, weight, bias)

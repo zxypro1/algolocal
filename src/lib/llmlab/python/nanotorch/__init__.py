@@ -46,18 +46,20 @@
 不是为了偷懒发明的。
 """
 
-from .tensor import Tensor, zeros, parameter
+from .tensor import Tensor, zeros, parameter, no_grad, enable_grad, is_grad_enabled
 from . import functional
 from . import functional as F
 from . import nn
 from . import optim
+from . import autograd
 from . import generate
 from . import log
 from ._bridge import phase, add_tokens, mark, release
 
 __all__ = [
     "Tensor", "zeros", "parameter",
-    "functional", "F", "nn", "optim", "generate", "log",
+    "no_grad", "enable_grad", "is_grad_enabled",
+    "functional", "F", "nn", "optim", "autograd", "generate", "log",
     "phase", "add_tokens", "mark", "release",
 ]
 
