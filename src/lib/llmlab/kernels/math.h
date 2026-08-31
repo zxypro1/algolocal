@@ -140,4 +140,93 @@ static inline double ll_sigmoid(double x) {
 static inline double ll_sqrt(double x) { return __builtin_sqrt(x); }
 static inline float ll_sqrtf(float x) { return __builtin_sqrtf(x); }
 
+/* ---------------------------------------------------------------- 低精度 */
+
+/*
+ * bf16 与 fp16 的**位级模拟**。
+ *
+ * 我们在浏览器里没有半精度硬件，所以做法和 gpulab 建模 fp8/fp4 是同一路：
+ * 按位编解码 + 正确的舍入，存储仍然是 f32。
+ * 于是「为什么 fp16 会溢出而 bf16 不会」不是被告知的，是算出来的 ——
+ * 两者尾数位数不同（bf16 只有 7 位）但**指数位数相同**（都是 8 位，
+ * 和 f32 一样），而 fp16 只有 5 位指数，最大值 65504。
+ *
+ * 第 17 关的对照组就靠这两个函数：同一份代码换一种精度，
+ * fp16 那条必须溢出成 inf。
+ */
+
+typedef unsigned int u32;
+
+static inline float ll_bits_to_f32(u32 b) {
+  union { u32 u; float f; } v;
+  v.u = b;
+  return v.f;
+}
+
+static inline u32 ll_f32_to_bits(float f) {
+  union { u32 u; float f; } v;
+  v.f = f;
+  return v.u;
+}
+
+/** 舍到 bf16 再回来。就近偶数舍入，和硬件一致 */
+static inline float ll_round_bf16(float x) {
+  u32 b = ll_f32_to_bits(x);
+  /* NaN 原样返回：加舍入项会把它变成 inf */
+  if ((b & 0x7F800000u) == 0x7F800000u && (b & 0x007FFFFFu) != 0) return x;
+  u32 lsb = (b >> 16) & 1u;
+  b = (b + 0x7FFFu + lsb) & 0xFFFF0000u;
+  return ll_bits_to_f32(b);
+}
+
+/**
+ * 舍到 fp16 再回来。
+ *
+ * fp16 是 1-5-10：最大 65504，超了就是 inf。次正规下界 2^-24。
+ * 这两条边界正是第 17 关要学员亲眼看到的东西，所以都老实实现，
+ * 不用「乘个系数再截断」那种糊弄法。
+ */
+static inline float ll_round_fp16(float x) {
+  u32 b = ll_f32_to_bits(x);
+  u32 sign = b & 0x80000000u;
+  u32 rest = b & 0x7FFFFFFFu;
+
+  if (rest >= 0x7F800000u) return x;                 /* inf / NaN 原样 */
+  if (rest >= 0x477FF000u) {                          /* 超出 fp16 的最大值 65504 */
+    return ll_bits_to_f32(sign | 0x7F800000u);        /* → ±inf */
+  }
+  if (rest < 0x33000000u) return ll_bits_to_f32(sign); /* 小于半个最小次正规 → ±0 */
+
+  int exp = (int)((rest >> 23) & 0xFFu) - 127;
+  u32 mant = rest & 0x007FFFFFu;
+
+  if (exp < -14) {
+    /* fp16 的次正规：有效尾数位数随指数减少 */
+    int shift = 13 + (-14 - exp);
+    if (shift > 24) return ll_bits_to_f32(sign);
+    u32 full = mant | 0x00800000u;                    /* 补上隐含的 1 */
+    u32 half = 1u << (shift - 1);
+    u32 lsb = (full >> shift) & 1u;
+    u32 q = (full + half - 1u + lsb) >> shift;        /* 就近偶数 */
+    /* 再展开回 f32：q × 2^-24 */
+    if (q == 0) return ll_bits_to_f32(sign);
+    float v = (float)q;
+    /* 2^-24 = 0x33800000 */
+    return ll_bits_to_f32(sign) == 0.0f
+      ? v * ll_bits_to_f32(0x33800000u)
+      : -(v * ll_bits_to_f32(0x33800000u));
+  }
+
+  /* 正规数：尾数保留 10 位，就近偶数 */
+  u32 lsb = (mant >> 13) & 1u;
+  u32 rounded = mant + 0x0FFFu + lsb;
+  if (rounded & 0x00800000u) {                        /* 进位冲进指数 */
+    exp += 1;
+    rounded = 0;
+    if (exp > 15) return ll_bits_to_f32(sign | 0x7F800000u);
+  }
+  u32 keep = rounded & 0x007FE000u;                   /* 只留高 10 位 */
+  return ll_bits_to_f32(sign | ((u32)(exp + 127) << 23) | keep);
+}
+
 #endif /* LLMLAB_MATH_H */

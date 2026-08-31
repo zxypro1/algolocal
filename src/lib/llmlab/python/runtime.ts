@@ -143,6 +143,18 @@ export async function loadPythonRuntime(options: LoadPythonOptions): Promise<Pyt
       // 不传 encoding：Emscripten 的 FS.writeFile 收到字符串时本来就按 UTF-8 写，
       // 而这个选项在新版里已经不在签名上了（tsc 会拒）
       py.FS.writeFile(path, content);
+      /*
+       * **每次写完都要让 import 缓存失效。**
+       *
+       * Python 的 FileFinder 按目录 mtime 缓存目录列表。在 Emscripten 的
+       * 内存文件系统里 mtime 的粒度很粗，于是「已经 import 过这个目录里的东西、
+       * 然后又往里写了一个新 .py」这个顺序下，新文件是**看不见**的 ——
+       * 报 `ModuleNotFoundError`，而文件明明就在那儿。
+       *
+       * 这条是先在测试里以偶发失败的形式冒出来的，但学员会稳定踩到：
+       * 关卡切换时平台往 /lab 写新文件，正好就是这个顺序。
+       */
+      py.runPython('import importlib; importlib.invalidate_caches()');
     },
     readFile(path) { return py.FS.readFile(path, { encoding: 'utf8' }); },
     mkdir(path) { py.FS.mkdirTree(path); },
