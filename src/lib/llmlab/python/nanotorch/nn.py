@@ -72,6 +72,62 @@ class Module:
         return self.forward(*args, **kwargs)
 
 
+class ModuleList(Module):
+    """一串子模块。用法和 `torch.nn.ModuleList` 一样。
+
+    存在的理由和 PyTorch 里一样：放进普通 list 的子模块**不会被登记**，
+    于是 `parameters()` 数不到它们 —— 模型看着建好了，优化器却一个参数都没更新。
+    这个错不报任何异常，只是 loss 一动不动。
+    """
+
+    def __init__(self, modules=None):
+        super().__init__()
+        self._items = []
+        for m in modules or []:
+            self.append(m)
+
+    def append(self, module):
+        idx = len(self._items)
+        self._items.append(module)
+        # 走 __setattr__，这样它才进 _modules
+        setattr(self, str(idx), module)
+        return self
+
+    def __len__(self):
+        return len(self._items)
+
+    def __getitem__(self, i):
+        return self._items[i]
+
+    def __iter__(self):
+        return iter(self._items)
+
+
+class ParameterList(Module):
+    """一串参数。对应 `torch.nn.ParameterList`，理由同 ModuleList。"""
+
+    def __init__(self, params=None):
+        super().__init__()
+        self._items = []
+        for p in params or []:
+            self.append(p)
+
+    def append(self, param):
+        idx = len(self._items)
+        self._items.append(param)
+        setattr(self, str(idx), param)
+        return self
+
+    def __len__(self):
+        return len(self._items)
+
+    def __getitem__(self, i):
+        return self._items[i]
+
+    def __iter__(self):
+        return iter(self._items)
+
+
 class Linear(Module):
     """不带 bias 的线性层。
 

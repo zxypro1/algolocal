@@ -28216,6 +28216,503 @@
           "zh": "一个头只能表达一种「看哪里」的模式。`多头注意力`把维度切成几份，每份各算一套查询/键/值，各自注意各自的东西，最后把结果拼起来再过一个输出投影。切分是免费的:总的计算量和一个大头一样，但表达能力强得多。\n\n`head_dim = dim // n_head`。八个头、每个 64 维的模型，和一个 512 维的单头，浮点运算量相同。\n\n`GQA`（分组查询注意力）动的是键和值:让若干个查询头**共用**一套键值。查询头仍然是 8 个，键值头可以只有 2 个,每 4 个查询头共享一份 kv。\n\n这么做的理由在推理侧。解码时每生成一个 token 都要读一遍整个 `KV cache`，而 cache 的大小正比于键值头数。8 个头减到 2 个，cache 就小 4 倍,在解码这种访存瓶颈的场景里是实打实的加速，而质量几乎没掉。Llama 2 70B 起就是这么配的。\n\n`n_kv_head = n_head` 时 GQA 退化成普通多头；`n_kv_head = 1` 时叫 MQA（多查询注意力），省得最多但质量掉得也明显。2 到 8 之间是常见的折中。",
           "en": "A single head can express only one pattern of \"where to look\". `Multi-head attention` splits the dimension into groups, computes a separate query/key/value set for each, lets each attend independently, then concatenates and applies an output projection. The split is free: total compute matches one large head, while expressiveness is much greater.\n\n`head_dim = dim // n_head`. Eight heads of 64 dimensions each cost the same floating-point work as one head of 512.\n\n`GQA` (grouped-query attention) changes the keys and values: several query heads **share** one key/value set. There can still be 8 query heads while only 2 key/value heads exist,every 4 query heads share one KV set.\n\nThe reason lives on the inference side. Decoding reads the entire `KV cache` for every generated token, and the cache scales with the number of key/value heads. Going from 8 to 2 makes it four times smaller,a real speedup in a memory-bound regime, at almost no quality cost. Llama 2 70B onward ships this configuration.\n\nWith `n_kv_head = n_head` GQA degenerates to ordinary multi-head; with `n_kv_head = 1` it is MQA (multi-query attention), which saves the most but visibly costs quality. Values between 2 and 8 are the usual compromise."
         }
+      },
+      {
+        "id": "rope",
+        "title": {
+          "zh": "RoPE —— 让注意力只看得见相对距离",
+          "en": "RoPE — making attention see only relative distance"
+        },
+        "goal": {
+          "zh": "在 `rope.py` 里自己把 RoPE 的表算出来，并接进第 4 关的注意力。\n\n```python\ndef build_tables(positions, head_dim, base=10000.0):\n    \"\"\"positions 是一串位置下标，返回 (cos, sin)，形状都是\n    (len(positions), head_dim // 2)。\"\"\"\n\nclass RopeAttention(nn.Module):\n    def forward(self, x, batch, seq, offset=0):\n        # q 和 k 各转一次；**v 不转**\n```\n\n**收的是位置列表，不是长度。** 解码时你要的往往不是 `0..S` 而是\n`t..t+1` —— 第 8 关的 KV cache 会直接用到这一点，所以接口现在就得是对的。\n\n## 表怎么算\n\n第 `i` 对维度（`i` 从 0 数到 `head_dim/2 - 1`）配一个频率：\n\n```\nθ(p, i) = p · base^(−2i / head_dim)\ncos[p][i] = cos(θ)      sin[p][i] = sin(θ)\n```\n\n`i = 0` 时频率是 1，转得最快，管的是相邻几个位置；\n`i` 越大频率越低，管的是几百上千个位置的尺度。\n一个头的 `head_dim/2` 对维度合起来就是一把不同刻度的尺子。\n\n## 转哪两维配对\n\n我们用**前后半配对**（Llama / HF 的写法）：第 `i` 维和第 `i + head_dim/2` 维\n当成一个复数转。另一种写法是相邻配对（`2i` 与 `2i+1`），\n两者数学上等价，但**表和权重必须按同一种约定**,混着用不会报错，只会静静地训不出来。\n\n```\nx[i]        ← x[i]·cos − x[i+half]·sin\nx[i+half]   ← x[i]·sin + x[i+half]·cos\n```\n\n## 怎么算过\n\n| | 要求 |\n| --- | --- |\n| 表 | 与 f64 参考最大差 ≤ 2e-6 |\n| 数值 | 整个注意力与 f64 参考最大差 ≤ 5e-5 |\n| **平移不变** | 整段往后挪 `Δ`，注意力分数矩阵**不变**（≤ 5e-5） |\n| v 没被转 | 每次前向恰好 `rope_fwd` **2 次** |\n\n平移不变那条是这一关的全部意义。`q_i · k_j` 转完之后只依赖 `i − j`,\n这就是「相对位置」四个字的准确含义，也是 RoPE 能外推到没训过的长度的原因。\n它挂了说明表没按位置对齐,而这个错在 loss 上看不出来。\n",
+          "en": "In `rope.py`, build the RoPE tables yourself and wire them into stage 4's attention.\n\n```python\ndef build_tables(positions, head_dim, base=10000.0):\n    \"\"\"positions is a list of position indices; returns (cos, sin), both\n    shaped (len(positions), head_dim // 2).\"\"\"\n\nclass RopeAttention(nn.Module):\n    def forward(self, x, batch, seq, offset=0):\n        # rotate q and k; **do not rotate v**\n```\n\n**It takes positions, not a length.** When decoding you usually want `t..t+1`\nrather than `0..S` — stage 8's KV cache depends on exactly this, so the interface\nhas to be right now.\n\n## Building the table\n\nDimension pair `i` (from 0 to `head_dim/2 - 1`) gets one frequency:\n\n```\nθ(p, i) = p · base^(−2i / head_dim)\ncos[p][i] = cos(θ)      sin[p][i] = sin(θ)\n```\n\nAt `i = 0` the frequency is 1 and rotation is fastest, covering neighbouring\npositions; larger `i` means lower frequency, covering hundreds or thousands of\npositions. Together the `head_dim/2` pairs form rulers at many scales.\n\n## Which dimensions pair up\n\nWe use **half-and-half pairing** (the Llama / HF convention): dimension `i` pairs\nwith dimension `i + head_dim/2`. The alternative pairs neighbours (`2i` with\n`2i+1`). They are mathematically equivalent, but **table and weights must agree**,\nmixing them raises no error and simply fails to train.\n\n```\nx[i]        ← x[i]·cos − x[i+half]·sin\nx[i+half]   ← x[i]·sin + x[i+half]·cos\n```\n\n## What counts as passing\n\n| | Requirement |\n| --- | --- |\n| Table | Max difference from the f64 reference ≤ 2e-6 |\n| Numerics | Whole attention within 5e-5 of the f64 reference |\n| **Shift invariance** | Shift the segment by `Δ`; the score matrix is unchanged (≤ 5e-5) |\n| v untouched | Exactly **2** `rope_fwd` calls per forward |\n\nShift invariance is the whole point of this stage. After rotation `q_i · k_j`\ndepends only on `i − j` — that is precisely what \"relative position\" means, and why\nRoPE extrapolates to lengths it never saw. If it fails, the table is not aligned to\npositions, and no loss curve will tell you.\n"
+        },
+        "checklist": [
+          {
+            "zh": "自己算的 cos / sin 表对得上 f64 参考",
+            "en": "Your cos / sin tables match the f64 reference"
+          },
+          {
+            "zh": "整段平移之后分数矩阵不变",
+            "en": "Shifting the whole segment leaves the score matrix unchanged"
+          },
+          {
+            "zh": "只转 q 和 k，不转 v",
+            "en": "Rotate q and k only, never v"
+          },
+          {
+            "zh": "build_tables 收位置列表，能从任意 offset 起算",
+            "en": "build_tables takes positions, so any offset works"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "base ** (-2.0 * i / head_dim) —— 指数是负的，i 越大频率越低。",
+            "en": "base ** (-2.0 * i / head_dim): the exponent is negative, so larger i means lower frequency."
+          },
+          {
+            "zh": "F.rope 是就地的，它改的就是传进去的那块。q 和 k 各调一次。",
+            "en": "F.rope is in-place: it rewrites the tensor you pass. Call it once for q and once for k."
+          },
+          {
+            "zh": "offset 只影响 positions —— range(offset, offset + seq)，别的都不用改。",
+            "en": "offset only affects positions: range(offset, offset + seq). Nothing else changes."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**顺手把 v 也转了。** 前向照跑，数值也不会离谱,注意力权重是对的，\n只是取出来的值被转过。模型仍然能训，只是比不转差一点。\n这一关靠数 `rope_fwd` 的调用次数把它抓出来。\n",
+            "en": "**Rotating v as well.** The forward pass runs and the numbers are not absurd: the\nattention weights are right, only the values fetched have been rotated. The model\nstill trains, just slightly worse. This stage catches it by counting `rope_fwd` calls.\n"
+          },
+          {
+            "zh": "**表按 head_dim 开而不是 head_dim/2。** 形状检查过不了是好事,\n真正麻烦的是把 `2i` 写成 `i`：表还是对的形状，频率却全错了一个尺度，\n短序列上几乎看不出来，长序列上直接废掉。\n",
+            "en": "**Sizing the table by head_dim instead of head_dim/2.** Failing a shape check is the\ngood outcome; the nasty variant is writing `i` where `2i` belongs. The table keeps\nits shape while every frequency is off by a factor, which is nearly invisible on short\nsequences and fatal on long ones.\n"
+          }
+        ],
+        "train": {
+          "files": {
+            "rope.py": "\"\"\"第 5 关：RoPE。\n\n自己算表，接进注意力。q 和 k 转，v 不转。\n\"\"\"\nimport math\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\n\n\ndef build_tables(positions, head_dim, base=10000.0):\n    \"\"\"返回 (cos, sin)，形状都是 (len(positions), head_dim // 2)。\"\"\"\n    assert head_dim % 2 == 0\n    half = head_dim // 2\n    cos = nt.zeros((len(positions), half), role=\"data\", name=\"rope.cos\")\n    sin = nt.zeros((len(positions), half), role=\"data\", name=\"rope.sin\")\n    # TODO: 逐个位置、逐对维度算 θ = p * base ** (-2i / head_dim)\n    cos.fill_(1.0)\n    sin.fill_(0.0)\n    return cos, sin\n\n\nclass RopeAttention(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed, base=10000.0):\n        super().__init__()\n        assert dim % n_head == 0 and n_head % n_kv_head == 0\n        self.dim, self.n_head, self.n_kv_head = dim, n_head, n_kv_head\n        self.head_dim = dim // n_head\n        self.base = base\n        hd = self.head_dim\n        self.wq = nt.parameter((dim, n_head * hd), seed + 1, 0.02, \"wq\")\n        self.wk = nt.parameter((dim, n_kv_head * hd), seed + 2, 0.02, \"wk\")\n        self.wv = nt.parameter((dim, n_kv_head * hd), seed + 3, 0.02, \"wv\")\n        self.wo = nt.parameter((n_head * hd, dim), seed + 4, 0.02, \"wo\")\n\n    def forward(self, x, batch, seq, offset=0):\n        # TODO: 投影 -> 给 q / k 转 RoPE -> 因果注意力 -> 输出投影\n        return nt.zeros((batch * seq, self.dim))\n\n\nif __name__ == \"__main__\":\n    cos, sin = build_tables(list(range(4)), 8)\n    print(\"表形状\", cos.shape, sin.shape)\n    m = RopeAttention(64, 4, 2, seed=11)\n    x = nt.zeros((2 * 8, 64), role=\"data\").normal_(1, 1.0)\n    print(\"输出形状\", m(x, 2, 8).shape)\n"
+          },
+          "referenceFiles": {
+            "rope.py": "\"\"\"第 5 关的参考实现。\"\"\"\nimport math\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\n\n\ndef build_tables(positions, head_dim, base=10000.0):\n    assert head_dim % 2 == 0\n    half = head_dim // 2\n    cos = nt.zeros((len(positions), half), role=\"data\", name=\"rope.cos\")\n    sin = nt.zeros((len(positions), half), role=\"data\", name=\"rope.sin\")\n    cv, sv = [], []\n    for p in positions:\n        for i in range(half):\n            theta = p * (base ** (-2.0 * i / head_dim))\n            cv.append(math.cos(theta))\n            sv.append(math.sin(theta))\n    cos.set_(cv)\n    sin.set_(sv)\n    return cos, sin\n\n\nclass RopeAttention(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed, base=10000.0):\n        super().__init__()\n        assert dim % n_head == 0 and n_head % n_kv_head == 0\n        self.dim, self.n_head, self.n_kv_head = dim, n_head, n_kv_head\n        self.head_dim = dim // n_head\n        self.base = base\n        hd = self.head_dim\n        self.wq = nt.parameter((dim, n_head * hd), seed + 1, 0.02, \"wq\")\n        self.wk = nt.parameter((dim, n_kv_head * hd), seed + 2, 0.02, \"wk\")\n        self.wv = nt.parameter((dim, n_kv_head * hd), seed + 3, 0.02, \"wv\")\n        self.wo = nt.parameter((n_head * hd, dim), seed + 4, 0.02, \"wo\")\n\n    def forward(self, x, batch, seq, offset=0):\n        rows, hd = batch * seq, self.head_dim\n        q = F.linear(x, self.wq)\n        k = F.linear(x, self.wk)\n        v = F.linear(x, self.wv)\n\n        # 位置从 offset 起算 —— 解码时这就是「已经生成了多少个」\n        cos, sin = build_tables(list(range(offset, offset + seq)), hd, self.base)\n        q = F.rope(q, cos, sin, batch, seq, self.n_head, hd)\n        k = F.rope(k, cos, sin, batch, seq, self.n_kv_head, hd)\n        # v 不转：注意力取的是「值」，值不该带位置\n\n        scores = F.attn_scores(q, k, batch, seq, seq, self.n_head, self.n_kv_head, hd)\n        valid = F.causal_valid(batch, self.n_head, seq)\n        probs = F.softmax(scores, batch * self.n_head * seq, seq, valid)\n        out = F.attn_apply(\n            probs, v, batch, seq, seq, self.n_head, self.n_kv_head, hd,\n            out_shape=(rows, self.n_head * hd)\n        )\n        return F.linear(out, self.wo)\n\n\nif __name__ == \"__main__\":\n    cos, sin = build_tables(list(range(4)), 8)\n    print(\"表形状\", cos.shape, sin.shape)\n    m = RopeAttention(64, 4, 2, seed=11)\n    x = nt.zeros((2 * 8, 64), role=\"data\").normal_(1, 1.0)\n    print(\"输出形状\", m(x, 2, 8).shape)\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "rope.spec.ts",
+            "content": "const lab = require('@llm/lab');\n\nconst B = 2, S = 8, DIM = 64, H = 4, KV = 2, BASE = 10000;\nconst HD = DIM / H;\n\n/** 平台侧 f64 的表 */\nfunction refTables(positions, hd, base) {\n  const half = hd / 2;\n  const cos = [], sin = [];\n  for (const p of positions)\n    for (let i = 0; i < half; i++) {\n      const th = p * Math.pow(base, (-2 * i) / hd);\n      cos.push(Math.cos(th));\n      sin.push(Math.sin(th));\n    }\n  return { cos, sin };\n}\n\nfunction rotate(vec, rows, heads, hd, cos, sin, seq) {\n  const half = hd / 2;\n  const out = Float64Array.from(vec);\n  for (let r = 0; r < rows; r++) {\n    const s = r % seq;\n    for (let h = 0; h < heads; h++)\n      for (let i = 0; i < half; i++) {\n        const a = out[r * heads * hd + h * hd + i];\n        const d = out[r * heads * hd + h * hd + i + half];\n        const c = cos[s * half + i], n = sin[s * half + i];\n        out[r * heads * hd + h * hd + i] = a * c - d * n;\n        out[r * heads * hd + h * hd + i + half] = a * n + d * c;\n      }\n  }\n  return out;\n}\n\nfunction build(offset) {\n  lab.py(`\nimport sys, json\nsys.path.insert(0, \"/lab\")\nimport importlib, rope\nimportlib.reload(rope)\nimport nanotorch as nt\n\nB, S, DIM, H, KV = ${B}, ${S}, ${DIM}, ${H}, ${KV}\n_m = rope.RopeAttention(DIM, H, KV, seed=11, base=${BASE})\n_x = nt.zeros((B * S, DIM), role=\"data\").normal_(77, 1.0)\n_out = _m(_x, B, S, offset=${offset || 0})\n`);\n  return {\n    out: JSON.parse(String(lab.py('json.dumps(_out.tolist())'))),\n    x: JSON.parse(String(lab.py('json.dumps(_x.tolist())'))),\n    w: JSON.parse(String(lab.py(\n      'json.dumps({\"wq\": _m.wq.tolist(), \"wk\": _m.wk.tolist(), '\n      + '\"wv\": _m.wv.tolist(), \"wo\": _m.wo.tolist()})'\n    ))),\n  };\n}\n\n/** f64 参考：投影 -> 转 q/k -> 因果注意力 -> 输出投影 */\nfunction reference(x, w, offset) {\n  const rows = B * S;\n  const proj = (mat, outDim) => {\n    const out = new Float64Array(rows * outDim);\n    for (let r = 0; r < rows; r++)\n      for (let o = 0; o < outDim; o++) {\n        let acc = 0;\n        for (let d = 0; d < DIM; d++) acc += x[r * DIM + d] * mat[d * outDim + o];\n        out[r * outDim + o] = acc;\n      }\n    return out;\n  };\n  const positions = [];\n  for (let s = 0; s < S; s++) positions.push(offset + s);\n  const { cos, sin } = refTables(positions, HD, BASE);\n\n  const q = rotate(proj(w.wq, H * HD), rows, H, HD, cos, sin, S);\n  const k = rotate(proj(w.wk, KV * HD), rows, KV, HD, cos, sin, S);\n  const v = proj(w.wv, KV * HD);\n\n  const scale = 1 / Math.sqrt(HD);\n  const rep = H / KV;\n  const ctx = new Float64Array(rows * H * HD);\n  const scoreDump = [];\n  for (let b = 0; b < B; b++)\n    for (let h = 0; h < H; h++)\n      for (let i = 0; i < S; i++) {\n        const kh = Math.floor(h / rep);\n        const raw = [];\n        for (let j = 0; j <= i; j++) {\n          let s = 0;\n          for (let c = 0; c < HD; c++)\n            s += q[(b * S + i) * H * HD + h * HD + c] * k[(b * S + j) * KV * HD + kh * HD + c];\n          raw.push(s * scale);\n        }\n        scoreDump.push(...raw);\n        const mx = Math.max(...raw);\n        const ex = raw.map((s) => Math.exp(s - mx));\n        const sum = ex.reduce((a, c) => a + c, 0);\n        for (let j = 0; j <= i; j++) {\n          const p = ex[j] / sum;\n          for (let c = 0; c < HD; c++)\n            ctx[(b * S + i) * H * HD + h * HD + c] += p * v[(b * S + j) * KV * HD + kh * HD + c];\n        }\n      }\n  const out = new Float64Array(rows * DIM);\n  for (let r = 0; r < rows; r++)\n    for (let d = 0; d < DIM; d++) {\n      let acc = 0;\n      for (let c = 0; c < H * HD; c++) acc += ctx[r * H * HD + c] * w.wo[c * DIM + d];\n      out[r * DIM + d] = acc;\n    }\n  return { out, scores: scoreDump };\n}\n\ndescribe('RoPE', () => {\n  it('自己算的表对得上 f64 参考', () => {\n    lab.py(`\nimport sys, json\nsys.path.insert(0, \"/lab\")\nimport importlib, rope\nimportlib.reload(rope)\n_cos, _sin = rope.build_tables(list(range(${S})), ${HD}, ${BASE})\n`);\n    const cos = JSON.parse(String(lab.py('json.dumps(_cos.tolist())')));\n    const sin = JSON.parse(String(lab.py('json.dumps(_sin.tolist())')));\n    const positions = [];\n    for (let s = 0; s < S; s++) positions.push(s);\n    const ref = refTables(positions, HD, BASE);\n\n    expect(cos.length).toBe(S * (HD / 2));\n    expect(sin.length).toBe(S * (HD / 2));\n    let diff = 0;\n    for (let i = 0; i < ref.cos.length; i++) {\n      diff = Math.max(diff, Math.abs(cos[i] - ref.cos[i]));\n      diff = Math.max(diff, Math.abs(sin[i] - ref.sin[i]));\n    }\n    console.log('表的最大差 ' + diff.toExponential(2));\n    lab.publish('rope.tableError', diff);\n    expect(diff).toBeLessThan(2e-6);\n  });\n\n  it('整个注意力与 f64 参考最大差 ≤ 5e-5', () => {\n    const r = build(0);\n    const ref = reference(r.x, r.w, 0);\n    let diff = 0;\n    for (let i = 0; i < ref.out.length; i++)\n      diff = Math.max(diff, Math.abs(r.out[i] - ref.out[i]));\n    console.log('最大差 ' + diff.toExponential(2));\n    lab.publish('attention.maxError', diff);\n    expect(diff).toBeLessThan(5e-5);\n  });\n\n  /*\n   * 这一关的重点。RoPE 之后 q_i·k_j 只依赖 i−j，\n   * 所以整段往后挪 Δ，分数矩阵应当一模一样。\n   * 挂了说明表没跟位置对齐 —— 而这个错在 loss 上看不出来。\n   */\n  it('整段平移之后，注意力分数矩阵不变', () => {\n    const D = 5;\n    const a = build(0);\n    const b2 = build(D);\n    const s0 = reference(a.x, a.w, 0).scores;\n    const sD = reference(b2.x, b2.w, D).scores;\n    // 先确认参考本身满足这条性质（否则测的是参考不是学员）\n    let refDiff = 0;\n    for (let i = 0; i < s0.length; i++) refDiff = Math.max(refDiff, Math.abs(s0[i] - sD[i]));\n    expect(refDiff).toBeLessThan(1e-12);\n\n    // 学员那边：offset 变了，输出应当逐值相同\n    let diff = 0;\n    for (let i = 0; i < a.out.length; i++)\n      diff = Math.max(diff, Math.abs(a.out[i] - b2.out[i]));\n    console.log('平移 ' + D + ' 之后的最大差 ' + diff.toExponential(2));\n    lab.publish('rope.shiftError', diff);\n    expect(diff).toBeLessThan(5e-5);\n  });\n\n  /*\n   * v 不该转。数值上很难抓（注意力权重仍然是对的），\n   * 所以直接数 rope_fwd 调了几次 —— 一次前向恰好两次，q 和 k。\n   */\n  it('一次前向恰好转两次：q 和 k，不含 v', () => {\n    const before = lab.metrics().kernelCalls.byOp.rope_fwd || 0;\n    build(0);\n    const after = lab.metrics().kernelCalls.byOp.rope_fwd || 0;\n    const calls = after - before;\n    console.log('一次前向的 rope_fwd 次数 ' + calls);\n    lab.publish('rope.callsPerForward', calls);\n    expect(calls).toBe(2);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "llm.rope.tableError",
+            "op": "lte",
+            "value": 0.000002,
+            "label": {
+              "zh": "cos / sin 表与 f64 参考的最大差",
+              "en": "max table difference from the f64 reference"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.attention.maxError",
+            "op": "lte",
+            "value": 0.00005,
+            "label": {
+              "zh": "带 RoPE 的注意力与 f64 参考的最大差",
+              "en": "max attention difference from the f64 reference"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.rope.shiftError",
+            "op": "lte",
+            "value": 0.00005,
+            "label": {
+              "zh": "整段平移之后的最大差（相对位置）",
+              "en": "max difference after shifting the segment (relative position)"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.rope.callsPerForward",
+            "op": "eq",
+            "value": 2,
+            "label": {
+              "zh": "一次前向转了几次（q 和 k，不含 v）",
+              "en": "rotations per forward (q and k, not v)"
+            },
+            "dimension": "correctness"
+          }
+        ],
+        "focus": [
+          "correctness"
+        ],
+        "extension": {
+          "zh": "`base` 决定了最低那档频率能覆盖多长。10000 是原论文的取值，对应几千的上下文；\n要把上下文拉到十万级，**光靠外推是不够的**,现在的做法是\n`YaRN` / `NTK-aware` 这类把 base 放大再微调一小段的方案，\n2026 年的长上下文模型基本都带一层这个。\n\n另一条正在铺开的路是 `QK-norm`：在算分数之前先给 q 和 k 各做一次 RMSNorm。\n它稳的是训练早期的注意力熵,Gemma 2 之后成了很多模型的标配。\n注意它和 MLA 有冲突（MLA 里 q/k 只以压缩形态存在），这也是第 4 关那条延伸里\n说的取舍。\n",
+          "en": "`base` sets how long the lowest frequency can cover. 10000 comes from the original\npaper and suits a few thousand tokens; reaching a hundred thousand **takes more than\nextrapolation**. Current practice is `YaRN` / `NTK-aware` scaling — enlarge the base\nand fine-tune briefly — and nearly every long-context model in 2026 ships one.\n\nAnother spreading technique is `QK-norm`: RMSNorm q and k before computing scores.\nIt stabilises attention entropy early in training and became standard for many models\nafter Gemma 2. Note it conflicts with MLA, where q/k exist only in compressed form —\nthe same trade-off stage 4's extension mentions.\n"
+        },
+        "primer": {
+          "zh": "注意力本身对顺序一无所知。把一句话的词打乱重排，注意力算出来的结果只是跟着换个位置,它看不出「谁在前谁在后」。所以位置信息必须另外喂进去。\n\n早期做法是`绝对位置编码`：给第 0 个位置配一个向量、第 1 个配另一个，加到词向量上。它能用，但有个硬伤,训练时只见过 0..1023 这些位置，第 1024 个位置的编码从没见过，模型到那里就废了。\n\n`RoPE`（旋转位置编码）换了个思路：不加，而是`转`。把每个头的维度两两配对当成复平面上的点，第 p 个位置就整体转 p·θ 的角度。\n\n妙处在于点积。两个向量各自转过 i·θ 和 j·θ 之后再做点积，结果只跟 `i − j` 有关,转的绝对角度抵消掉了。于是注意力天然看到的是`相对距离`，而不是绝对下标。\n\n不同的维度对配不同的频率：低维转得快，管相邻几个位置；高维转得慢，管几百上千的尺度。合起来像一把刻度从毫米到米的复合尺子。频率的底数叫 `base`，原论文取 10000,把它调大再微调一小段，就是今天把上下文从几千拉到十万的常规手段。\n\nRoPE 只转`查询`和`键`,分数是它们算出来的，位置该影响的是「看哪里」。`值`不转：值是取回来的内容，内容不该带着位置跑。",
+          "en": "Attention itself knows nothing about order. Shuffle a sentence and its outputs merely move with the tokens,it cannot tell what came first. Position has to be supplied separately.\n\nThe early approach was `absolute position embeddings`: a vector for position 0, another for position 1, added to the token embedding. It works, with one hard limitation,training only ever saw positions 0..1023, so position 1024 has an embedding the model never learned, and everything breaks there.\n\n`RoPE` (rotary position embedding) takes another route: it rotates instead of adding. Pair up the dimensions of each head as points on the complex plane, and rotate position p by an angle of p·θ.\n\nThe trick is in the dot product. Rotate two vectors by i·θ and j·θ, take their dot product, and the result depends only on `i − j`,the absolute angles cancel. Attention therefore sees `relative distance` rather than absolute indices.\n\nDifferent dimension pairs get different frequencies: low dimensions rotate fast and cover neighbours; high dimensions rotate slowly and cover hundreds or thousands of positions. Together they form a ruler graduated from millimetres to metres. The frequency base is called `base`, and the original paper used 10000,enlarging it and fine-tuning briefly is the standard way today to stretch context from thousands to a hundred thousand.\n\nRoPE rotates only `queries` and `keys`,they produce the scores, and position should shape where to look. `Values` are left alone: a value is the content fetched, and content should not carry a position with it."
+        }
+      },
+      {
+        "id": "rmsnorm-prenorm",
+        "title": {
+          "zh": "RMSNorm 与 pre-norm —— 深了还能不能训",
+          "en": "RMSNorm and pre-norm — staying trainable at depth"
+        },
+        "goal": {
+          "zh": "在 `norm.py` 里写归一化和残差堆叠，把「深度」这件事真的量出来。\n\n```python\nclass RMSNorm(nn.Module):\n    def __init__(self, dim, eps=1e-5):   # 只有一个 weight，**没有 bias**\n    def forward(self, x, rows):\n\nclass Stack(nn.Module):\n    def __init__(self, dim, n_layer, seed, residual_scale=True):\n    def forward(self, x, rows):\n        \"\"\"每层：h = norm(x) -> linear -> (可选缩放) -> x = x + h\n\n        顺手把每层之后的 F.rms(x) 记进 self.layer_rms。\"\"\"\n```\n\n## RMSNorm 和 LayerNorm 差在哪\n\nLayerNorm 先减均值再除标准差，RMSNorm **只除均方根**：\n\n```\nLayerNorm(x) = (x − mean(x)) / std(x) · g + b\nRMSNorm(x)   = x / sqrt(mean(x²) + ε) · g\n```\n\n少了减均值、少了 bias，省下大约 7% 的归一化开销,而效果基本持平。\n这是 Llama 之后的默认选择。\n\n一个直接的推论：**给输入整体加一个常数，LayerNorm 的输出不变，RMSNorm 的会变。**\n这一关就用它来验你写的到底是哪一个。\n\n## pre-norm 与残差缩放\n\n`pre-norm`（`x + f(norm(x))`）和 `post-norm`（`norm(x + f(x))`）的区别，\n在于残差通路上有没有归一化挡着。pre-norm 的残差是一条干净的恒等通路,\n这是深层能训起来的直接原因，也是今天的默认。\n\n代价是残差流的量级随深度涨。每层往上加一份方差 `σ²`，`L` 层之后是\n`sqrt(1 + L·σ²)`。把每层输出乘 `1/sqrt(2L)` 之后，总量变成\n`sqrt(1 + σ²/2)` —— **和深度无关**。GPT-2 起就是这么初始化的。\n\n这一关把权重按 `std = dim^(−1/2)` 初始化，于是 `σ ≈ 1`，三个数分别是：\n\n```\n16 层不带缩放   sqrt(1 + 16) ≈ 4.12\n16 层带缩放     sqrt(1 + 0.5) ≈ 1.22\n 2 层带缩放     sqrt(1 + 0.5) ≈ 1.22   ← 和 16 层一样\n```\n\n（`0.02` 那个常见的初始化是给 `dim = 768` 调的:\n`0.02 · sqrt(768) ≈ 0.55`。照搬到 `dim = 32` 上 `σ` 只有 0.11，\n深度效应会被压得几乎看不见。**初始化的尺度得跟着宽度走。**）\n\n## 怎么算过\n\n| | 要求 |\n| --- | --- |\n| 数值 | RMSNorm 与 f64 参考最大差 ≤ 2e-6 |\n| 是 RMSNorm 不是 LayerNorm | 整体平移之后输出的变化 **≥ 0.05** |\n| 参数 | 每层归一化恰好 `dim` 个参数（没有 bias） |\n| 深度无关 | 16 层与 2 层的残差流增长比 **≤ 1.25** |\n",
+          "en": "In `norm.py`, write the normalisation and the residual stack, and actually measure\nwhat depth does.\n\n```python\nclass RMSNorm(nn.Module):\n    def __init__(self, dim, eps=1e-5):   # one weight, **no bias**\n    def forward(self, x, rows):\n\nclass Stack(nn.Module):\n    def __init__(self, dim, n_layer, seed, residual_scale=True):\n    def forward(self, x, rows):\n        \"\"\"Each layer: h = norm(x) -> linear -> (optional scale) -> x = x + h\n\n        Record F.rms(x) after every layer into self.layer_rms.\"\"\"\n```\n\n## RMSNorm versus LayerNorm\n\nLayerNorm subtracts the mean then divides by the standard deviation; RMSNorm\n**only divides by the root mean square**:\n\n```\nLayerNorm(x) = (x − mean(x)) / std(x) · g + b\nRMSNorm(x)   = x / sqrt(mean(x²) + ε) · g\n```\n\nNo mean subtraction, no bias, about 7% less normalisation cost, and essentially the\nsame quality. It has been the default since Llama.\n\nOne immediate consequence: **add a constant to the whole input and LayerNorm's output\nis unchanged while RMSNorm's changes.** This stage uses that to check which one you\nactually wrote.\n\n## Pre-norm and residual scaling\n\n`pre-norm` (`x + f(norm(x))`) differs from `post-norm` (`norm(x + f(x))`) in\nwhether a normalisation sits on the residual path. Pre-norm keeps that path a clean\nidentity, which is the direct reason deep stacks train, and the default today.\n\nThe cost is that the residual stream grows with depth. Each layer adds variance\n`σ²`, so after `L` layers the scale is `sqrt(1 + L·σ²)`. Multiply each layer's\noutput by `1/sqrt(2L)` and the total becomes `sqrt(1 + σ²/2)` — **independent of\ndepth**. GPT-2 has initialised this way from the start.\n\n## What counts as passing\n\n| | Requirement |\n| --- | --- |\n| Numerics | RMSNorm within 2e-6 of the f64 reference |\n| RMSNorm, not LayerNorm | Output change under a constant shift **≥ 0.05** |\n| Parameters | Exactly `dim` per normalisation layer (no bias) |\n| Depth independence | 16-layer growth over 2-layer growth **≤ 1.25** |\n"
+        },
+        "checklist": [
+          {
+            "zh": "RMSNorm 只有 weight，没有 bias",
+            "en": "RMSNorm has a weight and no bias"
+          },
+          {
+            "zh": "整体平移能改变 RMSNorm 的输出",
+            "en": "A constant shift changes RMSNorm output"
+          },
+          {
+            "zh": "残差是 x + f(norm(x))，归一化不挡在残差通路上",
+            "en": "The residual is x + f(norm(x)); no normalisation on the residual path"
+          },
+          {
+            "zh": "带 1/sqrt(2L) 缩放之后增长与深度无关",
+            "en": "With 1/sqrt(2L) scaling the growth is depth-independent"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "F.rms_norm(x, weight, eps) 已经有了，weight 用 nt.parameter 建好再 fill_(1.0)。",
+            "en": "F.rms_norm(x, weight, eps) exists; build weight with nt.parameter and fill_(1.0)."
+          },
+          {
+            "zh": "F.rms(x) 返回一个普通的 float，是观测量，不进计算图。",
+            "en": "F.rms(x) returns a plain float; it is an observable, not part of the graph."
+          },
+          {
+            "zh": "每层输出乘 (2*n_layer) ** -0.5 就是那条缩放，用 F.scale。",
+            "en": "Multiply each layer output by (2*n_layer) ** -0.5 via F.scale."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**给 RMSNorm 加了 bias。** 参数量多了 `dim`，功能上也说得通,\n但它把「不减均值」这个前提破坏了：bias 能把均值挪回去，于是你写的其实是\n一个更贵的 LayerNorm。这一关单独查参数量。\n",
+            "en": "**Adding a bias to RMSNorm.** It costs `dim` extra parameters and seems harmless,\nbut it breaks the premise of not subtracting the mean: a bias can shift the mean back,\nso what you wrote is an expensive LayerNorm. This stage checks the parameter count.\n"
+          },
+          {
+            "zh": "**写成 post-norm。** `norm(x + f(x))` 在浅层上和 pre-norm 几乎没差,\n两三层的时候 loss 曲线看不出区别。差别要到十几层往上才出来，\n而那时候你已经没法用「换一行」来定位了。\n",
+            "en": "**Writing post-norm.** `norm(x + f(x))` is nearly indistinguishable from pre-norm in\na shallow stack: at two or three layers the loss curves overlap. The gap appears above\na dozen layers, by which point a one-line change is no longer easy to attribute.\n"
+          }
+        ],
+        "train": {
+          "files": {
+            "norm.py": "\"\"\"第 6 关：RMSNorm 与 pre-norm 残差。\"\"\"\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\n\n\nclass RMSNorm(nn.Module):\n    def __init__(self, dim, eps=1e-5):\n        super().__init__()\n        self.dim, self.eps = dim, eps\n        # TODO: 只有一个 weight，初值全 1，**没有 bias**\n        self.weight = nt.parameter((dim,), None, 0.0, \"norm.weight\")\n\n    def forward(self, x, rows):\n        # TODO\n        return x\n\n\nclass Stack(nn.Module):\n    def __init__(self, dim, n_layer, seed, residual_scale=True):\n        super().__init__()\n        self.dim, self.n_layer = dim, n_layer\n        self.residual_scale = residual_scale\n        self.layer_rms = []\n        # TODO: n_layer 组 (RMSNorm, linear 权重)，权重的 std 取 dim ** -0.5。\n        #       用 nn.ModuleList / nn.ParameterList 装 —— 放进普通 list\n        #       的子模块不会被登记，parameters() 数不到它们\n        self.norms = nn.ModuleList()\n        self.weights = nn.ParameterList()\n\n    def forward(self, x, rows):\n        self.layer_rms = []\n        # TODO: 每层 h = norm(x) -> linear -> 缩放 -> x = x + h\n        #       每层之后 self.layer_rms.append(F.rms(x))\n        return x\n\n\nif __name__ == \"__main__\":\n    DIM, ROWS = 32, 64\n    s = Stack(DIM, 4, seed=5)\n    x = nt.zeros((ROWS, DIM), role=\"data\").normal_(3, 1.0)\n    print(\"入口 rms\", round(F.rms(x), 4))\n    out = s(x, ROWS)\n    print(\"逐层 rms\", [round(v, 4) for v in s.layer_rms])\n"
+          },
+          "referenceFiles": {
+            "norm.py": "\"\"\"第 6 关的参考实现。\"\"\"\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\n\n\nclass RMSNorm(nn.Module):\n    def __init__(self, dim, eps=1e-5):\n        super().__init__()\n        self.dim, self.eps = dim, eps\n        # std=0 表示常数 1 起步 —— 归一化的增益就是这么初始化的\n        self.weight = nt.parameter((dim,), None, 0.0, \"norm.weight\")\n\n    def forward(self, x, rows):\n        return F.rms_norm(x, self.weight, self.eps)\n\n\nclass Stack(nn.Module):\n    def __init__(self, dim, n_layer, seed, residual_scale=True):\n        super().__init__()\n        self.dim, self.n_layer = dim, n_layer\n        self.residual_scale = residual_scale\n        self.layer_rms = []\n        self.norms = []\n        self.weights = []\n        # ModuleList / ParameterList：放进普通 list 的子模块不会被登记，\n        # parameters() 就数不到它们 —— 优化器一个参数都不更新，而且不报错\n        self.norms = nn.ModuleList([RMSNorm(dim) for _ in range(n_layer)])\n        self.weights = nn.ParameterList([\n            # std = dim**-0.5：支路输出的量级和残差流可比，σ ≈ 1\n            nt.parameter((dim, dim), seed + i + 1, dim ** -0.5, \"w\" + str(i))\n            for i in range(n_layer)\n        ])\n\n    def forward(self, x, rows):\n        self.layer_rms = []\n        # GPT-2 起的做法：每层输出乘 1/sqrt(2L)，总增长就与深度无关\n        scale = (2.0 * self.n_layer) ** -0.5 if self.residual_scale else 1.0\n        for i in range(self.n_layer):\n            # pre-norm：归一化在支路上，残差通路是干净的恒等\n            h = self.norms[i](x, rows)\n            h = F.linear(h, self.weights[i])\n            if scale != 1.0:\n                h = F.scale(h, scale)\n            x = F.add(x, h)\n            self.layer_rms.append(F.rms(x))\n        return x\n\n\nif __name__ == \"__main__\":\n    DIM, ROWS = 32, 64\n    s = Stack(DIM, 4, seed=5)\n    x = nt.zeros((ROWS, DIM), role=\"data\").normal_(3, 1.0)\n    print(\"入口 rms\", round(F.rms(x), 4))\n    out = s(x, ROWS)\n    print(\"逐层 rms\", [round(v, 4) for v in s.layer_rms])\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "norm.spec.ts",
+            "content": "const lab = require('@llm/lab');\n\nconst DIM = 32, ROWS = 64;\n\nfunction setup() {\n  lab.py(`\nimport sys, json\nsys.path.insert(0, \"/lab\")\nimport importlib, norm\nimportlib.reload(norm)\nimport nanotorch as nt\nfrom nanotorch import functional as F\n`);\n}\n\ndescribe('RMSNorm 与 pre-norm', () => {\n  it('RMSNorm 与 f64 参考最大差 ≤ 2e-6', () => {\n    setup();\n    lab.py(`\n_n = norm.RMSNorm(${DIM})\n_x = nt.zeros((${ROWS}, ${DIM}), role=\"data\").normal_(9, 1.5)\n_y = _n(_x, ${ROWS})\n`);\n    const x = JSON.parse(String(lab.py('json.dumps(_x.tolist())')));\n    const y = JSON.parse(String(lab.py('json.dumps(_y.tolist())')));\n    const g = JSON.parse(String(lab.py('json.dumps(_n.weight.tolist())')));\n\n    let diff = 0;\n    for (let r = 0; r < ROWS; r++) {\n      let ss = 0;\n      for (let d = 0; d < DIM; d++) ss += x[r * DIM + d] * x[r * DIM + d];\n      const inv = 1 / Math.sqrt(ss / DIM + 1e-5);\n      for (let d = 0; d < DIM; d++)\n        diff = Math.max(diff, Math.abs(y[r * DIM + d] - x[r * DIM + d] * inv * g[d]));\n    }\n    console.log('最大差 ' + diff.toExponential(2));\n    lab.publish('norm.rmsError', diff);\n    expect(diff).toBeLessThan(2e-6);\n  });\n\n  /*\n   * RMSNorm 不减均值，所以整体平移会改变输出；LayerNorm 不会。\n   * 这一条把「写成 LayerNorm」和「写对了」分开 —— 数值门槛做不到，\n   * 因为 LayerNorm 在零均值的输入上和 RMSNorm 几乎一样。\n   */\n  it('整体平移会改变输出 —— 证明不是 LayerNorm', () => {\n    setup();\n    lab.py(`\n_n = norm.RMSNorm(${DIM})\n_x = nt.zeros((${ROWS}, ${DIM}), role=\"data\").normal_(9, 1.5)\n_base = _n(_x, ${ROWS}).tolist()\n_x2 = nt.zeros((${ROWS}, ${DIM}), role=\"data\")\n_x2.set_([v + 1.0 for v in _x.tolist()])\n_shift = _n(_x2, ${ROWS}).tolist()\n`);\n    const base = JSON.parse(String(lab.py('json.dumps(_base)')));\n    const shifted = JSON.parse(String(lab.py('json.dumps(_shift)')));\n    let worst = 0;\n    for (let i = 0; i < base.length; i++)\n      worst = Math.max(worst, Math.abs(base[i] - shifted[i]));\n    console.log('整体 +1 之后的最大变化 ' + worst.toFixed(4) + '（LayerNorm 会是 0）');\n    lab.publish('norm.shiftSensitivity', worst);\n    expect(worst).toBeGreaterThan(0.05);\n  });\n\n  it('每层归一化恰好 dim 个参数，没有 bias', () => {\n    setup();\n    lab.py(`_n = norm.RMSNorm(${DIM})`);\n    const named = JSON.parse(String(lab.py(\n      'json.dumps([[n, p.numel] for n, p in _n.named_parameters()])'\n    )));\n    const total = named.reduce((a, pair) => a + pair[1], 0);\n    console.log('RMSNorm 的参数 ' + JSON.stringify(named));\n    lab.publish('params.normPerLayer', total);\n    expect(total).toBe(DIM);\n  });\n\n  /*\n   * 深度无关：带 1/sqrt(2L) 缩放时，16 层和 2 层的残差流增长应当接近。\n   * 不带缩放时 16 层会明显更大 —— 两种都跑一遍，\n   * 免得学员把 residual_scale 接成一个空开关也能过。\n   */\n  it('带缩放时增长与深度无关，不带时随深度涨', () => {\n    setup();\n    const growth = (layers, scaled) => {\n      lab.py(`\n_s = norm.Stack(${DIM}, ${layers}, seed=5, residual_scale=${scaled ? 'True' : 'False'})\n_x = nt.zeros((${ROWS}, ${DIM}), role=\"data\").normal_(3, 1.0)\n_in = F.rms(_x)\n_out = _s(_x, ${ROWS})\n_ratio = F.rms(_out) / _in\n_n_rms = len(_s.layer_rms)\n`);\n      return {\n        ratio: Number(lab.py('_ratio')),\n        layerCount: Number(lab.py('_n_rms')),\n      };\n    };\n\n    const small = growth(2, true);\n    const deep = growth(16, true);\n    const deepRaw = growth(16, false);\n\n    console.log(\n      '带缩放 2 层 ' + small.ratio.toFixed(3)\n      + '，16 层 ' + deep.ratio.toFixed(3)\n      + '；不带缩放 16 层 ' + deepRaw.ratio.toFixed(3)\n    );\n\n    // 逐层 rms 要真的记下来了 —— 张量面板和后面几关都读它\n    expect(small.layerCount).toBe(2);\n    expect(deep.layerCount).toBe(16);\n\n    const depthRatio = deep.ratio / small.ratio;\n    lab.publish('residual.growthDeep', deep.ratio);\n    lab.publish('residual.depthRatio', depthRatio);\n    lab.publish('residual.growthUnscaled', deepRaw.ratio);\n\n    expect(depthRatio).toBeLessThan(1.25);\n    // 理论上 4.12 / 1.22 ≈ 3.4 倍。取 2 倍：不带缩放必须明显更大，\n    // 否则 residual_scale 是个接了等于没接的空开关\n    expect(deepRaw.ratio).toBeGreaterThan(deep.ratio * 2.0);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "llm.norm.rmsError",
+            "op": "lte",
+            "value": 0.000002,
+            "label": {
+              "zh": "RMSNorm 与 f64 参考的最大差",
+              "en": "max RMSNorm difference from the f64 reference"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.norm.shiftSensitivity",
+            "op": "gte",
+            "value": 0.05,
+            "label": {
+              "zh": "整体平移带来的输出变化（LayerNorm 会是 0）",
+              "en": "output change under a constant shift (LayerNorm gives 0)"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.params.normPerLayer",
+            "op": "eq",
+            "value": 32,
+            "label": {
+              "zh": "每层归一化的参数量（没有 bias）",
+              "en": "parameters per normalisation layer (no bias)"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.residual.depthRatio",
+            "op": "lte",
+            "value": 1.25,
+            "label": {
+              "zh": "16 层与 2 层的残差流增长比",
+              "en": "residual growth of 16 layers over 2 layers"
+            },
+            "dimension": "correctness"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ],
+        "extension": {
+          "zh": "2026 年还在动的一处是**归一化放哪**。除了 pre-norm，\n`sandwich norm`（支路前后各一次）在超深模型上更稳，Gemma 2 与几个国产模型在用；\n`DeepNorm` 走的是另一条路 —— 保留 post-norm，但把残差乘一个跟深度有关的常数，\n千层规模上仍然收敛。\n\n另外注意 `eps` 的位置：`sqrt(mean(x²) + ε)` 和 `sqrt(mean(x²)) + ε` 不一样，\n前者是标准写法。bf16 训练时 `ε` 太小会在归一化那步吃掉精度,\n这是混合精度那一关（第 18 关）会再碰到的东西。\n",
+          "en": "One thing still moving in 2026 is **where normalisation goes**. Besides pre-norm,\n`sandwich norm` (one before and one after the branch) is more stable in very deep\nmodels and ships in Gemma 2 and several others; `DeepNorm` takes the other route,\nkeeping post-norm but scaling the residual by a depth-dependent constant, and still\nconverges at thousand-layer scale.\n\nAlso mind where `eps` sits: `sqrt(mean(x²) + ε)` is not `sqrt(mean(x²)) + ε`, and\nthe former is standard. Under bf16 an `ε` that is too small loses precision at the\nnormalisation step — something stage 18 on mixed precision revisits.\n"
+        },
+        "primer": {
+          "zh": "深网络训不动的经典原因是激活的量级失控:一层放大一点，二十层之后就是几个数量级。`归一化`是把每层的输入重新拉回一个固定的尺度。\n\n`LayerNorm` 的做法是减均值、除标准差，再乘一个可学的增益、加一个可学的偏置。`RMSNorm` 砍掉了减均值和偏置，只除均方根 `sqrt(mean(x²))`。省下大约 7% 的开销，效果基本持平,Llama 之后这就是默认。\n\n一个能拿来验证的推论：给输入整体加一个常数，LayerNorm 的输出不变（均值被减掉了），RMSNorm 的输出会变。写错了哪一个，这个性质会当场告诉你。\n\n归一化`放在哪`比用哪一种更要紧。`post-norm` 是 `norm(x + f(x))`,归一化挡在残差通路上；`pre-norm` 是 `x + f(norm(x))`,残差是一条干净的恒等通路，梯度可以不经任何缩放地从输出回到输入。原始 Transformer 用的是前者，需要精心设计的 warmup 才训得动；今天基本都是后者。\n\npre-norm 的代价是残差流会随深度变大:每层往上加一份，L 层之后大约是 `sqrt(1 + L·σ²)`。把每层输出乘 `1/sqrt(2L)` 就能把它压回与深度无关,GPT-2 起就是这么初始化的，一行代码，但没有它，深模型的前几百步会明显更难走。",
+          "en": "The classic reason deep networks fail to train is activation scale running away: each layer amplifies a little, and twenty layers later you are orders of magnitude off. `Normalisation` pulls every layer input back to a fixed scale.\n\n`LayerNorm` subtracts the mean, divides by the standard deviation, then applies a learned gain and a learned bias. `RMSNorm` drops the mean subtraction and the bias, dividing only by the root mean square `sqrt(mean(x²))`. About 7% cheaper at essentially the same quality,the default since Llama.\n\nOne consequence is directly testable: add a constant to the whole input and LayerNorm is unchanged (the mean was subtracted away) while RMSNorm moves. Whichever one you meant to write, this property tells you which one you actually wrote.\n\n`Where` normalisation sits matters more than which one you pick. `post-norm` is `norm(x + f(x))`,normalisation blocks the residual path. `pre-norm` is `x + f(norm(x))`,the residual stays a clean identity, and gradients travel from output to input without passing through any scaling. The original Transformer used the former and needed a carefully tuned warmup to train at all; today almost everything uses the latter.\n\nPre-norm costs you a residual stream that grows with depth: each layer adds a share, so after L layers the scale is about `sqrt(1 + L·σ²)`. Multiplying each layer output by `1/sqrt(2L)` flattens that back to depth-independent,how GPT-2 has initialised from the start. One line, but without it the first few hundred steps of a deep model are visibly harder."
+        }
+      },
+      {
+        "id": "swiglu-block",
+        "title": {
+          "zh": "SwiGLU 与完整的 block —— 一层到底是什么",
+          "en": "SwiGLU and the full block — what one layer actually is"
+        },
+        "goal": {
+          "zh": "前几关的零件都在 `parts.py` 里了（RoPE 表、RMSNorm、GQA 注意力）。\n这一关在 `block.py` 里写前馈网络，并把一整层拼出来。\n\n```python\ndef swiglu_hidden(dim, multiple_of=8):\n    \"\"\"按 Llama 的规则算隐藏维。返回一个整数。\"\"\"\n\nclass SwiGLU(nn.Module):\n    def __init__(self, dim, hidden, seed):\n        # w_gate / w_up: [dim, hidden]，w_down: [hidden, dim]\n\nclass Block(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed, n_layer=1):\n    def forward(self, x, batch, seq, offset=0):\n        # 两条 pre-norm 残差：注意力一条，前馈一条\n```\n\n## 隐藏维为什么是 176 而不是 256\n\n传统前馈是两个矩阵：`down(act(up(x)))`，隐藏维取 `4·dim`。\nSwiGLU 是**三个**矩阵：\n\n```\nSwiGLU(x) = down( silu(gate(x)) · up(x) )\nsilu(z) = z · σ(z)\n```\n\n三个矩阵要是也用 `4·dim`，参数就比传统前馈多 50%。\nLlama 的做法是把隐藏维乘 `2/3` 再向上取到 `multiple_of` 的倍数：\n\n```\nhidden = round_up( int(2 · (4 · dim) / 3), multiple_of )\ndim = 64  ->  int(512 · 2/3) = 170  ->  向上取到 8 的倍数 = 176\n```\n\n于是参数量和传统前馈基本持平，而效果更好。**取整到 8 的倍数不是洁癖** ——\n矩阵乘的分块和张量核心都按 8/16/32 对齐，170 会掉进一条慢路径。\n\n## 一层长什么样\n\n```\nx = x + scale · attn(norm1(x))\nx = x + scale · mlp(norm2(x))\n```\n\n两条残差，两个归一化，各挂在支路上。`scale` 是第 6 关那条 `1/sqrt(2L)`。\n\n## 怎么算过\n\n| | 要求 |\n| --- | --- |\n| 参数量 | 恰好 **46208**（解析式见下） |\n| 前馈数值 | 与 f64 参考最大差 ≤ 2e-6 |\n| **残差是恒等** | 把 `wo` 和 `w_down` 清零，输出必须和输入**逐位相同** |\n| 因果性 | 泄漏 = 0 |\n| 每 token 的前向 FLOPs | 与 `2N` 的比在 **1.0 ~ 1.6** 之间 |\n\n```\n注意力 12288 + 前馈 3·64·176 = 33792 + 两个 norm 128 = 46208\n```\n\n「残差是恒等」那条能一刀切开 pre-norm 和 post-norm：支路清零之后\npre-norm 的输出**就是**输入，post-norm 的输出是 `norm(x)`,差得很明显，\n而这两种写法在 loss 曲线上要十几层才分得开。\n\n最后一条是那个著名的经验规律：**前向大约是 `2N` FLOPs / token**\n（N 是参数量），反向再来两倍，一次训练步合计约 `6N`。\n注意力那块 `O(S²)` 的项让实测略高于 1.0。\n",
+          "en": "The pieces from earlier stages are in `parts.py` (RoPE tables, RMSNorm, GQA\nattention). This stage writes the feed-forward network in `block.py` and assembles a\ncomplete layer.\n\n```python\ndef swiglu_hidden(dim, multiple_of=8):\n    \"\"\"Llama's rule for the hidden width. Returns an integer.\"\"\"\n\nclass SwiGLU(nn.Module):\n    def __init__(self, dim, hidden, seed):\n        # w_gate / w_up: [dim, hidden]; w_down: [hidden, dim]\n\nclass Block(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed, n_layer=1):\n    def forward(self, x, batch, seq, offset=0):\n        # Two pre-norm residuals: one for attention, one for the MLP\n```\n\n## Why the hidden width is 176, not 256\n\nA classic feed-forward is two matrices, `down(act(up(x)))`, with a hidden width of\n`4·dim`. SwiGLU uses **three**:\n\n```\nSwiGLU(x) = down( silu(gate(x)) · up(x) )\nsilu(z) = z · σ(z)\n```\n\nThree matrices at `4·dim` would cost 50% more parameters than the classic version.\nLlama scales the width by `2/3` and rounds up to a multiple of `multiple_of`:\n\n```\nhidden = round_up( int(2 · (4 · dim) / 3), multiple_of )\ndim = 64  ->  int(512 · 2/3) = 170  ->  round up to a multiple of 8 = 176\n```\n\nParameters end up roughly matching the classic block while quality improves. **The\nrounding is not fastidiousness**: matmul tiling and tensor cores align to 8/16/32, and\n170 falls onto a slow path.\n\n## What a layer looks like\n\n```\nx = x + scale · attn(norm1(x))\nx = x + scale · mlp(norm2(x))\n```\n\nTwo residuals, two normalisations, each on a branch. `scale` is stage 6's\n`1/sqrt(2L)`.\n\n## What counts as passing\n\n| | Requirement |\n| --- | --- |\n| Parameters | Exactly **46208** (formula below) |\n| MLP numerics | Within 2e-6 of the f64 reference |\n| **Residual is identity** | Zero `wo` and `w_down`; output must be **bit-identical** to the input |\n| Causality | Leakage = 0 |\n| Forward FLOPs per token | Ratio to `2N` between **1.0 and 1.6** |\n\n```\nattention 12288 + MLP 3·64·176 = 33792 + two norms 128 = 46208\n```\n\nThe identity check cleanly separates pre-norm from post-norm: with the branches zeroed\npre-norm returns the input exactly, while post-norm returns `norm(x)` — an obvious\ndifference, where the two designs need a dozen layers before any loss curve tells them\napart.\n\nThe last row is the well-known rule of thumb: **a forward pass costs about `2N`\nFLOPs per token** (N being the parameter count), the backward twice that, so one\ntraining step is roughly `6N`. Attention's `O(S²)` term puts the measurement a\nlittle above 1.0.\n"
+        },
+        "checklist": [
+          {
+            "zh": "swiglu_hidden(64) 返回 176",
+            "en": "swiglu_hidden(64) returns 176"
+          },
+          {
+            "zh": "SwiGLU 是三个矩阵：gate / up / down",
+            "en": "SwiGLU uses three matrices: gate, up, down"
+          },
+          {
+            "zh": "两条 pre-norm 残差，归一化都在支路上",
+            "en": "Two pre-norm residuals, both normalisations on branches"
+          },
+          {
+            "zh": "支路清零之后 block 是恒等映射",
+            "en": "With branches zeroed the block is the identity"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "F.swiglu(gate, up) 已经有了，它算的就是 silu(gate) * up。",
+            "en": "F.swiglu(gate, up) already exists and computes silu(gate) * up."
+          },
+          {
+            "zh": "向上取整到 m 的倍数：(x + m - 1) // m * m。",
+            "en": "Rounding up to a multiple of m: (x + m - 1) // m * m."
+          },
+          {
+            "zh": "parts.py 里的 RopeAttention 和 RMSNorm 直接 import 就行，不用重写。",
+            "en": "Import RopeAttention and RMSNorm from parts.py; there is no need to rewrite them."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**隐藏维直接取 `4·dim`。** 跑得通、也能训，只是这一层的参数比该有的多了一半。\n放大到 70B 就是多出十几个 B 的参数、多出来的显存和多出来的训练时间,\n而它换不来相应的效果。\n",
+            "en": "**Taking `4·dim` as the hidden width.** It runs and it trains; the layer just carries\n50% more parameters than it should. At 70B scale that is billions of extra parameters,\nextra memory and extra training time, buying no matching quality.\n"
+          },
+          {
+            "zh": "**把归一化写到残差通路上。** `x = norm(x + f(x))` 和 `x = x + f(norm(x))`\n只差几个字符，浅层上几乎没差别。这一关的恒等检查会直接把它揪出来 ——\n支路清零之后前者给的是 `norm(x)`，后者给的才是 `x`。\n",
+            "en": "**Putting a normalisation on the residual path.** `x = norm(x + f(x))` and\n`x = x + f(norm(x))` differ by a few characters and behave almost identically when\nshallow. The identity check catches it immediately: with the branches zeroed the first\nreturns `norm(x)` while only the second returns `x`.\n"
+          }
+        ],
+        "train": {
+          "files": {
+            "parts.py": "\"\"\"前几关已经验收过的零件。这一关直接用，不用再写一遍。\"\"\"\nimport math\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\n\n\ndef build_tables(positions, head_dim, base=10000.0):\n    \"\"\"第 5 关的 RoPE 表。\"\"\"\n    half = head_dim // 2\n    cos = nt.zeros((len(positions), half), role=\"data\", name=\"rope.cos\")\n    sin = nt.zeros((len(positions), half), role=\"data\", name=\"rope.sin\")\n    cv, sv = [], []\n    for p in positions:\n        for i in range(half):\n            theta = p * (base ** (-2.0 * i / head_dim))\n            cv.append(math.cos(theta))\n            sv.append(math.sin(theta))\n    cos.set_(cv)\n    sin.set_(sv)\n    return cos, sin\n\n\nclass RMSNorm(nn.Module):\n    \"\"\"第 6 关的 RMSNorm。只有 weight，没有 bias。\"\"\"\n\n    def __init__(self, dim, eps=1e-5):\n        super().__init__()\n        self.dim, self.eps = dim, eps\n        self.weight = nt.parameter((dim,), None, 0.0, \"norm.weight\")\n\n    def forward(self, x, rows=0):\n        return F.rms_norm(x, self.weight, self.eps)\n\n\nclass RopeAttention(nn.Module):\n    \"\"\"第 4 + 5 关：多头 GQA 注意力 + RoPE。\"\"\"\n\n    def __init__(self, dim, n_head, n_kv_head, seed, base=10000.0):\n        super().__init__()\n        self.dim, self.n_head, self.n_kv_head = dim, n_head, n_kv_head\n        self.head_dim = dim // n_head\n        self.base = base\n        hd = self.head_dim\n        self.wq = nt.parameter((dim, n_head * hd), seed + 1, 0.02, \"wq\")\n        self.wk = nt.parameter((dim, n_kv_head * hd), seed + 2, 0.02, \"wk\")\n        self.wv = nt.parameter((dim, n_kv_head * hd), seed + 3, 0.02, \"wv\")\n        self.wo = nt.parameter((n_head * hd, dim), seed + 4, 0.02, \"wo\")\n\n    def forward(self, x, batch, seq, offset=0):\n        rows, hd = batch * seq, self.head_dim\n        q = F.linear(x, self.wq)\n        k = F.linear(x, self.wk)\n        v = F.linear(x, self.wv)\n        cos, sin = build_tables(list(range(offset, offset + seq)), hd, self.base)\n        q = F.rope(q, cos, sin, batch, seq, self.n_head, hd)\n        k = F.rope(k, cos, sin, batch, seq, self.n_kv_head, hd)\n        scores = F.attn_scores(q, k, batch, seq, seq, self.n_head, self.n_kv_head, hd)\n        valid = F.causal_valid(batch, self.n_head, seq, offset)\n        probs = F.softmax(scores, batch * self.n_head * seq, seq, valid)\n        out = F.attn_apply(\n            probs, v, batch, seq, seq, self.n_head, self.n_kv_head, hd,\n            out_shape=(rows, self.n_head * hd)\n        )\n        return F.linear(out, self.wo)\n",
+            "block.py": "\"\"\"第 7 关：SwiGLU 前馈 + 完整的 Transformer block。\"\"\"\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\nfrom parts import RMSNorm, RopeAttention\n\n\ndef swiglu_hidden(dim, multiple_of=8):\n    \"\"\"Llama 的规则：int(2 * (4 * dim) / 3) 向上取到 multiple_of 的倍数。\"\"\"\n    # TODO\n    return 4 * dim\n\n\nclass SwiGLU(nn.Module):\n    def __init__(self, dim, hidden, seed):\n        super().__init__()\n        self.dim, self.hidden = dim, hidden\n        # TODO: 三个矩阵 —— w_gate / w_up 是 [dim, hidden]，w_down 是 [hidden, dim]\n        self.w_gate = nt.parameter((dim, 1), seed + 1, 0.02, \"w_gate\")\n        self.w_up = nt.parameter((dim, 1), seed + 2, 0.02, \"w_up\")\n        self.w_down = nt.parameter((1, dim), seed + 3, 0.02, \"w_down\")\n\n    def forward(self, x, rows):\n        # TODO: down( silu(gate(x)) * up(x) )\n        return x\n\n\nclass Block(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed, n_layer=1):\n        super().__init__()\n        self.dim, self.n_layer = dim, n_layer\n        self.norm1 = RMSNorm(dim)\n        self.attn = RopeAttention(dim, n_head, n_kv_head, seed)\n        self.norm2 = RMSNorm(dim)\n        self.mlp = SwiGLU(dim, swiglu_hidden(dim), seed + 10)\n\n    def forward(self, x, batch, seq, offset=0):\n        # TODO: 两条 pre-norm 残差，支路各乘 1/sqrt(2 * n_layer)\n        return x\n\n\nif __name__ == \"__main__\":\n    print(\"swiglu_hidden(64) =\", swiglu_hidden(64))\n    b = Block(64, 4, 2, seed=21)\n    print(\"参数量\", b.num_parameters())\n    x = nt.zeros((2 * 8, 64), role=\"data\").normal_(1, 1.0)\n    print(\"输出形状\", b(x, 2, 8).shape)\n"
+          },
+          "referenceFiles": {
+            "block.py": "\"\"\"第 7 关的参考实现。\"\"\"\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\nfrom parts import RMSNorm, RopeAttention\n\n\ndef swiglu_hidden(dim, multiple_of=8):\n    # 三个矩阵，所以先乘 2/3 把参数量压回两矩阵前馈的水平\n    hidden = int(2 * (4 * dim) / 3)\n    # 再向上取到 multiple_of 的倍数 —— 对齐了矩阵乘才走得上快路径\n    return (hidden + multiple_of - 1) // multiple_of * multiple_of\n\n\nclass SwiGLU(nn.Module):\n    def __init__(self, dim, hidden, seed):\n        super().__init__()\n        self.dim, self.hidden = dim, hidden\n        self.w_gate = nt.parameter((dim, hidden), seed + 1, 0.02, \"w_gate\")\n        self.w_up = nt.parameter((dim, hidden), seed + 2, 0.02, \"w_up\")\n        self.w_down = nt.parameter((hidden, dim), seed + 3, 0.02, \"w_down\")\n\n    def forward(self, x, rows):\n        gate = F.linear(x, self.w_gate)\n        up = F.linear(x, self.w_up)\n        return F.linear(F.swiglu(gate, up), self.w_down)\n\n\nclass Block(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed, n_layer=1):\n        super().__init__()\n        self.dim, self.n_layer = dim, n_layer\n        self.norm1 = RMSNorm(dim)\n        self.attn = RopeAttention(dim, n_head, n_kv_head, seed)\n        self.norm2 = RMSNorm(dim)\n        self.mlp = SwiGLU(dim, swiglu_hidden(dim), seed + 10)\n\n    def forward(self, x, batch, seq, offset=0):\n        rows = batch * seq\n        scale = (2.0 * self.n_layer) ** -0.5\n        # 两条 pre-norm 残差。归一化在支路上，残差通路是干净的恒等\n        h = self.attn(self.norm1(x, rows), batch, seq, offset)\n        x = F.add(x, F.scale(h, scale))\n        h = self.mlp(self.norm2(x, rows), rows)\n        x = F.add(x, F.scale(h, scale))\n        return x\n\n\nif __name__ == \"__main__\":\n    print(\"swiglu_hidden(64) =\", swiglu_hidden(64))\n    b = Block(64, 4, 2, seed=21)\n    print(\"参数量\", b.num_parameters())\n    x = nt.zeros((2 * 8, 64), role=\"data\").normal_(1, 1.0)\n    print(\"输出形状\", b(x, 2, 8).shape)\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "block.spec.ts",
+            "content": "const lab = require('@llm/lab');\n\nconst B = 2, S = 8, DIM = 64, H = 4, KV = 2;\nconst HIDDEN = 176;\nconst PARAMS = DIM * H * 16 + DIM * KV * 16 * 2 + H * 16 * DIM + 3 * DIM * HIDDEN + 2 * DIM;\n\nfunction setup() {\n  lab.py(`\nimport sys, json\nsys.path.insert(0, \"/lab\")\nimport importlib, parts, block\nimportlib.reload(parts)\nimportlib.reload(block)\nimport nanotorch as nt\nfrom nanotorch import functional as F\n`);\n}\n\nfunction makeBlock(tail) {\n  setup();\n  lab.py(`\n_b = block.Block(${DIM}, ${H}, ${KV}, seed=21)\n_x = nt.zeros((${B} * ${S}, ${DIM}), role=\"data\").normal_(55, 1.0)\n${tail || ''}\nnt.phase(\"forward\")\n_out = _b(_x, ${B}, ${S})\nnt.phase(\"other\")\n`);\n  return {\n    out: JSON.parse(String(lab.py('json.dumps(_out.tolist())'))),\n    x: JSON.parse(String(lab.py('json.dumps(_x.tolist())'))),\n    params: Number(lab.py('_b.num_parameters()')),\n  };\n}\n\ndescribe('SwiGLU 与完整的 block', () => {\n  it('隐藏维按 Llama 的规则算：dim=64 -> 176', () => {\n    setup();\n    const h64 = Number(lab.py('block.swiglu_hidden(64)'));\n    const h768 = Number(lab.py('block.swiglu_hidden(768, 256)'));\n    console.log('swiglu_hidden(64) = ' + h64 + '，swiglu_hidden(768, 256) = ' + h768);\n    lab.publish('params.mlpHidden', h64);\n    expect(h64).toBe(176);\n    // Llama-7B 的那组数：dim=4096 时是 11008；这里按同一条规则缩小验一次\n    expect(h768).toBe(2048);\n  });\n\n  it('参数量恰好等于解析式', () => {\n    const r = makeBlock();\n    console.log('参数量 ' + r.params + '，解析式 ' + PARAMS);\n    lab.publish('params.block', r.params);\n    expect(r.params).toBe(PARAMS);\n  });\n\n  it('SwiGLU 前馈与 f64 参考最大差 ≤ 2e-6', () => {\n    setup();\n    lab.py(`\n_m = block.SwiGLU(${DIM}, ${HIDDEN}, seed=31)\n_x = nt.zeros((${B} * ${S}, ${DIM}), role=\"data\").normal_(66, 1.0)\n_y = _m(_x, ${B} * ${S})\n`);\n    const x = JSON.parse(String(lab.py('json.dumps(_x.tolist())')));\n    const y = JSON.parse(String(lab.py('json.dumps(_y.tolist())')));\n    const wg = JSON.parse(String(lab.py('json.dumps(_m.w_gate.tolist())')));\n    const wu = JSON.parse(String(lab.py('json.dumps(_m.w_up.tolist())')));\n    const wd = JSON.parse(String(lab.py('json.dumps(_m.w_down.tolist())')));\n\n    const rows = B * S;\n    let diff = 0;\n    for (let r = 0; r < rows; r++) {\n      const mid = new Float64Array(HIDDEN);\n      for (let hcol = 0; hcol < HIDDEN; hcol++) {\n        let g = 0, u = 0;\n        for (let d = 0; d < DIM; d++) {\n          g += x[r * DIM + d] * wg[d * HIDDEN + hcol];\n          u += x[r * DIM + d] * wu[d * HIDDEN + hcol];\n        }\n        mid[hcol] = (g / (1 + Math.exp(-g))) * u;   // silu(gate) * up\n      }\n      for (let d = 0; d < DIM; d++) {\n        let acc = 0;\n        for (let hcol = 0; hcol < HIDDEN; hcol++) acc += mid[hcol] * wd[hcol * DIM + d];\n        diff = Math.max(diff, Math.abs(y[r * DIM + d] - acc));\n      }\n    }\n    console.log('最大差 ' + diff.toExponential(2));\n    lab.publish('mlp.maxError', diff);\n    expect(diff).toBeLessThan(2e-6);\n  });\n\n  /*\n   * 把两条支路的出口权重清零，pre-norm 的 block 就是恒等映射 —— 逐位相同。\n   * post-norm 写法给出的是 norm(x)，差得一眼能看见。\n   * 这一条比任何数值门槛都利落，因为它比的是「一位都不许差」。\n   */\n  it('支路清零之后 block 是恒等映射（逐位）', () => {\n    const r = makeBlock('_b.attn.wo.fill_(0.0)\\n_b.mlp.w_down.fill_(0.0)');\n    let mismatches = 0;\n    for (let i = 0; i < r.x.length; i++) if (r.out[i] !== r.x[i]) mismatches += 1;\n    console.log('清零之后有 ' + mismatches + ' / ' + r.x.length + ' 个位置和输入不同');\n    lab.publish('residual.identityMismatches', mismatches);\n    expect(r.x.length).toBeGreaterThan(500);\n    expect(mismatches).toBe(0);\n  });\n\n  it('改掉最后一个位置，前面位置的输出一位都不变', () => {\n    const before = makeBlock().out;\n    const after = makeBlock(\n      '_x.set_([v + (2.5 if (i % (' + S + ' * ' + DIM + ')) >= (' + S + ' - 1) * ' + DIM\n      + ' else 0.0) for i, v in enumerate(_x.tolist())])'\n    ).out;\n    let leak = 0, checked = 0;\n    for (let b = 0; b < B; b++)\n      for (let i = 0; i < S - 1; i++)\n        for (let d = 0; d < DIM; d++) {\n          const at = (b * S + i) * DIM + d;\n          checked += 1;\n          if (before[at] !== after[at]) leak += 1;\n        }\n    lab.publish('causality.leakBits', leak);\n    expect(checked).toBeGreaterThan(500);\n    expect(leak).toBe(0);\n  });\n\n  /*\n   * 那条著名的经验规律：前向约 2N FLOPs / token。\n   * 注意力那块 O(S²) 的项让实测略高于 1.0。\n   * 明显低于 1.0 说明有矩阵没算，明显高于 1.6 说明多算了东西。\n   */\n  it('每 token 的前向 FLOPs 约等于 2N', () => {\n    setup();\n    const before = lab.metrics().flops.forward;\n    const beforeTokens = lab.metrics().tokens.total;\n    makeBlock();\n    const m = lab.metrics();\n    const spent = m.flops.forward - before;\n    const tokens = B * S;\n    const perToken = spent / tokens;\n    const ratio = perToken / (2 * PARAMS);\n    console.log(\n      '前向 ' + spent + ' FLOPs / ' + tokens + ' token = ' + perToken.toFixed(0)\n      + '；2N = ' + (2 * PARAMS) + '，比值 ' + ratio.toFixed(3)\n    );\n    void beforeTokens;\n    lab.publish('flops.perTokenOverTwoN', ratio);\n    expect(ratio).toBeGreaterThan(1.0);\n    expect(ratio).toBeLessThan(1.6);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "llm.params.block",
+            "op": "eq",
+            "value": 46208,
+            "label": {
+              "zh": "一层的参数量（解析式）",
+              "en": "parameters in one block (analytic)"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.mlp.maxError",
+            "op": "lte",
+            "value": 0.000002,
+            "label": {
+              "zh": "SwiGLU 前馈与 f64 参考的最大差",
+              "en": "max SwiGLU difference from the f64 reference"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.residual.identityMismatches",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "支路清零后与输入不同的位置数（pre-norm 应为 0）",
+              "en": "positions differing from the input with branches zeroed (0 for pre-norm)"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.causality.leakBits",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "因果泄漏（逐位比）",
+              "en": "causal leakage (bit-exact)"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.flops.perTokenOverTwoN",
+            "op": "lte",
+            "value": 1.6,
+            "label": {
+              "zh": "每 token 前向 FLOPs 与 2N 的比",
+              "en": "forward FLOPs per token over 2N"
+            },
+            "dimension": "efficiency"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "encapsulation",
+          "efficiency"
+        ],
+        "extension": {
+          "zh": "`2N` 与 `6N` 这两个数值得记住 —— 它们是所有算力预算的起点。\n一个 7B 模型在 1T token 上训一遍，就是 `6 · 7e9 · 1e12 ≈ 4.2e22` FLOPs；\n一张 H100 的 bf16 峰值约 1e15 FLOP/s，按 40% 的实际利用率算，\n**约合 1200 张卡跑一天**。第 21 关的缩放律会正面用到这个式子。\n\n前馈这一块 2026 年最大的变化是 `MoE`：把一个大前馈换成很多个小的，\n每个 token 只激活其中几个。DeepSeek-V3 的总参数 671B、激活 37B，\n`2N` 里的 N 从此要分「总参数」和「激活参数」两个来算 —— 第 22 关做这件事。\n",
+          "en": "`2N` and `6N` are worth memorising: every compute budget starts there. Training a 7B\nmodel on 1T tokens costs `6 · 7e9 · 1e12 ≈ 4.2e22` FLOPs; an H100 peaks near 1e15\nbf16 FLOP/s, and at a realistic 40% utilisation that is **about 1200 cards for a day**.\nStage 21 on scaling laws uses this formula directly.\n\nThe biggest change to the feed-forward block in 2026 is `MoE`: replace one large FFN\nwith many small ones and activate only a few per token. DeepSeek-V3 has 671B total\nparameters and 37B active, so the N in `2N` now splits into total and active — which\nis what stage 22 works through.\n"
+        },
+        "primer": {
+          "zh": "一层 Transformer 由两块组成：注意力负责`在位置之间搬运信息`，前馈网络负责`对每个位置各自做变换`。注意力是横着看的，前馈是竖着看的,少了任何一块，模型都会明显变弱。\n\n前馈网络的参数其实是大头。一层里注意力约 `4·dim²`，前馈约 `8·dim²`,三分之二的参数在这块看着最平平无奇的地方。\n\n传统写法是 `down(gelu(up(x)))`，隐藏维取 `4·dim`。`SwiGLU` 改成三个矩阵：`gate` 和 `up` 各投影一次，`silu(gate) · up` 逐元素相乘，再 `down` 投回去。多出来的那条`门控`路让网络能学「这一维要不要通过」，而不只是「通过多少」。\n\n三个矩阵要是都按 `4·dim` 开，参数就比原来多 50%。Llama 的解法是把隐藏维乘 `2/3` 再向上取到 8 或 256 的倍数,参数量持平，效果更好。取整不是洁癖：矩阵乘的分块和张量核心按 8/16/32 对齐，一个不对齐的宽度会掉进慢路径。\n\n整层的形状是两条 pre-norm 残差:`x = x + attn(norm1(x))`，然后 `x = x + mlp(norm2(x))`。把两条支路的出口权重清零，整层就应该是`恒等映射`,这是检查残差接对没接对最利落的办法。\n\n还有一个值得记住的数：一次前向大约是 `2N` 次浮点运算每 token（N 是参数量），反向约两倍，一个训练步合计约 `6N`。所有的算力预算都从这个式子开始算。",
+          "en": "A Transformer layer has two halves: attention `moves information between positions`, and the feed-forward network `transforms each position on its own`. Attention looks sideways, the FFN looks down,drop either and the model gets visibly weaker.\n\nMost parameters actually live in the FFN. Per layer, attention costs about `4·dim²` and the feed-forward about `8·dim²`,two thirds of the parameters sit in the least glamorous part.\n\nThe classic form is `down(gelu(up(x)))` with a hidden width of `4·dim`. `SwiGLU` uses three matrices instead: project through `gate` and `up`, multiply `silu(gate) · up` elementwise, then project back with `down`. That extra `gating` path lets the network learn whether a dimension should pass at all, not merely how much.\n\nThree matrices at `4·dim` each would cost 50% more parameters. Llama scales the width by `2/3` and rounds up to a multiple of 8 or 256,parameter count holds while quality improves. The rounding is not fastidiousness: matmul tiling and tensor cores align to 8/16/32, and an unaligned width falls onto a slow path.\n\nA whole layer is two pre-norm residuals: `x = x + attn(norm1(x))` then `x = x + mlp(norm2(x))`. Zero the output weights of both branches and the layer must become the `identity`,the cleanest way to check that the residuals are wired correctly.\n\nOne more number worth keeping: a forward pass costs roughly `2N` floating-point operations per token (N being the parameter count), the backward about twice that, so a training step is about `6N`. Every compute budget starts from this formula."
+        }
+      },
+      {
+        "id": "sampling-kvcache",
+        "title": {
+          "zh": "采样与 KV cache —— 解码为什么不是 O(n²)",
+          "en": "Sampling and the KV cache — why decoding is not O(n²)"
+        },
+        "goal": {
+          "zh": "在 `gen.py` 里写带缓存的注意力和生成循环。模型在 `model.py` 里已经接好了。\n\n```python\nclass CachedAttention(nn.Module):\n    def forward(self, x, batch, seq, cache=None, offset=0):\n        \"\"\"cache 为 None 时算整段；给了 cache 就把新的 k/v 追加进去，\n        再对缓存里已有的全部位置做注意力。\"\"\"\n\ndef generate(model, prompt, n_new, vocab, seed, use_cache=True,\n             temperature=1.0, top_k=0):\n    \"\"\"prompt 是一个 token 列表（batch=1）。返回新生成的 n_new 个 token。\"\"\"\n```\n\n## 为什么必须有 cache\n\n不带缓存的解码，每生成一个 token 都要把整段前缀从头算一遍：\n第 `t` 步是 `O(t)`，生成 `n` 个就是 `O(n²)`。\n带缓存之后每步只算**新来的那一个位置**的投影，前面的 k/v 直接读缓存,\n每步 `O(1)`，全程 `O(n)`。\n\n这不是「优化」，是能不能用的分界。第 27 关的 GRPO 要成批地 rollout，\n不做缓存那一关**真的跑不完**。\n\n## 两条路必须给出一样的结果\n\n带缓存和不带缓存算的是**同一个函数**，所以结果应当**逐位相同** ——\n不是「差不多」，是一位都不差。这一关的第一条门槛就是它。\n\n对不上通常是三件事之一：\nRoPE 的位置没跟着 `offset` 走、\n因果掩码的 `offset` 忘了传、\n往缓存里追加时 batch 之间串了位。\n\n## 缓存怎么用\n\n`nt.generate.KVCache` 已经写好了：形状 `[batch, max_seq, kv_heads·head_dim]`，\n`append(k, v, n)` 按位置追加。注意它是按 `max_seq` 开的，\n所以做注意力时 `seq_kv` 传 `cache.max_seq`，\n靠 `causal_valid(batch, heads, seq, offset)` 把还没写过的位置挡在外面 ——\n那些位置的概率是**硬 0**，不参与求和。\n\n## 采样\n\n`nt.generate.sample(logits, row, vocab, temperature, top_k, top_p, seed)`\n的参数名和叠加顺序都跟 HuggingFace 的 `generate()` 一致（先 top-k 后 top-p）。\n它是**确定性**的：结果只由 `(logits, seed)` 决定，\n概率相同的候选按 token id 排序 —— 否则整条重放链就断了。\n\n## 怎么算过\n\n| | 要求 |\n| --- | --- |\n| 两条路一致 | 带 cache 与不带 cache 的输出**逐位相同** |\n| 真的省了 | 不带 cache 的解码 FLOPs 是带 cache 的 **≥ 3 倍** |\n| 确定性 | 同一个 seed 跑两遍，结果完全一样 |\n| top-k | 采出来的 token 全在**逐步重放算出来的** top-k 集合里 |\n",
+          "en": "Write the cached attention and the generation loop in `gen.py`. The model in\n`model.py` is already wired up.\n\n```python\nclass CachedAttention(nn.Module):\n    def forward(self, x, batch, seq, cache=None, offset=0):\n        \"\"\"With cache=None compute the whole segment; with a cache, append the new\n        k/v and attend over every position the cache holds.\"\"\"\n\ndef generate(model, prompt, n_new, vocab, seed, use_cache=True,\n             temperature=1.0, top_k=0):\n    \"\"\"prompt is a list of tokens (batch=1). Returns the n_new new tokens.\"\"\"\n```\n\n## Why the cache is mandatory\n\nUncached decoding recomputes the whole prefix for every generated token: step `t`\ncosts `O(t)`, so `n` tokens cost `O(n²)`. With a cache each step projects only\n**the one new position** and reads earlier k/v straight from memory — `O(1)` per\nstep, `O(n)` overall.\n\nThis is not an optimisation but the line between usable and not. Stage 27's GRPO\nrolls out in batches, and without a cache that stage **genuinely does not finish**.\n\n## The two paths must agree exactly\n\nCached and uncached compute the **same function**, so the results must be\n**bit-identical** — not close, identical. That is this stage's first gate.\n\nA mismatch is usually one of three things: RoPE positions not following `offset`,\na forgotten `offset` on the causal mask, or appends that cross batch boundaries.\n\n## Using the cache\n\n`nt.generate.KVCache` is written for you: shape\n`[batch, max_seq, kv_heads·head_dim]`, with `append(k, v, n)` adding positions.\nIt is allocated at `max_seq`, so pass `cache.max_seq` as `seq_kv` when attending\nand let `causal_valid(batch, heads, seq, offset)` exclude positions not yet written\n— their probability is a **hard zero** and they never enter the sum.\n\n## Sampling\n\n`nt.generate.sample(logits, row, vocab, temperature, top_k, top_p, seed)` matches\nHuggingFace's `generate()` in both parameter names and ordering (top-k then top-p).\nIt is **deterministic**: the result depends only on `(logits, seed)`, and ties are\nbroken by token id — otherwise the whole replay chain breaks.\n\n## What counts as passing\n\n| | Requirement |\n| --- | --- |\n| Paths agree | Cached and uncached outputs are **bit-identical** |\n| Real saving | Uncached decoding costs **at least 3x** the FLOPs of cached |\n| Determinism | The same seed twice gives the same result |\n| top-k | Every sampled token lies in the top-k set **recomputed by replay** |\n"
+        },
+        "checklist": [
+          {
+            "zh": "带 cache 与不带 cache 的生成结果逐位相同",
+            "en": "Cached and uncached generation agree bit for bit"
+          },
+          {
+            "zh": "RoPE 的位置跟着 offset 走",
+            "en": "RoPE positions follow the offset"
+          },
+          {
+            "zh": "因果掩码带上了 offset",
+            "en": "The causal mask carries the offset"
+          },
+          {
+            "zh": "同一个 seed 采样结果完全一样，且 top-k 真的生效",
+            "en": "The same seed samples identically, and top-k actually takes effect"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "解码第 t 步：seq=1、offset=已生成长度、seq_kv=cache.max_seq。",
+            "en": "Decoding step t: seq=1, offset = length so far, seq_kv = cache.max_seq."
+          },
+          {
+            "zh": "prefill 一次把整段 prompt 塞进 cache，之后每步只喂一个 token。",
+            "en": "Prefill pushes the whole prompt into the cache once; after that feed one token per step."
+          },
+          {
+            "zh": "logits 是 [rows, vocab]，取最后一行就是 row = rows - 1。",
+            "en": "logits are [rows, vocab]; the last row is row = rows - 1."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**解码时 RoPE 还从 0 起算。** prefill 的结果是对的，从第一个新 token 起\n位置就全错了。生成出来的东西读着仍然像句子,因为模型还认得词，\n只是位置关系乱了。逐位比对是唯一能当场发现它的办法。\n",
+            "en": "**Leaving RoPE at position 0 while decoding.** Prefill is right and every generated\ntoken afterwards has the wrong position. The output still reads like language because\nthe model still recognises words; only the positional relations are scrambled. A\nbit-exact comparison is the only thing that catches this on the spot.\n"
+          },
+          {
+            "zh": "**因果掩码忘了 offset。** 解码时 `seq_q=1`，掩码算出来的有效长度就是 1 ——\n于是这个 token 只看得见它自己，前面的历史一个都没看。\n生成不会报错，只会变得毫无上下文。\n",
+            "en": "**Forgetting the offset on the causal mask.** While decoding `seq_q=1`, so the mask\ncomputes a valid length of 1 and the token attends only to itself, ignoring all\nhistory. Nothing raises an error; the generation simply loses all context.\n"
+          }
+        ],
+        "train": {
+          "files": {
+            "parts.py": "\"\"\"前几关已经验收过的零件。这一关直接用，不用再写一遍。\"\"\"\nimport math\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\n\n\ndef build_tables(positions, head_dim, base=10000.0):\n    \"\"\"第 5 关的 RoPE 表。\"\"\"\n    half = head_dim // 2\n    cos = nt.zeros((len(positions), half), role=\"data\", name=\"rope.cos\")\n    sin = nt.zeros((len(positions), half), role=\"data\", name=\"rope.sin\")\n    cv, sv = [], []\n    for p in positions:\n        for i in range(half):\n            theta = p * (base ** (-2.0 * i / head_dim))\n            cv.append(math.cos(theta))\n            sv.append(math.sin(theta))\n    cos.set_(cv)\n    sin.set_(sv)\n    return cos, sin\n\n\nclass RMSNorm(nn.Module):\n    \"\"\"第 6 关的 RMSNorm。只有 weight，没有 bias。\"\"\"\n\n    def __init__(self, dim, eps=1e-5):\n        super().__init__()\n        self.dim, self.eps = dim, eps\n        self.weight = nt.parameter((dim,), None, 0.0, \"norm.weight\")\n\n    def forward(self, x, rows=0):\n        return F.rms_norm(x, self.weight, self.eps)\n\n\nclass RopeAttention(nn.Module):\n    \"\"\"第 4 + 5 关：多头 GQA 注意力 + RoPE。\"\"\"\n\n    def __init__(self, dim, n_head, n_kv_head, seed, base=10000.0):\n        super().__init__()\n        self.dim, self.n_head, self.n_kv_head = dim, n_head, n_kv_head\n        self.head_dim = dim // n_head\n        self.base = base\n        hd = self.head_dim\n        self.wq = nt.parameter((dim, n_head * hd), seed + 1, 0.02, \"wq\")\n        self.wk = nt.parameter((dim, n_kv_head * hd), seed + 2, 0.02, \"wk\")\n        self.wv = nt.parameter((dim, n_kv_head * hd), seed + 3, 0.02, \"wv\")\n        self.wo = nt.parameter((n_head * hd, dim), seed + 4, 0.02, \"wo\")\n\n    def forward(self, x, batch, seq, offset=0):\n        rows, hd = batch * seq, self.head_dim\n        q = F.linear(x, self.wq)\n        k = F.linear(x, self.wk)\n        v = F.linear(x, self.wv)\n        cos, sin = build_tables(list(range(offset, offset + seq)), hd, self.base)\n        q = F.rope(q, cos, sin, batch, seq, self.n_head, hd)\n        k = F.rope(k, cos, sin, batch, seq, self.n_kv_head, hd)\n        scores = F.attn_scores(q, k, batch, seq, seq, self.n_head, self.n_kv_head, hd)\n        valid = F.causal_valid(batch, self.n_head, seq, offset)\n        probs = F.softmax(scores, batch * self.n_head * seq, seq, valid)\n        out = F.attn_apply(\n            probs, v, batch, seq, seq, self.n_head, self.n_kv_head, hd,\n            out_shape=(rows, self.n_head * hd)\n        )\n        return F.linear(out, self.wo)\n",
+            "model.py": "\"\"\"平台给的小模型：嵌入 -> 一层注意力（pre-norm 残差）-> 归一化 -> 输出头。\n\n输出头和嵌入表**权重绑定**（weight tying）—— 小模型上这能省掉一大块参数，\nGPT-2 起就是这么做的。\n\n注意力那一块是你在 gen.py 里写的 CachedAttention，这里只负责把它接起来。\n\"\"\"\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\nfrom parts import RMSNorm\n\n\nclass TinyModel(nn.Module):\n    def __init__(self, vocab, dim, attn, seed=41):\n        super().__init__()\n        self.vocab, self.dim = vocab, dim\n        self.embed = nt.parameter((vocab, dim), seed, 0.02, \"embed\")\n        self.norm1 = RMSNorm(dim)\n        self.attn = attn\n        self.norm_f = RMSNorm(dim)\n\n    def forward(self, idx, batch, seq, cache=None, offset=0):\n        rows = batch * seq\n        x = F.embedding(self.embed, idx, rows, self.dim)\n        h = self.attn(self.norm1(x, rows), batch, seq, cache=cache, offset=offset)\n        x = F.add(x, h)\n        x = self.norm_f(x, rows)\n        # 权重绑定：输出头就是嵌入表转置\n        return F.linear_tied(x, self.embed, rows, self.dim, self.vocab)\n",
+            "gen.py": "\"\"\"第 8 关：带 KV cache 的注意力 + 生成循环。\"\"\"\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\nfrom nanotorch.generate import KVCache, sample\nfrom parts import build_tables\n\n\nclass CachedAttention(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed, base=10000.0):\n        super().__init__()\n        self.dim, self.n_head, self.n_kv_head = dim, n_head, n_kv_head\n        self.head_dim = dim // n_head\n        self.base = base\n        hd = self.head_dim\n        self.wq = nt.parameter((dim, n_head * hd), seed + 1, 0.02, \"wq\")\n        self.wk = nt.parameter((dim, n_kv_head * hd), seed + 2, 0.02, \"wk\")\n        self.wv = nt.parameter((dim, n_kv_head * hd), seed + 3, 0.02, \"wv\")\n        self.wo = nt.parameter((n_head * hd, dim), seed + 4, 0.02, \"wo\")\n\n    def forward(self, x, batch, seq, cache=None, offset=0):\n        # TODO: 投影 -> RoPE（位置从 offset 起算）\n        #       cache 为 None：seq_kv = seq\n        #       给了 cache：append 之后 seq_kv = cache.max_seq\n        #       两条路都要把 offset 传给 causal_valid\n        return nt.zeros((batch * seq, self.dim))\n\n\ndef generate(model, prompt, n_new, vocab, seed, use_cache=True,\n             temperature=1.0, top_k=0):\n    \"\"\"返回新生成的 n_new 个 token（batch=1）。\"\"\"\n    # TODO: 不带 cache 就每步把整段重算；带 cache 先 prefill 再逐个解码\n    return []\n\n\nif __name__ == \"__main__\":\n    import model as M\n    VOCAB, DIM = 16, 64\n    attn = CachedAttention(DIM, 4, 2, seed=21)\n    m = M.TinyModel(VOCAB, DIM, attn)\n    out = generate(m, [1, 2, 3, 4], 6, VOCAB, seed=7, use_cache=True)\n    print(\"生成\", out)\n"
+          },
+          "referenceFiles": {
+            "gen.py": "\"\"\"第 8 关的参考实现。\"\"\"\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\nfrom nanotorch.generate import KVCache, sample\nfrom parts import build_tables\n\n\nclass CachedAttention(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed, base=10000.0):\n        super().__init__()\n        self.dim, self.n_head, self.n_kv_head = dim, n_head, n_kv_head\n        self.head_dim = dim // n_head\n        self.base = base\n        hd = self.head_dim\n        self.wq = nt.parameter((dim, n_head * hd), seed + 1, 0.02, \"wq\")\n        self.wk = nt.parameter((dim, n_kv_head * hd), seed + 2, 0.02, \"wk\")\n        self.wv = nt.parameter((dim, n_kv_head * hd), seed + 3, 0.02, \"wv\")\n        self.wo = nt.parameter((n_head * hd, dim), seed + 4, 0.02, \"wo\")\n\n    def forward(self, x, batch, seq, cache=None, offset=0):\n        rows, hd = batch * seq, self.head_dim\n        q = F.linear(x, self.wq)\n        k = F.linear(x, self.wk)\n        v = F.linear(x, self.wv)\n\n        # 位置从 offset 起算 —— 解码时这就是「已经生成了多少个」\n        cos, sin = build_tables(list(range(offset, offset + seq)), hd, self.base)\n        q = F.rope(q, cos, sin, batch, seq, self.n_head, hd)\n        k = F.rope(k, cos, sin, batch, seq, self.n_kv_head, hd)\n\n        if cache is None:\n            keys, values, seq_kv = k, v, seq\n        else:\n            cache.append(k, v, seq)\n            # 缓存是按 max_seq 开的，所以 seq_kv 传 max_seq，\n            # 还没写过的位置由 causal_valid 挡在外面（概率是硬 0）\n            keys, values, seq_kv = cache.k, cache.v, cache.max_seq\n\n        scores = F.attn_scores(\n            q, keys, batch, seq, seq_kv, self.n_head, self.n_kv_head, hd\n        )\n        valid = F.causal_valid(batch, self.n_head, seq, offset)\n        probs = F.softmax(scores, batch * self.n_head * seq, seq_kv, valid)\n        out = F.attn_apply(\n            probs, values, batch, seq, seq_kv, self.n_head, self.n_kv_head, hd,\n            out_shape=(rows, self.n_head * hd)\n        )\n        return F.linear(out, self.wo)\n\n\ndef generate(model, prompt, n_new, vocab, seed, use_cache=True,\n             temperature=1.0, top_k=0):\n    ids = list(prompt)\n    out = []\n    idx = nt.zeros((len(prompt) + n_new,), role=\"data\", name=\"gen.idx\")\n\n    cache = None\n    if use_cache:\n        cache = KVCache(1, len(prompt) + n_new,\n                        model.attn.n_kv_head, model.attn.head_dim)\n\n    for step in range(n_new):\n        if use_cache:\n            # 第一步把整段 prompt 一次塞进缓存，之后每步只喂新来的那一个\n            feed = ids if step == 0 else ids[-1:]\n            offset = cache.length\n        else:\n            # 不带缓存：每一步都把整段前缀从头算一遍，这就是那个 O(n²)\n            feed = ids\n            offset = 0\n        idx.set_int_(feed)\n        logits = model(idx, 1, len(feed), cache=cache, offset=offset)\n        nxt = sample(logits, len(feed) - 1, vocab,\n                     temperature=temperature, top_k=top_k, seed=seed + step)\n        ids.append(nxt)\n        out.append(nxt)\n    return out\n\n\nif __name__ == \"__main__\":\n    import model as M\n    VOCAB, DIM = 16, 64\n    attn = CachedAttention(DIM, 4, 2, seed=21)\n    m = M.TinyModel(VOCAB, DIM, attn)\n    out = generate(m, [1, 2, 3, 4], 6, VOCAB, seed=7, use_cache=True)\n    print(\"生成\", out)\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "gen.spec.ts",
+            "content": "const lab = require('@llm/lab');\n\nconst VOCAB = 16, DIM = 64, H = 4, KV = 2;\nconst PROMPT = '[1, 2, 3, 4]';\nconst NEW = 12;\n\nfunction setup() {\n  lab.py(`\nimport sys, json\nsys.path.insert(0, \"/lab\")\nimport importlib, parts, model, gen\nimportlib.reload(parts)\nimportlib.reload(model)\nimportlib.reload(gen)\nimport nanotorch as nt\n\ndef _fresh():\n    attn = gen.CachedAttention(${DIM}, ${H}, ${KV}, seed=21)\n    return model.TinyModel(${VOCAB}, ${DIM}, attn)\n`);\n}\n\nfunction run(useCache, seed, topK) {\n  lab.py(`\n_m = _fresh()\n_got = gen.generate(_m, ${PROMPT}, ${NEW}, ${VOCAB}, seed=${seed},\n                    use_cache=${useCache ? 'True' : 'False'}, top_k=${topK || 0})\n`);\n  return JSON.parse(String(lab.py('json.dumps(list(_got))')));\n}\n\ndescribe('采样与 KV cache', () => {\n  /*\n   * 这一关的第一条。两条路算的是同一个函数，所以不是「差不多」——\n   * 是一位都不许差。对不上一般是：RoPE 没跟 offset、掩码没带 offset、\n   * 追加时 batch 串位。\n   */\n  it('带 cache 与不带 cache 的生成逐位相同', () => {\n    setup();\n    const withCache = run(true, 7);\n    const without = run(false, 7);\n    console.log('带 cache ' + JSON.stringify(withCache));\n    console.log('不带     ' + JSON.stringify(without));\n    let mismatches = 0;\n    for (let i = 0; i < NEW; i++) if (withCache[i] !== without[i]) mismatches += 1;\n    lab.publish('cache.mismatches', mismatches);\n    expect(withCache.length).toBe(NEW);\n    expect(mismatches).toBe(0);\n  });\n\n  it('不带 cache 的解码 FLOPs 是带 cache 的 3 倍以上', () => {\n    setup();\n    const measure = (useCache) => {\n      const before = lab.metrics().flops.total;\n      run(useCache, 7);\n      return lab.metrics().flops.total - before;\n    };\n    const cached = measure(true);\n    const uncached = measure(false);\n    const ratio = uncached / cached;\n    console.log(\n      '带 cache ' + cached + ' FLOPs，不带 ' + uncached\n      + '，比值 ' + ratio.toFixed(2)\n    );\n    lab.publish('cache.flopsRatio', ratio);\n    expect(cached).toBeGreaterThan(0);\n    expect(ratio).toBeGreaterThan(3.0);\n  });\n\n  it('同一个 seed 跑两遍结果完全一样', () => {\n    setup();\n    const a = run(true, 99);\n    const b2 = run(true, 99);\n    let mismatches = 0;\n    for (let i = 0; i < NEW; i++) if (a[i] !== b2[i]) mismatches += 1;\n    lab.publish('sample.determinismMismatches', mismatches);\n    expect(mismatches).toBe(0);\n    // 换个 seed 应当采出不一样的东西，否则采样其实退化成了贪心\n    const c = run(true, 12345);\n    let differs = 0;\n    for (let i = 0; i < NEW; i++) if (a[i] !== c[i]) differs += 1;\n    console.log('换 seed 之后有 ' + differs + ' / ' + NEW + ' 个位置不同');\n    expect(differs).toBeGreaterThan(0);\n  });\n\n  /*\n   * top-k 真的接上了没有。\n   *\n   * 只比「k=1 是不是等于贪心」是不够的：没训过的模型每一步的 argmax\n   * 往往是同一个 token，于是一个「永远返回 4」的实现也能过。\n   * 所以这里**逐步重放**：把已经生成的前缀重新算一遍 logits，\n   * 取出真正的 top-k 集合，再看采出来的那个在不在里面。\n   */\n  it('采出来的 token 都落在真正的 top-k 集合里', () => {\n    setup();\n    const K = 3;\n    const sampled = run(true, 7, K);\n\n    // 逐步重放：第 i 步的前缀是 prompt + sampled[0..i-1]\n    lab.py(`\n_m = _fresh()\n_ids = list(${PROMPT})\n_idx = nt.zeros((len(_ids) + ${NEW},), role=\"data\")\n_tops = []\nfor _t in ${JSON.stringify(sampled)}:\n    _idx.set_int_(_ids)\n    _lg = _m(_idx, 1, len(_ids))\n    _row = (len(_ids) - 1) * ${VOCAB}\n    _vals = _lg.tolist()[_row:_row + ${VOCAB}]\n    _order = sorted(range(${VOCAB}), key=lambda i: (-_vals[i], i))\n    _tops.append(_order[:${K}])\n    _ids.append(_t)\n`);\n    const tops = JSON.parse(String(lab.py('json.dumps(_tops)')));\n\n    let violations = 0;\n    for (let i = 0; i < NEW; i++) if (!tops[i].includes(sampled[i])) violations += 1;\n    const distinct = new Set(sampled).size;\n    console.log('k=' + K + ' 采样 ' + JSON.stringify(sampled)\n      + '，出现了 ' + distinct + ' 个不同的 token');\n    console.log('前三步的 top-' + K + ' 集合 ' + JSON.stringify(tops.slice(0, 3)));\n    lab.publish('sample.topKViolations', violations);\n    expect(violations).toBe(0);\n    // 真的在 top-k 里挑，而不是每步都吐同一个 —— 否则上面那条是白测的\n    expect(distinct).toBeGreaterThan(1);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "llm.cache.mismatches",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "带 cache 与不带 cache 结果不同的 token 数",
+              "en": "tokens differing between the cached and uncached paths"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.cache.flopsRatio",
+            "op": "gte",
+            "value": 3,
+            "label": {
+              "zh": "不带 cache 与带 cache 的解码 FLOPs 比",
+              "en": "decode FLOPs of the uncached path over the cached one"
+            },
+            "dimension": "efficiency"
+          },
+          {
+            "metric": "llm.sample.determinismMismatches",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "同 seed 两次采样不同的 token 数",
+              "en": "tokens differing between two runs at the same seed"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.sample.topKViolations",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "top_k=1 时与贪心不同的 token 数",
+              "en": "tokens differing from greedy at top_k=1"
+            },
+            "dimension": "correctness"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "efficiency"
+        ],
+        "extension": {
+          "zh": "KV cache 是推理侧显存的大头。一个 70B 模型、batch 32、上下文 8k，\nGQA 之后的 cache 仍然要几十 GB —— **比权重本身还容易先撑爆**。\n围绕它有一整条技术线：GQA / MLA 减头数，量化到 int8 / fp8 减位宽，\n`PagedAttention`（vLLM）像操作系统的分页那样按块分配免掉碎片,\n这一条在 gpulab 第 18 关有单独一关。\n\n这里的实现是连续分配的那版，接口和真实引擎一致但没有分页。\n连续分配在批量服务下会碎得很厉害:这就是 vLLM 当初要解决的问题。\n",
+          "en": "The KV cache dominates inference memory. A 70B model at batch 32 and 8k context still\nneeds tens of GB of cache after GQA — **easier to blow up than the weights themselves**.\nA whole line of work targets it: GQA and MLA to cut head count, int8/fp8 quantisation\nto cut width, and `PagedAttention` (vLLM) to allocate in blocks like OS paging and\navoid fragmentation — which gpulab covers in its own stage 18.\n\nThe implementation here allocates contiguously, matching real engines at the interface\nwhile skipping paging. Contiguous allocation fragments badly under batched serving,\nwhich is precisely the problem vLLM set out to solve.\n"
+        },
+        "primer": {
+          "zh": "训练时整段序列一次算完,因果掩码保证第 t 个位置只看得见前面。生成时不行：第 t 个 token 还不存在，必须先采出来才能往下走。这就是`自回归解码`。\n\n朴素的写法是每生成一个 token 就把整段前缀重新跑一遍。第 t 步是 O(t)，生成 n 个是 `O(n²)`。生成 1000 个 token 要做的工作是生成 100 个的一百倍,这不是慢一点，这是不能用。\n\n关键的观察是：前面那些位置的`键`和`值`，每一步算出来的都一模一样。既然一样，存下来就好。这就是 `KV cache`,每步只算新来的那一个位置的 k/v，追加进缓存，然后对缓存里全部位置做注意力。每步 O(1)，全程 O(n)。\n\n代价是显存。缓存的大小是 `2 · 层数 · batch · 序列长 · kv头数 · 头维 · 位宽`,一个 70B 模型在长上下文、大 batch 下，缓存能比权重本身还大。GQA 减 kv 头数、量化减位宽、分页分配减碎片，这三条都是冲着它去的。\n\n带缓存和不带缓存算的是同一个函数，所以结果应当`逐位相同`。对不上通常是三件事：RoPE 的位置没跟着已生成长度走、因果掩码忘了传偏移、往缓存里追加时 batch 之间串了位。这三个错都不报异常,生成出来的东西照样像句子。\n\n采样这一侧，`temperature` 缩放 logits（越小越确定），`top-k` 只留概率最高的 k 个，`top-p` 留累计概率到 p 的那些。三者叠加的顺序是先 k 后 p,和 HuggingFace 一致。要能重放，采样必须确定性：同一份 logits 加同一个 seed 必须给同一个 token，概率相同的候选按 id 排序。",
+          "en": "Training computes the whole sequence at once,the causal mask keeps position t from seeing ahead. Generation cannot: token t does not exist yet and must be sampled before anything can follow. That is `autoregressive decoding`.\n\nThe naive approach reruns the entire prefix for each new token. Step t costs O(t), so n tokens cost `O(n²)`. Generating 1000 tokens is a hundred times the work of generating 100,not somewhat slower, but unusable.\n\nThe key observation is that the `keys` and `values` of earlier positions come out identical at every step. Since they are identical, store them. That is the `KV cache`: compute k/v only for the new position, append, and attend over everything the cache holds. O(1) per step, O(n) overall.\n\nThe cost is memory. The cache is `2 · layers · batch · length · kv_heads · head_dim · width`,on a 70B model with long context and large batches it can exceed the weights themselves. GQA cuts head count, quantisation cuts width, and paged allocation cuts fragmentation; all three target this.\n\nCached and uncached decoding compute the same function, so results must be `bit-identical`. Mismatches are usually one of three things: RoPE positions not following the generated length, a forgotten offset on the causal mask, or appends that cross batch boundaries. None of them raises an error,the output still reads like language.\n\nOn the sampling side, `temperature` scales the logits (lower is more deterministic), `top-k` keeps the k most probable tokens, and `top-p` keeps the smallest set reaching cumulative probability p. They stack k first, then p,matching HuggingFace. For replay to work sampling must be deterministic: the same logits and seed must give the same token, with ties broken by id."
+        }
       }
     ]
   },

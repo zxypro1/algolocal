@@ -176,6 +176,105 @@ json.dumps([n for n, _ in m.named_parameters()])
   });
 
   /*
+   * `ModuleList` / `ParameterList` 存在的理由，和 PyTorch 里一模一样：
+   * **放进普通 list 的子模块不会被登记**，于是 `parameters()` 数不到它们。
+   * 表现是模型看着建好了、前向也跑得通，而优化器一个参数都没更新 ——
+   * 不报任何异常，只是 loss 一动不动。
+   *
+   * 这一条把「登记了」和「没登记」两种写法并排跑，差别是 0 和 3。
+   */
+  it('ModuleList 会登记子模块，普通 list 不会', () => {
+    expect(session.py.run(`
+import nanotorch as nt
+from nanotorch import nn
+
+class Naive(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = [nn.Linear(4, 4, seed=i + 1) for i in range(3)]
+
+class Right(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.ModuleList([nn.Linear(4, 4, seed=i + 1) for i in range(3)])
+
+[len(Naive().parameters()), len(Right().parameters())][0]
+`)).toBe(0);
+
+    expect(session.py.run('len(Right().parameters())')).toBe(3);
+    // 下标、长度、迭代都要能用 —— 不然写起来还是得回到普通 list
+    expect(session.py.run('len(Right().layers)')).toBe(3);
+    expect(session.py.run('sum(1 for _ in Right().layers)')).toBe(3);
+  });
+
+  it('ParameterList 同理', () => {
+    expect(session.py.run(`
+import nanotorch as nt
+from nanotorch import nn
+
+class M(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.ws = nn.ParameterList([nt.parameter((2, 2), i + 1, 0.02) for i in range(3)])
+
+M().num_parameters()
+`)).toBe(12);
+  });
+
+  /*
+   * `F.scale` 的反向：乘常数的导数就是乘同一个常数。
+   *
+   * 单独验它是因为**它的反向一旦就地改了上游的 grad，错法非常隐蔽** ——
+   * 残差缩放这条路上 `out.grad` 是和别的分支共享的，
+   * 就地缩放会把别人的梯度也一起改掉，而前向完全正常。
+   */
+  it('F.scale 的反向是乘同一个常数，且不动上游的 grad', () => {
+    const out = session.py.run(`
+import json
+import nanotorch as nt
+from nanotorch import functional as F
+
+x = nt.parameter((4,), None, 0.0)      # 全 1
+x.set_([1.0, 2.0, 3.0, 4.0])
+y = F.scale(x, 0.25)
+fwd = y.tolist()
+
+# 同一个 grad 喂给两条分支：一条缩放、一条原样加。
+# 如果 scale 的反向就地改了 grad，第二条分支拿到的就是被改过的值。
+g = y.ensure_grad()
+g.set_([1.0, 1.0, 1.0, 1.0])
+y._backward()
+grad_after = x.grad.tolist()
+shared = g.tolist()
+
+json.dumps({"fwd": fwd, "grad": grad_after, "shared": shared})
+`) as string;
+    const r = JSON.parse(out);
+    expect(r.fwd).toEqual([0.25, 0.5, 0.75, 1]);
+    expect(r.grad).toEqual([0.25, 0.25, 0.25, 0.25]);
+    // 上游那份 grad 必须还是原来的 1，没被就地缩放掉
+    expect(r.shared).toEqual([1, 1, 1, 1]);
+  });
+
+  /*
+   * `F.norm` / `F.rms` 是观测量，不进计算图。
+   * 它们是第 6 关那条「残差流随深度涨多少」的量尺,量尺本身得先是准的。
+   */
+  it('F.norm 与 F.rms 算的是 L2 与均方根', () => {
+    const out = session.py.run(`
+import json
+import nanotorch as nt
+from nanotorch import functional as F
+x = nt.zeros((4,), role="data")
+x.set_([3.0, 4.0, 0.0, 0.0])
+json.dumps([F.norm(x), F.rms(x)])
+`) as string;
+    const [l2, rms] = JSON.parse(out);
+    expect(l2).toBeCloseTo(5, 6);
+    expect(rms).toBeCloseTo(2.5, 6);
+  });
+
+  /*
    * 权重共享的模型里，`parameters()` 绝不能把同一份权重数两遍 ——
    * 数两遍的话优化器会更新它两次，而参数量也会报错。
    * `tied_head` 写成函数而不是 Module 正是为了这个。
