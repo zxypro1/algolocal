@@ -106,6 +106,33 @@ def gemm(a, b, m, n, k, mode="nn", dtype=None):
     return out
 
 
+def exp(x):
+    """逐元素 `e^x`。对应 `torch.exp`。
+
+    强化学习里它只有一个用处，但那个用处绕不开：
+    重要性比值 `ρ = exp(log π_new − log π_old)`。
+    写成两个概率相除会在小概率上失去精度,所以是「在 log 空间里减，再 exp 回来」。
+
+    反向是 `dx = out · go` —— 导数就是它自己，不必重算一遍 exp。
+    """
+    out = Tensor(x.shape, x.dtype, name="exp")
+    B.exp_fwd(x.handle, out.handle, x.numel)
+
+    def backward():
+        go = out.grad
+        if go is None or not x.requires_grad:
+            return
+        dx = Tensor(x.shape, x.dtype, name="dexp")
+        B.exp_bwd(go.handle, out.handle, dx.handle, x.numel)
+        B.add_inplace(x.ensure_grad().handle, dx.handle, x.numel)
+
+    out.requires_grad = is_grad_enabled() and x.requires_grad
+    if out.requires_grad:
+        out._backward = backward
+        out._parents = (x,)
+    return out
+
+
 def mul(a, b):
     """逐元素相乘。对应 PyTorch 里的 `a * b`。
 

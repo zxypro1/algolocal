@@ -83,7 +83,7 @@ typedef float ll_f32x4 __attribute__((vector_size(16), aligned(4)));
  * 那种情况下代码看着是新的、跑的是旧的，而且不报任何错。
  * 改算子的语义时把它 +1。
  */
-int ll_abi_version(void) { return 4; }
+int ll_abi_version(void) { return 5; }
 
 /** 堆基址，JS 的分配器从这里往后排 */
 int ll_heap_base(void) { return (int)(unsigned long)(&__heap_base); }

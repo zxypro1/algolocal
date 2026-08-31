@@ -66,6 +66,8 @@ export interface PythonBridge {
   cross_entropy_bwd(probs: number, targets: number, mask: number, dlogits: number, rows: number, vocab: number, scale: number): void;
   embed_fwd(table: number, idx: number, out: number, rows: number, d: number): void;
   mul(a: number, b: number, out: number, n: number): void;
+  exp_fwd(x: number, out: number, n: number): void;
+  exp_bwd(go: number, out: number, dx: number, n: number): void;
   row_scale(x: number, s: number, out: number, rows: number, d: number): void;
   row_scale_bwd_s(go: number, x: number, ds: number, rows: number, d: number): void;
   embed_bwd(dout: number, idx: number, dtable: number, rows: number, d: number): void;
@@ -231,6 +233,8 @@ export function createPythonBridge(rt: Runtime): PythonBridge {
     cross_entropy_bwd: (probs, targets, mask, dlogits, rows, vocab, scale) =>
       ops.crossEntropyBwd(T(probs), T(targets), mask >= 0 ? T(mask) : null, T(dlogits), rows, vocab, scale),
     mul: (a, b, out, n) => ops.mul(T(a), T(b), T(out), n),
+    exp_fwd: (x, out, n) => ops.expFwd(T(x), T(out), n),
+    exp_bwd: (go, out, dx, n) => ops.expBwd(T(go), T(out), T(dx), n),
     row_scale: (x, sc, out, rows, d) => ops.rowScale(T(x), T(sc), T(out), rows, d),
     row_scale_bwd_s: (go, x, ds, rows, d) => ops.rowScaleBwdS(T(go), T(x), T(ds), rows, d),
     embed_fwd: (table, idx, out, rows, d) => ops.embedFwd(T(table), T(idx), T(out), rows, d),

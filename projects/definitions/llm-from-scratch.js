@@ -13849,6 +13849,74 @@ const STAGE_LENGTH = {
   ),
 };
 
+/** 第 27 关验收过的 rollout，第 28 关起直接用 */
+const ROLLOUT_PY = code`
+        """第 27 关的参考实现。"""
+        import nanotorch as nt
+        from nanotorch import functional as F
+        import kit
+
+
+        def prompt_seed(prompt):
+            """按 prompt 的内容算一个确定性的整数。不能用 Python 的 hash() ——
+            它在不同进程里可能不同，而这里要的正是跨进程也稳的东西。"""
+            h = 2166136261
+            for t in kit.encode(prompt):
+                h = ((h ^ (t + 1)) * 16777619) & 0x7fffffff
+            return h
+
+
+        def rollout(model, prompts, group_size, max_new, seed,
+                    temperature=1.0, top_k=0):
+            out = []
+            max_seq = kit.S
+            buf = nt.zeros((max_seq,), name="roll.idx")
+            for i, prompt in enumerate(prompts):
+                samples, steps = [], []
+                for j in range(group_size):
+                    # **可寻址的随机性**：同一个 (seed, prompt 内容, j) 永远给同一条输出。
+                    #
+                    # 注意是按**内容**算，不是按它在这一批里的下标算 ——
+                    # 按下标的话，单独重跑其中一个 prompt 会得到另一条输出，
+                    # 而「把出问题那一条再跑一遍」正是重放要做的事
+                    sub = seed * 100003 + prompt_seed(prompt) * 101 + j
+                    ids = kit.encode(prompt)
+                    caches = model.make_caches(1, max_seq)
+                    mk = nt.mark()
+                    got, used = [], 0
+                    with nt.no_grad():
+                        for step in range(max_new):
+                            nt.release(mk)
+                            # 第一步把整段 prompt 塞进缓存，之后每步只喂新来的那一个
+                            feed = ids if step == 0 else ids[-1:]
+                            offset = caches[0].length
+                            if offset + len(feed) > max_seq:
+                                break
+                            buf.set_int_(feed + [kit.PAD] * (max_seq - len(feed)))
+                            lg = model.logits(buf, 1, len(feed), caches, offset)
+                            nxt = nt.generate.sample(
+                                lg, len(feed) - 1, kit.V,
+                                temperature=temperature, top_k=top_k, seed=sub + step
+                            )
+                            used += 1
+                            if nxt == kit.EOS:
+                                break          # 撞到 EOS 就停 —— 之后的 token 是纯浪费
+                            got.append(nxt)
+                            ids.append(nxt)
+                    nt.release(mk)
+                    samples.append(kit.decode(got))
+                    steps.append(used)
+                out.append({"prompt": prompt, "samples": samples, "steps": steps})
+            return out
+
+
+        if __name__ == "__main__":
+            m = kit.LM(seed=1)
+            g = rollout(m, ["7+5=", "1+2="], 4, 4, seed=3)
+            for grp in g:
+                print(grp["prompt"], grp["samples"], grp["steps"])
+`;
+
 /* ================================================================== */
 /* 第 27 关：rollout 基础设施                                           */
 /* ================================================================== */
@@ -14064,7 +14132,7 @@ const STAGE_ROLLOUT = {
                     temperature=1.0, top_k=0):
             out = []
             max_seq = kit.S
-            buf = nt.zeros((max_seq,), role="data", name="roll.idx")
+            buf = nt.zeros((max_seq,), name="roll.idx")
             for i, prompt in enumerate(prompts):
                 samples, steps = [], []
                 for j in range(group_size):
@@ -14353,6 +14421,1254 @@ const STAGE_ROLLOUT = {
   ),
 };
 
+/* ================================================================== */
+/* 第 28 关：GRPO + RLVR                                               */
+/* ================================================================== */
+
+const STAGE_GRPO = {
+  id: 'grpo-rlvr',
+  title: t('GRPO + RLVR —— 用规则当奖励，用同组当基线', 'GRPO + RLVR — rules as reward, the group as baseline'),
+  goal: t(
+    code`
+      PPO 要一个 \`critic\`（价值网络）来估计基线,它和策略一样大，
+      要单独训、单独存、单独调。\`GRPO\` 的做法是把它去掉：
+      **同一个 prompt 采一组，用组内的平均奖励当基线。**
+
+      而 \`RLVR\` 把奖励模型也去掉：可验证的任务直接**用规则判对错**。
+      两个一起，整条链上只剩策略一个模型。
+
+      在 \`grpo.py\` 里实现：
+
+      \`\`\`python
+      def verify(prompt, sample):
+          """规则验证器。答对给 1，答错给 0。"""
+
+      def group_advantages(rewards, group_size):
+          """组内归一化：A_i = (r_i − 组内均值) / (组内标准差 + eps)。
+          返回和 rewards 等长的列表。"""
+
+      def grpo_loss(logp, old_logp, advantages, mask, rows, eps_low, eps_high):
+          """带裁剪的策略梯度。ρ = exp(logp − old_logp)。"""
+
+      def train(policy, prompts, steps, group_size, inner_epochs, ...): ...
+      \`\`\`
+
+      ## 组内基线为什么够用
+
+      策略梯度需要一个基线来降方差,减去任何**与动作无关**的量都不改变梯度的期望。
+      PPO 用一个学出来的 \`V(s)\`，GRPO 用**同一个 prompt 的另外 G−1 条样本的平均**。
+
+      后者的好处不只是省一个网络：它天然是**无偏**的（同分布采出来的），
+      而 critic 要自己训，训不准的时候会引入偏差,
+      而「critic 训不准」在长序列上是常态。
+
+      代价是方差：G 条样本估出来的均值比一个学出来的 V 抖。
+      所以 GRPO 要 G ≥ 8（这一关用 8）。
+
+      ## 一个必须恒成立的等式
+
+      组内归一化之后，**每一组的优势之和必须是 0**。
+      这不是巧合，是定义,减去均值就是这个意思。
+
+      它也是一条极好的自查：如果某一组的优势和不是 0，
+      要么归一化写错了，要么分组分错了（把不同 prompt 的样本混进了一组）。
+      **后者尤其隐蔽** —— 分错组的实现照样能训，只是基线变成了「全 batch 平均」，
+      于是 GRPO 退化成了一个方差更大的 REINFORCE。
+
+      这一关的门槛：\`|每组优势之和|\` 的最大值 ≤ 1e-5。
+
+      ## 全对或全错的那些组
+
+      如果一组里 8 条全对（或全错），组内标准差是 0，优势也全是 0,
+      **这一组对梯度没有任何贡献**。
+
+      这不是 bug，是 GRPO 的固有性质：模型已经稳定做对的题，没什么可学的。
+      但它有个实际后果:训练后期大部分组都全对，有效的 batch 越来越小。
+      真实系统里会**按难度筛题**，把全对的题换掉。
+
+      ## 裁剪与内层轮次
+
+      \`ρ = π_new / π_old\`。**只跑一个内层轮次的话 ρ 恒等于 1**，裁剪不起作用,
+      这时 GRPO 就是带基线的 REINFORCE。
+      跑多个轮次（这一关跑 2 个）之后 ρ 才会偏离 1，裁剪才有意义。
+
+      \`\`\`
+      L = −(1/N) Σ min( ρ·A,  clip(ρ, 1−ε_low, 1+ε_high)·A )
+      \`\`\`
+
+      这一关先用对称的 \`ε_low = ε_high = 0.2\`。第 29 关会把它拆开。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | **组内优势和为 0** | 最大 \\|和\\| ≤ **1e-5** |
+      | 验证器 | 与平台的规则实现完全一致 |
+      | **学到了东西** | 留出集通过率比起点高 ≥ **0.15**，且 rollout 通过率后 10 步比前 10 步高 ≥ **0.1** |
+      | 不跑飞 | 相对起点的逐 token KL ≤ **0.8** |
+    `,
+    code`
+      PPO needs a \`critic\` (value network) to estimate the baseline — as large as the
+      policy, separately trained, stored and tuned. \`GRPO\` removes it: **sample a group per
+      prompt and use the group's mean reward as the baseline.**
+
+      \`RLVR\` then removes the reward model too: verifiable tasks **judge correctness by
+      rule**. Together, only the policy remains.
+
+      Implement in \`grpo.py\`:
+
+      \`\`\`python
+      def verify(prompt, sample):
+          """Rule-based verifier. 1 for correct, 0 otherwise."""
+
+      def group_advantages(rewards, group_size):
+          """Group normalisation: A_i = (r_i − group mean) / (group std + eps).
+          Returns a list as long as rewards."""
+
+      def grpo_loss(logp, old_logp, advantages, mask, rows, eps_low, eps_high):
+          """Clipped policy gradient. ρ = exp(logp − old_logp)."""
+
+      def train(policy, prompts, steps, group_size, inner_epochs, ...): ...
+      \`\`\`
+
+      ## Why a group baseline suffices
+
+      Policy gradients need a baseline to reduce variance, and subtracting anything
+      **independent of the action** leaves the gradient's expectation unchanged. PPO uses a
+      learned \`V(s)\`; GRPO uses **the mean of the other G−1 samples for the same prompt**.
+
+      Beyond saving a network, the group baseline is naturally **unbiased** (drawn from the
+      same distribution), whereas a critic must be trained and introduces bias when it is
+      inaccurate — and an inaccurate critic is the norm on long sequences.
+
+      The cost is variance: a mean over G samples is noisier than a learned V. Hence GRPO
+      wants G >= 8, which is what this stage uses.
+
+      ## An identity that must always hold
+
+      After group normalisation, **each group's advantages must sum to zero**. That is not a
+      coincidence but the definition — subtracting the mean says exactly this.
+
+      It also makes an excellent self-check: a group whose advantages do not sum to zero
+      means either the normalisation is wrong or the grouping is (samples from different
+      prompts mixed into one group). **The latter is especially insidious** — a
+      wrongly-grouped implementation still trains, its baseline simply becomes "the whole
+      batch mean", and GRPO degenerates into a higher-variance REINFORCE.
+
+      The gate: the largest \`|group sum|\` must be <= 1e-5.
+
+      ## Groups that are all-correct or all-wrong
+
+      When all 8 samples in a group are correct (or all wrong), the group's standard
+      deviation is zero and so are its advantages — **that group contributes nothing to the
+      gradient**.
+
+      This is not a bug but an inherent property of GRPO: questions the model reliably gets
+      right have nothing left to teach. It has a practical consequence, though: late in
+      training most groups are all-correct and the effective batch shrinks. Real systems
+      **filter by difficulty**, swapping out the solved questions.
+
+      ## Clipping and inner epochs
+
+      \`ρ = π_new / π_old\`. **With a single inner epoch ρ is identically 1** and clipping
+      does nothing — GRPO is then REINFORCE with a baseline. Only with several epochs (two
+      here) does ρ move away from 1 and clipping start to matter.
+
+      \`\`\`
+      L = −(1/N) Σ min( ρ·A,  clip(ρ, 1−ε_low, 1+ε_high)·A )
+      \`\`\`
+
+      This stage uses a symmetric \`ε_low = ε_high = 0.2\`; stage 29 splits them apart.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | **Group advantages sum to zero** | Largest \\|sum\\| <= **1e-5** |
+      | Verifier | Exactly matches the platform's rule |
+      | **It learned** | Held-out pass rate up >= **0.15**, and rollout pass rate's last ten steps beat its first ten by >= **0.1** |
+      | No blow-up | Per-token KL from the starting policy <= **0.8** |
+    `
+  ),
+  checklist: [
+    t('每组优势之和为 0', "Each group's advantages sum to zero"),
+    t('全对 / 全错的组优势全是 0', 'All-correct and all-wrong groups get zero advantages'),
+    t('ρ 用 exp(logp − old_logp) 算，不是两个概率相除',
+      'ρ comes from exp(logp − old_logp), not from dividing probabilities'),
+    t('通过率比起点明显提高', 'The pass rate clearly exceeds the starting point'),
+  ],
+  hints: [
+    t('F.exp 是可导的；ρ = F.exp(F.add(logp, F.scale(old_logp, -1)))。',
+      'F.exp is differentiable; ρ = F.exp(F.add(logp, F.scale(old_logp, -1))).'),
+    t('old_logp 要在 no_grad 下算一次，之后每个内层轮次都用它。',
+      'Compute old_logp once under no_grad and reuse it across inner epochs.'),
+    t('标准差为 0 的组直接把优势填 0，别去除一个接近 0 的数。',
+      'When the group std is zero, set advantages to zero rather than dividing by near-zero.'),
+  ],
+  pitfalls: [
+    t(code`
+      **分组分错。** 把整个 batch 当成一组去归一化,基线从「同一个 prompt 的
+      其他样本」变成了「所有 prompt 的平均」。模型照样能训，
+      只是基线不再对应这道题的难度，方差大很多，GRPO 退化成 REINFORCE。
+      **每组优势之和为 0** 那条门槛就是抓它的：分错组的话，
+      单个 prompt 的组内和不会是 0。
+    `, code`
+      **Grouping incorrectly.** Normalising over the whole batch turns the baseline from
+      "other samples of the same prompt" into "the average across all prompts". The model
+      still trains, but the baseline no longer reflects this question's difficulty, variance
+      rises sharply, and GRPO degenerates into REINFORCE. The "advantages sum to zero" gate
+      catches it: with the wrong grouping, a single prompt's group sum is not zero.
+    `),
+    t(code`
+      **ρ 用两个概率相除。** \`π_new / π_old\` 在小概率上会失去精度 ——
+      两个 1e-8 量级的数相除，有效位数所剩无几。
+      正确的做法是**在 log 空间里减，再 exp 回来**：\`exp(logp − old_logp)\`。
+      这也是为什么整条 RL 的链上到处都是 log-prob 而不是 prob。
+    `, code`
+      **Computing ρ by dividing probabilities.** \`π_new / π_old\` loses precision at small
+      probabilities — dividing two numbers around 1e-8 leaves almost no significant digits.
+      The correct form **subtracts in log space and exponentiates back**:
+      \`exp(logp − old_logp)\`. That is also why the entire RL chain carries log-probs
+      rather than probabilities.
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_POST_PY,
+      'rollout.py': ROLLOUT_PY,
+      'grpo.py': code`
+        """第 28 关：GRPO + RLVR。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import functional as F
+        import kit
+
+
+        def verify(prompt, sample):
+            """规则验证器：答对 1，答错 0。"""
+            # TODO: prompt 形如 "7+5="，算出正确答案再和 sample 比
+            return 0.0
+
+
+        def group_advantages(rewards, group_size):
+            """组内归一化。返回和 rewards 等长的列表。"""
+            # TODO: 每 group_size 个一组，减均值除标准差；标准差为 0 时全填 0
+            return [0.0] * len(rewards)
+
+
+        def grpo_loss(logp, old_logp, advantages, mask, rows, eps_low, eps_high):
+            """带裁剪的策略梯度。logp / old_logp 是 [rows, 1]。"""
+            # TODO: ρ = exp(logp − old_logp)；取 min(ρ·A, clip(ρ)·A)；按 mask 平均后取负
+            return nt.zeros((1,))
+
+
+        def train(policy, prompts, steps, group_size=8, inner_epochs=2,
+                  max_new=4, peak_lr=0.004, eps_low=0.2, eps_high=0.2, seed=1):
+            """返回 {"pass_rate": [...], "adv_sums": [...]}"""
+            # TODO: 每步换一批 prompt -> rollout -> 验证 -> 组内优势 ->
+            #       算一次 old_logp（no_grad）-> 内层轮次里更新
+            return {"pass_rate": [], "adv_sums": []}
+
+
+        if __name__ == "__main__":
+            print(verify("7+5=", "12"), verify("7+5=", "13"))
+            print(group_advantages([1.0, 0.0, 1.0, 0.0], 4))
+      `,
+    },
+    referenceFiles: {
+      'grpo.py': code`
+        """第 28 关的参考实现。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import functional as F
+        import kit
+
+
+        def verify(prompt, sample):
+            # RLVR 的全部内容就是这个函数：**规则判对错，不需要人标、也不需要奖励模型**
+            body = prompt[:-1]
+            if "+" in body:
+                a, b = body.split("+")
+                want = str(int(a) + int(b))
+            else:
+                a, b = body.split("-")
+                want = str(int(a) - int(b))
+            return 1.0 if sample == want else 0.0
+
+
+        def group_advantages(rewards, group_size):
+            out = []
+            for start in range(0, len(rewards), group_size):
+                grp = rewards[start:start + group_size]
+                n = len(grp)
+                mean = sum(grp) / n
+                var = sum((r - mean) ** 2 for r in grp) / n
+                std = var ** 0.5
+                if std < 1e-8:
+                    # 全对或全错：组内没有差异，这一组对梯度没有贡献。
+                    # 不是 bug —— 是 GRPO 的固有性质
+                    out.extend([0.0] * n)
+                else:
+                    out.extend([(r - mean) / std for r in grp])
+            return out
+
+
+        def grpo_loss(logp, old_logp, advantages, mask, rows, eps_low, eps_high):
+            # ρ 在 **log 空间里减再 exp 回来**。两个概率相除会在小概率上失去精度
+            ratio = F.exp(F.add(logp, F.scale(old_logp, -1.0)))
+
+            adv = nt.zeros((rows,), name="grpo.adv")
+            adv.set_(advantages)
+            unclipped = F.row_scale(ratio, adv, rows, 1)
+
+            # clip(ρ) 那一支不带梯度 —— 它只是个上/下界，取 min 之后
+            # 只有没被裁到的那些位置会有梯度
+            rv = ratio.tolist()
+            clipped_vals = [min(max(v, 1.0 - eps_low), 1.0 + eps_high) for v in rv]
+            clipped = nt.zeros((rows, 1), name="grpo.clipped")
+            clipped.set_([c * a for c, a in zip(clipped_vals, advantages)])
+
+            # min(ρ·A, clip(ρ)·A)：逐位挑小的那一支
+            un = unclipped.tolist()
+            cl = clipped.tolist()
+            pick = nt.zeros((rows,), name="grpo.pick")
+            pick.set_([1.0 if un[i] <= cl[i] else 0.0 for i in range(rows)])
+            chosen = F.row_scale(unclipped, pick, rows, 1)
+
+            keep = nt.zeros((rows,), name="grpo.keep")
+            keep.set_(mask)
+            per = F.row_scale(chosen, keep, rows, 1)
+
+            total = sum(mask)
+            seg = nt.zeros((rows,), name="grpo.seg")
+            seg.set_int_([0] * rows)
+            summed = F.scatter_add(per, seg, rows, 1, 1)
+            # 取负、按参与的位置数平均
+            return F.scale(summed, -1.0 / max(1.0, total))
+
+
+        def _seq_logp_per_token(model, idx, targets, mask, batch, seq):
+            rows = batch * seq
+            lp = F.log_softmax(model.logits(idx, batch, seq), rows, kit.V)
+            sel = nt.zeros((rows,), name="grpo.sel")
+            sel.set_int_([r * kit.V + targets[r] for r in range(rows)])
+            return F.gather(lp, sel, rows, 1)
+
+
+        def train(policy, prompts, steps, group_size=8, inner_epochs=2,
+                  max_new=4, peak_lr=0.004, eps_low=0.2, eps_high=0.2, seed=1):
+            import rollout as R
+            opt = nt.optim.AdamW(policy.parameters(), lr=peak_lr, betas=(0.9, 0.95),
+                                 weight_decay=0.0, grad_clip=1.0)
+            n = min(6, len(prompts)) * group_size
+            idx = nt.zeros((n * kit.S,), role="data", name="grpo.idx")
+            pass_rate, adv_sums = [], []
+            base = nt.mark()
+
+            # 每步换一批 prompt。固定在同几道题上反复采的话，
+            # 策略会记住那几道题的答案而在别的题上变差 —— 实测掉 20 个点
+            per_step = min(6, len(prompts))
+            for st in range(1, steps + 1):
+                nt.release(base)
+                start = ((st - 1) * per_step) % len(prompts)
+                batch_prompts = [prompts[(start + k) % len(prompts)]
+                                 for k in range(per_step)]
+                groups = R.rollout(policy, batch_prompts, group_size, max_new,
+                                   seed * 1000 + st)
+
+                flat, tg, mk, rewards = [], [], [], []
+                for grp in groups:
+                    for smp in grp["samples"]:
+                        ri, rt, rm = kit.build_row(grp["prompt"], smp)
+                        flat.extend(ri)
+                        tg.extend(rt)
+                        mk.extend(rm)
+                        rewards.append(verify(grp["prompt"], smp))
+                idx.set_int_(flat)
+                pass_rate.append(sum(rewards) / len(rewards))
+
+                adv_seq = group_advantages(rewards, group_size)
+                # 每个 token 用它所属序列的优势
+                adv_tok = [adv_seq[r // kit.S] for r in range(n * kit.S)]
+                for start in range(0, len(adv_seq), group_size):
+                    adv_sums.append(sum(adv_seq[start:start + group_size]))
+
+                with nt.no_grad():
+                    old = _seq_logp_per_token(policy, idx, tg, mk, n, kit.S)
+                    old_vals = old.tolist()
+                old_t = nt.zeros((n * kit.S, 1), name="grpo.old")
+                old_t.set_(old_vals)
+
+                # 内层轮次 > 1 的时候 ρ 才会偏离 1，裁剪才有意义
+                for _ in range(inner_epochs):
+                    opt.zero_grad()
+                    nt.phase("forward")
+                    lp = _seq_logp_per_token(policy, idx, tg, mk, n, kit.S)
+                    loss = grpo_loss(lp, old_t, adv_tok, mk, n * kit.S, eps_low, eps_high)
+                    nt.phase("other")
+                    loss.backward()
+                    opt.step(lr=peak_lr)
+
+            nt.release(base)
+            return {"pass_rate": pass_rate, "adv_sums": adv_sums}
+
+
+        if __name__ == "__main__":
+            print(verify("7+5=", "12"), verify("7+5=", "13"))
+            print(group_advantages([1.0, 0.0, 1.0, 0.0], 4))
+      `,
+    },
+  },
+  specs: [
+    spec('grpo.spec.ts', code`
+      ${LAB}
+
+      const SFT_STEPS = 100, MAXV = 20, GROUP = 8, RL_STEPS = 80, RL_LR = 0.001;
+
+      function setup() {
+        lab.py(\`
+      import sys, json, math
+      sys.path.insert(0, "/lab")
+      import importlib, kit, rollout, grpo
+      importlib.reload(kit)
+      importlib.reload(rollout)
+      importlib.reload(grpo)
+      import nanotorch as nt
+      from nanotorch import functional as F
+
+      _cache = {}
+
+      def _sft():
+          m = kit.LM(seed=1)
+          kit.sft_train(m, kit.make_pairs(512, 5, \${MAXV}, "+"), \${SFT_STEPS}, 16)
+          return m
+
+      _prompts = [p for p, _ in kit.make_pairs(160, 41, \${MAXV}, "+")]
+      _held = kit.make_pairs(48, 777, \${MAXV}, "+")
+
+      def _run():
+          if "r" not in _cache:
+              pol = _sft()
+              before = kit.exact_match(pol, _held)
+              res = grpo.train(pol, _prompts, \${RL_STEPS}, \${GROUP}, 2, 4, \${RL_LR})
+              after = kit.exact_match(pol, _held)
+              _cache["r"] = {"before": before, "after": after,
+                             "pass_rate": res["pass_rate"],
+                             "adv_sums": res["adv_sums"], "model": pol}
+          return _cache["r"]
+      \`);
+      }
+
+      describe('GRPO + RLVR', () => {
+        it('验证器和平台的规则完全一致', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _cases = [("7+5=", "12"), ("7+5=", "13"), ("0+0=", "0"), ("9+9=", "18"),
+                ("9+9=", "8"), ("3+4=", ""), ("12+7=", "19")]
+      json.dumps([[p, s, grpo.verify(p, s)] for p, s in _cases])
+      \`)));
+          let bad = 0;
+          for (const [prompt, sample, got] of r) {
+            const body = prompt.slice(0, -1);
+            const [a, b] = body.split('+').map(Number);
+            const want = String(a + b) === sample ? 1 : 0;
+            if (got !== want) bad += 1;
+          }
+          console.log(r.map(([p, s, v]) => p + '"' + s + '" -> ' + v).join('  '));
+          lab.publish('rl.verifierMismatches', bad);
+          expect(bad).toBe(0);
+        });
+
+        /*
+         * 组内归一化之后每组的优势之和必须是 0 —— 这不是巧合，是定义。
+         * 分错组的实现（拿全 batch 当一组）在这里会露馅。
+         */
+        it('每组优势之和为 0，全对 / 全错的组全是 0', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _cases = {
+          "mixed": [1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+          "all_ok": [1.0] * 8,
+          "all_bad": [0.0] * 8,
+      }
+      _two = [1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0] + [1.0] * 8
+      json.dumps({k: grpo.group_advantages(v, 8) for k, v in _cases.items()}
+                 | {"two_groups": grpo.group_advantages(_two, 8)})
+      \`)));
+          const sum = (a) => a.reduce((x, c) => x + c, 0);
+          console.log('混合组 ' + r.mixed.map((v) => v.toFixed(3)).join(', '));
+          console.log('全对组 ' + r.all_ok.join(', ') + '；全错组 ' + r.all_bad.join(', '));
+          expect(Math.abs(sum(r.mixed))).toBeLessThan(1e-9);
+          expect(r.all_ok.every((v) => v === 0)).toBe(true);
+          expect(r.all_bad.every((v) => v === 0)).toBe(true);
+          // 两组拼在一起时，**每一组各自**求和为 0
+          expect(Math.abs(sum(r.two_groups.slice(0, 8)))).toBeLessThan(1e-9);
+          expect(Math.abs(sum(r.two_groups.slice(8)))).toBeLessThan(1e-9);
+        });
+
+        it('训练过程中每一组的优势和都是 0', () => {
+          setup();
+          const r = JSON.parse(String(lab.py('json.dumps(_run()["adv_sums"])')));
+          let worst = 0;
+          for (const v of r) worst = Math.max(worst, Math.abs(v));
+          console.log('训练里一共 ' + r.length + ' 组，|优势和| 的最大值 ' + worst.toExponential(2));
+          lab.publish('rl.groupAdvantageMean', worst);
+          expect(r.length).toBeGreaterThan(50);
+          expect(worst).toBeLessThan(1e-5);
+        });
+
+        it('通过率比起点明显提高', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _x = _run()
+      json.dumps({"before": _x["before"], "after": _x["after"],
+                  "curve": _x["pass_rate"][::8] + _x["pass_rate"][-1:],
+                  "full": _x["pass_rate"]})
+      \`)));
+          const gain = r.after - r.before;
+          console.log(
+            '起点 ' + (r.before * 100).toFixed(1) + '% -> RL 之后 '
+            + (r.after * 100).toFixed(1) + '%（提高 ' + (gain * 100).toFixed(1) + ' 个点）'
+          );
+          console.log('rollout 通过率 ' + r.curve.map((v) => v.toFixed(2)).join(' -> '));
+          /*
+           * 除了留出集，还看 **rollout 自己的通过率曲线** ——
+           * 那是 GRPO 直接在优化的东西，比「泛化到没见过的题」稳得多。
+           * 一个 4 万参数的模型，留出集上的提升本来就带噪声。
+           */
+          const head = r.full.slice(0, 10).reduce((a, c) => a + c, 0) / 10;
+          const tail = r.full.slice(-10).reduce((a, c) => a + c, 0) / 10;
+          console.log(
+            '前 10 步 rollout 通过率 ' + head.toFixed(3)
+            + ' -> 后 10 步 ' + tail.toFixed(3) + '（涨 ' + (tail - head).toFixed(3) + '）'
+          );
+          lab.publish('rl.verifierPassRate', r.after);
+          lab.publish('rl.passRateGain', gain);
+          lab.publish('rl.rolloutGain', tail - head);
+          expect(gain).toBeGreaterThanOrEqual(0.15);
+          expect(tail - head).toBeGreaterThan(0.1);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.rl.verifierMismatches', op: 'eq', value: 0,
+      zh: '验证器与平台规则对不上的例子数', en: 'verifier disagreements with the platform rule',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.rl.groupAdvantageMean', op: 'lte', value: 1e-5,
+      zh: '训练里每组优势之和的最大绝对值',
+      en: 'largest absolute group-advantage sum during training', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.rl.passRateGain', op: 'gte', value: 0.15,
+      zh: 'RL 之后通过率比起点提高了多少', en: 'pass-rate gain over the starting policy',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.rl.rolloutGain', op: 'gte', value: 0.1,
+      zh: 'rollout 通过率：后 10 步比前 10 步高多少',
+      en: 'rollout pass rate: last ten steps over the first ten', dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness'],
+  extension: t(
+    code`
+      \`RLVR\` 是 2026 年后训练最重要的一个转向。它的前提很朴素：
+      **有些任务的对错可以用规则判**,数学答案对不对、代码跑不跑得过测试、
+      形式化证明检查器认不认。这几类任务上不需要奖励模型，
+      也就没有奖励被钻空子的问题（第 24、26 关那些）。
+
+      DeepSeek-R1 把这条路推到了一个反直觉的地方：**只用 RLVR、不做 SFT**
+      也能训出很强的推理能力（R1-Zero），而且模型会自己长出「先想一想再回答」
+      这种行为 —— 没有人教它，是奖励逼出来的。
+
+      但 RLVR 有一个结构性的边界：**可验证的任务只是所有任务的一小块**。
+      「写一封得体的邮件」「这段代码可读吗」没有验证器。
+      所以真实流程是两条路并用,可验证的部分用 RLVR，其余用偏好优化。
+
+      2026 年还在扩边界的方向有几个：用**单元测试生成**把更多代码任务变成可验证的；
+      用**形式化工具**（Lean）把数学证明变成可验证的；
+      以及最有争议的一条 —— 用**另一个模型**当验证器（LLM-as-judge），
+      它把「可验证」的范围扩大了很多，但也把奖励模型那些老问题请了回来。
+    `,
+    code`
+      \`RLVR\` is the most important shift in 2026 post-training, and its premise is plain:
+      **some tasks can be judged correct by rule** — whether a mathematical answer matches,
+      whether code passes its tests, whether a proof checker accepts. Those need no reward
+      model, and so have none of the reward-hacking problems from stages 24 and 26.
+
+      DeepSeek-R1 pushed this to a counter-intuitive place: **RLVR alone, with no SFT**, can
+      produce strong reasoning (R1-Zero), and the model grows "think before answering"
+      behaviour on its own — nobody taught it; the reward forced it out.
+
+      RLVR has a structural boundary though: **verifiable tasks are a small slice of all
+      tasks**. "Write a tactful email" and "is this code readable" have no verifier. So real
+      pipelines run both routes — RLVR where verification exists, preference optimisation
+      elsewhere.
+
+      Several directions are widening that boundary in 2026: **generating unit tests** to
+      make more coding tasks verifiable; **formal tools** (Lean) to make proofs verifiable;
+      and the most contested one — using **another model as the verifier** (LLM-as-judge),
+      which widens the scope considerably while inviting every old reward-model problem back
+      in.
+    `
+  ),
+};
+
+/** 第 28 关那条训练循环，参数化之后给第 29 关做 A/B */
+const GRPO_REF_PY = code`
+  """第 28 关那条 GRPO 训练循环，把「优势怎么算」和「损失怎么写」拿出来当参数。
+
+  第 29 关要做的是 A/B：同一条循环、同一份数据、同一个起点，
+  只换这两件事。**要比较，就先让别的都不变。**
+  """
+  import nanotorch as nt
+  from nanotorch import functional as F
+  import kit
+  import rollout as R
+
+
+  def verify(prompt, sample):
+      body = prompt[:-1]
+      if "+" in body:
+          a, b = body.split("+")
+          want = str(int(a) + int(b))
+      else:
+          a, b = body.split("-")
+          want = str(int(a) - int(b))
+      return 1.0 if sample == want else 0.0
+
+
+  def _logp_per_token(model, idx, targets, batch, seq):
+      rows = batch * seq
+      lp = F.log_softmax(model.logits(idx, batch, seq), rows, kit.V)
+      sel = nt.zeros((rows,), name="ref.sel")
+      sel.set_int_([r * kit.V + targets[r] for r in range(rows)])
+      return F.gather(lp, sel, rows, 1)
+
+
+  def train_with(policy, adv_fn, loss_fn, prompts, steps, group_size=8,
+                 inner_epochs=2, max_new=4, peak_lr=0.001, seed=1):
+      opt = nt.optim.AdamW(policy.parameters(), lr=peak_lr, betas=(0.9, 0.95),
+                           weight_decay=0.0, grad_clip=1.0)
+      per_step = min(6, len(prompts))
+      n = per_step * group_size
+      idx = nt.zeros((n * kit.S,), role="data", name="ref.idx")
+      pass_rate = []
+      base = nt.mark()
+      for st in range(1, steps + 1):
+          nt.release(base)
+          start = ((st - 1) * per_step) % len(prompts)
+          batch_prompts = [prompts[(start + k) % len(prompts)] for k in range(per_step)]
+          groups = R.rollout(policy, batch_prompts, group_size, max_new, seed * 1000 + st)
+
+          flat, tg, mk, rewards = [], [], [], []
+          for grp in groups:
+              for smp in grp["samples"]:
+                  ri, rt, rm = kit.build_row(grp["prompt"], smp)
+                  flat.extend(ri)
+                  tg.extend(rt)
+                  mk.extend(rm)
+                  rewards.append(verify(grp["prompt"], smp))
+          idx.set_int_(flat)
+          pass_rate.append(sum(rewards) / len(rewards))
+
+          adv_seq = adv_fn(rewards, group_size)
+          adv_tok = [adv_seq[r // kit.S] for r in range(n * kit.S)]
+
+          with nt.no_grad():
+              old_vals = _logp_per_token(policy, idx, tg, n, kit.S).tolist()
+          old_t = nt.zeros((n * kit.S, 1), name="ref.old")
+          old_t.set_(old_vals)
+
+          for _ in range(inner_epochs):
+              opt.zero_grad()
+              nt.phase("forward")
+              lp = _logp_per_token(policy, idx, tg, n, kit.S)
+              loss = loss_fn(lp, old_t, adv_tok, mk, n * kit.S, 0.2, 0.28)
+              nt.phase("other")
+              loss.backward()
+              opt.step(lr=peak_lr)
+
+      nt.release(base)
+      return {"pass_rate": pass_rate}
+`;
+
+/* ================================================================== */
+/* 第 29 关：GRPO 的三个修正                                            */
+/* ================================================================== */
+
+const STAGE_GRPO_FIX = {
+  id: 'grpo-fixes',
+  title: t('GRPO 的三个修正 —— 每一个都对着一个具体的病',
+    "GRPO's three corrections — each aimed at one specific ailment"),
+  goal: t(
+    code`
+      第 28 关那版 GRPO 能训，但它有三个已经被反复记录下来的毛病。
+      2025 到 2026 年间，三篇工作各自指出了一个,而三个修正都只有几行。
+
+      在 \`fixes.py\` 里实现：
+
+      \`\`\`python
+      def group_advantages_v2(rewards, group_size):
+          """Dr.GRPO：**只减均值，不除标准差**。"""
+
+      def grpo_loss_v2(logp, old_logp, advantages, mask, rows,
+                       eps_low, eps_high):
+          """token 级归一化 + 非对称裁剪。"""
+      \`\`\`
+
+      ## 修正一：不要除标准差（Dr.GRPO）
+
+      第 28 关的优势是 \`(r − mean) / std\`。除以标准差看着像标准做法
+      （它就是 z-score），但它引入了一个偏置：
+
+      **同样的「对了一个」，在一个几乎全错的组里被放得很大，
+      在一个对错各半的组里被压得很小。** 因为前者的 std 更小。
+
+      于是模型被推着去优先攻克「几乎做不出来的题」,而那些题往往是噪声。
+      Dr.GRPO 的结论是**去掉除法**：只减均值。
+      优势的量级从此由奖励本身决定，而不是由组内碰巧的方差决定。
+
+      注意：**减均值那一半必须留着**,它才是基线，去掉它就没有方差缩减了。
+      所以「每组优势之和为 0」这条门槛在修正之后**仍然成立**。
+
+      ## 修正二：token 级归一化，不是序列级
+
+      第 28 关按「参与的 token 总数」平均。另一种很自然的写法是
+      **先在每条序列内平均，再在序列之间平均**,
+      而这两种在序列长度不同时**不一样**。
+
+      \`\`\`
+      序列级：  L = (1/G) Σ_i (1/|y_i|) Σ_t ...     ← 每条序列权重相同
+      token 级：L = (1/Σ|y_i|) Σ_i Σ_t ...         ← 每个 token 权重相同
+      \`\`\`
+
+      序列级的后果是：**短序列里每个 token 拿到的更新被放大了**
+      （放大的倍数正好是长度比）。而在推理任务上，短的往往是「直接蒙一个」，
+      长的才是「一步步推」—— 于是这个偏置正好推向错误的方向。
+
+      这一关的探针直接量它：造两条长度不同、优势相同的序列，
+      **每个 token 上的梯度必须一样大**。
+
+      ## 一个连带的后果：学习率要跟着调
+
+      去掉 \`/std\` 之后，优势的**量级变了**。对错各半的组里，
+      z-score 是 ±1.0，而只减均值是 ±0.5,整整小一半。
+
+      同样的学习率下，修正版走的步子就小了一半。这一关把学习率从
+      \`0.001\` 提到 \`0.002\` 来补上。
+
+      **改一个归一化，等效学习率就变了** —— 这件事在任何论文里都不会被单独写出来，
+      而它是「照着论文改完之后效果反而变差」最常见的原因。
+
+      ## 修正三：clip-higher（DAPO）
+
+      第 28 关用对称的 \`ε = 0.2\`。DAPO 指出上界应该放宽：
+
+      \`\`\`
+      ε_low = 0.2      ε_high = 0.28
+      \`\`\`
+
+      理由是**熵坍缩**。一个当前概率很低的 token（比如 0.01），
+      即使优势为正，\`ρ\` 的上界 1.2 也意味着它最多只能涨到 0.012,
+      而一个概率 0.9 的 token 可以涨到 1.0（被截断）。
+      于是低概率的选项**永远追不上来**，策略越训越确定、探索越来越少，
+      最后卡在一个局部解上。
+
+      把上界单独放宽，给低概率的 token 留出上升的空间。
+      下界不动 —— 它管的是「别把某个动作压得太狠」，那一侧本来就没问题。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | 优势 | **只减均值**：每组和仍为 0，但不再除以标准差 |
+      | **token 级** | 长短两条序列上，每个 token 的梯度大小之比在 **[0.98, 1.02]** |
+      | 裁剪 | \`ε_high > ε_low\`，且非对称真的生效 |
+      | 效果 | rollout 通过率后 10 步比前 10 步高 ≥ **0.1**（留出集的提升报出来但不卡,那个量在这个尺度上噪声太大） |
+    `,
+    code`
+      Stage 28's GRPO trains, but it has three well-documented ailments. Between 2025 and
+      2026 three papers each identified one — and all three corrections are a few lines.
+
+      Implement in \`fixes.py\`:
+
+      \`\`\`python
+      def group_advantages_v2(rewards, group_size):
+          """Dr.GRPO: **subtract the mean, do not divide by the standard deviation**."""
+
+      def grpo_loss_v2(logp, old_logp, advantages, mask, rows,
+                       eps_low, eps_high):
+          """Token-level normalisation plus asymmetric clipping."""
+      \`\`\`
+
+      ## Correction one: do not divide by the standard deviation (Dr.GRPO)
+
+      Stage 28's advantage is \`(r − mean) / std\`. Dividing by the standard deviation looks
+      standard — it is a z-score — but it introduces a bias:
+
+      **The same "one correct answer" is magnified in a nearly-all-wrong group and
+      suppressed in a half-and-half group**, because the former has a smaller std.
+
+      The model is thus pushed to prioritise near-impossible questions, which are usually
+      noise. Dr.GRPO's conclusion is to **drop the division** and only subtract the mean.
+      Advantage magnitude is then set by the reward itself rather than by a group's
+      incidental variance.
+
+      Note: **the mean subtraction must stay** — that is the baseline, and removing it
+      removes the variance reduction. So the "group advantages sum to zero" gate **still
+      holds** after the correction.
+
+      ## Correction two: token-level normalisation, not sequence-level
+
+      Stage 28 averages over the total number of participating tokens. Another natural
+      formulation **averages within each sequence first, then across sequences** — and the
+      two differ whenever sequence lengths differ.
+
+      \`\`\`
+      sequence-level: L = (1/G) Σ_i (1/|y_i|) Σ_t ...     <- each sequence weighted equally
+      token-level:    L = (1/Σ|y_i|) Σ_i Σ_t ...          <- each token weighted equally
+      \`\`\`
+
+      The consequence of sequence-level is that **each token in a short sequence receives an
+      amplified update**, by exactly the length ratio. And in reasoning tasks the short
+      responses tend to be guesses while the long ones do the step-by-step work — so the bias
+      points in precisely the wrong direction.
+
+      This stage's probe measures it directly: build two sequences of different lengths with
+      the same advantage, and **every token's gradient must have the same magnitude**.
+
+      ## A knock-on consequence: the learning rate must follow
+
+      Dropping \`/std\` changes the **magnitude** of the advantage. In a half-and-half group
+      the z-score is ±1.0 while mean-subtraction alone gives ±0.5 — half the size.
+
+      At the same learning rate the corrected version therefore takes half-sized steps. This
+      stage raises the rate from \`0.001\` to \`0.002\` to compensate.
+
+      **Changing a normalisation changes the effective learning rate** — something no paper
+      states separately, and the most common reason a faithful reimplementation performs
+      worse than the original.
+
+      ## Correction three: clip-higher (DAPO)
+
+      Stage 28 used a symmetric \`ε = 0.2\`. DAPO argues the upper bound should be loosened:
+
+      \`\`\`
+      ε_low = 0.2      ε_high = 0.28
+      \`\`\`
+
+      The reason is **entropy collapse**. A token with a currently low probability (say
+      0.01), even with a positive advantage, is capped by \`ρ\`'s upper bound of 1.2 at
+      rising to 0.012, while a token at 0.9 can climb to 1.0 (and be clipped). Low-probability
+      options can therefore **never catch up**, the policy grows more and more certain,
+      exploration disappears, and it settles into a local solution.
+
+      Loosening the upper bound alone gives low-probability tokens room to rise. The lower
+      bound stays put — it governs "do not crush an action too hard", and that side was never
+      the problem.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | Advantage | **Mean subtracted only**: group sums stay 0, no division by std |
+      | **Token-level** | Per-token gradient ratio between short and long sequences in **[0.98, 1.02]** |
+      | Clipping | \`ε_high > ε_low\`, and the asymmetry genuinely takes effect |
+      | Result | Rollout pass rate's last ten steps beat its first ten by >= **0.1** (the held-out gain is reported but not gated; it is too noisy at this scale) |
+    `
+  ),
+  checklist: [
+    t('优势只减均值，不除标准差', 'Advantages subtract the mean without dividing by std'),
+    t('每组优势之和仍为 0', 'Group advantages still sum to zero'),
+    t('长短序列上每个 token 的梯度一样大', 'Per-token gradients match across short and long sequences'),
+    t('ε_high 比 ε_low 大，且真的生效', 'ε_high exceeds ε_low and genuinely takes effect'),
+  ],
+  hints: [
+    t('token 级归一化就是「除以 sum(mask)」，序列级是「先按条平均再按条平均」。',
+      'Token-level means dividing by sum(mask); sequence-level averages within then across.'),
+    t('探针查的是 logp.grad —— 造两条长度不同的序列，看每个 token 上的梯度。',
+      'The probe inspects logp.grad: build two sequences of different lengths and compare per-token gradients.'),
+    t('非对称裁剪只改上界：clip(ρ, 1−ε_low, 1+ε_high)。',
+      'Asymmetric clipping only moves the upper bound: clip(ρ, 1−ε_low, 1+ε_high).'),
+  ],
+  pitfalls: [
+    t(code`
+      **连均值一起去掉。** Dr.GRPO 说的是「不要除标准差」，不是「不要基线」。
+      去掉减均值之后优势就是原始奖励，方差缩减完全消失,
+      训练还能跑，只是慢得多、抖得多。
+      **每组优势之和为 0** 那条门槛在修正之后仍然要成立，就是为了守住这一点。
+    `, code`
+      **Removing the mean along with it.** Dr.GRPO says do not divide by the standard
+      deviation, not do not use a baseline. Without mean subtraction the advantage is the raw
+      reward and variance reduction vanishes entirely — training still runs, just far slower
+      and noisier. The "group advantages sum to zero" gate still applies after the correction
+      precisely to hold this line.
+    `),
+    t(code`
+      **序列级归一化。** 它看起来更「公平」（每条序列一票），
+      而后果是短序列里每个 token 的更新被放大了,放大倍数正好是长度比。
+      在推理任务上短的往往是蒙的、长的才是推的，于是这个偏置正好推反了方向。
+      而它在任何 loss 曲线上都看不出来 —— 只有直接量每个 token 的梯度才看得见。
+    `, code`
+      **Sequence-level normalisation.** It looks fairer (one vote per sequence) and results in
+      each token of a short sequence receiving an amplified update, by exactly the length
+      ratio. In reasoning tasks short responses tend to be guesses and long ones do the work,
+      so the bias points the wrong way. No loss curve shows it; only measuring per-token
+      gradients does.
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_POST_PY,
+      'rollout.py': ROLLOUT_PY,
+      'grpo_ref.py': GRPO_REF_PY,
+      'fixes.py': code`
+        """第 29 关：GRPO 的三个修正。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import functional as F
+        import kit
+
+
+        def group_advantages_v2(rewards, group_size):
+            """Dr.GRPO：只减均值，不除标准差。"""
+            # TODO
+            return [0.0] * len(rewards)
+
+
+        def grpo_loss_v2(logp, old_logp, advantages, mask, rows,
+                         eps_low=0.2, eps_high=0.28):
+            """token 级归一化 + 非对称裁剪。"""
+            # TODO: ρ = exp(logp − old_logp)；clip 的上下界不同；
+            #       按 **参与的 token 总数** 平均，不是按序列平均
+            return nt.zeros((1,))
+
+
+        if __name__ == "__main__":
+            print(group_advantages_v2([1.0, 0.0, 0.0, 0.0], 4))
+            print(group_advantages_v2([1.0, 1.0, 1.0, 0.0], 4))
+      `,
+    },
+    referenceFiles: {
+      'fixes.py': code`
+        """第 29 关的参考实现。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import functional as F
+        import kit
+
+
+        def group_advantages_v2(rewards, group_size):
+            out = []
+            for start in range(0, len(rewards), group_size):
+                grp = rewards[start:start + group_size]
+                mean = sum(grp) / len(grp)
+                # **只减均值**。除以标准差会让「几乎全错的组」里那一个对的
+                # 被放得很大 —— 而那些题往往是噪声。
+                # 减均值那一半必须留着：它才是基线
+                out.extend([r - mean for r in grp])
+            return out
+
+
+        def grpo_loss_v2(logp, old_logp, advantages, mask, rows,
+                         eps_low=0.2, eps_high=0.28):
+            ratio = F.exp(F.add(logp, F.scale(old_logp, -1.0)))
+
+            adv = nt.zeros((rows,), name="fix.adv")
+            adv.set_(advantages)
+            unclipped = F.row_scale(ratio, adv, rows, 1)
+
+            rv = ratio.tolist()
+            # **非对称**：上界放宽到 1 + eps_high，给低概率的 token 留上升空间；
+            # 下界不动
+            clipped_vals = [min(max(v, 1.0 - eps_low), 1.0 + eps_high) for v in rv]
+            clipped = nt.zeros((rows, 1), name="fix.clipped")
+            clipped.set_([c * a for c, a in zip(clipped_vals, advantages)])
+
+            un = unclipped.tolist()
+            cl = clipped.tolist()
+            pick = nt.zeros((rows,), name="fix.pick")
+            pick.set_([1.0 if un[i] <= cl[i] else 0.0 for i in range(rows)])
+            chosen = F.row_scale(unclipped, pick, rows, 1)
+
+            keep = nt.zeros((rows,), name="fix.keep")
+            keep.set_(mask)
+            per = F.row_scale(chosen, keep, rows, 1)
+
+            seg = nt.zeros((rows,), name="fix.seg")
+            seg.set_int_([0] * rows)
+            summed = F.scatter_add(per, seg, rows, 1, 1)
+            # **token 级**：除以参与的 token 总数。
+            # 先按条平均再按条平均的话，短序列里每个 token 会被放大
+            total = sum(mask)
+            return F.scale(summed, -1.0 / max(1.0, total))
+
+
+        if __name__ == "__main__":
+            print(group_advantages_v2([1.0, 0.0, 0.0, 0.0], 4))
+            print(group_advantages_v2([1.0, 1.0, 1.0, 0.0], 4))
+      `,
+    },
+  },
+  specs: [
+    spec('fixes.spec.ts', code`
+      ${LAB}
+
+      function setup() {
+        lab.py(\`
+      import sys, json, math
+      sys.path.insert(0, "/lab")
+      import importlib, kit, rollout, fixes
+      importlib.reload(kit)
+      importlib.reload(rollout)
+      importlib.reload(fixes)
+      import nanotorch as nt
+      from nanotorch import functional as F
+      \`);
+      }
+
+      describe('GRPO 的三个修正', () => {
+        it('优势只减均值：组和仍为 0，但不再被标准差放大', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _rare = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # 八条里只有一条对
+      _half = [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]   # 对错各半
+      json.dumps({"rare": fixes.group_advantages_v2(_rare, 8),
+                  "half": fixes.group_advantages_v2(_half, 8),
+                  "all_ok": fixes.group_advantages_v2([1.0] * 8, 8)})
+      \`)));
+          const sum = (a) => a.reduce((x, c) => x + c, 0);
+          console.log('几乎全错的组 ' + r.rare.map((v) => v.toFixed(3)).join(', '));
+          console.log('对错各半的组 ' + r.half.map((v) => v.toFixed(3)).join(', '));
+          // 组和仍为 0 —— 基线还在
+          expect(Math.abs(sum(r.rare))).toBeLessThan(1e-9);
+          expect(Math.abs(sum(r.half))).toBeLessThan(1e-9);
+          expect(r.all_ok.every((v) => Math.abs(v) < 1e-9)).toBe(true);
+          /*
+           * 关键对比：那个「对了一个」的优势，在两组里应当**量级相当**。
+           * 第 28 关除标准差的版本里，几乎全错的组会把它放大到 2.65 倍。
+           */
+          const rareTop = Math.max(...r.rare);
+          const halfTop = Math.max(...r.half);
+          const amp = rareTop / halfTop;
+          const zRare = 1 - 1 / 8, zHalf = 0.5;
+          const zAmp = (zRare / Math.sqrt((1 / 8) * (7 / 8))) / (zHalf / 0.5);
+          console.log(
+            '「对了一个」的优势：几乎全错的组 ' + rareTop.toFixed(3)
+            + '，对错各半的组 ' + halfTop.toFixed(3) + '，放大 ' + amp.toFixed(3) + ' 倍'
+            + '（除标准差的话会放大 ' + zAmp.toFixed(2) + ' 倍）'
+          );
+          lab.publish('grpo.rareGroupAmplification', amp);
+          expect(amp).toBeLessThan(2.0);
+          expect(zAmp).toBeGreaterThan(2.0);
+        });
+
+        /*
+         * 这一关最锋利的一条：造两条**长度不同、优势相同**的序列，
+         * 直接量 logp 上每个 token 的梯度。token 级归一化下它们必须一样大。
+         * 序列级归一化下短的那条会被放大，倍数正好是长度比。
+         */
+        it('长短两条序列上，每个 token 的梯度一样大', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      # 两条序列：第一条 completion 有 2 个 token，第二条有 6 个
+      _rows = 2 * kit.S
+      _mask = [0.0] * _rows
+      for _t in range(2):
+          _mask[_t] = 1.0
+      for _t in range(6):
+          _mask[kit.S + _t] = 1.0
+      _adv = [1.0] * kit.S + [1.0] * kit.S      # 两条的优势相同
+
+      _logp = nt.parameter((_rows, 1), None, 0.0, "logp")
+      _logp.set_([-0.5] * _rows)
+      _old = nt.zeros((_rows, 1), role="data")
+      _old.set_([-0.5] * _rows)
+
+      _loss = fixes.grpo_loss_v2(_logp, _old, _adv, _mask, _rows, 0.2, 0.28)
+      _loss.backward()
+      _g = _logp.grad.tolist()
+      json.dumps({"short": [_g[_t] for _t in range(2)],
+                  "long": [_g[kit.S + _t] for _t in range(6)],
+                  "loss": _loss.item(0), "S": kit.S})
+      \`)));
+          const avg = (a) => a.reduce((x, c) => x + Math.abs(c), 0) / a.length;
+          const s = avg(r.short), l = avg(r.long);
+          const ratio = s / l;
+          console.log(
+            '短序列（2 token）每个 token 的梯度 ' + s.toExponential(3)
+            + '，长序列（6 token）' + l.toExponential(3) + '，比值 ' + ratio.toFixed(4)
+          );
+          console.log('（序列级归一化的话这个比值会是 6/2 = 3）');
+          lab.publish('grpo.shortSeqAmplification', ratio);
+          expect(s).toBeGreaterThan(0);
+          expect(ratio).toBeGreaterThan(0.98);
+          expect(ratio).toBeLessThan(1.02);
+          // loss 也该是「token 级平均」：8 个 token 各贡献 −1·1/8
+          expect(Math.abs(r.loss - -1)).toBeLessThan(1e-6);
+        });
+
+        /*
+         * 非对称裁剪不能只是「传了两个参数」——
+         * 上界放宽必须真的让 ρ 在 (1.2, 1.28] 之间的位置不被裁到。
+         */
+        it('clip-higher 真的生效：上界之内的比值不被裁', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _rows = 4
+      _mask = [1.0] * _rows
+      _adv = [1.0] * _rows
+      # 让 ρ 分别落在 1.10 / 1.25 / 1.40 / 0.70
+      _delta = [math.log(1.10), math.log(1.25), math.log(1.40), math.log(0.70)]
+      _logp = nt.parameter((_rows, 1), None, 0.0, "logp")
+      _logp.set_(_delta)
+      _old = nt.zeros((_rows, 1), role="data")
+      _old.set_([0.0] * _rows)
+
+      def _grad(lo, hi):
+          _logp.zero_grad()
+          _l = fixes.grpo_loss_v2(_logp, _old, _adv, _mask, _rows, lo, hi)
+          _l.backward()
+          return list(_logp.grad.tolist())
+
+      json.dumps({"asym": _grad(0.2, 0.28), "sym": _grad(0.2, 0.2)})
+      \`)));
+          const nz = (a) => a.map((v) => (Math.abs(v) > 1e-12 ? 1 : 0));
+          console.log('ρ = 1.10 / 1.25 / 1.40 / 0.70');
+          console.log('非对称 (0.2, 0.28) 的梯度 ' + r.asym.map((v) => v.toExponential(2)).join(', '));
+          console.log('对称   (0.2, 0.2 ) 的梯度 ' + r.sym.map((v) => v.toExponential(2)).join(', '));
+          const asym = nz(r.asym), sym = nz(r.sym);
+          lab.publish('grpo.clipHigherActive', asym[1] === 1 && sym[1] === 0 ? 1 : 0);
+          // ρ = 1.25：非对称下没被裁（还有梯度），对称下被裁掉（梯度为 0）
+          expect(asym[1]).toBe(1);
+          expect(sym[1]).toBe(0);
+          // ρ = 1.40：两边都超出上界，都被裁
+          expect(asym[2]).toBe(0);
+          /*
+           * ρ = 0.70 落在下界之外，但**优势为正时它照样有梯度** ——
+           * min(ρ·A, clip(ρ)·A) 在 A > 0 时挑的是小的那个，
+           * 而 0.70·A < 0.8·A，挑中的是没被裁的那一支。
+           *
+           * 这不是 bug，是 PPO 式裁剪的定义：**裁剪对每个符号只挡一边**。
+           * A > 0 时只有上界起作用（防止把一个已经在涨的动作推得太远），
+           * A < 0 时才轮到下界。
+           */
+          expect(asym[3]).toBe(1);
+        });
+
+        it('修正之后的 GRPO 照样学得动', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      import grpo_ref
+      _pol = kit.LM(seed=1)
+      kit.sft_train(_pol, kit.make_pairs(512, 5, 20, "+"), 100, 16)
+      _held = kit.make_pairs(48, 777, 20, "+")
+      _before = kit.exact_match(_pol, _held)
+      _res = grpo_ref.train_with(_pol, fixes.group_advantages_v2, fixes.grpo_loss_v2,
+                                 [p for p, _ in kit.make_pairs(160, 41, 20, "+")],
+                                 80, 8, 2, 4, 0.002)
+      _after = kit.exact_match(_pol, _held)
+      json.dumps({"before": _before, "after": _after, "curve": _res["pass_rate"]})
+      \`)));
+          const gain = r.after - r.before;
+          const head = r.curve.slice(0, 10).reduce((a, c) => a + c, 0) / 10;
+          const tail = r.curve.slice(-10).reduce((a, c) => a + c, 0) / 10;
+          console.log(
+            '起点 ' + (r.before * 100).toFixed(1) + '% -> 修正版 RL 之后 '
+            + (r.after * 100).toFixed(1) + '%（提高 ' + (gain * 100).toFixed(1) + ' 个点）'
+          );
+          console.log(
+            'rollout 通过率前 10 步 ' + head.toFixed(3) + ' -> 后 10 步 ' + tail.toFixed(3)
+          );
+          lab.publish('rl.fixedPassRateGain', gain);
+          lab.publish('rl.fixedRolloutGain', tail - head);
+          /*
+           * 卡的是 **rollout 自己的通过率曲线** —— RL 直接在优化的就是它。
+           * 留出集上的提升在这个尺度（4 万参数、80 步 RL）噪声很大，
+           * 报出来但不卡：**一个噪声大的量当门槛，卡住的是运气不是实现。**
+           */
+          expect(gain).toBeGreaterThan(0);
+          expect(tail - head).toBeGreaterThan(0.1);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.grpo.rareGroupAmplification', op: 'lte', value: 2.0,
+      zh: '「几乎全错的组」里那一个对的优势被放大了多少',
+      en: 'how much a lone correct answer is amplified in a nearly-all-wrong group',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.grpo.shortSeqAmplification', op: 'lte', value: 1.02,
+      zh: '短序列每 token 梯度与长序列的比（token 级归一化）',
+      en: 'short-versus-long per-token gradient ratio under token-level normalisation',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.grpo.clipHigherActive', op: 'eq', value: 1,
+      zh: 'clip-higher 真的放宽了上界', en: 'clip-higher genuinely loosens the upper bound',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.rl.fixedRolloutGain', op: 'gte', value: 0.1,
+      zh: '修正版 rollout 通过率：后 10 步比前 10 步高多少',
+      en: 'corrected rollout pass rate: last ten steps over the first ten',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness'],
+  extension: t(
+    code`
+      这三个修正有一个共同的形状：**它们都不是「算错了」，而是「归一化选错了」**。
+
+      除标准差、按序列平均、对称裁剪 —— 每一个单独看都很合理，
+      甚至更「标准」。而每一个都在数据的某个维度上引入了偏置，
+      并且**都不会在 loss 曲线上表现出来**。发现它们靠的是
+      「盯着一个具体的量」：优势的分布、每个 token 的梯度、低概率 token 的熵。
+
+      2026 年这条线还在继续。\`GSPO\`（序列级重要性比值）指出
+      token 级的比值在长序列上会累积出巨大的方差，主张在序列层面做裁剪;
+      这和这一关的「token 级归一化」不矛盾（一个说的是**归一化**，
+      一个说的是**比值的粒度**），但两者怎么配仍然在争。
+
+      还有一条更基本的：**RL 到底在教模型新东西，还是只在放大它已经会的**。
+      有工作指出 RLVR 主要是把基座模型里已有的解法**挑出来并加强**，
+      而不是发明新解法（pass@k 在 k 很大时，RL 前后差不多）。
+      如果这是对的，那么 RL 的上限取决于预训练,
+      而这把问题又推回了这个项目的前半部分。
+    `,
+    code`
+      The three corrections share a shape: **none of them is a miscalculation; each is a
+      wrong choice of normalisation.**
+
+      Dividing by std, averaging per sequence, clipping symmetrically — each looks reasonable
+      in isolation and arguably more standard. And each introduces a bias along some
+      dimension of the data, while **none shows up in the loss curve**. Finding them takes
+      watching a specific quantity: the distribution of advantages, per-token gradients, the
+      entropy of low-probability tokens.
+
+      The line continues through 2026. \`GSPO\` (sequence-level importance ratios) argues that
+      token-level ratios accumulate enormous variance on long sequences and that clipping
+      belongs at the sequence level. That does not contradict this stage's token-level
+      normalisation — one concerns **normalisation**, the other the **granularity of the
+      ratio** — but how the two should combine is still contested.
+
+      A more fundamental question remains: **is RL teaching the model anything new, or only
+      amplifying what it already had?** Work suggests RLVR mainly **selects and strengthens**
+      solutions already present in the base model rather than inventing new ones (pass@k at
+      large k is similar before and after RL). If that is right, RL's ceiling is set by
+      pretraining — which pushes the question back into the first half of this project.
+    `
+  ),
+};
+
 /* ------------------------------------------------------------------ */
 
 module.exports = {
@@ -14582,5 +15898,6 @@ module.exports = {
     STAGE_SCHEDULE, STAGE_CLIP, STAGE_PACKING, STAGE_PRETRAIN,
     STAGE_AMP, STAGE_RECOMPUTE, STAGE_SCALING, STAGE_MOE, STAGE_MUON,
     STAGE_SFT, STAGE_MIXTURE, STAGE_RM, STAGE_DPO, STAGE_LENGTH, STAGE_ROLLOUT,
+    STAGE_GRPO, STAGE_GRPO_FIX,
   ],
 };
