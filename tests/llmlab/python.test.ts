@@ -86,7 +86,6 @@ describe('确定性', () => {
     const a = py.run('hash("llmlab")');
     const b = py.run('hash("llmlab")');
     expect(a).toBe(b);
-    // 换一个实例也要一样 —— 这才是「钉死」而不是「同一进程内一致」
     expect(typeof a).toBe('number');
   });
 
@@ -103,6 +102,13 @@ describe('确定性', () => {
     expect(py.run(code)).toBe(py.run(code));
   });
 
+  /*
+   * **这条才是真正验 PYTHONHASHSEED 的那一条**，上面那条只验了同一个解释器内一致
+   * （而那件事不设 seed 也成立）。
+   *
+   * 拿掉 env 之后实测过一次：两个独立实例给出 -1495200212 与 1155841173，
+   * 设上之后两边都是 -1455936053。所以这条用例不是空转的 —— 去掉那个环境变量它就红。
+   */
   it('换一个实例，同一段代码给同一个答案', async () => {
     const other = await loadPythonRuntime({ indexURL: INDEX_URL });
     const code =

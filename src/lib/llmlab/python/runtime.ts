@@ -31,7 +31,14 @@ import type { PyodideAPI, PyodideConfig } from 'pyodide';
 
 /** Pyodide 实例上我们真正用到的那部分 */
 export interface PythonRuntime {
-  /** 跑一段 Python，返回最后一个表达式的值（已转成 JS） */
+  /**
+   * 跑一段 Python，返回最后一个表达式的值。
+   *
+   * ⚠️ **返回的是 Pyodide 的原始值，不是转好的 JS。** 数字与字符串会自动落成
+   * JS 的原始类型，但 list / dict / 自定义对象回来的是 `PyProxy` ——
+   * 拿两个 PyProxy 直接比相等比的是代理对象本身（里面还有个 `ptr`），
+   * 内容相同也会不等。要值就在 Python 侧 `json.dumps` 一下，或者自己 `.toJs()`。
+   */
   run(code: string): unknown;
   runAsync(code: string): Promise<unknown>;
   /** 往 Python 的全局命名空间里塞一个对象（算子桥就是这么进去的） */
