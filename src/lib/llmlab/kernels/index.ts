@@ -89,14 +89,28 @@ export interface Kernels {
 }
 
 /**
- * 从 wasm 字节建一个算子核实例。
+ * 同步建一个算子核实例。
  *
- * 同步版：`WebAssembly.Module` + `new WebAssembly.Instance`。
- * 模块只有 37KB，同步编译不会卡住渲染，换来的是调用方不用到处 await。
+ * ⚠️ **浏览器主线程上用不了这个。** Chrome 禁止在主线程同步编译大于 4KB 的
+ * wasm buffer（`new WebAssembly.Module` 直接抛），而我们的产物是 37KB。
+ * Node 与 Web Worker 没有这条限制，所以：
+ *
+ * - 测试、判定（跑在 Worker 里）、Electron 主进程 → 用这个
+ * - 浏览器主线程 → 用 {@link createKernelsAsync} 或 {@link loadKernelsFromUrl}
+ *
+ * 这条限制在 jest 里**永远照不到**（Node 不管），所以写在这儿而不是等它在
+ * 浏览器上炸 —— opslab 那四个「只有在浏览器里跑才会暴露」的问题就是这么来的。
  */
 export function createKernels(bytes: BufferSource): Kernels {
-  const module = new WebAssembly.Module(bytes);
+  return fromModule(new WebAssembly.Module(bytes));
+}
 
+/** 异步建一个算子核实例。浏览器主线程走这条 */
+export async function createKernelsAsync(bytes: BufferSource): Promise<Kernels> {
+  return fromModule(await WebAssembly.compile(bytes));
+}
+
+function fromModule(module: WebAssembly.Module): Kernels {
   /*
    * 零 import 是硬要求，不是巧合 —— kernels.c 特意用 wasm32-unknown-unknown
    * 而不是 wasip1 编。这里核一下：哪天有人不小心引进 libc，
@@ -119,7 +133,16 @@ export function createKernels(bytes: BufferSource): Kernels {
   }
 
   const memory = fn.memory;
-  const base = fn.ll_heap_base();
+  /*
+   * 往上取整到 16。
+   *
+   * `Float64Array(buffer, byteOffset, len)` 要求 byteOffset 是 8 的倍数，
+   * 不是就抛 RangeError。链接器给的 `__heap_base` 现在恰好是 16 对齐的
+   * （1048576，正好是栈的大小，因为 --stack-first 且没有静态数据），
+   * **但那是巧合** —— 哪天 kernels.c 里多一个静态数组，它就可能变成 4 的倍数，
+   * 于是每一次建 f64 视图都抛。这一行让它不再依赖巧合。
+   */
+  const base = (fn.ll_heap_base() + 15) & ~15;
   let top = 0;
 
   const ensure = (needed: number) => {
@@ -156,5 +179,6 @@ export async function loadKernelsFromUrl(url = '/llmlab/llmlab-kernels.wasm'): P
    */
   const response = await fetch(url, { cache: 'no-store' });
   if (!response.ok) throw new Error(`取算子核失败：${url} → HTTP ${response.status}`);
-  return createKernels(await response.arrayBuffer());
+  // 走异步编译：主线程上同步编 37KB 的 buffer 会被 Chrome 直接拒掉
+  return createKernelsAsync(await response.arrayBuffer());
 }

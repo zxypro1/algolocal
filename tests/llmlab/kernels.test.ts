@@ -18,7 +18,9 @@
  */
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { createKernels, KERNEL_ABI_VERSION, type Kernels } from '../../src/lib/llmlab/kernels';
+import {
+  createKernels, createKernelsAsync, KERNEL_ABI_VERSION, type Kernels,
+} from '../../src/lib/llmlab/kernels';
 
 const WASM = join(__dirname, '..', '..', 'public', 'llmlab', 'llmlab-kernels.wasm');
 
@@ -661,6 +663,41 @@ describe('吞吐量（只记录，不断言）', () => {
     // 机器不同数不同，所以不断言具体值 —— 只要不是慢到离谱（说明 SIMD 没生效）
     console.log(`  sgemm ${M}x${N}x${Kd}: ${gflops.toFixed(1)} GFLOP/s`);
     expect(gflops).toBeGreaterThan(2);
+    K.reset(mark);
+  });
+});
+
+describe('装载路径：同步与异步', () => {
+  /*
+   * 浏览器主线程禁止同步编译大于 4KB 的 wasm buffer，而我们的产物是 37KB。
+   * Node 没有这条限制，所以这条用例**验不出**那个问题 —— 它只保证异步那条路
+   * 真的存在、真的能用，免得将来有人顺手把它删了。
+   * 真正的防线是 index.ts 里那段注释与 loadKernelsFromUrl 的实现。
+   */
+  it('异步装载出来的实例与同步的行为一致', async () => {
+    const other = await createKernelsAsync(readFileSync(WASM));
+    expect(other.fn.ll_abi_version()).toBe(KERNEL_ABI_VERSION);
+
+    const M = 16, N = 12, Kd = 8;
+    const run = (kk: Kernels) => {
+      const a = kk.alloc(M * Kd * 4), b = kk.alloc(Kd * N * 4), c = kk.alloc(M * N * 4);
+      const ra = rng(401), rb = rng(402);
+      const av = kk.f32(a, M * Kd), bv = kk.f32(b, Kd * N);
+      for (let i = 0; i < M * Kd; i++) av[i] = ra();
+      for (let i = 0; i < Kd * N; i++) bv[i] = rb();
+      kk.fn.gemm_nn_f32(a, b, c, M, N, Kd);
+      return Array.from(kk.f32(c, M * N));
+    };
+    const mark = K.mark();
+    expect(run(other)).toEqual(run(K));
+    K.reset(mark);
+  });
+
+  it('堆基址是 16 对齐的 —— 不然 f64 视图建不出来', () => {
+    const mark = K.mark();
+    K.alloc(1);                       // 故意分一个奇数字节数
+    const off = K.alloc(8);
+    expect(() => K.f64(off, 1)).not.toThrow();
     K.reset(mark);
   });
 });
