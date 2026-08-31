@@ -10963,6 +10963,1202 @@ const STAGE_MUON = {
   ),
 };
 
+/** 后训练那几关共用的套件：一个可验证的算术世界 + 模型 + 生成 */
+const KIT_POST_PY = code`
+  """后训练共用的套件。
+
+  ## 为什么是算术
+
+  后训练的每一步都要能**判对错**。算术是最干净的可验证任务：
+  \`7+5=\` 的答案只有一个，不需要人来标,这正是 \`RLVR\`（可验证奖励的强化学习）
+  的前提，也是 2026 年后训练里最靠得住的那一类信号。
+
+  ## 词表
+
+  \`\`\`
+  0-9  数字        10 '+'      11 '-'
+  12 '='           13 EOS      14 PAD
+  \`\`\`
+
+  一条样本长这样：\`7+5=\` → \`12<eos>\`，编码之后 \`[7,10,5,12] + [1,2,13]\`。
+
+  模型是 \`dim=48, n_layer=2, n_head=4, n_kv_head=2, hidden=128\`，序列长 12。
+  """
+  import math
+  import nanotorch as nt
+  from nanotorch import nn, functional as F
+
+  V, PLUS, MINUS, EQ, EOS, PAD = 15, 10, 11, 12, 13, 14
+  D, L, H, KV, HID, S = 48, 2, 4, 2, 128, 12
+
+
+  def encode(text):
+      out = []
+      for ch in text:
+          if ch.isdigit():
+              out.append(int(ch))
+          elif ch == "+":
+              out.append(PLUS)
+          elif ch == "-":
+              out.append(MINUS)
+          elif ch == "=":
+              out.append(EQ)
+      return out
+
+
+  def decode(ids):
+      table = {PLUS: "+", MINUS: "-", EQ: "=", EOS: "", PAD: ""}
+      return "".join(table[i] if i >= 10 else str(i) for i in ids)
+
+
+  def make_pairs(n, seed, max_value=10, op="+"):
+      """确定性地造 n 条 (prompt, answer)。减法保证不出现负数。"""
+      st = (seed * 1103515245 + 12345) & 0x7fffffff
+      out = []
+      for _ in range(n):
+          st = (st * 1103515245 + 12345) & 0x7fffffff
+          a = st % max_value
+          st = (st * 1103515245 + 12345) & 0x7fffffff
+          b = st % max_value
+          if op == "-":
+              a, b = max(a, b), min(a, b)
+              out.append((str(a) + "-" + str(b) + "=", str(a - b)))
+          else:
+              out.append((str(a) + "+" + str(b) + "=", str(a + b)))
+      return out
+
+
+  def build_tables(n, head_dim, base=10000.0):
+      half = head_dim // 2
+      cos = nt.zeros((n, half), role="data", name="rope.cos")
+      sin = nt.zeros((n, half), role="data", name="rope.sin")
+      cv, sv = [], []
+      for p in range(n):
+          for i in range(half):
+              th = p * (base ** (-2.0 * i / head_dim))
+              cv.append(math.cos(th))
+              sv.append(math.sin(th))
+      cos.set_(cv)
+      sin.set_(sv)
+      return cos, sin
+
+
+  class Norm(nn.Module):
+      def __init__(self, dim):
+          super().__init__()
+          self.weight = nt.parameter((dim,), None, 0.0, "g")
+
+      def forward(self, x):
+          return F.rms_norm(x, self.weight, 1e-5)
+
+
+  class Attn(nn.Module):
+      def __init__(self, dim, nh, nkv, seed, max_seq=32):
+          super().__init__()
+          self.nh, self.nkv, self.hd = nh, nkv, dim // nh
+          hd = self.hd
+          self.wq = nt.parameter((dim, nh * hd), seed + 1, dim ** -0.5, "wq")
+          self.wk = nt.parameter((dim, nkv * hd), seed + 2, dim ** -0.5, "wk")
+          self.wv = nt.parameter((dim, nkv * hd), seed + 3, dim ** -0.5, "wv")
+          self.wo = nt.parameter((nh * hd, dim), seed + 4, (nh * hd) ** -0.5, "wo")
+          self._cos, self._sin = build_tables(max_seq, hd)
+
+      def forward(self, x, b, s):
+          hd = self.hd
+          q = F.linear(x, self.wq)
+          k = F.linear(x, self.wk)
+          v = F.linear(x, self.wv)
+          q = F.rope(q, self._cos, self._sin, b, s, self.nh, hd)
+          k = F.rope(k, self._cos, self._sin, b, s, self.nkv, hd)
+          sc = F.attn_scores(q, k, b, s, s, self.nh, self.nkv, hd)
+          pr = F.softmax(sc, b * self.nh * s, s, F.causal_valid(b, self.nh, s))
+          o = F.attn_apply(pr, v, b, s, s, self.nh, self.nkv, hd,
+                           out_shape=(b * s, self.nh * hd))
+          return F.linear(o, self.wo)
+
+
+  class Mlp(nn.Module):
+      def __init__(self, dim, hid, seed):
+          super().__init__()
+          self.wg = nt.parameter((dim, hid), seed + 1, dim ** -0.5, "wg")
+          self.wu = nt.parameter((dim, hid), seed + 2, dim ** -0.5, "wu")
+          self.wd = nt.parameter((hid, dim), seed + 3, hid ** -0.5, "wd")
+
+      def forward(self, x):
+          return F.linear(F.swiglu(F.linear(x, self.wg), F.linear(x, self.wu)), self.wd)
+
+
+  class Block(nn.Module):
+      def __init__(self, dim, nh, nkv, hid, seed, nl):
+          super().__init__()
+          self.n1, self.at = Norm(dim), Attn(dim, nh, nkv, seed)
+          self.n2, self.mp = Norm(dim), Mlp(dim, hid, seed + 40)
+          self.sc = (2.0 * nl) ** -0.5
+
+      def forward(self, x, b, s):
+          x = F.add(x, F.scale(self.at(self.n1(x), b, s), self.sc))
+          return F.add(x, F.scale(self.mp(self.n2(x)), self.sc))
+
+
+  class LM(nn.Module):
+      def __init__(self, seed=1):
+          super().__init__()
+          self.embed = nt.parameter((V, D), seed, D ** -0.5, "embed")
+          self.blocks = nn.ModuleList([
+              Block(D, H, KV, HID, seed + 100 * (i + 1), L) for i in range(L)
+          ])
+          self.nf = Norm(D)
+
+      def logits(self, idx, b, s):
+          rows = b * s
+          x = F.embedding(self.embed, idx, rows, D)
+          for blk in self.blocks:
+              x = blk(x, b, s)
+          x = self.nf(x)
+          return F.linear_tied(x, self.embed, rows, D, V)
+
+      def forward(self, idx, tgt, b, s, mask=None):
+          return F.cross_entropy(self.logits(idx, b, s), tgt, b * s, V, mask)
+
+
+  def generate_answer(model, prompt, max_new=3):
+      """贪心生成，撞到 EOS 就停。返回解码之后的字符串。"""
+      cur = encode(prompt)
+      out = []
+      buf = nt.zeros((S,), role="data", name="gen.idx")
+      with nt.no_grad():
+          mk = nt.mark()
+          for _ in range(max_new):
+              nt.release(mk)
+              if len(cur) >= S:
+                  break
+              buf.set_int_(cur + [PAD] * (S - len(cur)))
+              lg = model.logits(buf, 1, S)
+              nxt = nt.generate.greedy(lg, len(cur) - 1, V)
+              if nxt == EOS:
+                  break
+              out.append(nxt)
+              cur.append(nxt)
+      return decode(out)
+
+
+  def build_row(prompt, answer):
+      """一条 SFT 样本：(idx, tgt, mask)。mask 只在回答上为 1（第 22 关的结论）。"""
+      p = encode(prompt)
+      a = encode(answer) + [EOS]
+      full = p + a
+      full = full + [PAD] * (S + 1 - len(full))
+      mask = [1.0 if (t >= len(p) - 1 and t < len(p) - 1 + len(a)) else 0.0 for t in range(S)]
+      return full[:S], full[1:S + 1], mask
+
+
+  def sft_train(model, pairs, steps, batch_size=16, peak_lr=0.03):
+      """平台版的 SFT 循环。第 22 关自己写过一遍，之后几关直接用。"""
+      opt = nt.optim.AdamW(model.parameters(), lr=peak_lr, betas=(0.9, 0.95),
+                           weight_decay=0.1, grad_clip=1.0)
+      idx = nt.zeros((batch_size * S,), role="data", name="idx")
+      tgt = nt.zeros((batch_size * S,), role="data", name="tgt")
+      msk = nt.zeros((batch_size * S,), role="data", name="mask")
+      base = nt.mark()
+      warmup = max(1, steps // 20)
+      for st in range(1, steps + 1):
+          nt.release(base)
+          bi, bt, bm = [], [], []
+          for k in range(batch_size):
+              p, a = pairs[(st * batch_size + k) % len(pairs)]
+              ri, rt, rm = build_row(p, a)
+              bi.extend(ri)
+              bt.extend(rt)
+              bm.extend(rm)
+          idx.set_int_(bi)
+          tgt.set_int_(bt)
+          msk.set_(bm)
+          opt.zero_grad()
+          nt.phase("forward")
+          loss = F.cross_entropy(model.logits(idx, batch_size, S), tgt,
+                                 batch_size * S, V, msk)
+          nt.phase("other")
+          loss.backward()
+          if st <= warmup:
+              lr = peak_lr * st / warmup
+          else:
+              pr = (st - warmup) / max(1, steps - warmup)
+              lr = peak_lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * pr)))
+          opt.step(lr=lr)
+      nt.release(base)
+      return model
+
+
+  def exact_match(model, pairs):
+      """精确匹配率 —— 可验证任务的奖励函数就是它。"""
+      ok = 0
+      for prompt, answer in pairs:
+          if generate_answer(model, prompt) == answer:
+              ok += 1
+      return ok / max(1, len(pairs))
+`;
+
+/* ================================================================== */
+/* 第 22 关：SFT                                                       */
+/* ================================================================== */
+
+const STAGE_SFT = {
+  id: 'sft',
+  title: t('SFT —— loss 只算在回答上', 'SFT — the loss counts only on the answer'),
+  goal: t(
+    code`
+      预训练教会模型「下一个 token 是什么」。**监督微调（SFT）**教它
+      「拿到一个问题，该输出什么」—— 同样是下一个 token 预测，
+      区别只有一个：**loss 只算在回答上，不算在问题上。**
+
+      在 \`sft.py\` 里实现：
+
+      \`\`\`python
+      def build_row(prompt, answer, block_size, eos_id, pad_id):
+          """返回 (idx, tgt, mask)，三个都是长度 block_size 的列表。
+
+          mask[t] = 1 只在「这一位要预测的是回答里的 token」时成立。"""
+
+      def masked_loss(logits, targets, mask, rows, vocab):
+          """按 mask 算的平均 loss。**不能直接用 cross_entropy 报的那个数。**"""
+
+      def train(model, pairs, steps, batch_size, ...):
+          """跑 SFT。返回 {"loss": [...], "final": float}。"""
+      \`\`\`
+
+      ## 为什么问题上不能算 loss
+
+      在问题上算 loss，等于让模型**学习怎么生成问题**。
+      它照样会收敛,loss 曲线一样好看，甚至更低（问题比回答好预测得多）。
+      但你要的能力是「回答」，而训练信号被稀释了。
+
+      在真实的对话数据上这件事更严重：一轮对话里 prompt 常常比 completion 长好几倍，
+      于是绝大部分梯度花在了学习「用户会怎么说话」上。
+
+      这一关的第一条门槛就是它，而且查得很硬：
+      **prompt 位置上的 \`dlogits\` 必须逐位为 0。**
+
+      ## mask 的边界在哪
+
+      \`\`\`
+      文本      7 + 5 =  1  2  <eos>  <pad> ...
+      位置 t    0 1 2 3  4  5    6      7
+      预测的是  +  5 =  1  2  <eos>  <pad>
+      mask      0 0 0 1  1  1     0      0
+                     ↑
+                最后一个 prompt token 的位置上，要预测的已经是答案的第一位了
+      \`\`\`
+
+      **边界差一位是最常见的错。** 往前差一位，模型学不到「看到 \`=\` 该开口」；
+      往后差一位，\`=\` 本身进了 loss。两种都能训出东西来，都比正确的差一点。
+
+      \`<pad>\` 位置也要屏蔽,它们不是内容。
+
+      ## cross_entropy 报的数不是你要的数
+
+      \`F.cross_entropy(logits, targets, rows, vocab, mask)\` 的 \`mask\`
+      **只作用在梯度上**,它前向返回的仍然是**全部位置**的平均。
+      直接拿它画曲线的话，你看到的是「包含 prompt 与 padding 的平均」，
+      而那个数会随着训练**上升**（模型专心学回答，在 prompt 位置上变得越来越差）。
+
+      这不是实现的疏忽，是有意留的边界:算梯度和报数字是两件事，
+      而混淆它们的后果只有自己算一遍才看得清。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | **prompt 不进 loss** | prompt 位置上梯度不为 0 的个数 = **0** |
+      | mask 的边界 | 与参考的 mask 逐位相同 |
+      | 报的数 | 与平台按 mask 重算的一致（差 ≤ 1e-6） |
+      | 学会了 | 留出集上精确匹配 ≥ **90%** |
+    `,
+    code`
+      Pretraining teaches a model what the next token is. **Supervised fine-tuning (SFT)**
+      teaches it what to output given a question — still next-token prediction, differing in
+      exactly one respect: **the loss counts only on the answer, never on the question.**
+
+      Implement in \`sft.py\`:
+
+      \`\`\`python
+      def build_row(prompt, answer, block_size, eos_id, pad_id):
+          """Return (idx, tgt, mask), each a list of length block_size.
+
+          mask[t] = 1 only where this position predicts a token of the answer."""
+
+      def masked_loss(logits, targets, mask, rows, vocab):
+          """Mean loss under the mask. **Not the number cross_entropy reports.**"""
+
+      def train(model, pairs, steps, batch_size, ...):
+          """Run SFT. Returns {"loss": [...], "final": float}."""
+      \`\`\`
+
+      ## Why the question must not carry loss
+
+      Computing loss on the question means teaching the model **how to generate questions**.
+      It still converges; the curve looks just as good, often better (questions are far more
+      predictable than answers). But the capability you want is answering, and the training
+      signal has been diluted.
+
+      On real conversational data this matters more: a turn's prompt is often several times
+      longer than its completion, so most of the gradient goes into learning how users talk.
+
+      That is this stage's first gate, and it is checked strictly:
+      **\`dlogits\` at prompt positions must be exactly zero.**
+
+      ## Where the mask boundary sits
+
+      \`\`\`
+      text        7 + 5 =  1  2  <eos>  <pad> ...
+      position t  0 1 2 3  4  5    6      7
+      predicts    +  5 =  1  2  <eos>  <pad>
+      mask        0 0 0 1  1  1     0      0
+                       ^
+             at the last prompt token, what comes next is already the answer
+      \`\`\`
+
+      **Off-by-one here is the most common mistake.** One position early and the model never
+      learns to start speaking when it sees \`=\`; one position late and \`=\` itself enters
+      the loss. Both train to something, both slightly worse than correct.
+
+      \`<pad>\` positions must be masked too — they are not content.
+
+      ## The number cross_entropy reports is not the number you want
+
+      The \`mask\` argument of \`F.cross_entropy(logits, targets, rows, vocab, mask)\`
+      **affects only the gradient**; its forward value is still the mean over **all**
+      positions. Plotting that gives you "the average including prompt and padding", and
+      that number **rises** during training — the model concentrates on answers and gets
+      steadily worse at prompt positions.
+
+      This is a deliberate boundary rather than an oversight: computing a gradient and
+      reporting a number are two different things, and only computing it yourself makes the
+      difference visible.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | **No loss on the prompt** | Non-zero gradients at prompt positions = **0** |
+      | Mask boundary | Bit-identical to the reference mask |
+      | Reported number | Matches the platform's masked recomputation (within 1e-6) |
+      | It learned | Exact match on the held-out set >= **90%** |
+    `
+  ),
+  checklist: [
+    t('mask 从「最后一个 prompt token」的位置开始', 'The mask starts at the last prompt token'),
+    t('padding 位置也屏蔽', 'Padding positions are masked too'),
+    t('报的 loss 是按 mask 算的', 'The reported loss is computed under the mask'),
+    t('留出集上精确匹配 ≥ 90%', 'Exact match on the held-out set is at least 90%'),
+  ],
+  hints: [
+    t('位置 t 预测的是 tgt[t]，所以边界看的是「tgt[t] 属不属于回答」。',
+      'Position t predicts tgt[t], so the boundary asks whether tgt[t] belongs to the answer.'),
+    t('F.softmax 之后按 targets 取概率，就能自己算按 mask 的平均。',
+      'Softmax then index by targets to compute the masked mean yourself.'),
+    t('mask 要作为 F.cross_entropy 的第五个参数传进去，梯度才会被屏蔽。',
+      "Pass the mask as cross_entropy's fifth argument so the gradient is masked."),
+  ],
+  pitfalls: [
+    t(code`
+      **mask 的边界差一位。** 从 \`=\` 的**下一个**位置开始的话，
+      模型永远学不到「看到 \`=\` 就该开口」—— 生成时它在 \`=\` 之后不知道该说什么。
+      而 loss 曲线完全正常，评测里也只是准确率低一点。
+      这一关拿参考 mask 逐位对，就是为了它。
+    `, code`
+      **An off-by-one mask boundary.** Starting one position after \`=\` means the model
+      never learns that \`=\` is its cue to speak — at generation time it does not know what
+      follows \`=\`. The loss curve looks perfectly normal and evaluation merely scores a
+      little lower. Comparing bit-for-bit against the reference mask exists for this.
+    `),
+    t(code`
+      **拿 \`cross_entropy\` 返回的数当训练曲线。** 那是**全部位置**的平均，
+      包含 prompt 与 padding。SFT 越训，模型在 prompt 位置上越差，
+      于是这条曲线会**往上走** —— 而真正的（按 mask 的）loss 在往下走。
+      看着上升的曲线去调超参，方向全反了。
+    `, code`
+      **Plotting the number \`cross_entropy\` returns.** That is the mean over **all**
+      positions including prompt and padding. The longer SFT runs, the worse the model gets
+      at prompt positions, so this curve **rises** while the true masked loss falls. Tuning
+      hyperparameters against a rising curve sends you in exactly the wrong direction.
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_POST_PY,
+      'sft.py': code`
+        """第 22 关：SFT。loss 只算在回答上。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import functional as F
+        import kit
+
+
+        def build_row(prompt, answer, block_size, eos_id, pad_id):
+            """返回 (idx, tgt, mask)，都是长度 block_size 的列表。"""
+            # TODO: 拼出 prompt + answer + eos，补 pad；
+            #       mask 只在「这一位要预测的是回答（含 eos）」时为 1
+            return [pad_id] * block_size, [pad_id] * block_size, [0.0] * block_size
+
+
+        def masked_loss(logits, targets, mask, rows, vocab):
+            """按 mask 算的平均 loss。"""
+            # TODO: softmax 之后按 targets 取概率，只在 mask 为 1 的位置上平均
+            return 0.0
+
+
+        def train(model, pairs, steps, batch_size=16, peak_lr=0.03, seed=1):
+            """返回 {"loss": [每步按 mask 的 loss], "final": 最后 20 步的平均}。"""
+            # TODO
+            return {"loss": [], "final": 0.0}
+
+
+        if __name__ == "__main__":
+            idx, tgt, mask = build_row("7+5=", "12", kit.S, kit.EOS, kit.PAD)
+            print("idx ", idx)
+            print("tgt ", tgt)
+            print("mask", [int(v) for v in mask])
+      `,
+    },
+    referenceFiles: {
+      'sft.py': code`
+        """第 22 关的参考实现。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import functional as F
+        import kit
+
+
+        def build_row(prompt, answer, block_size, eos_id, pad_id):
+            p = kit.encode(prompt)
+            a = kit.encode(answer) + [eos_id]
+            full = p + a
+            full = full + [pad_id] * (block_size + 1 - len(full))
+            idx = full[:block_size]
+            tgt = full[1:block_size + 1]
+            # 位置 t 预测的是 tgt[t]。回答的第一位落在**最后一个 prompt token** 上,
+            # 所以边界是 t >= len(p) - 1，而不是 t >= len(p)
+            mask = []
+            for t in range(block_size):
+                in_answer = (t >= len(p) - 1) and (t < len(p) - 1 + len(a))
+                mask.append(1.0 if in_answer else 0.0)
+            return idx, tgt, mask
+
+
+        def masked_loss(logits, targets, mask, rows, vocab):
+            # cross_entropy 报的是**全部位置**的平均（prompt 与 padding 都算进去了），
+            # 那个数在 SFT 里会往上走。要看的曲线得自己按 mask 算
+            probs = F.softmax(logits, rows, vocab).tolist()
+            total, count = 0.0, 0.0
+            for r in range(rows):
+                if mask[r] > 0:
+                    p = probs[r * vocab + targets[r]]
+                    total += -math.log(max(p, 1e-30))
+                    count += 1.0
+            return total / max(1.0, count)
+
+
+        def train(model, pairs, steps, batch_size=16, peak_lr=0.03, seed=1):
+            opt = nt.optim.AdamW(model.parameters(), lr=peak_lr, betas=(0.9, 0.95),
+                                 weight_decay=0.1, grad_clip=1.0)
+            idx = nt.zeros((batch_size * kit.S,), role="data", name="idx")
+            tgt = nt.zeros((batch_size * kit.S,), role="data", name="tgt")
+            msk = nt.zeros((batch_size * kit.S,), role="data", name="mask")
+            hist = []
+            base = nt.mark()
+            warmup = max(1, steps // 20)
+            for st in range(1, steps + 1):
+                nt.release(base)
+                bi, bt, bm = [], [], []
+                for k in range(batch_size):
+                    p, a = pairs[(st * batch_size + k) % len(pairs)]
+                    ri, rt, rm = build_row(p, a, kit.S, kit.EOS, kit.PAD)
+                    bi.extend(ri)
+                    bt.extend(rt)
+                    bm.extend(rm)
+                idx.set_int_(bi)
+                tgt.set_int_(bt)
+                msk.set_(bm)
+
+                opt.zero_grad()
+                nt.phase("forward")
+                logits = model.logits(idx, batch_size, kit.S)
+                # mask 传进去，梯度才被屏蔽
+                loss = F.cross_entropy(logits, tgt, batch_size * kit.S, kit.V, msk)
+                nt.phase("other")
+                loss.backward()
+
+                if st <= warmup:
+                    lr = peak_lr * st / warmup
+                else:
+                    pr = (st - warmup) / max(1, steps - warmup)
+                    lr = peak_lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * pr)))
+                opt.step(lr=lr)
+
+                if st % 10 == 0 or st == steps:
+                    hist.append(masked_loss(logits, bt, bm, batch_size * kit.S, kit.V))
+            nt.release(base)
+            return {"loss": hist, "final": sum(hist[-3:]) / max(1, len(hist[-3:]))}
+
+
+        if __name__ == "__main__":
+            idx, tgt, mask = build_row("7+5=", "12", kit.S, kit.EOS, kit.PAD)
+            print("idx ", idx)
+            print("tgt ", tgt)
+            print("mask", [int(v) for v in mask])
+      `,
+    },
+  },
+  specs: [
+    spec('sft.spec.ts', code`
+      ${LAB}
+
+      const STEPS = 300, BATCH = 16;
+
+      function setup() {
+        lab.py(\`
+      import sys, json, math
+      sys.path.insert(0, "/lab")
+      import importlib, kit, sft
+      importlib.reload(kit)
+      importlib.reload(sft)
+      import nanotorch as nt
+      from nanotorch import functional as F
+      \`);
+      }
+
+      /** 平台侧的参考 mask —— 位置 t 预测 tgt[t]，回答从最后一个 prompt token 开始 */
+      function refRow(prompt, answer, S, EOS, PAD) {
+        const enc = (s) => [...s].map((c) => (c >= '0' && c <= '9' ? Number(c)
+          : c === '+' ? 10 : c === '-' ? 11 : 12));
+        const p = enc(prompt), a = [...enc(answer), EOS];
+        const full = [...p, ...a];
+        while (full.length < S + 1) full.push(PAD);
+        const mask = [];
+        for (let t = 0; t < S; t++) {
+          mask.push(t >= p.length - 1 && t < p.length - 1 + a.length ? 1 : 0);
+        }
+        return { idx: full.slice(0, S), tgt: full.slice(1, S + 1), mask };
+      }
+
+      describe('SFT', () => {
+        it('mask 的边界和参考逐位相同', () => {
+          setup();
+          const S = Number(lab.py('kit.S')), EOS = Number(lab.py('kit.EOS')), PAD = Number(lab.py('kit.PAD'));
+          const cases = [['7+5=', '12'], ['0+0=', '0'], ['9+9=', '18'], ['3+4=', '7']];
+          let mismatches = 0;
+          for (const [p, a] of cases) {
+            const got = JSON.parse(String(lab.py(
+              'json.dumps([list(v) for v in sft.build_row(' + JSON.stringify(p) + ', '
+              + JSON.stringify(a) + ', kit.S, kit.EOS, kit.PAD)])'
+            )));
+            const ref = refRow(p, a, S, EOS, PAD);
+            for (let t = 0; t < S; t++) {
+              if (got[0][t] !== ref.idx[t]) mismatches += 1;
+              if (got[1][t] !== ref.tgt[t]) mismatches += 1;
+              if (Math.round(got[2][t]) !== ref.mask[t]) mismatches += 1;
+            }
+            if (p === '7+5=') {
+              console.log('7+5= -> 12');
+              console.log('  idx  ' + JSON.stringify(got[0]));
+              console.log('  tgt  ' + JSON.stringify(got[1]));
+              console.log('  mask ' + JSON.stringify(got[2].map((v) => Math.round(v))));
+            }
+          }
+          lab.publish('sft.maskMismatches', mismatches);
+          expect(mismatches).toBe(0);
+        });
+
+        /*
+         * 这一关最硬的一条：prompt 位置上的梯度必须**逐位为 0**。
+         * 在 prompt 上算 loss 的模型照样收敛，曲线甚至更好看 ——
+         * 只有直接看 dlogits 才分得开。
+         */
+        it('prompt 位置上的梯度逐位为 0', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _m = kit.LM(seed=1)
+      _pairs = kit.make_pairs(64, 5, 10)
+      _bs = 8
+      _bi, _bt, _bm = [], [], []
+      for _k in range(_bs):
+          _p, _a = _pairs[_k]
+          _ri, _rt, _rm = sft.build_row(_p, _a, kit.S, kit.EOS, kit.PAD)
+          _bi.extend(_ri); _bt.extend(_rt); _bm.extend(_rm)
+      _idx = nt.zeros((_bs * kit.S,), role="data"); _idx.set_int_(_bi)
+      _tgt = nt.zeros((_bs * kit.S,), role="data"); _tgt.set_int_(_bt)
+      _msk = nt.zeros((_bs * kit.S,), role="data"); _msk.set_(_bm)
+
+      _lg = _m.logits(_idx, _bs, kit.S)
+      _loss = F.cross_entropy(_lg, _tgt, _bs * kit.S, kit.V, _msk)
+      _loss.backward()
+      json.dumps({"dlogits": _lg.grad.tolist(), "mask": _bm,
+                  "rows": _bs * kit.S, "vocab": kit.V})
+      \`)));
+
+          const report = lab.probe.lossMask(r.dlogits, r.mask, r.rows, r.vocab);
+          console.log(
+            '参与 loss 的位置 ' + report.contributingPositions
+            + '，被屏蔽的 ' + report.maskedPositions
+            + '，屏蔽位置上梯度不为 0 的 ' + report.leakedPositions
+          );
+          lab.publish('loss.contributingPromptPositions', report.leakedPositions);
+          lab.publish('loss.contributingPositions', report.contributingPositions);
+          expect(report.maskedPositions).toBeGreaterThan(0);
+          expect(report.contributingPositions).toBeGreaterThan(0);
+          expect(report.leakedPositions).toBe(0);
+        });
+
+        /*
+         * cross_entropy 报的是全部位置的平均。SFT 越训它越**高** ——
+         * 模型专心学回答，在 prompt 位置上越来越差。
+         * 拿它当训练曲线，调参的方向是反的。
+         */
+        it('报的 loss 是按 mask 算的，且与内建报的那个明显不同', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _m = kit.LM(seed=1)
+      _pairs = kit.make_pairs(64, 5, 10)
+      _bs = 8
+      _bi, _bt, _bm = [], [], []
+      for _k in range(_bs):
+          _p, _a = _pairs[_k]
+          _ri, _rt, _rm = sft.build_row(_p, _a, kit.S, kit.EOS, kit.PAD)
+          _bi.extend(_ri); _bt.extend(_rt); _bm.extend(_rm)
+      _idx = nt.zeros((_bs * kit.S,), role="data"); _idx.set_int_(_bi)
+      _tgt = nt.zeros((_bs * kit.S,), role="data"); _tgt.set_int_(_bt)
+      _msk = nt.zeros((_bs * kit.S,), role="data"); _msk.set_(_bm)
+      with nt.no_grad():
+          _lg = _m.logits(_idx, _bs, kit.S)
+          _raw = F.cross_entropy(_lg, _tgt, _bs * kit.S, kit.V, _msk).value
+          _mine = sft.masked_loss(_lg, _bt, _bm, _bs * kit.S, kit.V)
+          _probs = F.softmax(_lg, _bs * kit.S, kit.V).tolist()
+      json.dumps({"raw": _raw, "mine": _mine, "probs": _probs, "tgt": _bt, "mask": _bm,
+                  "rows": _bs * kit.S, "vocab": kit.V})
+      \`)));
+
+          // 平台按 mask 重算一遍
+          let total = 0, count = 0;
+          for (let i = 0; i < r.rows; i++) {
+            if (r.mask[i] > 0) {
+              total += -Math.log(Math.max(r.probs[i * r.vocab + r.tgt[i]], 1e-30));
+              count += 1;
+            }
+          }
+          const ref = total / count;
+          console.log(
+            '按 mask ' + r.mine.toFixed(6) + '（平台重算 ' + ref.toFixed(6) + '），'
+            + 'cross_entropy 报的 ' + r.raw.toFixed(6) + '（全部位置的平均）'
+          );
+          lab.publish('loss.maskedError', Math.abs(r.mine - ref));
+          expect(Math.abs(r.mine - ref)).toBeLessThan(1e-6);
+        });
+
+        it('300 步之后留出集精确匹配 ≥ 90%', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _m = kit.LM(seed=1)
+      _train = kit.make_pairs(512, 5, 10)
+      _res = sft.train(_m, _train, \${STEPS}, \${BATCH})
+      _held = kit.make_pairs(64, 777, 10)
+      _acc = kit.exact_match(_m, _held)
+      _sample = [(p, kit.generate_answer(_m, p), a) for p, a in _held[:4]]
+      json.dumps({"final": _res["final"], "acc": _acc, "curve": _res["loss"][::6],
+                  "sample": _sample})
+      \`)));
+          console.log('按 mask 的 loss 曲线 ' + r.curve.map((v) => v.toFixed(3)).join(' -> '));
+          console.log('留出集精确匹配 ' + (r.acc * 100).toFixed(1) + '%');
+          for (const [p, got, want] of r.sample) console.log('  ' + p + got + '（该是 ' + want + '）');
+          lab.publish('eval.exactMatch', r.acc);
+          lab.publish('loss.sftFinal', r.final);
+          expect(r.acc).toBeGreaterThanOrEqual(0.9);
+          // 曲线要真的在降
+          expect(r.curve[r.curve.length - 1]).toBeLessThan(r.curve[0]);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.loss.contributingPromptPositions', op: 'eq', value: 0,
+      zh: 'prompt 位置上梯度不为 0 的个数', en: 'prompt positions with a non-zero gradient',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.sft.maskMismatches', op: 'eq', value: 0,
+      zh: '与参考 mask 对不上的位置数', en: 'positions differing from the reference mask',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.loss.maskedError', op: 'lte', value: 1e-6,
+      zh: '按 mask 的 loss 与平台重算的差', en: 'masked loss versus the platform recomputation',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.eval.exactMatch', op: 'gte', value: 0.9,
+      zh: '留出集上的精确匹配率', en: 'exact match on the held-out set', dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness'],
+  extension: t(
+    code`
+      真实的 SFT 数据是**多轮对话**，mask 要按轮次给:
+      每一轮的 assistant 回复算 loss，user 那一轮不算，system 提示也不算。
+      一条 10 轮的对话上，mask 是一串交替的区间，边界比这一关多得多，
+      而每一个边界都可能差一位。
+
+      \`chat template\` 就是把这件事标准化的东西 —— 它规定了
+      \`<|im_start|>user ... <|im_end|>\` 这类标记怎么写，
+      于是 mask 可以从标记里算出来而不是手工数位置。
+      **模板对不上是部署时最常见的坑之一**：训练用了一套模板、
+      推理时框架用了另一套，模型的表现会莫名其妙地差一截，而没有任何报错。
+
+      2026 年 SFT 这一步本身的地位在下降 —— 越来越多的流程是
+      「很少的 SFT 冷启动 + 大量的 RL」（DeepSeek-R1 那条路），
+      因为 SFT 只能模仿数据里已有的东西，而 RL 能找到数据里没有的解法。
+      但**冷启动那一小步仍然是必须的**：没有它，RL 一开始采不出任何格式正确的样本，
+      奖励恒为 0，梯度也就恒为 0。
+    `,
+    code`
+      Real SFT data is **multi-turn dialogue**, and the mask follows the turns: assistant
+      replies carry loss, user turns do not, system prompts do not. Across a ten-turn
+      conversation the mask is a series of alternating intervals with far more boundaries
+      than here — and every boundary can be off by one.
+
+      A \`chat template\` is what standardises this: it fixes how markers like
+      \`<|im_start|>user ... <|im_end|>\` are written, so the mask can be derived from the
+      markers rather than counted by hand. **A template mismatch is among the most common
+      deployment traps**: train with one template, serve with another, and the model gets
+      inexplicably worse with nothing raising an error.
+
+      SFT's own standing has been declining through 2026 — more pipelines run "a little SFT
+      cold start plus a lot of RL" (DeepSeek-R1's route), because SFT can only imitate what
+      is in the data while RL can find solutions that are not. But **that small cold start
+      remains necessary**: without it RL samples nothing correctly formatted, every reward is
+      zero, and so is every gradient.
+    `
+  ),
+};
+
+/* ================================================================== */
+/* 第 23 关：数据配比与对齐税                                           */
+/* ================================================================== */
+
+const STAGE_MIXTURE = {
+  id: 'data-mixture',
+  title: t('数据配比 —— 学会新的，别忘了旧的', 'Data mixture — learn the new without forgetting the old'),
+  goal: t(
+    code`
+      模型已经会加法了（第 22 关训出来的）。现在要教它减法。
+
+      最直接的做法是**拿减法数据继续 SFT**。它会学会减法 ——
+      同时把加法忘掉。这就是 \`对齐税\`（alignment tax）：
+      为了学会新任务而失去的旧能力。
+
+      在 \`mixture.py\` 里实现数据配比：
+
+      \`\`\`python
+      def mix(general, instruct, ratio, count, seed):
+          """按 ratio 混合两个数据源，返回长度 count 的列表。
+
+          ratio 是**指令数据占的比例**：0 全是通用数据，1 全是指令数据。
+          要求：比例误差 ≤ 2%，而且顺序是确定的（同 seed 同结果）。"""
+
+      def choose_ratio():
+          """你选的配比。两条门槛要同时满足。"""
+      \`\`\`
+
+      ## 两条门槛必须同时成立
+
+      | | 要求 |
+      | --- | --- |
+      | 学会了新的 | 减法的精确匹配 ≥ **0.85** |
+      | 没忘掉旧的 | 加法的精确匹配**掉的幅度** ≤ **0.15** |
+
+      **只卡一条的话，最省事的做法就是把另一条换掉** ——
+      只卡「学会减法」，全用减法数据最快；只卡「别忘加法」，一条减法数据都不加最稳。
+      两条一起卡，才逼出「配比」这件事本身。
+
+      这也是真实的后训练里最日常的一个决策：指令数据混多少、
+      不同来源之间怎么配、要不要保留一部分预训练数据回放。
+      它不是一个可以「求解」的问题，是一个要**量着调**的问题。
+
+      ## 混的时候有两个坑
+
+      **比例要准。** 「每 k 条插一条」这种写法在 ratio 不是 1/k 的时候会偏，
+      而偏出来的配比你不会知道 —— 除非量一遍。
+
+      **顺序要确定。** 同一个 seed 必须给同一个混合结果，
+      否则这一关的两个数字之间没法比较,你不知道差异来自配比还是来自采样。
+
+      ## 顺带说一句「灾难性遗忘」
+
+      这一关的现象在小模型上格外明显（容量小、任务少），
+      但它在真实尺度上一样存在，只是形式更隐蔽：
+      不是「完全不会加法了」，而是**某些能力悄悄退化**,
+      代码能力在做完一轮对话对齐之后掉几个点，是行业里反复出现的事。
+
+      所以真实流程里会保留一部分**预训练数据回放**（replay），
+      并且用一整套评测集在后训练前后各跑一遍,
+      这一关的「加法准确率掉了多少」就是那件事的最小形式。
+    `,
+    code`
+      The model already does addition (trained in stage 22). Now teach it subtraction.
+
+      The direct approach is to **continue SFT on subtraction data**. It will learn
+      subtraction — and forget addition. That is the \`alignment tax\`: old capability lost
+      in exchange for a new one.
+
+      Implement the mixture in \`mixture.py\`:
+
+      \`\`\`python
+      def mix(general, instruct, ratio, count, seed):
+          """Mix two sources by ratio, returning a list of length count.
+
+          ratio is the **share of instruction data**: 0 is all general, 1 all instruction.
+          Requirements: proportion within 2%, and a deterministic order (same seed,
+          same result)."""
+
+      def choose_ratio():
+          """Your chosen ratio. Both gates must hold at once."""
+      \`\`\`
+
+      ## Both gates must hold together
+
+      | | Requirement |
+      | --- | --- |
+      | New learned | Subtraction exact match >= **0.85** |
+      | Old retained | Addition exact match **drops** by at most **0.15** |
+
+      **Gate only one and the cheapest move is to sacrifice the other** — gate only "learn
+      subtraction" and all-subtraction data wins; gate only "keep addition" and adding no
+      subtraction at all is safest. Requiring both is what forces the mixture question to
+      exist.
+
+      This is also the most routine decision in real post-training: how much instruction
+      data, how sources are proportioned, whether to replay pretraining data. It is not a
+      problem you solve but one you **tune against measurements**.
+
+      ## Two traps when mixing
+
+      **The proportion must be accurate.** "Insert one every k" drifts whenever the ratio is
+      not exactly 1/k, and you will not know the drift — unless you measure it.
+
+      **The order must be deterministic.** The same seed must produce the same mixture, or
+      the two numbers in this stage cannot be compared: you would not know whether a
+      difference came from the ratio or from the sampling.
+
+      ## A word on catastrophic forgetting
+
+      The effect is especially stark on a small model (little capacity, few tasks), but it
+      exists at real scale in a subtler form: not "cannot do addition any more" but
+      **capabilities quietly regressing** — coding scores dropping a few points after a round
+      of dialogue alignment is a recurring industry experience.
+
+      That is why real pipelines keep a share of **pretraining data replay** and run a full
+      evaluation suite before and after post-training. "How much did addition accuracy drop"
+      is the smallest version of that same practice.
+    `
+  ),
+  checklist: [
+    t('混合的比例误差 ≤ 2%', 'The mixed proportion is within 2%'),
+    t('同一个 seed 给同一个结果', 'The same seed produces the same mixture'),
+    t('减法学会了（≥ 0.85）', 'Subtraction is learned (>= 0.85)'),
+    t('加法掉的幅度 ≤ 0.15', 'Addition drops by at most 0.15'),
+  ],
+  hints: [
+    t('按累积计数决定下一条取哪边，比「每 k 条插一条」准。',
+      'Deciding by running counts is more accurate than "insert one every k".'),
+    t('kit.make_pairs(n, seed, max_value, op) 的 op 可以是 "+" 或 "-"。',
+      'kit.make_pairs(n, seed, max_value, op) accepts "+" or "-".'),
+    t('kit.sft_train 是平台版的 SFT 循环，直接用。',
+      'kit.sft_train is the platform SFT loop; use it directly.'),
+  ],
+  pitfalls: [
+    t(code`
+      **全用指令数据。** 减法学得最快最好,而加法在同一次训练里被冲掉。
+      在这一关上是「加法准确率从 1.00 掉到接近 0」，
+      在真实尺度上则是某几个评测集悄悄掉几个点,后者更难发现，
+      因为没人会在做完对齐之后把所有旧评测重跑一遍。除非流程里写死了要跑。
+    `, code`
+      **Using only instruction data.** Subtraction is learned fastest and best, while
+      addition is washed out in the same run. Here that reads as addition accuracy falling
+      from 1.00 toward zero; at real scale it reads as a few evaluation suites quietly losing
+      a few points — much harder to notice, because nobody reruns every old evaluation after
+      alignment unless the pipeline mandates it.
+    `),
+    t(code`
+      **混合的顺序不确定。** 用了全局随机状态的话，同一个配比跑两遍会得到不同的结果，
+      于是「配比 0.5 比 0.8 好」这个结论根本立不住 ——
+      你不知道差异来自配比还是来自这一次的采样。
+      **要比较，就先让别的东西都不变。**
+    `, code`
+      **A non-deterministic mixture order.** Using global random state means the same ratio
+      gives different results across runs, so "0.5 beats 0.8" cannot be concluded at all —
+      the difference might be the ratio or might be this run's sampling. **To compare, hold
+      everything else fixed first.**
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_POST_PY,
+      'mixture.py': code`
+        """第 23 关：数据配比与对齐税。"""
+        import kit
+
+
+        def mix(general, instruct, ratio, count, seed):
+            """按 ratio 混合。ratio 是指令数据占的比例。确定性。"""
+            # TODO: 按累积计数决定下一条取哪边，保证比例准且顺序确定
+            return list(general[:count])
+
+
+        def choose_ratio():
+            """你选的配比。两条门槛要同时满足。"""
+            # TODO
+            return 1.0
+
+
+        if __name__ == "__main__":
+            g = kit.make_pairs(64, 1, 10, "+")
+            i = kit.make_pairs(64, 2, 10, "-")
+            m = mix(g, i, 0.5, 20, seed=7)
+            print("混出来的前 6 条", [p for p, _ in m[:6]])
+            share = sum(1 for p, _ in m if "-" in p) / len(m)
+            print("指令数据占比", share)
+      `,
+    },
+    referenceFiles: {
+      'mixture.py': code`
+        """第 23 关的参考实现。"""
+        import kit
+
+
+        def mix(general, instruct, ratio, count, seed):
+            # 按**累积计数**决定下一条取哪边：已经取了多少条指令数据，
+            # 和「应该取多少条」比。这样任何 ratio 都准，
+            # 而「每 k 条插一条」只在 ratio = 1/k 时准
+            out = []
+            taken_i = 0
+            gi, ii = 0, 0
+            for n in range(count):
+                want_i = (n + 1) * ratio
+                if taken_i < want_i - 1e-9 and len(instruct) > 0:
+                    out.append(instruct[(ii + seed) % len(instruct)])
+                    ii += 1
+                    taken_i += 1
+                else:
+                    out.append(general[(gi + seed) % len(general)])
+                    gi += 1
+            return out
+
+
+        def choose_ratio():
+            # 全用指令数据（1.0）减法最好，但加法被冲掉；
+            # 一条不加（0.0）加法最稳，但减法学不会。
+            # 一半一半时两条门槛同时成立
+            return 0.5
+
+
+        if __name__ == "__main__":
+            g = kit.make_pairs(64, 1, 10, "+")
+            i = kit.make_pairs(64, 2, 10, "-")
+            m = mix(g, i, 0.5, 20, seed=7)
+            print("混出来的前 6 条", [p for p, _ in m[:6]])
+            share = sum(1 for p, _ in m if "-" in p) / len(m)
+            print("指令数据占比", share)
+      `,
+    },
+  },
+  specs: [
+    spec('mixture.spec.ts', code`
+      ${LAB}
+
+      const BASE_STEPS = 300, TUNE_STEPS = 200, BATCH = 16;
+
+      function setup() {
+        lab.py(\`
+      import sys, json, math
+      sys.path.insert(0, "/lab")
+      import importlib, kit, mixture
+      importlib.reload(kit)
+      importlib.reload(mixture)
+      import nanotorch as nt
+      from nanotorch import functional as F
+
+      _cache = {}
+
+      def _base():
+          """会加法的起点。所有配比都从同一个它出发,不然比的就不是配比了。"""
+          if "base" not in _cache:
+              m = kit.LM(seed=1)
+              kit.sft_train(m, kit.make_pairs(512, 5, 10, "+"), \${BASE_STEPS}, \${BATCH})
+              _cache["base"] = kit.exact_match(m, kit.make_pairs(48, 777, 10, "+"))
+          return _cache["base"]
+
+      def _run(ratio):
+          """从同一个起点出发，按 ratio 混合数据再微调，量两个能力。"""
+          key = "r%.3f" % ratio
+          if key in _cache:
+              return _cache[key]
+          m = kit.LM(seed=1)
+          kit.sft_train(m, kit.make_pairs(512, 5, 10, "+"), \${BASE_STEPS}, \${BATCH})
+          general = kit.make_pairs(512, 5, 10, "+")
+          instruct = kit.make_pairs(512, 9, 10, "-")
+          data = mixture.mix(general, instruct, ratio, 512, seed=7)
+          kit.sft_train(m, data, \${TUNE_STEPS}, \${BATCH})
+          out = {
+              "add": kit.exact_match(m, kit.make_pairs(48, 777, 10, "+")),
+              "sub": kit.exact_match(m, kit.make_pairs(48, 778, 10, "-")),
+              "share": sum(1 for p, _ in data if "-" in p) / len(data),
+          }
+          _cache[key] = out
+          return out
+      \`);
+      }
+
+      describe('数据配比与对齐税', () => {
+        it('混合的比例准，而且顺序确定', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _g = kit.make_pairs(256, 1, 10, "+")
+      _i = kit.make_pairs(256, 2, 10, "-")
+      _out = {}
+      for _r in [0.0, 0.25, 0.5, 0.75, 1.0]:
+          _m1 = mixture.mix(_g, _i, _r, 200, seed=7)
+          _m2 = mixture.mix(_g, _i, _r, 200, seed=7)
+          _share = sum(1 for p, _ in _m1 if "-" in p) / len(_m1)
+          _out["%.2f" % _r] = {"share": _share, "same": _m1 == _m2, "n": len(_m1)}
+      json.dumps(_out)
+      \`)));
+          let worst = 0;
+          for (const [want, v] of Object.entries(r)) {
+            worst = Math.max(worst, Math.abs(v.share - Number(want)));
+            console.log(
+              '要求 ' + want + ' -> 实际 ' + v.share.toFixed(3)
+              + '，两次一致 ' + v.same + '，条数 ' + v.n
+            );
+            expect(v.same).toBe(true);
+            expect(v.n).toBe(200);
+          }
+          lab.publish('mixture.ratioError', worst);
+          expect(worst).toBeLessThan(0.02);
+        });
+
+        /*
+         * 这一关的全部意义：两条门槛必须同时成立。
+         * 只卡一条的话，最省事的做法就是把另一条换掉。
+         */
+        it('学会减法且加法没掉太多', () => {
+          setup();
+          const base = Number(lab.py('_base()'));
+          const ratio = Number(lab.py('mixture.choose_ratio()'));
+          const r = JSON.parse(String(lab.py('json.dumps(_run(mixture.choose_ratio()))')));
+          const drop = base - r.add;
+          console.log(
+            '起点：加法 ' + (base * 100).toFixed(1) + '%'
+          );
+          console.log(
+            '配比 ' + ratio.toFixed(2) + '（实际 ' + r.share.toFixed(2) + '）之后：'
+            + '加法 ' + (r.add * 100).toFixed(1) + '%（掉了 ' + (drop * 100).toFixed(1) + ' 个点）'
+            + '，减法 ' + (r.sub * 100).toFixed(1) + '%'
+          );
+          lab.publish('eval.subtractionAccuracy', r.sub);
+          lab.publish('alignmentTax.additionDrop', drop);
+          expect(base).toBeGreaterThan(0.9);
+          expect(r.sub).toBeGreaterThanOrEqual(0.85);
+          expect(drop).toBeLessThanOrEqual(0.15);
+        });
+
+        /*
+         * 对照：全用指令数据。减法学得最好，而加法被冲掉 ——
+         * 「对齐税」这三个字在这里是一个量出来的数。
+         */
+        it('全用指令数据的对照：减法更好，加法塌掉', () => {
+          setup();
+          const base = Number(lab.py('_base()'));
+          const pure = JSON.parse(String(lab.py('json.dumps(_run(1.0))')));
+          const dropPure = base - pure.add;
+          console.log(
+            '配比 1.00：加法 ' + (pure.add * 100).toFixed(1) + '%（掉了 '
+            + (dropPure * 100).toFixed(1) + ' 个点），减法 ' + (pure.sub * 100).toFixed(1) + '%'
+          );
+          lab.publish('alignmentTax.pureInstructDrop', dropPure);
+          // 对照必须真的塌掉，否则这一关的前提不成立
+          expect(dropPure).toBeGreaterThan(0.3);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.mixture.ratioError', op: 'lte', value: 0.02,
+      zh: '混合出来的比例与要求的最大差', en: 'largest gap between requested and actual mixture ratio',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.eval.subtractionAccuracy', op: 'gte', value: 0.85,
+      zh: '新能力：减法的精确匹配', en: 'new capability: subtraction exact match',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.alignmentTax.additionDrop', op: 'lte', value: 0.15,
+      zh: '对齐税：加法准确率掉了多少', en: 'alignment tax: how much addition accuracy fell',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.alignmentTax.pureInstructDrop', op: 'gte', value: 0.3,
+      zh: '全用指令数据的对照掉了多少（要真的塌）',
+      en: 'the all-instruction control must genuinely collapse', dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness'],
+  extension: t(
+    code`
+      真实的后训练数据配比要复杂得多。一份典型的 SFT 数据集会分几十个来源
+      （对话、代码、数学、多语言、安全、工具调用……），每个来源一个权重，
+      而这些权重是**跑出来的**:训一版、跑一整套评测、看哪个维度掉了、调、再训。
+
+      有几个已经成了共识的做法：
+
+      **回放（replay）。** 后训练里掺 5% 到 20% 的预训练数据，
+      专门用来防遗忘。便宜且有效。
+
+      **模型融合（model soup / merging）。** 把「擅长对话的那版」和
+      「擅长代码的那版」的权重按比例平均起来。听着不该有用，实际上很有用 ——
+      这是 2026 年绕开对齐税最省事的一条路。
+
+      **课程顺序。** 同一批数据，先难后易和先易后难的结果不一样。
+      这一条至今没有很干净的理论，全靠试。
+
+      最后一句：**对齐税不是必然的**。它在很多时候是「数据配比没调好」的症状，
+      而不是「学新东西必须付出的代价」。区分这两者的唯一办法是量。
+    `,
+    code`
+      Real post-training mixtures are far more involved. A typical SFT set spans dozens of
+      sources (dialogue, code, mathematics, multilingual, safety, tool use, …), each with a
+      weight, and those weights are **found empirically**: train a version, run a full
+      evaluation suite, see which dimension dropped, adjust, retrain.
+
+      A few practices have become consensus:
+
+      **Replay.** Mix 5% to 20% pretraining data into post-training specifically to prevent
+      forgetting. Cheap and effective.
+
+      **Model merging (model soup).** Average the weights of the dialogue-strong version and
+      the code-strong version. It sounds like it should not work and works well — the
+      cheapest route around the alignment tax in 2026.
+
+      **Curriculum order.** The same data in a hard-to-easy order gives a different result
+      than easy-to-hard. There is still no clean theory here; it is found by trying.
+
+      One last point: **the alignment tax is not inevitable**. It is often a symptom of a
+      mixture that was not tuned rather than a price that must be paid for new capability.
+      The only way to tell the two apart is to measure.
+    `
+  ),
+};
+
 /* ------------------------------------------------------------------ */
 
 module.exports = {
@@ -11191,5 +12387,6 @@ module.exports = {
     STAGE_MANUAL_BWD, STAGE_ENGINE, STAGE_MODEL_BWD, STAGE_ADAMW,
     STAGE_SCHEDULE, STAGE_CLIP, STAGE_PACKING, STAGE_PRETRAIN,
     STAGE_AMP, STAGE_RECOMPUTE, STAGE_SCALING, STAGE_MOE, STAGE_MUON,
+    STAGE_SFT, STAGE_MIXTURE,
   ],
 };
