@@ -227,6 +227,89 @@ M().num_parameters()
   });
 
   /*
+   * `F.log_softmax` —— 后训练那几关的地基。
+   *
+   * **不是 `log(softmax(x))`**：softmax 之后小概率会下溢成 0，再取 log 就是 −inf。
+   * 这一条特意用一组跨度很大的 logits 验：合成的那一步给出的是一个很负的有限数，
+   * 而分开算会得到 −inf。
+   */
+  it('log_softmax 在概率下溢的地方仍然是有限值', () => {
+    const out = session.py.run(`
+import json, math
+import nanotorch as nt
+from nanotorch import functional as F
+
+x = nt.zeros((1, 4), role="data")
+x.set_([0.0, -120.0, -200.0, 1.0])       # 后两个的概率会下溢成 0
+ls = F.log_softmax(x, 1, 4).tolist()
+sm = F.softmax(x, 1, 4).tolist()
+naive = [math.log(v) if v > 0 else float("-inf") for v in sm]
+json.dumps({"ls": ls, "sm": sm, "naive": [str(v) for v in naive]})
+`) as string;
+    const r = JSON.parse(out);
+    // 合成的那一步全是有限值
+    expect(r.ls.every((v: number) => Number.isFinite(v))).toBe(true);
+    expect(r.ls[2]).toBeLessThan(-100);
+    // 而先 softmax 再 log 已经变成 −inf 了 —— 这就是不能那么写的理由
+    expect(r.naive[2]).toBe('-inf');
+    // 数值上和 x − logsumexp 对得上
+    const mx = 1.0;
+    const lse = mx + Math.log([0, -120, -200, 1].reduce((a, v) => a + Math.exp(v - mx), 0));
+    for (let j = 0; j < 4; j++) {
+      expect(Math.abs(r.ls[j] - ([0, -120, -200, 1][j] - lse))).toBeLessThan(1e-4);
+    }
+  });
+
+  /*
+   * log_softmax 的反向：`dx_j = dout_j − exp(out_j)·Σ_k dout_k`。
+   * 和 softmax 的反向长得像，但求和项**不带权重** ——
+   * 写成 softmax 那一版的话前向照样对，梯度悄悄错。
+   */
+  it('log_softmax 的反向对得上中心差分（f64）', () => {
+    const out = session.py.run(`
+import json
+import nanotorch as nt
+from nanotorch import functional as F
+
+rows, cols = 3, 5
+x = nt.parameter((rows, cols), 11, 1.0, "x", dtype="f64")
+w = nt.zeros((rows, cols), "f64", role="data")
+w.set_([0.3, -0.2, 0.5, 0.1, -0.4] * rows)     # 一组不对称的上游梯度
+
+def forward():
+    y = F.log_softmax(x, rows, cols)
+    # 标量出口：Σ w·y
+    return y, sum(a * b for a, b in zip(y.tolist(), w.tolist()))
+
+y, _ = forward()
+g = y.ensure_grad()
+g.set_(w.tolist())
+y._backward()
+ana = list(x.grad.tolist())
+
+vals = list(x.tolist())
+h = 1e-5
+num = []
+for i in range(rows * cols):
+    orig = vals[i]
+    vals[i] = orig + h; x.set_(vals)
+    _, lp = forward()
+    vals[i] = orig - h; x.set_(vals)
+    _, lm = forward()
+    vals[i] = orig; x.set_(vals)
+    num.append((lp - lm) / (2 * h))
+json.dumps({"ana": ana, "num": num})
+`) as string;
+    const r = JSON.parse(out);
+    let worst = 0;
+    for (let i = 0; i < r.ana.length; i++) {
+      worst = Math.max(worst, Math.abs(r.ana[i] - r.num[i])
+        / Math.max(1e-6, Math.abs(r.ana[i]) + Math.abs(r.num[i])));
+    }
+    expect(worst).toBeLessThan(2e-3);
+  });
+
+  /*
    * `F.mul` / `F.row_scale` / `F.gather` / `F.scatter_add` —— 第 20 关起要用的四个。
    *
    * 四个一起验是因为 MoE 那一关把它们串成一条链：

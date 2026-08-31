@@ -31,6 +31,7 @@ export type OpName =
   | 'attn_scores_fwd' | 'attn_scores_bwd'
   | 'attn_apply_fwd' | 'attn_apply_bwd'
   | 'softmax_rows_fwd' | 'softmax_rows_bwd'
+  | 'log_softmax_fwd' | 'log_softmax_bwd'
   | 'layernorm_fwd' | 'layernorm_bwd'
   | 'quantize_bf16' | 'quantize_fp16' | 'count_nonfinite'
   | 'cross_entropy' | 'cross_entropy_bwd'
@@ -376,6 +377,30 @@ export class Ops {
     if (valid) expect(valid.count >= rows, 'softmax_rows 的 valid 要每行一个');
     this.call('softmax_rows_fwd', 5 * rows * cols, dt, (s) => {
       this.kernels.fn[`softmax_rows_fwd_${s}`](x.off, valid ? valid.off : -1, out.off, rows, cols);
+    });
+  }
+
+  /**
+   * log_softmax。**不是 `log(softmax(x))`** —— 那样小概率会先下溢成 0 再变成 −inf。
+   * 强化学习里 log-prob 到处都是，而那些地方的概率常常很小。
+   */
+  logSoftmaxRows(x: Tensor, valid: Tensor | null, out: Tensor, rows: number, cols: number): void {
+    const dt = sameDType(x, out);
+    expect(x.count >= rows * cols && out.count >= rows * cols, 'log_softmax 的张量装不下');
+    this.call('log_softmax_fwd', 5 * rows * cols, dt, (s) => {
+      this.kernels.fn[`log_softmax_fwd_${s}`](x.off, valid ? valid.off : -1, out.off, rows, cols);
+    });
+  }
+
+  logSoftmaxRowsBwd(
+    dout: Tensor, out: Tensor, valid: Tensor | null, dx: Tensor, rows: number, cols: number
+  ): void {
+    const dt = sameDType(dout, out, dx);
+    expect(dx.count >= rows * cols, 'log_softmax_bwd 的 dx 装不下');
+    this.call('log_softmax_bwd', 4 * rows * cols, dt, (s) => {
+      this.kernels.fn[`log_softmax_bwd_${s}`](
+        dout.off, out.off, valid ? valid.off : -1, dx.off, rows, cols
+      );
     });
   }
 

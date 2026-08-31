@@ -11189,6 +11189,28 @@ const KIT_POST_PY = code`
       return model
 
 
+  def make_preference_pairs(n, seed, max_value=10, op="+"):
+      """造偏好对：(prompt, chosen, rejected)。
+
+      \`chosen\` 是正确答案，\`rejected\` 是一个**错得不离谱**的答案
+      （差 1 到 3）。差太远的话奖励模型学一个「长度」或者「首位数字」
+      的捷径就能全对,偏好数据的难度决定了奖励模型学到的是什么。
+      """
+      base = make_pairs(n, seed, max_value, op)
+      out = []
+      st = (seed * 22695477 + 1) & 0x7fffffff
+      for prompt, answer in base:
+          st = (st * 22695477 + 1) & 0x7fffffff
+          delta = 1 + st % 3
+          st = (st * 22695477 + 1) & 0x7fffffff
+          if st % 2 == 0 or int(answer) - delta < 0:
+              wrong = int(answer) + delta
+          else:
+              wrong = int(answer) - delta
+          out.append((prompt, answer, str(wrong)))
+      return out
+
+
   def exact_match(model, pairs):
       """精确匹配率 —— 可验证任务的奖励函数就是它。"""
       ok = 0
@@ -12159,6 +12181,1163 @@ const STAGE_MIXTURE = {
   ),
 };
 
+/* ================================================================== */
+/* 第 24 关：奖励模型                                                   */
+/* ================================================================== */
+
+const STAGE_RM = {
+  id: 'reward-model',
+  title: t('奖励模型 —— 从「哪个更好」学出一个分数', 'The reward model — turning "which is better" into a score'),
+  goal: t(
+    code`
+      人类标不出「这个回答值 7.3 分」，但标得出「A 比 B 好」。
+      \`奖励模型\`要解决的就是这个错配：**从成对的偏好里学出一个标量分数。**
+
+      在 \`rm.py\` 里实现：
+
+      \`\`\`python
+      class RewardModel(nn.Module):
+          """在语言模型上接一个标量头。r(prompt+answer) 是一个数。"""
+          def reward(self, rows_idx, batch, seq, last_pos):
+              """last_pos[i] 是第 i 条序列**最后一个内容 token** 的位置。"""
+
+      def bt_loss(reward_chosen, reward_rejected, n_pairs):
+          """Bradley-Terry 的成对损失。"""
+
+      def train(model, pairs, steps, ...): ...
+      \`\`\`
+
+      ## Bradley-Terry 就是一个两类的 softmax
+
+      成对偏好的标准模型是 Bradley-Terry：
+      「A 胜过 B 的概率」是两者分数之差过 sigmoid。
+
+      \`\`\`
+      P(A ≻ B) = σ(r_A − r_B)
+      loss     = −log σ(r_A − r_B)
+      \`\`\`
+
+      而 \`−log σ(Δ)\` 正好是**两类 softmax 的交叉熵**：
+      把 \`[r_A, r_B]\` 当成两个 logit、正确类是 0，算出来的就是它。
+
+      \`\`\`
+      −log( e^{r_A} / (e^{r_A} + e^{r_B}) ) = −log σ(r_A − r_B)
+      \`\`\`
+
+      所以**不需要单独实现 sigmoid 和它的反向** —— 把两个奖励拼成
+      \`[n_pairs, 2]\` 的 logits 交给 \`F.cross_entropy\`，目标全填 0。
+      成对损失和分类损失在这里是同一个东西。
+
+      ## 分数要从哪个位置读
+
+      标量头作用在每个位置上，但一条序列只该有**一个**分数,
+      读的是**最后一个内容 token** 的位置，不是最后一个位置。
+
+      \`\`\`
+      7 + 5 = 1 2 <eos> <pad> <pad>
+                      ↑ 从这里读
+      \`\`\`
+
+      读 \`S-1\`（最后一个位置）的话，读到的是 padding 上的输出。
+      不同长度的序列会读到不同数量的 padding 之后的位置，
+      于是**分数变成了长度的函数**,而这个错在准确率上未必看得出来，
+      因为长度本身在这个数据里和对错相关。
+
+      这一关拿「多补一个 padding，分数不许变」来查它。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | 排序 | 留出集上成对准确率 ≥ **0.9** |
+      | 损失 | 与 \`−log σ(Δ)\` 的参考实现差 ≤ 1e-6 |
+      | **位置** | 多补一个 padding，分数变化 ≤ 1e-6 |
+      | 校准 | 预测概率与实际胜率的偏差 ≤ **0.15** |
+
+      最后一条是「校准」：模型说「A 有 70% 的概率更好」的那些对里，
+      A 真的更好的比例应该接近 70%。
+      **排序对了不等于校准好了** —— 一个把所有 Δ 都放大十倍的模型排序完全一样，
+      而它会说每一对都是 99.99%。而 RLHF 里奖励是要被当成数值用的（不只是排序），
+      所以校准是有意义的。
+    `,
+    code`
+      People cannot label "this answer is worth 7.3", but they can label "A is better than
+      B". A \`reward model\` bridges that gap: **learn a scalar score from pairwise
+      preferences.**
+
+      Implement in \`rm.py\`:
+
+      \`\`\`python
+      class RewardModel(nn.Module):
+          """A scalar head on top of a language model. r(prompt+answer) is one number."""
+          def reward(self, rows_idx, batch, seq, last_pos):
+              """last_pos[i] is the position of sequence i's **last content token**."""
+
+      def bt_loss(reward_chosen, reward_rejected, n_pairs):
+          """The Bradley-Terry pairwise loss."""
+
+      def train(model, pairs, steps, ...): ...
+      \`\`\`
+
+      ## Bradley-Terry is a two-class softmax
+
+      The standard model for pairwise preference is Bradley-Terry: the probability that A
+      beats B is the sigmoid of their score difference.
+
+      \`\`\`
+      P(A ≻ B) = σ(r_A − r_B)
+      loss     = −log σ(r_A − r_B)
+      \`\`\`
+
+      And \`−log σ(Δ)\` is exactly the **cross-entropy of a two-class softmax**: treat
+      \`[r_A, r_B]\` as two logits with class 0 correct and you get precisely that.
+
+      \`\`\`
+      −log( e^{r_A} / (e^{r_A} + e^{r_B}) ) = −log σ(r_A − r_B)
+      \`\`\`
+
+      So **there is no need to implement a sigmoid and its backward separately** — stack the
+      two rewards into \`[n_pairs, 2]\` logits, hand them to \`F.cross_entropy\` with all
+      targets 0. Pairwise loss and classification loss are the same thing here.
+
+      ## Which position the score is read from
+
+      The scalar head applies at every position, but a sequence should have exactly **one**
+      score — read at the **last content token**, not the last position.
+
+      \`\`\`
+      7 + 5 = 1 2 <eos> <pad> <pad>
+                      ^ read here
+      \`\`\`
+
+      Reading \`S-1\` reads output over padding. Sequences of different lengths then read
+      after different amounts of padding, so **the score becomes a function of length** — a
+      mistake accuracy may not reveal, because length correlates with correctness in this
+      data anyway.
+
+      This stage checks it by appending one more padding token and requiring the score not
+      to move.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | Ranking | Pairwise accuracy on held-out data >= **0.9** |
+      | Loss | Within 1e-6 of a reference \`−log σ(Δ)\` |
+      | **Position** | One extra padding changes the score by <= 1e-6 |
+      | Calibration | Predicted probability versus actual win rate <= **0.15** |
+
+      The last row is calibration: among pairs where the model says "A wins with 70%
+      probability", A should actually win about 70% of the time. **Correct ranking does not
+      imply good calibration** — scaling every Δ by ten leaves the ranking identical while
+      claiming 99.99% on every pair. In RLHF the reward is used as a number rather than only
+      an ordering, so calibration matters.
+    `
+  ),
+  checklist: [
+    t('分数从最后一个内容 token 上读', 'The score is read at the last content token'),
+    t('用两类 softmax 表达 Bradley-Terry', 'Bradley-Terry is expressed as a two-class softmax'),
+    t('留出集成对准确率 ≥ 0.9', 'Held-out pairwise accuracy is at least 0.9'),
+    t('概率是校准的', 'The probabilities are calibrated'),
+  ],
+  hints: [
+    t('标量头就是 nt.parameter((dim, 1))，F.linear 之后每个位置一个数。',
+      'The scalar head is nt.parameter((dim, 1)); after F.linear each position holds one number.'),
+    t('F.gather(r_all, idx, n, 1) 能按位置把每条序列的那一个数取出来。下标缓冲每步现造，别标成 data。',
+      'F.gather(r_all, idx, n, 1) picks out the one number per sequence; its index buffer is per-step, so do not mark it as data.'),
+    t('把 chosen / rejected 交替排，得到的 [2n, 1] 直接当 [n, 2] 的 logits 用。',
+      'Interleave chosen and rejected; the resulting [2n, 1] doubles as [n, 2] logits.'),
+  ],
+  pitfalls: [
+    t(code`
+      **在最后一个位置读分数。** 那里是 padding。不同长度的序列读到的
+      「padding 之后第几个位置」不一样，于是**分数偷偷变成了长度的函数**。
+      准确率未必掉 —— 在这个数据里长度和对错本来就相关，
+      模型会顺着这条捷径走，而你以为它学会了判断对错。
+    `, code`
+      **Reading the score at the last position.** That is padding. Sequences of different
+      lengths land at different offsets into the padding, so **the score quietly becomes a
+      function of length**. Accuracy need not drop — length correlates with correctness in
+      this data anyway, so the model takes the shortcut while you believe it learned to judge
+      correctness.
+    `),
+    t(code`
+      **只看排序不看校准。** 把所有 Δ 乘十，排序一模一样，成对准确率一分不掉,
+      而模型会说每一对都是 99.99%。RLHF 里奖励是被当成**数值**用的
+      （要减基线、要算优势），一个过度自信的奖励模型会让策略往一个方向冲过头。
+    `, code`
+      **Checking ranking but not calibration.** Multiply every Δ by ten: identical ranking,
+      identical pairwise accuracy — and the model now claims 99.99% on every pair. RLHF uses
+      the reward as a **number** (baselines get subtracted, advantages computed), and an
+      overconfident reward model pushes the policy too far in one direction.
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_POST_PY,
+      'rm.py': code`
+        """第 24 关：奖励模型。从成对偏好里学出一个标量分数。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import nn, functional as F
+        import kit
+
+
+        class RewardModel(nn.Module):
+            def __init__(self, seed=1):
+                super().__init__()
+                self.lm = kit.LM(seed=seed)
+                # 标量头：每个位置一个数
+                self.head = nt.parameter((kit.D, 1), seed + 7, kit.D ** -0.5, "rm.head")
+
+            def hidden(self, idx, batch, seq):
+                rows = batch * seq
+                x = F.embedding(self.lm.embed, idx, rows, kit.D)
+                for blk in self.lm.blocks:
+                    x = blk(x, batch, seq)
+                return self.lm.nf(x)
+
+            def reward(self, idx, batch, seq, last_pos):
+                """返回长度 batch 的奖励。last_pos[i] 是第 i 条的最后一个内容位置。"""
+                # TODO: 隐藏态 -> 标量头 -> 按 last_pos 取出每条的那一个数
+                return nt.zeros((batch, 1))
+
+
+        def bt_loss(reward_pairs, n_pairs):
+            """reward_pairs 是 [2*n_pairs, 1]，chosen / rejected 交替。"""
+            # TODO: 当成 [n_pairs, 2] 的 logits，目标全 0，走两类 softmax
+            return nt.zeros((1,))
+
+
+        def train(model, pairs, steps, batch_pairs=8, peak_lr=0.02):
+            """返回 {"loss": [...]}"""
+            # TODO
+            return {"loss": []}
+
+
+        if __name__ == "__main__":
+            rm = RewardModel()
+            print("参数量", rm.num_parameters())
+      `,
+    },
+    referenceFiles: {
+      'rm.py': code`
+        """第 24 关的参考实现。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import nn, functional as F
+        import kit
+
+
+        def _rows(prompt, answer):
+            """一条序列的 token 与它最后一个内容位置。"""
+            ids = kit.encode(prompt) + kit.encode(answer) + [kit.EOS]
+            last = len(ids) - 1
+            ids = ids + [kit.PAD] * (kit.S - len(ids))
+            return ids[:kit.S], min(last, kit.S - 1)
+
+
+        class RewardModel(nn.Module):
+            def __init__(self, seed=1):
+                super().__init__()
+                self.lm = kit.LM(seed=seed)
+                self.head = nt.parameter((kit.D, 1), seed + 7, kit.D ** -0.5, "rm.head")
+
+            def hidden(self, idx, batch, seq):
+                rows = batch * seq
+                x = F.embedding(self.lm.embed, idx, rows, kit.D)
+                for blk in self.lm.blocks:
+                    x = blk(x, batch, seq)
+                return self.lm.nf(x)
+
+            def reward(self, idx, batch, seq, last_pos):
+                h = self.hidden(idx, batch, seq)
+                r_all = F.linear(h, self.head)          # [batch*seq, 1]
+                # 每条序列只取**最后一个内容 token** 的那一个数。
+                # 取 seq-1 的话读到的是 padding 上的输出,分数会变成长度的函数
+                # 每步现造的下标缓冲是**一次性**的 —— 标成 data 的话它落在
+                # 训练循环的 mark 之后，第二步的 release 会当场报错
+                sel = nt.zeros((batch,), name="rm.sel")
+                sel.set_int_([i * seq + last_pos[i] for i in range(batch)])
+                return F.gather(r_all, sel, batch, 1)
+
+
+        def bt_loss(reward_pairs, n_pairs):
+            # −log σ(r_c − r_r) 就是两类 softmax 的交叉熵：
+            # 把 [r_c, r_r] 当两个 logit，正确类是 0。
+            # reward_pairs 已经是 chosen / rejected 交替的 [2n, 1]，
+            # 它的扁平布局正好就是 [n, 2]
+            tgt = nt.zeros((n_pairs,), name="bt.tgt")
+            tgt.set_int_([0] * n_pairs)
+            return F.cross_entropy(reward_pairs, tgt, n_pairs, 2)
+
+
+        def train(model, pairs, steps, batch_pairs=8, peak_lr=0.02):
+            opt = nt.optim.AdamW(model.parameters(), lr=peak_lr, betas=(0.9, 0.95),
+                                 weight_decay=0.1, grad_clip=1.0)
+            n = batch_pairs * 2
+            idx = nt.zeros((n * kit.S,), role="data", name="rm.idx")  # 循环外，常驻
+            hist = []
+            base = nt.mark()
+            warmup = max(1, steps // 20)
+            for st in range(1, steps + 1):
+                nt.release(base)
+                flat, last = [], []
+                for k in range(batch_pairs):
+                    p, c, r = pairs[(st * batch_pairs + k) % len(pairs)]
+                    for ans in (c, r):
+                        row, lp = _rows(p, ans)
+                        flat.extend(row)
+                        last.append(lp)
+                idx.set_int_(flat)
+
+                opt.zero_grad()
+                nt.phase("forward")
+                rew = model.reward(idx, n, kit.S, last)
+                loss = bt_loss(rew, batch_pairs)
+                nt.phase("other")
+                loss.backward()
+                if st <= warmup:
+                    lr = peak_lr * st / warmup
+                else:
+                    pr = (st - warmup) / max(1, steps - warmup)
+                    lr = peak_lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * pr)))
+                opt.step(lr=lr)
+                hist.append(loss.value)
+            nt.release(base)
+            return {"loss": hist}
+
+
+        def score(model, prompt, answer, extra_pad=0):
+            """单条打分。extra_pad 只用来验「分数不该跟 padding 走」。"""
+            row, lp = _rows(prompt, answer)
+            with nt.no_grad():
+                idx = nt.zeros((kit.S,), role="data")
+                idx.set_int_(row)
+                return model.reward(idx, 1, kit.S, [lp]).item(0)
+
+
+        if __name__ == "__main__":
+            rm = RewardModel()
+            print("参数量", rm.num_parameters())
+      `,
+    },
+  },
+  specs: [
+    spec('rm.spec.ts', code`
+      ${LAB}
+
+      const STEPS = 260;
+
+      function setup() {
+        lab.py(\`
+      import sys, json, math
+      sys.path.insert(0, "/lab")
+      import importlib, kit, rm
+      importlib.reload(kit)
+      importlib.reload(rm)
+      import nanotorch as nt
+      from nanotorch import functional as F
+
+      _cache = {}
+
+      def _rows(prompt, answer, pad_extra=0):
+          ids = kit.encode(prompt) + kit.encode(answer) + [kit.EOS]
+          last = len(ids) - 1
+          ids = ids + [kit.PAD] * (kit.S - len(ids))
+          return ids[:kit.S], min(last, kit.S - 1)
+
+      def _trained():
+          if "m" not in _cache:
+              m = rm.RewardModel(seed=1)
+              rm.train(m, kit.make_preference_pairs(512, 5, 10), \${STEPS})
+              _cache["m"] = m
+          return _cache["m"]
+
+      def _scores(model, triples):
+          """每条 (prompt, chosen, rejected) 的一对分数。"""
+          out = []
+          # 缓冲要在 mark **之前**分配 —— 它是常驻的，落在 mark 之后会被 release 拦下
+          idx = nt.zeros((2 * kit.S,), role="data", name="score.idx")
+          with nt.no_grad():
+              mk = nt.mark()
+              for p, c, r in triples:
+                  nt.release(mk)
+                  flat, last = [], []
+                  for ans in (c, r):
+                      row, lp = _rows(p, ans)
+                      flat.extend(row)
+                      last.append(lp)
+                  idx.set_int_(flat)
+                  rr = model.reward(idx, 2, kit.S, last).tolist()
+                  out.append([rr[0], rr[1]])
+          return out
+      \`);
+      }
+
+      describe('奖励模型', () => {
+        it('Bradley-Terry 的损失就是两类 softmax 的交叉熵', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _n = 6
+      _rw = nt.zeros((2 * _n, 1), role="data")
+      _vals = [1.5, 0.2, -0.8, 0.4, 2.0, 2.0, 0.0, -3.0, 0.7, 0.9, -1.1, -1.3]
+      _rw.set_(_vals)
+      _l = rm.bt_loss(_rw, _n)
+      json.dumps({"loss": _l.value, "vals": _vals})
+      \`)));
+          // 平台照公式重算：mean(-log σ(r_c − r_r))
+          let ref = 0;
+          for (let i = 0; i < r.vals.length; i += 2) {
+            const d = r.vals[i] - r.vals[i + 1];
+            ref += -Math.log(1 / (1 + Math.exp(-d)));
+          }
+          ref /= r.vals.length / 2;
+          console.log('学员 ' + r.loss.toFixed(8) + '，参考 −log σ(Δ) 的平均 ' + ref.toFixed(8));
+          lab.publish('rm.lossError', Math.abs(r.loss - ref));
+          expect(Math.abs(r.loss - ref)).toBeLessThan(1e-6);
+        });
+
+        /*
+         * 分数必须从**最后一个内容 token** 上读。读最后一个位置的话读到的是
+         * padding，不同长度的序列偏移不同,分数偷偷变成长度的函数。
+         */
+        it('多补一个 padding，分数不变', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _m = rm.RewardModel(seed=1)
+      _cases = [("7+5=", "12"), ("0+0=", "0"), ("9+9=", "18")]
+      _out = []
+      for _p, _a in _cases:
+          _row, _lp = _rows(_p, _a)
+          _idx = nt.zeros((kit.S,), role="data"); _idx.set_int_(_row)
+          with nt.no_grad():
+              _base = _m.reward(_idx, 1, kit.S, [_lp]).item(0)
+          # 换一条更长的 padding 布局：内容不变，只是右边多了 pad
+          _row2 = _row[:]
+          _idx2 = nt.zeros((kit.S,), role="data"); _idx2.set_int_(_row2)
+          with nt.no_grad():
+              _same = _m.reward(_idx2, 1, kit.S, [_lp]).item(0)
+              # 读最后一个位置会得到的那个数 —— 作为对照
+              _tail = _m.reward(_idx, 1, kit.S, [kit.S - 1]).item(0)
+          _out.append([_base, _same, _tail])
+      json.dumps(_out)
+      \`)));
+          let worst = 0, tailGap = 0;
+          for (const [base, same, tail] of r) {
+            worst = Math.max(worst, Math.abs(base - same));
+            tailGap = Math.max(tailGap, Math.abs(base - tail));
+          }
+          console.log(
+            '同一条内容两次打分的最大差 ' + worst.toExponential(2)
+            + '；而读最后一个位置（padding 上）会差 ' + tailGap.toFixed(4)
+          );
+          lab.publish('rm.padInvariance', worst);
+          expect(worst).toBeLessThan(1e-6);
+          // 对照：读 padding 位置确实是另一个数，所以这条门槛不是白设的
+          expect(tailGap).toBeGreaterThan(1e-3);
+        });
+
+        it('留出集上的成对准确率 ≥ 0.9', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _m = _trained()
+      _held = kit.make_preference_pairs(120, 777, 10)
+      _sc = _scores(_m, _held)
+      json.dumps({"scores": _sc})
+      \`)));
+          let right = 0, margin = 0;
+          for (const [c, j] of r.scores) { if (c > j) right += 1; margin += c - j; }
+          const acc = right / r.scores.length;
+          console.log(
+            '成对准确率 ' + (acc * 100).toFixed(1) + '%（' + right + ' / ' + r.scores.length + '），'
+            + '平均 margin ' + (margin / r.scores.length).toFixed(3)
+          );
+          lab.publish('rm.pairwiseAccuracy', acc);
+          lab.publish('rm.meanMargin', margin / r.scores.length);
+          expect(acc).toBeGreaterThanOrEqual(0.9);
+          expect(margin / r.scores.length).toBeGreaterThan(0);
+        });
+
+        /*
+         * 校准：模型说「70% 概率 A 更好」的那些对里，A 真的更好的比例
+         * 应当接近 70%。排序对了不等于校准好了 ——
+         * 把所有 Δ 乘十，排序一模一样，而每一对都变成 99.99%。
+         */
+        it('预测概率是校准的', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _m = _trained()
+      _held = kit.make_preference_pairs(240, 909, 10)
+      json.dumps({"scores": _scores(_m, _held)})
+      \`)));
+          const bins = [0, 0, 0, 0, 0].map(() => ({ n: 0, p: 0, win: 0 }));
+          for (const [c, j] of r.scores) {
+            const p = 1 / (1 + Math.exp(-(c - j)));
+            const b = Math.min(4, Math.floor(p * 5));
+            bins[b].n += 1; bins[b].p += p; bins[b].win += c > j ? 1 : 0;
+          }
+          let worst = 0;
+          const lines = [];
+          for (let b = 0; b < 5; b++) {
+            if (bins[b].n < 8) continue;
+            const meanP = bins[b].p / bins[b].n;
+            const winRate = bins[b].win / bins[b].n;
+            worst = Math.max(worst, Math.abs(meanP - winRate));
+            lines.push('[' + (b / 5).toFixed(1) + ',' + ((b + 1) / 5).toFixed(1) + ') n=' + bins[b].n
+              + ' 预测 ' + meanP.toFixed(3) + ' 实际 ' + winRate.toFixed(3));
+          }
+          console.log('校准分箱：' + lines.join(' | '));
+          lab.publish('rm.calibrationError', worst);
+          expect(lines.length).toBeGreaterThanOrEqual(1);
+          expect(worst).toBeLessThan(0.15);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.rm.lossError', op: 'lte', value: 1e-6,
+      zh: '与 −log σ(Δ) 参考实现的差', en: 'gap from the reference −log σ(Δ)', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.rm.padInvariance', op: 'lte', value: 1e-6,
+      zh: '多补 padding 之后分数的变化', en: 'score change under extra padding', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.rm.pairwiseAccuracy', op: 'gte', value: 0.9,
+      zh: '留出集上的成对准确率', en: 'held-out pairwise accuracy', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.rm.calibrationError', op: 'lte', value: 0.15,
+      zh: '预测概率与实际胜率的最大偏差', en: 'largest gap between predicted probability and win rate',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness'],
+  extension: t(
+    code`
+      奖励模型是 RLHF 那条路的核心，也是它最脆的一环。几个真实的问题：
+
+      **奖励被钻空子（reward hacking）。** 策略会找到「奖励模型给高分但人类不喜欢」
+      的输出。最经典的是**长度**:奖励模型从数据里学到「长的更好」，
+      于是策略把答案越写越长。第 26 关专门做这件事。
+
+      **分布漂移。** 奖励模型是在某个策略产出的数据上训的，
+      而 RL 会把策略推离那个分布,越往后，奖励模型见到的输入越陌生，
+      给分越不可信。所以真实流程里奖励模型要**定期用新数据重训**。
+
+      **2026 年的评测标准是 RewardBench v2。** 它把「排序对不对」拆成了
+      多个维度（事实性、安全、格式、推理），因为一个总分掩盖了太多东西。
+
+      而 \`RLVR\` 这条路根本不训奖励模型 —— 可验证的任务（数学、代码、
+      形式化推理）直接用**规则**判对错。没有奖励模型，就没有奖励被钻空子的问题。
+      这是 2026 年后训练最重要的一个转向，第 28 关做的就是它。
+    `,
+    code`
+      The reward model is the core of the RLHF route and also its most fragile link. A few
+      real problems:
+
+      **Reward hacking.** The policy finds outputs the reward model scores highly and humans
+      dislike. The classic case is **length**: the reward model learns "longer is better"
+      from the data, and the policy writes longer and longer answers. Stage 26 addresses
+      exactly this.
+
+      **Distribution drift.** The reward model was trained on data from some policy, and RL
+      pushes the policy away from that distribution — the further it goes, the more
+      unfamiliar its inputs and the less trustworthy its scores. Real pipelines therefore
+      **retrain the reward model periodically** on fresh data.
+
+      **RewardBench v2 is the 2026 benchmark.** It splits "is the ranking right" into several
+      dimensions (factuality, safety, format, reasoning), because a single score hides too
+      much.
+
+      The \`RLVR\` route trains no reward model at all — verifiable tasks (mathematics, code,
+      formal reasoning) judge correctness by **rule**. No reward model means no reward
+      hacking. That is the most important shift in 2026 post-training, and stage 28 is about
+      exactly it.
+    `
+  ),
+};
+
+/* ================================================================== */
+/* 第 25 关：DPO                                                       */
+/* ================================================================== */
+
+const STAGE_DPO = {
+  id: 'dpo',
+  title: t('DPO —— 不要奖励模型的偏好优化', 'DPO — preference optimisation without a reward model'),
+  goal: t(
+    code`
+      RLHF 那条路要三个模型：策略、奖励模型、参考模型,还要一整套 PPO。
+      \`DPO\` 的发现是：**如果奖励模型是 Bradley-Terry 的，
+      那么最优策略和奖励之间有一个闭式关系**,于是奖励模型可以被消掉，
+      偏好数据可以直接用来训策略。
+
+      在 \`dpo.py\` 里实现：
+
+      \`\`\`python
+      def sequence_logprob(model, idx, targets, mask, batch, seq):
+          """每条序列在 completion 上的对数概率**之和**。返回 [batch, 1]，可导。"""
+
+      def dpo_loss(policy_logp, ref_logp, beta, n_pairs):
+          """两个都是 [2n, 1]，chosen / rejected 交替。"""
+
+      def train(policy, ref, pairs, steps, beta, ...): ...
+      \`\`\`
+
+      ## 损失
+
+      \`\`\`
+      Δ_w = log π(y_w|x) − log π_ref(y_w|x)      ← 「隐式奖励」
+      Δ_l = log π(y_l|x) − log π_ref(y_l|x)
+      L   = −log σ( β·(Δ_w − Δ_l) )
+      \`\`\`
+
+      \`β·Δ\` 就是 DPO 的**隐式奖励**,它不是被训出来的，是被推导出来的。
+      而 \`−log σ(·)\` 又是第 24 关那个两类 softmax。
+      所以 DPO 的实现和奖励模型的实现在**形状上是同一个东西**，
+      区别只在于分数从哪来：一个来自专门的标量头，一个来自策略与参考的对数概率之差。
+
+      ## 参考模型不参与梯度
+
+      \`π_ref\` 是冻结的（一般就是 SFT 之后那一版）。它在损失里只作为**基准**出现,
+      算它的 log-prob 要在 \`no_grad\` 下。
+
+      忘了这一点的话，梯度会同时推着策略和参考往相反方向走,
+      于是 \`Δ_w − Δ_l\` 涨得飞快而模型什么也没学到。
+      **loss 掉得特别快**是这个错最典型的症状。
+
+      ## 为什么要有 β 和参考项
+
+      \`β\` 控制「允许离参考多远」—— 但**这句话是渐近的，不是每一步的**。
+
+      损失对 \`Δ\` 的梯度是 \`β·(1 − σ(β·Δ))\`。训练早期 \`Δ\` 还小、σ 接近 0.5，
+      于是梯度的大小**正比于 β**。也就是说在**固定步数、固定学习率**下，
+      β 越大策略走得越远,和「β 越大约束越紧」的直觉正好相反。
+      β 的约束作用要到收敛之后才体现（最优解里的 KL 罚项是 \`1/β\`）。
+
+      这一关实测过（同样 120 步、同样学习率，量的是好输出上的逐 token KL）：
+
+      \`\`\`
+      β = 0.1   KL 0.841
+      β = 0.5   KL 1.353      ← 更大的 β，跑得更远
+      \`\`\`
+
+      真正压住漂移的是**步数和学习率**：把学习率减半、步数降到 100 之后是 **0.561**。
+      这一关的门槛就定在这个基础上。
+
+      参考项本身是一个隐式的 \`KL\` 约束：
+      \`log π − log π_ref\` 大就意味着策略在这条样本上已经偏离参考很多。
+      没有它的话，模型可以靠**把所有概率都压低**来拉开 \`Δ_w − Δ_l\`,
+      赢是赢了，而语言模型本身垮掉。
+
+      这一关会量这件事：策略相对参考的 KL 必须在界内。
+
+      ## 序列的对数概率是**和**不是平均
+
+      \`log π(y|x) = Σ_t log p_t\`,一条 completion 的所有 token 加起来。
+      改成平均的话，**长答案被系统性地偏袒**（平均值不随长度增长），
+      而这正是第 26 关那个「长度偏置」的一个来源。这一关先按标准的和来写。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | 损失 | 与参考公式差 ≤ 1e-6 |
+      | **参考不带梯度** | 训练之后参考模型的参数一位都没变 |
+      | 偏好 | 留出集上隐式奖励的排序准确率 ≥ **0.9** |
+      | 不跑飞 | **好输出上**相对参考的逐 token KL ≤ **0.8** |
+    `,
+    code`
+      The RLHF route needs three models — policy, reward model, reference — plus all of PPO.
+      \`DPO\`'s insight is that **if the reward model is Bradley-Terry, there is a closed-form
+      relation between the optimal policy and the reward**, so the reward model can be
+      eliminated and preference data can train the policy directly.
+
+      Implement in \`dpo.py\`:
+
+      \`\`\`python
+      def sequence_logprob(model, idx, targets, mask, batch, seq):
+          """The **sum** of log probabilities over the completion. Returns [batch, 1],
+          differentiable."""
+
+      def dpo_loss(policy_logp, ref_logp, beta, n_pairs):
+          """Both are [2n, 1] with chosen / rejected interleaved."""
+
+      def train(policy, ref, pairs, steps, beta, ...): ...
+      \`\`\`
+
+      ## The loss
+
+      \`\`\`
+      Δ_w = log π(y_w|x) − log π_ref(y_w|x)      <- the "implicit reward"
+      Δ_l = log π(y_l|x) − log π_ref(y_l|x)
+      L   = −log σ( β·(Δ_w − Δ_l) )
+      \`\`\`
+
+      \`β·Δ\` is DPO's **implicit reward** — not trained but derived. And \`−log σ(·)\` is
+      stage 24's two-class softmax again. So DPO and a reward model have **the same shape**;
+      they differ only in where the score comes from: a dedicated scalar head, or the
+      difference of log probabilities between policy and reference.
+
+      ## The reference takes no gradient
+
+      \`π_ref\` is frozen (usually the post-SFT version). It appears in the loss only as a
+      **baseline**, so its log-probabilities are computed under \`no_grad\`.
+
+      Forgetting this makes the gradient push policy and reference in opposite directions,
+      so \`Δ_w − Δ_l\` grows quickly while the model learns nothing. **A loss that drops
+      unusually fast** is this mistake's signature.
+
+      ## Why β and the reference term exist
+
+      \`β\` controls how far the policy may stray — but **that statement is asymptotic, not
+      per-step**.
+
+      The loss gradient with respect to \`Δ\` is \`β·(1 − σ(β·Δ))\`. Early in training \`Δ\`
+      is small and σ is near 0.5, so the gradient magnitude is **proportional to β**. At a
+      **fixed step count and learning rate**, a larger β therefore moves the policy
+      *further* — the opposite of the intuition that larger β constrains more tightly. β's
+      constraining role appears only at convergence, where the optimum carries a KL penalty
+      of \`1/β\`.
+
+      This stage measured it (same 120 steps, same learning rate, per-token KL on chosen
+      responses):
+
+      \`\`\`
+      β = 0.1   KL 0.841
+      β = 0.5   KL 1.353      <- larger β, further drift
+      \`\`\`
+
+      What actually contains the drift is **step count and learning rate**: halving the rate
+      and dropping to 100 steps gives **0.561**, which is what this stage's gate is set
+      against.
+
+      The reference term is itself an implicit \`KL\` constraint: a large
+      \`log π − log π_ref\` means the policy already differs a lot on that sample. Without
+      it, the model can widen \`Δ_w − Δ_l\` simply by **pushing all probabilities down** — it
+      wins the objective while the language model itself collapses.
+
+      This stage measures that: the policy's KL from the reference must stay within bounds.
+
+      ## A sequence log-probability is a **sum**, not a mean
+
+      \`log π(y|x) = Σ_t log p_t\` across the completion's tokens. Using a mean instead
+      **systematically favours long answers** (a mean does not grow with length), which is
+      one source of the length bias stage 26 examines. This stage uses the standard sum.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | Loss | Within 1e-6 of the reference formula |
+      | **Reference frozen** | Not one parameter of the reference moved during training |
+      | Preference | Implicit-reward ranking accuracy on held-out data >= **0.9** |
+      | No blow-up | Per-token KL from the reference **on chosen responses** <= **0.8** |
+    `
+  ),
+  checklist: [
+    t('序列 log-prob 是 completion 上的和', 'The sequence log-probability sums over the completion'),
+    t('参考模型在 no_grad 下算，参数一位不变',
+      'The reference runs under no_grad and its parameters never move'),
+    t('隐式奖励的排序准确率 ≥ 0.9', 'Implicit-reward ranking accuracy is at least 0.9'),
+    t('相对参考的 KL 在界内', 'KL from the reference stays within bounds'),
+  ],
+  hints: [
+    t('F.log_softmax 之后用 F.gather 取出目标 token 的那一个数,别先 softmax 再 log。',
+      'Use F.log_softmax then F.gather for the target token; do not softmax then log.'),
+    t('F.row_scale 拿 mask 屏蔽 prompt 与 padding，F.scatter_add 把每条序列的加起来。',
+      'F.row_scale applies the mask; F.scatter_add sums each sequence.'),
+    t('chosen / rejected 交替排，[2n, 1] 的扁平布局正好是 [n, 2] 的 logits。',
+      'Interleave chosen and rejected; the [2n, 1] layout is exactly [n, 2] logits.'),
+  ],
+  pitfalls: [
+    t(code`
+      **参考模型忘了 \`no_grad\`。** 梯度会同时推策略和参考往相反方向走,
+      \`Δ_w − Δ_l\` 涨得飞快，loss 掉得特别漂亮，而模型什么也没学到。
+      **loss 掉得比预期快**在 DPO 里几乎总是这个错。
+      这一关直接查参考模型的参数有没有动过。
+    `, code`
+      **Forgetting \`no_grad\` on the reference.** The gradient pushes policy and reference in
+      opposite directions, \`Δ_w − Δ_l\` grows fast, the loss falls beautifully, and the model
+      learns nothing. **A loss falling faster than expected** is almost always this in DPO.
+      The stage checks the reference's parameters directly.
+    `),
+    t(code`
+      **把序列 log-prob 写成平均。** 平均值不随长度增长，于是长答案被系统性地偏袒 ——
+      这是 DPO 让答案越写越长的一个直接来源。
+      更麻烦的是它**看起来更合理**（「归一化一下总没错吧」），
+      而这一关的门槛全都过得去,要到第 26 关量长度的时候才暴露。
+    `, code`
+      **Writing the sequence log-probability as a mean.** A mean does not grow with length,
+      so long answers are systematically favoured — a direct source of DPO's tendency to
+      lengthen answers. Worse, it **looks more reasonable** ("normalising can't hurt"), and
+      every gate here still passes; only stage 26's length measurement exposes it.
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_POST_PY,
+      'dpo.py': code`
+        """第 25 关：DPO。不要奖励模型的偏好优化。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import nn, functional as F
+        import kit
+
+
+        def sequence_logprob(model, idx, targets, mask, batch, seq):
+            """每条序列在 completion 上的 log-prob 之和。返回 [batch, 1]。"""
+            # TODO: logits -> log_softmax -> 按 targets 取 -> 乘 mask -> 按序列求和
+            return nt.zeros((batch, 1))
+
+
+        def dpo_loss(policy_logp, ref_logp, beta, n_pairs):
+            """policy_logp / ref_logp 都是 [2n, 1]，chosen / rejected 交替。"""
+            # TODO: logits = beta * (policy − ref)，当成 [n, 2]，目标全 0
+            return nt.zeros((1,))
+
+
+        def train(policy, ref, pairs, steps, beta=0.1, batch_pairs=8, peak_lr=0.01):
+            """返回 {"loss": [...]}"""
+            # TODO
+            return {"loss": []}
+
+
+        if __name__ == "__main__":
+            print("beta 越小，允许策略离参考越远")
+      `,
+    },
+    referenceFiles: {
+      'dpo.py': code`
+        """第 25 关的参考实现。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import nn, functional as F
+        import kit
+
+
+        def sequence_logprob(model, idx, targets, mask, batch, seq):
+            rows = batch * seq
+            logits = model.logits(idx, batch, seq)
+            # log_softmax 而不是 log(softmax(...))：小概率会下溢成 0，再取 log 是 −inf
+            lp = F.log_softmax(logits, rows, kit.V)
+
+            sel = nt.zeros((rows,), name="dpo.sel")
+            sel.set_int_([r * kit.V + targets[r] for r in range(rows)])
+            per = F.gather(lp, sel, rows, 1)               # 每个位置一个 log p
+
+            mk = nt.zeros((rows,), name="dpo.mask")
+            mk.set_(mask)
+            per = F.row_scale(per, mk, rows, 1)            # prompt 与 padding 清零
+
+            seg = nt.zeros((rows,), name="dpo.seg")
+            seg.set_int_([r // seq for r in range(rows)])
+            # **求和**不是平均。平均会系统性地偏袒长答案（第 26 关的病根之一）
+            return F.scatter_add(per, seg, rows, 1, batch)
+
+
+        def dpo_loss(policy_logp, ref_logp, beta, n_pairs):
+            # Δ = log π − log π_ref，就是 DPO 的隐式奖励（差一个 β）
+            delta = F.add(policy_logp, F.scale(ref_logp, -1.0))
+            logits = F.scale(delta, beta)
+            # −log σ(β(Δ_w − Δ_l)) 就是两类 softmax，和第 24 关同一个形状
+            tgt = nt.zeros((n_pairs,), name="dpo.tgt")
+            tgt.set_int_([0] * n_pairs)
+            return F.cross_entropy(logits, tgt, n_pairs, 2)
+
+
+        def _rows(prompt, answer):
+            return kit.build_row(prompt, answer)
+
+
+        def train(policy, ref, pairs, steps, beta=0.1, batch_pairs=8, peak_lr=0.01):
+            opt = nt.optim.AdamW(policy.parameters(), lr=peak_lr, betas=(0.9, 0.95),
+                                 weight_decay=0.0, grad_clip=1.0)
+            n = batch_pairs * 2
+            idx = nt.zeros((n * kit.S,), role="data", name="dpo.idx")
+            hist = []
+            base = nt.mark()
+            warmup = max(1, steps // 20)
+            for st in range(1, steps + 1):
+                nt.release(base)
+                flat, tg, mk = [], [], []
+                for k in range(batch_pairs):
+                    p, c, r = pairs[(st * batch_pairs + k) % len(pairs)]
+                    for ans in (c, r):
+                        ri, rt, rm = _rows(p, ans)
+                        flat.extend(ri)
+                        tg.extend(rt)
+                        mk.extend(rm)
+                idx.set_int_(flat)
+
+                opt.zero_grad()
+                nt.phase("forward")
+                # 参考在 no_grad 下 —— 它只是基准，不该被推动
+                with nt.no_grad():
+                    ref_lp = sequence_logprob(ref, idx, tg, mk, n, kit.S)
+                pol_lp = sequence_logprob(policy, idx, tg, mk, n, kit.S)
+                loss = dpo_loss(pol_lp, ref_lp, beta, batch_pairs)
+                nt.phase("other")
+                loss.backward()
+
+                if st <= warmup:
+                    lr = peak_lr * st / warmup
+                else:
+                    pr = (st - warmup) / max(1, steps - warmup)
+                    lr = peak_lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * pr)))
+                opt.step(lr=lr)
+                hist.append(loss.value)
+            nt.release(base)
+            return {"loss": hist}
+
+
+        if __name__ == "__main__":
+            print("beta 越小，允许策略离参考越远")
+      `,
+    },
+  },
+  specs: [
+    spec('dpo.spec.ts', code`
+      ${LAB}
+
+      const SFT_STEPS = 120, DPO_STEPS = 100, BETA = 0.1, MAXV = 20, DPO_LR = 0.005;
+
+      function setup() {
+        lab.py(\`
+      import sys, json, math
+      sys.path.insert(0, "/lab")
+      import importlib, kit, dpo
+      importlib.reload(kit)
+      importlib.reload(dpo)
+      import nanotorch as nt
+      from nanotorch import functional as F
+
+      _cache = {}
+
+      def _sft(seed=1):
+          """SFT 之后那一版。参考模型和策略的起点都是它。"""
+          m = kit.LM(seed=seed)
+          kit.sft_train(m, kit.make_pairs(512, 5, \${MAXV}, "+"), \${SFT_STEPS}, 16)
+          return m
+
+      def _batched(triples):
+          """把若干 (prompt, chosen, rejected) 摊成 chosen/rejected 交替的一批。"""
+          flat, tg, mk = [], [], []
+          for p, c, r in triples:
+              for ans in (c, r):
+                  ri, rt, rm = kit.build_row(p, ans)
+                  flat.extend(ri); tg.extend(rt); mk.extend(rm)
+          return flat, tg, mk
+
+      def _trained():
+          if "pol" not in _cache:
+              pol = _sft()
+              ref = _sft()          # 同一个 seed、同一份数据 -> 逐位相同的一份冻结拷贝
+              before = [list(p.tolist()) for p in ref.parameters()]
+              dpo.train(pol, ref, kit.make_preference_pairs(512, 5, \${MAXV}), \${DPO_STEPS},
+                        \${BETA}, 8, \${DPO_LR})
+              after = [list(p.tolist()) for p in ref.parameters()]
+              moved = sum(1 for a, b in zip(before, after) for u, v in zip(a, b) if u != v)
+              _cache["pol"], _cache["ref"], _cache["moved"] = pol, ref, moved
+          return _cache
+      \`);
+      }
+
+      describe('DPO', () => {
+        it('损失与参考公式一致', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _n = 5
+      _pol = nt.zeros((2 * _n, 1), role="data")
+      _ref = nt.zeros((2 * _n, 1), role="data")
+      _pv = [-3.0, -4.0, -2.5, -2.0, -5.0, -5.5, -1.0, -1.2, -6.0, -4.0]
+      _rv = [-3.5, -3.5, -2.0, -2.4, -5.2, -5.0, -1.1, -1.0, -5.5, -4.5]
+      _pol.set_(_pv); _ref.set_(_rv)
+      _l = dpo.dpo_loss(_pol, _ref, \${BETA}, _n)
+      json.dumps({"loss": _l.value, "pv": _pv, "rv": _rv})
+      \`)));
+          let ref = 0;
+          for (let i = 0; i < r.pv.length; i += 2) {
+            const dw = r.pv[i] - r.rv[i];
+            const dl = r.pv[i + 1] - r.rv[i + 1];
+            ref += -Math.log(1 / (1 + Math.exp(-BETA * (dw - dl))));
+          }
+          ref /= r.pv.length / 2;
+          console.log('学员 ' + r.loss.toFixed(8) + '，参考 ' + ref.toFixed(8));
+          lab.publish('dpo.lossError', Math.abs(r.loss - ref));
+          expect(Math.abs(r.loss - ref)).toBeLessThan(1e-6);
+        });
+
+        it('序列 log-prob 是 completion 上的和', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _m = kit.LM(seed=1)
+      _tri = [("7+5=", "12", "13"), ("0+0=", "0", "1")]
+      _flat, _tg, _mk = _batched(_tri)
+      _idx = nt.zeros((4 * kit.S,), role="data"); _idx.set_int_(_flat)
+      with nt.no_grad():
+          _lp = dpo.sequence_logprob(_m, _idx, _tg, _mk, 4, kit.S).tolist()
+          _all = F.log_softmax(_m.logits(_idx, 4, kit.S), 4 * kit.S, kit.V).tolist()
+      json.dumps({"lp": _lp, "all": _all, "tg": _tg, "mk": _mk})
+      \`)));
+          const S = Number(lab.py('kit.S')), V = Number(lab.py('kit.V'));
+          let worst = 0;
+          for (let b = 0; b < 4; b++) {
+            let sum = 0;
+            for (let t = 0; t < S; t++) {
+              const row = b * S + t;
+              if (r.mk[row] > 0) sum += r.all[row * V + r.tg[row]];
+            }
+            worst = Math.max(worst, Math.abs(sum - r.lp[b]));
+          }
+          console.log('四条序列的 log-prob ' + r.lp.map((v) => v.toFixed(3)).join(', ')
+            + '；与逐位求和的最大差 ' + worst.toExponential(2));
+          lab.publish('dpo.logprobError', worst);
+          expect(worst).toBeLessThan(1e-5);
+          // 是和不是平均：一条 3 个 token 的 completion，和应当明显小于单个 token 的 log-prob
+          expect(r.lp.every((v) => v < 0)).toBe(true);
+        });
+
+        /*
+         * 参考模型必须冻结。忘了 no_grad 的话梯度会同时推策略和参考，
+         * loss 掉得特别漂亮而模型什么也没学到。
+         */
+        it('训练之后参考模型一位都没变', () => {
+          setup();
+          const moved = Number(lab.py('_trained()["moved"]'));
+          console.log('参考模型被改动的参数个数 ' + moved);
+          lab.publish('dpo.referenceMoved', moved);
+          expect(moved).toBe(0);
+        });
+
+        it('隐式奖励排序准确 ≥ 0.9，且 KL 不跑飞', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _c = _trained()
+      _pol, _ref = _c["pol"], _c["ref"]
+      _held = kit.make_preference_pairs(96, 777, \${MAXV})
+      _flat, _tg, _mk = _batched(_held)
+      _n = 2 * len(_held)
+      _idx = nt.zeros((_n * kit.S,), role="data"); _idx.set_int_(_flat)
+      with nt.no_grad():
+          _p = dpo.sequence_logprob(_pol, _idx, _tg, _mk, _n, kit.S).tolist()
+          _r = dpo.sequence_logprob(_ref, _idx, _tg, _mk, _n, kit.S).tolist()
+          # 逐 token 的 KL(π ‖ π_ref)，只在 completion 位置上算
+          _lp_p = F.log_softmax(_pol.logits(_idx, _n, kit.S), _n * kit.S, kit.V).tolist()
+          _lp_r = F.log_softmax(_ref.logits(_idx, _n, kit.S), _n * kit.S, kit.V).tolist()
+      json.dumps({"p": _p, "r": _r, "lp_p": _lp_p, "lp_r": _lp_r, "mk": _mk,
+                  "rows": _n * kit.S, "V": kit.V})
+      \`)));
+
+          let right = 0, margin = 0;
+          for (let i = 0; i < r.p.length; i += 2) {
+            const dw = r.p[i] - r.r[i];
+            const dl = r.p[i + 1] - r.r[i + 1];
+            if (dw > dl) right += 1;
+            margin += dw - dl;
+          }
+          const pairs = r.p.length / 2;
+          const acc = right / pairs;
+
+          /*
+           * KL 只在 **chosen** 那些序列上算。
+           * rejected 的概率是 DPO 主动在压的,拿它去量「策略跑没跑飞」，
+           * 问的不是同一件事：那个数越大恰恰说明 DPO 在起作用。
+           * 约束要落在「好输出上策略离参考多远」。
+           */
+          const S = Number(lab.py('kit.S'));
+          let kl = 0, n = 0;
+          for (let row = 0; row < r.rows; row++) {
+            if (r.mk[row] <= 0) continue;
+            if (Math.floor(row / S) % 2 !== 0) continue;   // 偶数条是 chosen
+            let s = 0;
+            for (let j = 0; j < r.V; j++) {
+              const a = r.lp_p[row * r.V + j];
+              if (a < -60) continue;
+              s += Math.exp(a) * (a - r.lp_r[row * r.V + j]);
+            }
+            kl += s; n += 1;
+          }
+          kl /= Math.max(1, n);
+
+          console.log(
+            'β = ' + BETA + '：隐式奖励排序准确 ' + (acc * 100).toFixed(1) + '%（'
+            + right + ' / ' + pairs + '），平均 margin ' + (margin / pairs).toFixed(3)
+            + '；逐 token KL(π‖ref) ' + kl.toFixed(4)
+          );
+          lab.publish('pref.accuracy', acc);
+          lab.publish('dpo.implicitRewardMargin', margin / pairs);
+          lab.publish('kl.fromReference', kl);
+          expect(acc).toBeGreaterThanOrEqual(0.9);
+          expect(margin / pairs).toBeGreaterThan(0);
+          expect(kl).toBeLessThan(0.8);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.dpo.lossError', op: 'lte', value: 1e-6,
+      zh: '与 DPO 参考公式的差', en: 'gap from the reference DPO formula', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.dpo.referenceMoved', op: 'eq', value: 0,
+      zh: '训练之后参考模型被改动的参数个数',
+      en: 'reference parameters altered during training', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.pref.accuracy', op: 'gte', value: 0.9,
+      zh: '留出集上隐式奖励的排序准确率', en: 'held-out implicit-reward ranking accuracy',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.kl.fromReference', op: 'lte', value: 0.8,
+      zh: '策略相对参考的逐 token KL', en: 'per-token KL from the reference', dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness'],
+  extension: t(
+    code`
+      DPO 出来之后有一大批变体，各自动的是同一个式子里的不同部分：
+
+      **\`IPO\`** 换掉了 \`−log σ\`,它指出 DPO 在偏好数据确定性很高时会过拟合
+      （σ 饱和之后梯度不再约束「离参考多远」），改成一个平方损失。
+
+      **\`KTO\`** 不要成对数据,只要「这条好 / 这条不好」的单条标注，
+      来自前景理论。数据便宜得多。
+
+      **\`SimPO\`** 干脆去掉参考模型,用长度归一化的 log-prob 加一个边距项。
+      省一个模型的显存，但也失去了那个隐式的 KL 约束。
+
+      而 2026 年更大的变化是**在线**：DPO 是离线的（偏好数据事先标好），
+      而在线的偏好优化（\`online DPO\` / \`iterative DPO\`）边训边采样、边标注,
+      效果明显更好，代价是要一整套 rollout 基础设施。第 27 关做的就是那个。
+    `,
+    code`
+      A family of variants followed DPO, each altering a different part of the same
+      expression:
+
+      **\`IPO\`** replaces \`−log σ\`, pointing out that DPO overfits when preferences are
+      highly deterministic (once σ saturates it no longer constrains distance from the
+      reference), and substitutes a squared loss.
+
+      **\`KTO\`** drops pairwise data entirely, needing only "this one is good / bad" single
+      labels, derived from prospect theory. Far cheaper data.
+
+      **\`SimPO\`** removes the reference model altogether, using a length-normalised
+      log-probability plus a margin. It saves a model's worth of memory and loses the
+      implicit KL constraint.
+
+      The larger 2026 shift is toward **online** methods: DPO is offline (preferences labelled
+      in advance), while online preference optimisation (\`online DPO\` / \`iterative DPO\`)
+      samples and labels as it trains — noticeably better, at the cost of a full rollout
+      infrastructure. That is what stage 27 builds.
+    `
+  ),
+};
+
 /* ------------------------------------------------------------------ */
 
 module.exports = {
@@ -12387,6 +13566,6 @@ module.exports = {
     STAGE_MANUAL_BWD, STAGE_ENGINE, STAGE_MODEL_BWD, STAGE_ADAMW,
     STAGE_SCHEDULE, STAGE_CLIP, STAGE_PACKING, STAGE_PRETRAIN,
     STAGE_AMP, STAGE_RECOMPUTE, STAGE_SCALING, STAGE_MOE, STAGE_MUON,
-    STAGE_SFT, STAGE_MIXTURE,
+    STAGE_SFT, STAGE_MIXTURE, STAGE_RM, STAGE_DPO,
   ],
 };

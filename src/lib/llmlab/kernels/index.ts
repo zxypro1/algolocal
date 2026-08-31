@@ -51,6 +51,8 @@ export interface KernelExports {
   attn_apply_fwd_f32(p: number, v: number, out: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number): void;
   attn_apply_bwd_f32(dout: number, p: number, v: number, dp: number, dv: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number): void;
   softmax_rows_fwd_f32(x: number, valid: number, out: number, rows: number, cols: number): void;
+  log_softmax_fwd_f32(x: number, valid: number, out: number, rows: number, cols: number): void;
+  log_softmax_bwd_f32(dout: number, out: number, valid: number, dx: number, rows: number, cols: number): void;
   softmax_rows_bwd_f32(dout: number, out: number, valid: number, dx: number, rows: number, cols: number): void;
   layernorm_fwd_f32(x: number, g: number, b: number, out: number, mean: number, inv: number, rows: number, d: number, eps: number): void;
   layernorm_bwd_f32(dout: number, x: number, g: number, mean: number, inv: number, dg: number, db: number, dx: number, rows: number, d: number): void;
@@ -88,6 +90,8 @@ export interface KernelExports {
   attn_apply_fwd_f64(p: number, v: number, out: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number): void;
   attn_apply_bwd_f64(dout: number, p: number, v: number, dp: number, dv: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number): void;
   softmax_rows_fwd_f64(x: number, valid: number, out: number, rows: number, cols: number): void;
+  log_softmax_fwd_f64(x: number, valid: number, out: number, rows: number, cols: number): void;
+  log_softmax_bwd_f64(dout: number, out: number, valid: number, dx: number, rows: number, cols: number): void;
   softmax_rows_bwd_f64(dout: number, out: number, valid: number, dx: number, rows: number, cols: number): void;
   layernorm_fwd_f64(x: number, g: number, b: number, out: number, mean: number, inv: number, rows: number, d: number, eps: number): void;
   layernorm_bwd_f64(dout: number, x: number, g: number, mean: number, inv: number, dg: number, db: number, dx: number, rows: number, d: number): void;
@@ -97,7 +101,7 @@ export interface KernelExports {
 }
 
 /** 这一版算子的 ABI。改了算子语义就在 kernels.c 里 +1，两边对不上要立刻炸 */
-export const KERNEL_ABI_VERSION = 3;
+export const KERNEL_ABI_VERSION = 4;
 
 const PAGE = 65536;
 
