@@ -27969,6 +27969,253 @@
           "zh": "困惑度是这个领域最老的指标之一（Jelinek 1977），到今天仍然是预训练阶段\n唯一还在用的核心数字 —— 因为它不需要标注、不需要人工评价、\n而且和下游能力的相关性一直很好。\n\n现代论文里报的 loss 都是 nat（自然对数），少数报 bits-per-byte（BPB）——\n后者除以字节数而不是 token 数，这样不同分词器之间才能比。\n",
           "en": "Perplexity is one of the oldest metrics in the field (Jelinek 1977) and still the one\nnumber that matters during pretraining — it needs no labels, no human judgement, and\ncorrelates well with downstream ability.\n\nModern papers report loss in nats; a few report bits-per-byte, dividing by bytes\nrather than tokens so that different tokenizers can be compared.\n"
         }
+      },
+      {
+        "id": "causal-attention",
+        "title": {
+          "zh": "单头因果自注意力 —— 自己把它拼出来",
+          "en": "Single-head causal attention — assemble it yourself"
+        },
+        "goal": {
+          "zh": "在 `attention.py` 里实现一个单头因果自注意力。\n\n```python\ndef single_head_attention(x, wq, wk, wv, batch, seq, head_dim):\n    \"\"\"x 是 [batch*seq, d_model]，三个权重都是 [d_model, head_dim]。\n    返回 [batch*seq, head_dim]。\"\"\"\n```\n\n## 用哪些零件\n\n```python\nfrom nanotorch import functional as F\n\nq = F.linear(x, wq)                                   # [rows, hd]\nscores = F.attn_scores(q, k, batch, seq, seq, 1, 1, head_dim)\nvalid = F.causal_valid(batch, 1, seq)                 # 每行能看到多少个键\nprobs = F.softmax(scores, batch * seq, seq, valid)\nout = F.attn_apply(probs, v, batch, seq, seq, 1, 1, head_dim)\n```\n\n**`F.scaled_dot_product_attention` 这一关不许用。** 它是融合好的一整块，\n而这一关的全部内容就是自己把它拼出来。平台数得到调用次数，必须是 0。\n\n## 怎么算过\n\n| | 要求 |\n| --- | --- |\n| 数值 | 与平台的 f64 参考实现最大差 **≤ 2e-6** |\n| 因果性 | 改掉最后一个位置的输入，前面位置的输出**一位都不变** |\n| 概率 | 每一行的注意力概率和为 1，被掩掉的位置是**硬 0** |\n| 捷径 | 禁用算子调用次数 = 0 |\n\n## 2e-6 这个界是怎么来的\n\n你的实现跑在 **fp32** 上，参考实现跑在 fp64 上,所以两者必然有差，\n问题只是差多少算正常。\n\nfp32 的机器精度是 `ε = 2⁻²³ ≈ 1.19e-7`。K 项累加的相对误差界大约是\n`√K · ε`；这一关里 K 是 head_dim 与 seq 两次累加的量级，约 14，\n于是界在 `4.5e-7` 上下。**实测参考解是 3.5e-7**，门槛取 2e-6,\n留了约 6 倍的余量给不同的求和顺序。\n\n界不是拍出来的。一个「差 1e-3」的实现一定是算错了，\n而一个「差 1e-9」的实现不可能跑在 fp32 上。\n\n## 为什么因果性要单独查\n\n因为**漏了因果掩码的模型 loss 会更低**。它能看到答案，训练曲线漂亮得多，\n而生成时一个字都对不上。这个错在任何 loss 曲线上都看不出来,\n只有拿「改未来、看现在」这个探针去问才问得出来。\n",
+          "en": "Implement single-head causal self-attention in `attention.py`.\n\n```python\ndef single_head_attention(x, wq, wk, wv, batch, seq, head_dim):\n    \"\"\"x is [batch*seq, d_model]; the three weights are [d_model, head_dim].\n    Returns [batch*seq, head_dim].\"\"\"\n```\n\n## The pieces\n\n```python\nfrom nanotorch import functional as F\n\nq = F.linear(x, wq)                                   # [rows, hd]\nscores = F.attn_scores(q, k, batch, seq, seq, 1, 1, head_dim)\nvalid = F.causal_valid(batch, 1, seq)                 # how many keys each row may see\nprobs = F.softmax(scores, batch * seq, seq, valid)\nout = F.attn_apply(probs, v, batch, seq, seq, 1, 1, head_dim)\n```\n\n**`F.scaled_dot_product_attention` is forbidden in this stage.** It is the fused\nversion, and assembling it yourself is the entire point. The platform counts the\ncalls; the count must be zero.\n\n## What counts as passing\n\n| | Requirement |\n| --- | --- |\n| Numerics | Max difference from the f64 reference **≤ 2e-6** |\n| Causality | Change the last input position; earlier outputs must be **bit-identical** |\n| Probabilities | Every row sums to 1; masked positions are **hard zero** |\n| Shortcuts | Forbidden operator calls = 0 |\n\n## Where 2e-6 comes from\n\nYour implementation runs in **fp32**, the reference in fp64, so a difference is\nunavoidable; the only question is how much is normal.\n\nfp32 machine epsilon is `ε = 2⁻²³ ≈ 1.19e-7`. The relative error of a K-term sum is\nroughly `√K · ε`; here K is on the order of head_dim plus seq, about 14, putting the\nbound near `4.5e-7`. **The reference measures 3.5e-7**, so the gate sits at 2e-6,\nleaving about 6x of headroom for different summation orders.\n\nThe bound is derived, not guessed. An implementation off by 1e-3 is wrong; one off by\n1e-9 cannot be running in fp32.\n\n## Why causality gets its own check\n\nBecause **a model that leaks the future has a lower loss**. It can see the answer,\nthe training curve looks better, and generation is worthless. No loss curve shows\nthis. Only the \"change the future, watch the present\" probe finds it.\n"
+        },
+        "checklist": [
+          {
+            "zh": "与 f64 参考的最大差 ≤ 2e-6（fp32 的界，见任务说明）",
+            "en": "Max difference from the f64 reference ≤ 2e-6 (an fp32 bound)"
+          },
+          {
+            "zh": "因果泄漏 = 0（逐位比）",
+            "en": "Causal leakage = 0 (bit-identical)"
+          },
+          {
+            "zh": "每行概率和为 1，掩掉的位置是硬 0",
+            "en": "Rows sum to 1; masked positions are hard zero"
+          },
+          {
+            "zh": "没用融合的 scaled_dot_product_attention",
+            "en": "Did not use the fused scaled_dot_product_attention"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "三个投影都是同一个 F.linear，只是权重不同。",
+            "en": "All three projections are the same F.linear with different weights."
+          },
+          {
+            "zh": "单头就是 heads=1、kv_heads=1 —— 那两个参数在下一关才真正用上。",
+            "en": "Single head means heads=1 and kv_heads=1; those two arguments come alive next stage."
+          },
+          {
+            "zh": "softmax 的 rows 是 batch*heads*seq_q，cols 是 seq_kv。单头时 rows = batch*seq。",
+            "en": "softmax takes rows = batch*heads*seq_q and cols = seq_kv; with one head rows = batch*seq."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**忘了缩放 1/√head_dim。** 前向照样能算，loss 也会降,只是慢，\n因为 softmax 进了饱和区、梯度变得很小。这个错和参考实现比才看得出来。\n",
+            "en": "**Forgetting the 1/√head_dim scale.** It still computes, and the loss still drops,\njust slowly, because softmax saturates and gradients shrink. Only a comparison with\nthe reference reveals it.\n"
+          },
+          {
+            "zh": "**把掩码做成「加一个很大的负数」而不是「不算」。** 结果几乎一样，\n但被掩位置的概率是 1e-30 而不是 0,而因果性探针要的是**逐位**为 0。\n我们的做法是给 softmax 一个每行的有效长度，掩掉的位置根本不参与。\n",
+            "en": "**Masking by adding a large negative number instead of excluding.** Nearly the same\nresult, but masked probabilities are 1e-30 rather than 0, and the causality probe\nwants **bit-exact** zero. Here softmax takes a per-row valid length instead, so\nmasked positions never participate.\n"
+          }
+        ],
+        "train": {
+          "forbidden": [
+            "attn_fwd"
+          ],
+          "files": {
+            "attention.py": "\"\"\"第 3 关：单头因果自注意力。\n\n这一关不许用 F.scaled_dot_product_attention（融合的那一块）。\n自己用 attn_scores / causal_valid / softmax / attn_apply 拼出来。\n\"\"\"\nimport nanotorch as nt\nfrom nanotorch import functional as F\n\n\ndef single_head_attention(x, wq, wk, wv, batch, seq, head_dim):\n    \"\"\"x: [batch*seq, d_model]，wq/wk/wv: [d_model, head_dim]。\n\n    返回 [batch*seq, head_dim]。\n    \"\"\"\n    # TODO: 1) 三个投影\n    # TODO: 2) 算分数（记得缩放 1/sqrt(head_dim)，attn_scores 默认帮你做了）\n    # TODO: 3) 因果掩码 + softmax\n    # TODO: 4) 加权求和\n    return nt.zeros((batch * seq, head_dim))\n\n\nif __name__ == \"__main__\":\n    B, S, D, HD = 2, 6, 8, 8\n    x = nt.zeros((B * S, D), role=\"data\").normal_(1, 1.0)\n    wq = nt.zeros((D, HD), role=\"data\").normal_(2, 0.5)\n    wk = nt.zeros((D, HD), role=\"data\").normal_(3, 0.5)\n    wv = nt.zeros((D, HD), role=\"data\").normal_(4, 0.5)\n    out = single_head_attention(x, wq, wk, wv, B, S, HD)\n    print(\"输出形状\", out.shape, \"前三个数\", [round(v, 4) for v in out.tolist()[:3]])\n"
+          },
+          "referenceFiles": {
+            "attention.py": "\"\"\"第 3 关的参考实现。\"\"\"\nimport nanotorch as nt\nfrom nanotorch import functional as F\n\n\ndef single_head_attention(x, wq, wk, wv, batch, seq, head_dim):\n    rows = batch * seq\n\n    # 1) 三个投影：同一个 linear，不同的权重\n    q = F.linear(x, wq)\n    k = F.linear(x, wk)\n    v = F.linear(x, wv)\n\n    # 2) 分数。attn_scores 默认按 1/sqrt(head_dim) 缩放\n    #    单头 => heads=1, kv_heads=1\n    scores = F.attn_scores(q, k, batch, seq, seq, 1, 1, head_dim)\n\n    # 3) 因果掩码写成「每行能看到多少个键」，掩掉的位置根本不参与 softmax，\n    #    所以概率是硬 0 而不是一个很小的数\n    valid = F.causal_valid(batch, 1, seq)\n    probs = F.softmax(scores, rows, seq, valid)\n\n    # 4) 加权求和\n    return F.attn_apply(probs, v, batch, seq, seq, 1, 1, head_dim,\n                        out_shape=(rows, head_dim))\n\n\nif __name__ == \"__main__\":\n    B, S, D, HD = 2, 6, 8, 8\n    x = nt.zeros((B * S, D), role=\"data\").normal_(1, 1.0)\n    wq = nt.zeros((D, HD), role=\"data\").normal_(2, 0.5)\n    wk = nt.zeros((D, HD), role=\"data\").normal_(3, 0.5)\n    wv = nt.zeros((D, HD), role=\"data\").normal_(4, 0.5)\n    out = single_head_attention(x, wq, wk, wv, B, S, HD)\n    print(\"输出形状\", out.shape, \"前三个数\", [round(v, 4) for v in out.tolist()[:3]])\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "attention.spec.ts",
+            "content": "const lab = require('@llm/lab');\n\n/** 造输入、跑学员的实现、把用得上的数都读回 JS */\nfunction runStudent(extra) {\n  lab.py(`\nimport sys, json\nsys.path.insert(0, \"/lab\")\nimport importlib, attention\nimportlib.reload(attention)\nimport nanotorch as nt\n\nB, S, D, HD = 2, 6, 8, 8\n_x = nt.zeros((B * S, D), role=\"data\").normal_(11, 1.0)\n_wq = nt.zeros((D, HD), role=\"data\").normal_(21, 0.5)\n_wk = nt.zeros((D, HD), role=\"data\").normal_(22, 0.5)\n_wv = nt.zeros((D, HD), role=\"data\").normal_(23, 0.5)\n${extra || ''}\n_out = attention.single_head_attention(_x, _wq, _wk, _wv, B, S, HD)\n`);\n  return {\n    x: JSON.parse(String(lab.py('json.dumps(_x.tolist())'))),\n    wq: JSON.parse(String(lab.py('json.dumps(_wq.tolist())'))),\n    wk: JSON.parse(String(lab.py('json.dumps(_wk.tolist())'))),\n    wv: JSON.parse(String(lab.py('json.dumps(_wv.tolist())'))),\n    out: JSON.parse(String(lab.py('json.dumps(_out.tolist())'))),\n  };\n}\n\n/**\n * 平台侧的参考实现，f64。\n *\n * 刻意写得笨：三重循环、显式掩码、显式减最大值。\n * 判定的参考实现要的是**一眼能看出对不对**，不是快。\n */\nfunction reference(x, wq, wk, wv, B, S, D, HD) {\n  const proj = (w) => {\n    const out = new Float64Array(B * S * HD);\n    for (let r = 0; r < B * S; r++)\n      for (let h = 0; h < HD; h++) {\n        let acc = 0;\n        for (let d = 0; d < D; d++) acc += x[r * D + d] * w[d * HD + h];\n        out[r * HD + h] = acc;\n      }\n    return out;\n  };\n  const q = proj(wq), k = proj(wk), v = proj(wv);\n  const scale = 1 / Math.sqrt(HD);\n  const out = new Float64Array(B * S * HD);\n  for (let b = 0; b < B; b++)\n    for (let i = 0; i < S; i++) {\n      const scores = [];\n      for (let j = 0; j <= i; j++) {       // 因果：只看 j ≤ i\n        let s = 0;\n        for (let h = 0; h < HD; h++) s += q[(b * S + i) * HD + h] * k[(b * S + j) * HD + h];\n        scores.push(s * scale);\n      }\n      const mx = Math.max(...scores);\n      const exps = scores.map((s) => Math.exp(s - mx));\n      const sum = exps.reduce((a, c) => a + c, 0);\n      for (let j = 0; j <= i; j++) {\n        const p = exps[j] / sum;\n        for (let h = 0; h < HD; h++) out[(b * S + i) * HD + h] += p * v[(b * S + j) * HD + h];\n      }\n    }\n  return out;\n}\n\nfunction maxDiff(a, b) {\n  let m = 0;\n  for (let i = 0; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i]));\n  return m;\n}\n\n\nconst B = 2, S = 6, D = 8, HD = 8;\n\ndescribe('单头因果自注意力', () => {\n  it('与 f64 参考实现最大差 ≤ 2e-6（fp32 的界）', () => {\n    const r = runStudent();\n    const ref = reference(r.x, r.wq, r.wk, r.wv, B, S, D, HD);\n    const diff = maxDiff(r.out, ref);\n    console.log('最大差 ' + diff.toExponential(2));\n    lab.publish('attention.maxError', diff);\n    expect(diff).toBeLessThan(2e-6);\n  });\n\n  /*\n   * 因果性：改掉最后一个位置的输入，前面位置的输出必须**逐位**不变。\n   * 判据不是「掩码写了没」（那查的是实现），而是行为。\n   */\n  it('改掉最后一个位置，前面位置的输出一位都不变', () => {\n    const before = runStudent().out;\n    const after = runStudent(\n      '_x.set_([v + (3.5 if (i % (S * D)) >= (S - 1) * D else 0.0) '\n      + 'for i, v in enumerate(_x.tolist())])'\n    ).out;\n\n    let leak = 0;\n    let checked = 0;\n    for (let b = 0; b < B; b++)\n      for (let i = 0; i < S - 1; i++)     // 最后一个位置本来就该变\n        for (let h = 0; h < HD; h++) {\n          const at = (b * S + i) * HD + h;\n          checked += 1;\n          if (before[at] !== after[at]) leak += 1;\n        }\n    console.log('查了 ' + checked + ' 个位置，泄漏 ' + leak + ' 个');\n    lab.publish('causality.leakBits', leak);\n    lab.publish('causality.checked', checked);\n    expect(checked).toBeGreaterThan(50);\n    expect(leak).toBe(0);\n  });\n\n  it('每一行的概率和为 1，掩掉的位置是硬 0', () => {\n    // 直接问学员的实现要中间的概率矩阵：用同样的零件再算一遍\n    const probs = JSON.parse(String(lab.py(`\nimport nanotorch as nt, json\nfrom nanotorch import functional as F\n_q = F.linear(_x, _wq)\n_k = F.linear(_x, _wk)\n_sc = F.attn_scores(_q, _k, B, S, S, 1, 1, HD)\n_pr = F.softmax(_sc, B * S, S, F.causal_valid(B, 1, S))\njson.dumps(_pr.tolist())\n`)));\n    let worstSum = 0;\n    let hardZeros = 0;\n    for (let b = 0; b < B; b++)\n      for (let i = 0; i < S; i++) {\n        let sum = 0;\n        for (let j = 0; j <= i; j++) sum += probs[(b * S + i) * S + j];\n        worstSum = Math.max(worstSum, Math.abs(sum - 1));\n        for (let j = i + 1; j < S; j++) {\n          if (probs[(b * S + i) * S + j] === 0) hardZeros += 1;\n        }\n      }\n    lab.publish('attention.probRowSumError', worstSum);\n    // 同样是 fp32 的界：S 项求和，√S·ε ≈ 3e-7\n    expect(worstSum).toBeLessThan(1e-6);\n    expect(hardZeros).toBe(B * (S * (S - 1)) / 2);\n  });\n\n  it('没有用融合的那一块', () => {\n    runStudent();\n    const m = lab.metrics();\n    expect(m.builtins.forbiddenCalls).toBe(0);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "llm.attention.maxError",
+            "op": "lte",
+            "value": 0.000002,
+            "label": {
+              "zh": "与 f64 参考的最大差（fp32 的界）",
+              "en": "max difference from the f64 reference (fp32 bound)"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.causality.leakBits",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "因果泄漏（逐位比）",
+              "en": "causal leakage (bit-exact)"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.attention.probRowSumError",
+            "op": "lte",
+            "value": 0.000001,
+            "label": {
+              "zh": "每行概率和与 1 的差",
+              "en": "row-sum deviation from 1"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.builtins.forbiddenCalls",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "用了禁用的融合算子",
+              "en": "forbidden fused operator calls"
+            },
+            "dimension": "correctness"
+          }
+        ],
+        "focus": [
+          "correctness"
+        ],
+        "extension": {
+          "zh": "拆开写比融合写多算了大约一倍的分数：融合实现只算 `Σ(i+1)` 个，\n拆开是完整的 `S²`。**FlashAttention 省下的正是这一半**，\n外加那块 [B, H, S, S] 的中间矩阵根本不落地。第 16 关会回到这件事。\n\n真 PyTorch 里 `F.scaled_dot_product_attention` 会按输入形状自动选后端\n（FlashAttention / memory-efficient / math），`is_causal=True` 就是这里的掩码。\n",
+          "en": "Assembling it by hand computes roughly twice the scores: the fused version does\n`Σ(i+1)`, the split one does the full `S²`. **That half is what FlashAttention\nsaves**, on top of never materialising the [B, H, S, S] matrix at all. Stage 16\nreturns to this.\n\nIn real PyTorch, `F.scaled_dot_product_attention` picks a backend from the shapes\n(FlashAttention / memory-efficient / math), and `is_causal=True` is this mask.\n"
+        },
+        "primer": {
+          "zh": "注意力回答一个很具体的问题：预测第 t 个位置时，前面每个位置各应该占多大权重。做法是给每个位置算三样东西,`查询`（query）、`键`（key）、`值`（value），都是同一个向量乘不同的权重矩阵得到的。\n\n第 i 个位置的查询和第 j 个位置的键做点积，得到一个`分数`,它衡量「i 有多想看 j」。分数除以 `sqrt(head_dim)` 之后过 softmax 变成一组和为 1 的权重，再拿这组权重去对所有位置的值做加权求和。这就是全部。\n\n除以 `sqrt(head_dim)` 不是装饰。点积的方差随维度线性增长，不缩放的话 softmax 很快进入饱和区：一个位置拿到接近 1 的权重、其余接近 0，梯度也就跟着消失。缩放让分数的方差回到 1 附近。\n\n`因果掩码`是自回归模型的命门：预测第 t 个位置时只许看 `0..t`，看到 `t+1` 就是看到了答案。漏掉它的模型训练 loss 会明显更低、曲线更漂亮，而生成时一个字都对不上,这个错在任何 loss 曲线上都看不出来。\n\n掩码有两种做法。一种是给被掩的分数加一个很大的负数，softmax 之后它们接近 0；另一种是让它们根本不参与 softmax，于是概率是`硬 0`。我们用后者:因果性要靠「改未来、看现在有没有变」来验，而逐位比较容不下 1e-30 这样的残留。",
+          "en": "Attention answers a specific question: when predicting position t, how much weight should each earlier position get? Each position produces three things,a `query`, a `key` and a `value`, all obtained by multiplying the same vector by different weight matrices.\n\nThe query at position i dotted with the key at position j gives a `score` measuring how much i wants to look at j. Divide the scores by `sqrt(head_dim)`, push them through softmax to get weights summing to 1, and take the weighted sum of all values. That is the whole mechanism.\n\nThe `sqrt(head_dim)` division is not decoration. Dot-product variance grows linearly with dimension, and without scaling softmax saturates quickly: one position takes nearly all the weight, the rest take almost none, and gradients vanish with them. Scaling brings the score variance back near 1.\n\nThe `causal mask` is what makes an autoregressive model work: predicting position t may look at `0..t` only, and seeing `t+1` means seeing the answer. A model that omits it has a visibly lower training loss and a prettier curve while generating nothing usable,and no loss curve reveals this.\n\nThere are two ways to mask. One adds a large negative number to the masked scores so softmax pushes them near zero; the other excludes them from softmax entirely so the probability is a `hard zero`. We use the latter: causality is verified by changing the future and checking that the present is bit-identical, and a bit-exact comparison has no room for a 1e-30 remainder."
+        }
+      },
+      {
+        "id": "multi-head-gqa",
+        "title": {
+          "zh": "多头与 GQA —— 少几个 kv 头能省多少",
+          "en": "Multi-head and GQA — what fewer KV heads buy you"
+        },
+        "goal": {
+          "zh": "在 `mha.py` 里把多头注意力写成一个 `nn.Module`，并支持 **GQA**。\n\n```python\nclass MultiHeadAttention(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed):\n        # wq: [dim, n_head * head_dim]\n        # wk / wv: [dim, n_kv_head * head_dim]   ← 注意是 n_kv_head\n        # wo: [n_head * head_dim, dim]\n\n    def forward(self, x, batch, seq):\n        ...\n```\n\n`head_dim = dim // n_head`。**wk 与 wv 按 `n_kv_head` 开，不是 `n_head`** ——\n这就是 GQA 省下来的地方，也是这一关最容易写错的一行。\n\n## 怎么算过\n\n| | 要求 |\n| --- | --- |\n| 参数量 | **恰好等于解析式**（见下） |\n| 数值 | 与 f64 参考最大差 ≤ 2e-6（fp32 的界，同第 3 关） |\n| 因果性 | 泄漏 = 0 |\n| 捷径 | 仍然不许用融合的那一块 |\n\n参数量的解析式：\n\n```\ndim·n_head·hd  +  dim·n_kv_head·hd × 2  +  n_head·hd·dim\n```\n\n`n_kv_head = n_head` 时它退化成普通的 MHA。本关的配置是\n`dim=64, n_head=8, n_kv_head=2`，所以 wk 与 wv 各只有 MHA 的 **1/4**。\n\n## 为什么要有 GQA\n\n推理时每生成一个 token 都要读一遍整个 KV cache，而 cache 的大小正比于\n`n_kv_head`。把 8 个 kv 头减到 2 个，**KV cache 直接小 4 倍** ——\n这在解码时是实打实的带宽，而质量几乎没掉。Llama 2 70B 起就是这么做的。\n",
+          "en": "Write multi-head attention as an `nn.Module` in `mha.py`, with **GQA**.\n\n```python\nclass MultiHeadAttention(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed):\n        # wq: [dim, n_head * head_dim]\n        # wk / wv: [dim, n_kv_head * head_dim]   ← note n_kv_head\n        # wo: [n_head * head_dim, dim]\n\n    def forward(self, x, batch, seq):\n        ...\n```\n\n`head_dim = dim // n_head`. **wk and wv are sized by `n_kv_head`, not\n`n_head`** — that is what GQA saves, and the easiest line to get wrong here.\n\n## What counts as passing\n\n| | Requirement |\n| --- | --- |\n| Parameters | **Exactly** the analytic formula (below) |\n| Numerics | Max difference from the f64 reference ≤ 2e-6 (the fp32 bound, as in stage 3) |\n| Causality | Leakage = 0 |\n| Shortcuts | The fused operator is still forbidden |\n\nThe formula:\n\n```\ndim·n_head·hd  +  dim·n_kv_head·hd × 2  +  n_head·hd·dim\n```\n\nWith `n_kv_head = n_head` it degenerates to plain MHA. This stage uses\n`dim=64, n_head=8, n_kv_head=2`, so wk and wv are each **a quarter** of MHA's.\n\n## Why GQA exists\n\nDecoding reads the whole KV cache for every generated token, and the cache scales\nwith `n_kv_head`. Going from 8 KV heads to 2 makes **the cache four times smaller**\n— real decode bandwidth, at almost no quality cost. Llama 2 70B onwards does this.\n"
+        },
+        "checklist": [
+          {
+            "zh": "参数量恰好等于解析式",
+            "en": "Parameter count exactly matches the formula"
+          },
+          {
+            "zh": "wk / wv 按 n_kv_head 开",
+            "en": "wk and wv are sized by n_kv_head"
+          },
+          {
+            "zh": "与 f64 参考最大差 ≤ 2e-6",
+            "en": "Max difference from the f64 reference ≤ 2e-6"
+          },
+          {
+            "zh": "因果泄漏 = 0",
+            "en": "Causal leakage = 0"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "attn_scores 与 attn_apply 都收 heads 与 kv_heads 两个参数，头的共享它们内部处理。",
+            "en": "attn_scores and attn_apply both take heads and kv_heads; they handle the sharing."
+          },
+          {
+            "zh": "softmax 的 rows 现在是 batch*n_head*seq，不再是 batch*seq。",
+            "en": "softmax now takes rows = batch*n_head*seq, no longer batch*seq."
+          },
+          {
+            "zh": "causal_valid 也要按 n_head 开，每个头各有一份行长度。",
+            "en": "causal_valid is sized by n_head too: one row length per head."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**wk / wv 按 n_head 开。** 前向完全跑得通、数值也对（因为 kv 头够用），\n只有参数量对不上。而多出来的那些参数会一直占着显存与优化器状态,\n在真实模型上就是白白多几个 GB。\n",
+            "en": "**Sizing wk / wv by n_head.** The forward pass works and the numbers are right\n(there are enough KV heads), only the parameter count is off. Those extra parameters\noccupy memory and optimiser state forever, which on a real model is several wasted GB.\n"
+          },
+          {
+            "zh": "**忘了改 softmax 的 rows。** 单头时 rows = batch*seq，多头时是 batch*n_head*seq。\n写错的话只有第一个头被归一化，其余头的概率和不是 1,而输出看起来仍然是「有数」的。\n",
+            "en": "**Forgetting to update softmax's row count.** With one head rows = batch*seq; with\nmany it is batch*n_head*seq. Get it wrong and only the first head is normalised while\nthe rest do not sum to 1 — and the output still looks like plausible numbers.\n"
+          }
+        ],
+        "train": {
+          "forbidden": [
+            "attn_fwd"
+          ],
+          "files": {
+            "mha.py": "\"\"\"第 4 关：多头注意力 + GQA。\n\n仍然不许用 F.scaled_dot_product_attention。\n\"\"\"\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\n\n\nclass MultiHeadAttention(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed):\n        super().__init__()\n        assert dim % n_head == 0\n        assert n_head % n_kv_head == 0\n        self.dim = dim\n        self.n_head = n_head\n        self.n_kv_head = n_kv_head\n        self.head_dim = dim // n_head\n        # TODO: 四个权重。注意 wk / wv 按 n_kv_head 开，不是 n_head\n        self.wq = nt.parameter((dim, 1), seed + 1, 0.02, \"wq\")\n        self.wk = nt.parameter((dim, 1), seed + 2, 0.02, \"wk\")\n        self.wv = nt.parameter((dim, 1), seed + 3, 0.02, \"wv\")\n        self.wo = nt.parameter((1, dim), seed + 4, 0.02, \"wo\")\n\n    def forward(self, x, batch, seq):\n        # TODO: 投影 -> 分数 -> 因果 softmax -> 加权求和 -> 输出投影\n        return nt.zeros((batch * seq, self.dim))\n\n\nif __name__ == \"__main__\":\n    B, S, DIM, H, KV = 2, 6, 64, 8, 2\n    m = MultiHeadAttention(DIM, H, KV, seed=7)\n    print(\"参数量\", m.num_parameters())\n    x = nt.zeros((B * S, DIM), role=\"data\").normal_(1, 1.0)\n    print(\"输出形状\", m(x, B, S).shape)\n"
+          },
+          "referenceFiles": {
+            "mha.py": "\"\"\"第 4 关的参考实现。\"\"\"\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\n\n\nclass MultiHeadAttention(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed):\n        super().__init__()\n        assert dim % n_head == 0\n        assert n_head % n_kv_head == 0\n        self.dim = dim\n        self.n_head = n_head\n        self.n_kv_head = n_kv_head\n        self.head_dim = dim // n_head\n        # wq 与 wo 按 n_head 开；**wk / wv 按 n_kv_head 开**,这就是 GQA\n        self.wq = nt.parameter((dim, n_head * self.head_dim), seed + 1, 0.02, \"wq\")\n        self.wk = nt.parameter((dim, n_kv_head * self.head_dim), seed + 2, 0.02, \"wk\")\n        self.wv = nt.parameter((dim, n_kv_head * self.head_dim), seed + 3, 0.02, \"wv\")\n        self.wo = nt.parameter((n_head * self.head_dim, dim), seed + 4, 0.02, \"wo\")\n\n    def forward(self, x, batch, seq):\n        rows = batch * seq\n        q = F.linear(x, self.wq)\n        k = F.linear(x, self.wk)\n        v = F.linear(x, self.wv)\n\n        scores = F.attn_scores(\n            q, k, batch, seq, seq, self.n_head, self.n_kv_head, self.head_dim\n        )\n        # rows 现在按 n_head 开：每个头的每一行各自归一化\n        valid = F.causal_valid(batch, self.n_head, seq)\n        probs = F.softmax(scores, batch * self.n_head * seq, seq, valid)\n\n        out = F.attn_apply(\n            probs, v, batch, seq, seq, self.n_head, self.n_kv_head, self.head_dim,\n            out_shape=(rows, self.n_head * self.head_dim)\n        )\n        return F.linear(out, self.wo)\n\n\nif __name__ == \"__main__\":\n    B, S, DIM, H, KV = 2, 6, 64, 8, 2\n    m = MultiHeadAttention(DIM, H, KV, seed=7)\n    print(\"参数量\", m.num_parameters())\n    x = nt.zeros((B * S, DIM), role=\"data\").normal_(1, 1.0)\n    print(\"输出形状\", m(x, B, S).shape)\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "mha.spec.ts",
+            "content": "const lab = require('@llm/lab');\n\nconst B = 2, S = 6, DIM = 64, H = 8, KV = 2;\nconst HD = DIM / H;\n\nfunction build(extra) {\n  lab.py(`\nimport sys, json\nsys.path.insert(0, \"/lab\")\nimport importlib, mha\nimportlib.reload(mha)\nimport nanotorch as nt\n\nB, S, DIM, H, KV = ${B}, ${S}, ${DIM}, ${H}, ${KV}\n_m = mha.MultiHeadAttention(DIM, H, KV, seed=7)\n_x = nt.zeros((B * S, DIM), role=\"data\").normal_(31, 1.0)\n${extra || ''}\n_out = _m(_x, B, S)\n`);\n  return {\n    params: lab.py('_m.num_parameters()'),\n    named: JSON.parse(String(lab.py('json.dumps([[n, p.numel] for n, p in _m.named_parameters()])'))),\n    out: JSON.parse(String(lab.py('json.dumps(_out.tolist())'))),\n    x: JSON.parse(String(lab.py('json.dumps(_x.tolist())'))),\n    weights: JSON.parse(String(lab.py(\n      'json.dumps({\"wq\": _m.wq.tolist(), \"wk\": _m.wk.tolist(), '\n      + '\"wv\": _m.wv.tolist(), \"wo\": _m.wo.tolist()})'\n    ))),\n  };\n}\n\n/** 平台侧 f64 参考。写得笨，一眼能看出对不对 */\nfunction reference(x, w) {\n  const proj = (mat, outDim) => {\n    const out = new Float64Array(B * S * outDim);\n    for (let r = 0; r < B * S; r++)\n      for (let o = 0; o < outDim; o++) {\n        let acc = 0;\n        for (let d = 0; d < DIM; d++) acc += x[r * DIM + d] * mat[d * outDim + o];\n        out[r * outDim + o] = acc;\n      }\n    return out;\n  };\n  const q = proj(w.wq, H * HD);\n  const k = proj(w.wk, KV * HD);\n  const v = proj(w.wv, KV * HD);\n  const scale = 1 / Math.sqrt(HD);\n  const rep = H / KV;\n  const ctx = new Float64Array(B * S * H * HD);\n\n  for (let b = 0; b < B; b++)\n    for (let h = 0; h < H; h++) {\n      const kh = Math.floor(h / rep);\n      for (let i = 0; i < S; i++) {\n        const scores = [];\n        for (let j = 0; j <= i; j++) {\n          let s = 0;\n          for (let c = 0; c < HD; c++) {\n            s += q[(b * S + i) * H * HD + h * HD + c] * k[(b * S + j) * KV * HD + kh * HD + c];\n          }\n          scores.push(s * scale);\n        }\n        const mx = Math.max(...scores);\n        const exps = scores.map((s) => Math.exp(s - mx));\n        const sum = exps.reduce((a, c) => a + c, 0);\n        for (let j = 0; j <= i; j++) {\n          const p = exps[j] / sum;\n          for (let c = 0; c < HD; c++) {\n            ctx[(b * S + i) * H * HD + h * HD + c] +=\n              p * v[(b * S + j) * KV * HD + kh * HD + c];\n          }\n        }\n      }\n    }\n\n  const out = new Float64Array(B * S * DIM);\n  for (let r = 0; r < B * S; r++)\n    for (let d = 0; d < DIM; d++) {\n      let acc = 0;\n      for (let c = 0; c < H * HD; c++) acc += ctx[r * H * HD + c] * w.wo[c * DIM + d];\n      out[r * DIM + d] = acc;\n    }\n  return out;\n}\n\ndescribe('多头与 GQA', () => {\n  it('参数量恰好等于解析式', () => {\n    const r = build();\n    const expected = DIM * H * HD + DIM * KV * HD * 2 + H * HD * DIM;\n    console.log('参数量 ' + r.params + '，解析式 ' + expected);\n    lab.publish('params.mha', r.params);\n    expect(r.params).toBe(expected);\n  });\n\n  /*\n   * 单独查 wk / wv 的大小。只查总数的话，「wk 按 n_head 开、wo 按 n_kv_head 开」\n   * 这种两处都错但总数碰巧对得上的实现会漏过去。\n   */\n  it('wk 与 wv 按 n_kv_head 开，不是 n_head', () => {\n    const named = new Map(build().named);\n    expect(named.get('wk')).toBe(DIM * KV * HD);\n    expect(named.get('wv')).toBe(DIM * KV * HD);\n    expect(named.get('wq')).toBe(DIM * H * HD);\n    expect(named.get('wo')).toBe(H * HD * DIM);\n  });\n\n  it('与 f64 参考最大差 ≤ 2e-6（fp32 的界）', () => {\n    const r = build();\n    const ref = reference(r.x, r.weights);\n    let diff = 0;\n    for (let i = 0; i < ref.length; i++) diff = Math.max(diff, Math.abs(r.out[i] - ref[i]));\n    console.log('最大差 ' + diff.toExponential(2));\n    lab.publish('attention.maxError', diff);\n    expect(diff).toBeLessThan(2e-6);\n  });\n\n  it('改掉最后一个位置，前面位置的输出一位都不变', () => {\n    const before = build().out;\n    const after = build(\n      '_x.set_([v + (2.5 if (i % (S * DIM)) >= (S - 1) * DIM else 0.0) '\n      + 'for i, v in enumerate(_x.tolist())])'\n    ).out;\n    let leak = 0;\n    let checked = 0;\n    for (let b = 0; b < B; b++)\n      for (let i = 0; i < S - 1; i++)\n        for (let d = 0; d < DIM; d++) {\n          const at = (b * S + i) * DIM + d;\n          checked += 1;\n          if (before[at] !== after[at]) leak += 1;\n        }\n    lab.publish('causality.leakBits', leak);\n    expect(checked).toBeGreaterThan(500);\n    expect(leak).toBe(0);\n  });\n\n  it('GQA 真的省了 —— 换成 MHA 参数量会变大', () => {\n    const gqa = DIM * H * HD + DIM * KV * HD * 2 + H * HD * DIM;\n    const mha = DIM * H * HD + DIM * H * HD * 2 + H * HD * DIM;\n    lab.publish('params.mhaEquivalent', mha);\n    expect(gqa).toBeLessThan(mha);\n    // kv 头减到 1/4，wk + wv 也就减到 1/4\n    expect(mha - gqa).toBe(2 * DIM * (H - KV) * HD);\n  });\n\n  it('没有用融合的那一块', () => {\n    build();\n    expect(lab.metrics().builtins.forbiddenCalls).toBe(0);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "llm.params.mha",
+            "op": "eq",
+            "value": 10240,
+            "label": {
+              "zh": "参数量（解析式）",
+              "en": "parameter count (analytic)"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.attention.maxError",
+            "op": "lte",
+            "value": 0.000002,
+            "label": {
+              "zh": "与 f64 参考的最大差（fp32 的界）",
+              "en": "max difference from the f64 reference (fp32 bound)"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.causality.leakBits",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "因果泄漏（逐位比）",
+              "en": "causal leakage (bit-exact)"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.builtins.forbiddenCalls",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "用了禁用的融合算子",
+              "en": "forbidden fused operator calls"
+            },
+            "dimension": "correctness"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ],
+        "extension": {
+          "zh": "2026 年的新变化：**MLA（多头潜在注意力）在大规模上胜出**。\nDeepSeek-V3、Kimi K2、LongCat 都用它,把 KV 压成一个共享的低秩潜向量，\n比 GQA 省得更多而质量更好。代价是 Q/K 在推理时只以展开形态瞬时存在，\n于是 QK-norm 这类技巧用不了。\n\nGQA 仍然是理解 KV cache 的最好起点,而且绝大多数中小模型还在用它。\n",
+          "en": "A 2026 development: **MLA (multi-head latent attention) wins at scale**.\nDeepSeek-V3, Kimi K2 and LongCat all use it, compressing KV into a shared low-rank\nlatent — more savings than GQA at better quality. The cost is that Q/K exist only\ntransiently in expanded form at inference, which rules out tricks like QK-norm.\n\nGQA remains the best entry point for understanding the KV cache, and most small and\nmid-size models still use it.\n"
+        },
+        "primer": {
+          "zh": "一个头只能表达一种「看哪里」的模式。`多头注意力`把维度切成几份，每份各算一套查询/键/值，各自注意各自的东西，最后把结果拼起来再过一个输出投影。切分是免费的:总的计算量和一个大头一样，但表达能力强得多。\n\n`head_dim = dim // n_head`。八个头、每个 64 维的模型，和一个 512 维的单头，浮点运算量相同。\n\n`GQA`（分组查询注意力）动的是键和值:让若干个查询头**共用**一套键值。查询头仍然是 8 个，键值头可以只有 2 个,每 4 个查询头共享一份 kv。\n\n这么做的理由在推理侧。解码时每生成一个 token 都要读一遍整个 `KV cache`，而 cache 的大小正比于键值头数。8 个头减到 2 个，cache 就小 4 倍,在解码这种访存瓶颈的场景里是实打实的加速，而质量几乎没掉。Llama 2 70B 起就是这么配的。\n\n`n_kv_head = n_head` 时 GQA 退化成普通多头；`n_kv_head = 1` 时叫 MQA（多查询注意力），省得最多但质量掉得也明显。2 到 8 之间是常见的折中。",
+          "en": "A single head can express only one pattern of \"where to look\". `Multi-head attention` splits the dimension into groups, computes a separate query/key/value set for each, lets each attend independently, then concatenates and applies an output projection. The split is free: total compute matches one large head, while expressiveness is much greater.\n\n`head_dim = dim // n_head`. Eight heads of 64 dimensions each cost the same floating-point work as one head of 512.\n\n`GQA` (grouped-query attention) changes the keys and values: several query heads **share** one key/value set. There can still be 8 query heads while only 2 key/value heads exist,every 4 query heads share one KV set.\n\nThe reason lives on the inference side. Decoding reads the entire `KV cache` for every generated token, and the cache scales with the number of key/value heads. Going from 8 to 2 makes it four times smaller,a real speedup in a memory-bound regime, at almost no quality cost. Llama 2 70B onward ships this configuration.\n\nWith `n_kv_head = n_head` GQA degenerates to ordinary multi-head; with `n_kv_head = 1` it is MQA (multi-query attention), which saves the most but visibly costs quality. Values between 2 and 8 are the usual compromise."
+        }
       }
     ]
   },
