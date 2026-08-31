@@ -3024,6 +3024,26 @@ const primers = {
         'And a more fundamental question: **is RL teaching the model anything new, or only amplifying what it already had?** Work suggests RLVR mainly selects and strengthens solutions already in the base model rather than inventing new ones. If so, RL\'s ceiling is set by pretraining.'
       )
     ),
+    'finale': t(
+      p(
+        '到这一关为止，从一段字节到一个会跟随指令的模型，整条链的每一块都写过了。这一关只做一件事：**把它们接起来，让那些结论在同一次运行里同时成立**。',
+        '三段的分工很清楚。`预训练`在完整的文本上做下一个 token 预测,模型学会符号怎么排列，但不会「被问了就回答」。`SFT` 同样是下一个 token 预测，只是 loss 只算在回答上,模型学会「看到问题就该开口」。`RL` 采样、判对错、按相对优势更新,模型学会「说对的那个」。',
+        '而**三段的目标函数其实只有两种**：交叉熵和策略梯度。区别全在数据和 mask 上。如果整个项目只留下一句话，是这句。',
+        '接起来之后要卡的不是新东西,是`交接处`。每一段单独跑通了，接起来仍然可能出问题，而出问题的地方几乎总是交接：SFT 的 mask 在流水线里还成立吗？RL 的分组还对吗？整条链还能重放吗？',
+        '最后那条最要紧。**三段各自确定性，接起来未必**,任何一处用了全局随机状态、或者依赖了集合与字典的遍历顺序，整条链就不可重放了。而一条不可重放的流水线，出了问题只能从头猜。',
+        '真实尺度上多出来的东西，绝大部分是`工程`而不是新想法：分布式、检查点与断点续训、推理与训练的权重同步、以及一整套评测。而每一样都建立在这些不变量上,「反向是前向的两倍」「优势和为 0」「mask 挡住了 prompt」，在 671B 上和在这里是同一句话。',
+        '最后留一件事：**这条流水线现在是可重放的**。拿它做点别的实验,换个任务、换个优化器、把某个修正关掉看看会怎样。一条可重放的流水线，才谈得上做实验。'
+      ),
+      p(
+        'By this stage every block of the chain from raw bytes to an instruction-following model has been written. This stage does one thing: **connect them so those conclusions hold simultaneously in a single run**.',
+        'The three phases divide the work cleanly. `Pretraining` does next-token prediction over whole texts,the model learns how symbols arrange but not that a question wants an answer. `SFT` is the same prediction with loss only on the answer,the model learns that a question is its cue to speak. `RL` samples, judges, and updates by relative advantage,the model learns to say the correct one.',
+        'And **only two objective functions appear across all three**: cross-entropy and policy gradient. All the difference is in the data and the mask. If this project leaves one sentence behind, it is that one.',
+        'What connecting them gates is not new material but the `seams`. Each phase passed alone; joining them can still break things, and the break is almost always at a seam: does SFT\'s mask still hold in the pipeline? Is the RL grouping still right? Does the whole chain still replay?',
+        'That last one matters most. **Three deterministic phases need not compose**,any global random state anywhere, or a dependence on set and dictionary iteration order, and the chain stops replaying. A pipeline that cannot replay leaves you guessing from the start.',
+        'What real scale adds is mostly `engineering` rather than new ideas: distribution, checkpointing and resumption, weight synchronisation between inference and training, a full evaluation suite. Each rests on these invariants,"the backward costs twice the forward", "advantages sum to zero", "the mask keeps the prompt out" are the same sentences at 671B as here.',
+        'One last thing: **this pipeline is replayable**. Use it for something else,change the task, change the optimiser, switch a correction off and see what happens. Only a replayable pipeline makes experiments possible.'
+      )
+    ),
   },
 };
 
