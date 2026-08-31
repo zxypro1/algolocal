@@ -82,6 +82,8 @@
     "release:minor": "bash scripts/release.sh minor",
     "release:major": "bash scripts/release.sh major",
     "release:dry": "bash scripts/release.sh patch --dry-run",
+    "nanotorch:build": "node scripts/build-nanotorch.js",
+    "kernels:build": "bash scripts/build-llmlab-kernels.sh",
     "projects:build": "node scripts/build-projects.js",
     "projects:verify": "node scripts/build-projects.js && node scripts/verify-projects.js"
   },
