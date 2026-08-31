@@ -12,6 +12,7 @@ import { createKernels, createKernelsAsync, loadKernelsFromUrl, type Kernels } f
 import { Arena } from './tensor';
 import { Meter, Ops, type OpName } from './ops';
 import { buildLlmMetrics, type LlmMetricTree } from './metrics';
+import { TrainingLog } from './recorder';
 
 export { Arena, DTYPE_BYTES, numel } from './tensor';
 export type { DType, Tensor, TensorRole, ArenaStats } from './tensor';
@@ -19,12 +20,23 @@ export { Meter, Ops } from './ops';
 export type { OpName, Phase, OpRecord, OpCounters } from './ops';
 export { buildLlmMetrics, isForbiddenGateMetric, FORBIDDEN_GATE_PREFIXES } from './metrics';
 export type { LlmMetricTree } from './metrics';
+export { TrainingLog, histogramOf } from './recorder';
+export type {
+  TrainStepRecord, SampleRecord, AttentionSnapshot, HistogramSnapshot, TrainingLogView,
+} from './recorder';
 
 export interface Runtime {
   readonly kernels: Kernels;
   readonly arena: Arena;
   readonly ops: Ops;
   readonly meter: Meter;
+  /**
+   * 训练日志。学员的脚本往里写，面板与结果面板从里面读。
+   *
+   * **不是门槛的来源** —— 日志是学员自愿写的，可以少写、写错、不写。
+   * 门槛读的是 `metrics()` 那棵树，在算子层数出来的，绕不过。
+   */
+  readonly log: TrainingLog;
   /** 本关禁用哪些算子。判定开始时设一次 */
   forbid(ops: OpName[]): void;
   metrics(extra?: RuntimeMetricsInput): LlmMetricTree;
@@ -40,8 +52,9 @@ function makeRuntime(kernels: Kernels): Runtime {
   const arena = new Arena(kernels);
   const meter = new Meter();
   const ops = new Ops(kernels, arena, meter);
+  const log = new TrainingLog();
   return {
-    kernels, arena, ops, meter,
+    kernels, arena, ops, meter, log,
     forbid(list) {
       meter.forbidden = new Set(list);
     },
