@@ -38,37 +38,76 @@ export function makeRandom(seed: number) {
   };
 }
 
-const SUBJECTS = [
-  'the cat', 'a dog', 'the tall man', 'my sister', 'the old ship', 'a small bird',
-  'her brother', 'the young teacher', 'that grey horse', 'the quiet child',
+const DETERMINERS = ['the', 'a', 'that', 'this', 'her', 'his', 'their', 'my', 'our', 'one'] as const;
+const ADJECTIVES = [
+  'tall', 'old', 'quiet', 'broken', 'blue', 'small', 'empty', 'grey', 'wooden', 'narrow',
+  'bright', 'heavy', 'distant', 'sudden', 'careful', 'patient', 'crooked', 'faint',
+] as const;
+const NOUNS = [
+  'cat', 'dog', 'man', 'sister', 'ship', 'bird', 'brother', 'teacher', 'horse', 'child',
+  'harbour', 'box', 'door', 'letter', 'room', 'street', 'stone', 'clock', 'map', 'garden',
+  'window', 'bridge', 'river', 'market', 'lantern', 'ledger', 'kettle', 'orchard',
 ] as const;
 const VERBS = [
-  'walked to', 'looked at', 'carried', 'found', 'painted', 'remembered',
-  'opened', 'counted', 'described', 'lost',
+  'walked to', 'looked at', 'carried', 'found', 'painted', 'remembered', 'opened',
+  'counted', 'described', 'lost', 'repaired', 'measured', 'borrowed', 'buried',
+  'sketched', 'weighed', 'mentioned', 'abandoned', 'polished', 'inherited',
 ] as const;
-const OBJECTS = [
-  'the harbour', 'a wooden box', 'the blue door', 'her letters', 'the quiet room',
-  'an empty street', 'three small stones', 'the broken clock', 'a paper map',
+const ADVERBIALS = [
+  'before dawn', 'without a word', 'in the rain', 'twice that week', 'as usual',
+  'on the way home', 'after the storm', 'by the old wall', 'for no clear reason',
+  'while the bells rang', 'under a low sky', 'against her better judgement',
 ] as const;
-const TAILS = [
-  'before dawn.', 'without a word.', 'in the rain.', 'and then left.',
-  'twice that week.', 'again.', 'as usual.', 'on the way home.',
+const CONNECTIVES = [
+  'and then', 'but', 'so', 'although', 'because', 'until', 'while', 'after which',
+] as const;
+const NAMES = [
+  'Mira', 'Tomas', 'Odile', 'Bran', 'Yusuf', 'Perrin', 'Ines', 'Calder',
+  'Nadia', 'Osgood', 'Lucia', 'Ferran',
 ] as const;
 
 /**
  * 模板文法生成的英文。
  *
- * 刻意留着真实文本的两个性质：**词有边界**（BPE 能学出 `the` / `ed` 这样的片段），
- * **有长程重复**（同一个主语会在段落里再出现，注意力有东西可抓）。
- * 但它比真英文规整得多，所以 loss 的地板比真语料低 —— 题面里要写清这一点。
+ * 刻意留着真实文本的三个性质：**词有边界**（BPE 能学出 `the` / `ed` 这样的片段）、
+ * **有长程重复**（同一个名字会在段落里再出现，注意力有东西可抓）、
+ * **短语不完全重复**（限定词 / 形容词 / 名词各自独立抽，组合数上万）。
+ *
+ * 第三条是后加的，而且是被数据逼出来的：第一版只有四个整块短语槽位
+ * （主语 / 动词 / 宾语 / 状语，各十来个选项），于是 BPE 在 512 词表下
+ * 把**整句话**合成了一个 token —— 压缩率 **12.0**。
+ *
+ * 那个数没有意义：真实语料在 512 词表下大约是 2–3。压缩率门槛也就跟着废了，
+ * 因为随便写个实现都能过。**语料太规整会让门槛失去分辨力**，
+ * 而这件事只有把参考解跑一遍、看着那个 12.0 才发现得了。
+ *
+ * 它仍然比真英文规整，所以 loss 的地板比真语料低 —— 题面里写清这一点。
  */
 export function templatedEnglish(bytes: number, seed = 20260831): string {
   const r = makeRandom(seed);
-  let out = '';
-  while (out.length < bytes) {
-    out += `${r.pick(SUBJECTS)} ${r.pick(VERBS)} ${r.pick(OBJECTS)} ${r.pick(TAILS)}\n`;
+  const phrase = () => `${r.pick(DETERMINERS)} ${r.pick(ADJECTIVES)} ${r.pick(NOUNS)}`;
+  const out: string[] = [];
+  let length = 0;
+
+  while (length < bytes) {
+    const shape = r.int(4);
+    let sentence: string;
+    if (shape === 0) {
+      sentence = `${phrase()} ${r.pick(VERBS)} ${phrase()} ${r.pick(ADVERBIALS)}.`;
+    } else if (shape === 1) {
+      sentence = `${r.pick(NAMES)} ${r.pick(VERBS)} ${phrase()}, ${r.pick(CONNECTIVES)} `
+        + `${phrase()} ${r.pick(VERBS)} ${phrase()}.`;
+    } else if (shape === 2) {
+      sentence = `${r.pick(ADVERBIALS)}, ${phrase()} ${r.pick(VERBS)} ${r.int(90) + 2} `
+        + `${r.pick(NOUNS)}s.`;
+    } else {
+      sentence = `${r.pick(NAMES)} said that ${phrase()} ${r.pick(VERBS)} ${phrase()} `
+        + `${r.pick(ADVERBIALS)}.`;
+    }
+    out.push(sentence);
+    length += sentence.length + 1;
   }
-  return out.slice(0, bytes);
+  return out.join('\n').slice(0, bytes);
 }
 
 /**

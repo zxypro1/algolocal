@@ -30,6 +30,17 @@ export interface LlmMetricTree {
 export interface BuildMetricsInput {
   meter: Meter;
   arena: ArenaStats;
+  /**
+   * 判定算出来、要给门槛读的值。
+   *
+   * 有一类量**只能由判定算**：分词器的压缩率、与 fp64 参考的最大误差、
+   * 因果泄漏的位数、留出集上的困惑度。它们不是算子层能数出来的，
+   * 而是隐藏用例主动去量的。
+   *
+   * 它们和计量树里那些数**一样硬** —— 因为算它们的是平台的代码，不是学员的。
+   * 学员的 `nt.log.report(...)` 落在日志里，不落在这里。
+   */
+  published?: Record<string, unknown>;
   /** 参数量，按模块分。由模型自己报 —— 它才知道哪些张量是参数 */
   params?: { total: number; active?: number; byModule?: Record<string, number> };
   /** 墙钟，**只作展示** */
@@ -65,7 +76,7 @@ export function buildLlmMetrics(input: BuildMetricsInput): LlmMetricTree {
   const forbiddenHits: Record<string, number> = {};
   for (const [op, n] of meter.forbiddenHits) forbiddenHits[op] = n;
 
-  return {
+  const tree: LlmMetricTree = {
     /* ---- 全部精确：算子层逐次累加，公式写在 ops.ts 每个方法旁边 ---- */
     flops: {
       total,
@@ -128,6 +139,24 @@ export function buildLlmMetrics(input: BuildMetricsInput): LlmMetricTree {
       tokensPerSecond: input.timing?.tokensPerSecond ?? 0,
     },
   };
+
+  // 判定发布的值按点号路径合进去，于是门槛写 `llm.tokenizer.compression` 就能读到
+  for (const [path, value] of Object.entries(input.published ?? {})) {
+    setPath(tree as Record<string, unknown>, path, value);
+  }
+  return tree;
+}
+
+/** 按 `a.b.c` 写进嵌套对象。中间不存在就建 */
+function setPath(target: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split('.');
+  let node = target;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const key = parts[i];
+    if (typeof node[key] !== 'object' || node[key] === null) node[key] = {};
+    node = node[key] as Record<string, unknown>;
+  }
+  node[parts[parts.length - 1]] = value;
 }
 
 /**

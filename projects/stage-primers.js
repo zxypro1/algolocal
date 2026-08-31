@@ -2483,6 +2483,40 @@ const primers = {
       )
     ),
   },
+  'llm-from-scratch': {
+    'byte-bpe': t(
+      p(
+        '模型不认识字符，只认识`整数`。把文本变成整数的那一步叫`分词`（tokenization），2026 年绝大多数模型用的是同一个算法：`字节对编码`（BPE，byte pair encoding）。',
+        '为什么从`字节`开始而不是字符：从字符开始的话，你立刻要回答「表里放哪些字符」，中文有几万个、emoji 每年还在加，而漏掉一个就会出现「不认识的字符」。字节只有 256 个，任何文本都能表示，永远不会遇到未登录字符。这正是 Llama 3 与 GPT-4o 都用字节级 BPE 的原因。',
+        '算法本身只有三步：把文本变成一串字节，这是初始词表；数一数哪一对相邻 token 出现得最多，把它合并成一个新 token；重复第二步直到词表到达目标大小。每次合并记下来就得到一张`merge 表`。编码时按这张表的顺序反复合并，解码时按 id 展开回字节再解 UTF-8。',
+        '有一个细节必须提前定死：`平局`。「出现最多的那一对」经常不止一个，不定规则的话同一份语料两次训练会得到不同的词表，而两次都是对的。真实实现都会规定一个确定的顺序，我们的规则是先比频次，频次相同时取第一次出现位置更靠前的那一对。',
+        '最后，这一关会跑得有点慢，纯 Python 的循环比编译语言慢两个数量级。这不是实现问题：HuggingFace 之所以把 `tokenizers` 用 Rust 重写，正是因为这一步在真实语料上要跑几个小时。'
+      ),
+      p(
+        'A model does not see characters, only `integers`. Turning text into integers is `tokenization`, and in 2026 almost every model uses the same algorithm: `byte pair encoding` (BPE).',
+        'Why start from `bytes` rather than characters: starting from characters forces you to answer "which characters go in the table", there are tens of thousands of Chinese ones and new emoji every year, and anything you miss becomes an unknown character. Bytes are only 256, can represent any text, and never produce an out-of-vocabulary symbol. That is why Llama 3 and GPT-4o both use byte-level BPE.',
+        'The algorithm is three steps: turn the text into bytes, which is the initial vocabulary; count which adjacent pair occurs most often and merge it into a new token; repeat until the vocabulary reaches the target size. Recording every merge gives a `merge table`. Encoding replays that table in order; decoding expands ids back to bytes and decodes UTF-8.',
+        'One detail must be pinned down first: `ties`. "The most frequent pair" is often not unique, and without a rule two runs over the same corpus produce different vocabularies while both are correct. Every real implementation fixes an order; ours is highest count first, and on a tie the pair whose first occurrence is earlier.',
+        'Finally, this stage runs a little slowly, pure Python loops are two orders of magnitude slower than compiled code. That is not a flaw in the setup: HuggingFace rewrote `tokenizers` in Rust precisely because this step takes hours on real corpora.'
+      )
+    ),
+    baselines: t(
+      p(
+        '后面十几关的门槛都是「loss 要低于某个数」。而一个 loss 是好是坏，`单看它是判断不了的`，取决于词表多大、语料多规整。所以第一件事是把地板测出来。',
+        '三条基线，从笨到不那么笨。`均匀基线`假设每个 token 等概率，交叉熵恰好是 `ln(V)`。`unigram 基线`只看每个 token 出现的频率，不看上下文。`bigram 基线`只看前一个 token，按转移频率给出预测。',
+        'bigram 是最要紧的那一条：它代表「完全不理解语言、只记住了相邻搭配」能达到的水平。一个模型如果打不穿 bigram，说明它的注意力根本没在工作，后面几关的门槛正是建立在这个判断上的。',
+        '`交叉熵`是 `-1/N · Σ log p(实际出现的那个 token)`，单位是 nat。`困惑度`是 `exp(交叉熵)`，直觉是「模型平均在多少个候选里犹豫」；均匀分布的困惑度恰好等于词表大小。',
+        '还有一件必须做的事是`平滑`。留出集里一定会出现训练集没见过的搭配，不平滑的话概率是 0、对数是负无穷，整条基线就废了。这里用加一平滑：`p(b|a) = (count(a,b) + 1) / (count(a) + V)`，注意分母也要加。'
+      ),
+      p(
+        'Most gates from here on read "loss below X". But a loss on its own `tells you nothing`, it depends on vocabulary size and how regular the corpus is. So the first job is to measure the floor.',
+        'Three baselines, from dumb to less dumb. The `uniform baseline` assumes every token is equally likely, giving cross-entropy exactly `ln(V)`. The `unigram baseline` uses each token frequency and ignores context. The `bigram baseline` looks only at the previous token and predicts from transition counts.',
+        'Bigram is the one that matters: it is what "understands nothing, merely memorised adjacent pairs" achieves. A model that cannot beat bigram has attention that is not working at all, several later gates rest on exactly that judgement.',
+        '`Cross-entropy` is `-1/N · Σ log p(the token that actually occurred)`, measured in nats. `Perplexity` is `exp(cross-entropy)`, read as "how many candidates is the model hesitating between"; a uniform model has perplexity equal to the vocabulary size.',
+        'One more thing is mandatory: `smoothing`. The held-out set will contain pairs the training split never saw, and without smoothing the probability is zero, the logarithm is negative infinity, and the baseline is unusable. We use add-one smoothing: `p(b|a) = (count(a,b) + 1) / (count(a) + V)`, and note that the denominator is smoothed too.'
+      )
+    ),
+  },
 };
 
 function attachStagePrimers(project) {

@@ -17,6 +17,7 @@ export type {
 export { buildWorld, mergeWorldSpec } from './world';
 export type { TrainWorld, BuildWorldOptions } from './world';
 
+export { runCommand, absolutePath, LAB_ROOT } from './shell';
 export { createLlmLabApi, createTrainLabModules } from './modules';
 export type { LlmLabApi, ScriptResult } from './modules';
 

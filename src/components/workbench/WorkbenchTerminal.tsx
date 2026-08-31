@@ -44,6 +44,14 @@ export default function WorkbenchTerminal(
   const termRef = useRef<Terminal | null>(null);
   // 命令执行期间不接受新输入，也不重画提示符
   const busyRef = useRef(false);
+  /*
+   * 每条命令一个编号，Ctrl+C 时 +1。
+   *
+   * 用来**放弃**一条还在跑的命令：它的 Promise 落地时编号已经不是自己那个了，
+   * 于是输出被丢掉、提示符也不重画。少了这个，Ctrl+C 之后那条命令回来时
+   * 会把输出打在新的提示符后面，看起来像凭空冒出来的。
+   */
+  const runIdRef = useRef(0);
   const lineRef = useRef('');
   const historyRef = useRef<string[]>([]);
   const historyPosRef = useRef(0);
@@ -140,7 +148,31 @@ export default function WorkbenchTerminal(
 
       term.onData(async (data) => {
         const active = term;
-        if (!active || busyRef.current) return;
+        if (!active) return;
+
+        /*
+         * **Ctrl+C 要在 busy 检查之前处理。**
+         *
+         * 之前它在后面，于是命令一旦挂住（比如一段跑不完的用户代码），
+         * 所有输入都被丢掉、包括 Ctrl+C —— 终端永久卡死，唯一的出路是刷新页面，
+         * 而刷新会连带丢掉工作台里的状态。这是在 llmlab 手点时撞见的。
+         */
+        if (data === KEY_CTRL_C) {
+          if (busyRef.current) {
+            runIdRef.current += 1;   // 让那条还在跑的命令的输出作废
+            busyRef.current = false;
+            active.write('^C\r\n');
+            lineRef.current = '';
+            writePrompt(active);
+            return;
+          }
+          active.write('^C');
+          lineRef.current = '';
+          writePrompt(active);
+          return;
+        }
+
+        if (busyRef.current) return;
 
         if (data === KEY_ENTER) {
           const line = lineRef.current.trim();
@@ -153,15 +185,21 @@ export default function WorkbenchTerminal(
 
           historyRef.current.push(line);
           historyPosRef.current = historyRef.current.length;
+          const runId = (runIdRef.current += 1);
           busyRef.current = true;
           try {
             const out = await onCommandRef.current(line);
+            // 期间按过 Ctrl+C 的话，这条命令已经被放弃了，输出不要再打出来
+            if (runId !== runIdRef.current) return;
             if (out) active.write(out);
           } catch (error) {
+            if (runId !== runIdRef.current) return;
             active.write(`${RED}${String((error as Error)?.message || error)}${RESET}`);
           } finally {
-            busyRef.current = false;
-            writePrompt(active);
+            if (runId === runIdRef.current) {
+              busyRef.current = false;
+              writePrompt(active);
+            }
           }
           return;
         }
@@ -171,13 +209,6 @@ export default function WorkbenchTerminal(
             lineRef.current = lineRef.current.slice(0, -1);
             active.write('\b \b');
           }
-          return;
-        }
-
-        if (data === KEY_CTRL_C) {
-          active.write('^C');
-          lineRef.current = '';
-          writePrompt(active);
           return;
         }
 

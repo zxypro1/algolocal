@@ -47,6 +47,17 @@ export function scoreColor(score: number): string {
 /* 用例与门槛                                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 门槛的比较符怎么显示。
+ *
+ * 以前只分「lte / lt 显示 ≤，其余一律 ≥」。于是 `eq` 的门槛被写成 `≥` ——
+ * 一条「词表必须恰好 512」的门槛在界面上读作「至少 512」，
+ * 而学员照着做会得到一个过不了的实现。`gt` 同理，被弱化成了 `≥`。
+ */
+const GATE_OP: Record<string, string> = {
+  lte: '≤', lt: '<', gte: '≥', gt: '>', eq: '=',
+};
+
 export function RunReportPanel({ report }: { report: StageRunReport | null }) {
   const { t } = useTranslation();
   const localized = useLocalized();
@@ -109,7 +120,7 @@ export function RunReportPanel({ report }: { report: StageRunReport | null }) {
                 </Group>
                 <Text size="xs" c={gate.passed ? 'dimmed' : 'red'} style={{ whiteSpace: 'nowrap' }}>
                   {Number.isFinite(gate.actual) ? gate.actual : '—'}
-                  {gate.gate.unit || ''} / {gate.gate.op === 'lte' || gate.gate.op === 'lt' ? '≤' : '≥'}{' '}
+                  {gate.gate.unit || ''} / {GATE_OP[gate.gate.op] ?? '≥'}{' '}
                   {gate.gate.value}
                   {gate.gate.unit || ''}
                 </Text>
