@@ -22,9 +22,9 @@ function fail(message) {
 
 function validate(project, source) {
   const kind = project.workspace?.kind;
-  // ops / gpu 形态没有「工作区文件」这个概念：学员编辑的是机器磁盘上的文件，
-  // 由 stage.ops.files / stage.gpu.files 铺下去
-  const machineBased = kind === 'ops' || kind === 'gpu';
+  // ops / gpu / train 形态没有「工作区文件」这个概念：学员编辑的是机器磁盘上的文件，
+  // 由 stage.<kind>.files 铺下去
+  const machineBased = kind === 'ops' || kind === 'gpu' || kind === 'train';
   const required = ['id', 'title', 'summary', 'difficulty', 'brief', 'stages']
     .concat(machineBased ? [] : ['files']);
   for (const field of required) {

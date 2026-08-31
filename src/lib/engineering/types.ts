@@ -148,6 +148,8 @@ export interface ProjectStage {
   ops?: OpsStageSpec;
   /** gpu 形态的关卡增量（workspace.kind === 'gpu' 时才有意义） */
   gpu?: GpuStageSpec;
+  /** train 形态的关卡增量（workspace.kind === 'train' 时才有意义） */
+  train?: TrainStageSpec;
   /** 本关重点考察的维度，用于 AI 评审聚焦 */
   focus?: DimensionKey[];
   /**
@@ -173,7 +175,17 @@ export interface ProjectStage {
  * 这里声明的是**形态**而不是布局坐标：面板怎么摆是代码的事，
  * 题目只回答「这是哪一类实验台」。
  */
-export type WorkspaceKind = 'code' | 'ops' | 'gpu';
+export type WorkspaceKind = 'code' | 'ops' | 'gpu' | 'train';
+
+/**
+ * 每一支都必须有人接。
+ *
+ * `tests/engineering/workspace-dispatch.test.ts` 拿这张表去比对
+ * `pages/projects/[id].tsx` 里的分支 —— 加了一支却忘了接，测试直接红。
+ * （原来那条用例只查 `projects.json` 里出现过的 kind，于是「类型加了、
+ * 组件还没写」这段窗口期是没有信号的，而 gpulab 那次恰恰整段都在窗口期里。）
+ */
+export const WORKSPACE_KINDS: WorkspaceKind[] = ['code', 'ops', 'gpu', 'train'];
 
 /** 现有形态：多文件工作区 + 隐藏用例 + 指标门槛 */
 export interface CodeWorkspaceSpec {
@@ -489,7 +501,55 @@ export interface GpuStageSpec {
   referenceCommands?: string[];
 }
 
-export type WorkspaceSpec = CodeWorkspaceSpec | OpsWorkspaceSpec | GpuWorkspaceSpec;
+/**
+ * train 形态：任务 + 终端 + IDE + 训练 + 张量 + 样例。
+ *
+ * 学员写 Python，对着 `nanotorch`（PyTorch 的严格子集）实现模型与训练循环，
+ * 真的把 loss 训下去。世界（语料、词表、模型档位、超参、检查点）放在项目上，
+ * 每一关只写自己的增量 —— 和 ops / gpu 一个路子。
+ */
+export interface TrainWorkspaceSpec {
+  kind: 'train';
+  world?: import('../llmlab/lab').TrainWorldSpec;
+}
+
+/**
+ * 一关在 train 世界上加的增量。
+ *
+ * 判定仍然走隐藏用例（`stage.specs`），只是那些 TS 里 import 的是 `@llm/lab`。
+ */
+export interface TrainStageSpec {
+  /** 进入本关时往机器磁盘上放的文件（一般是几个 .py） */
+  files?: Record<string, string>;
+  /** 这一关的世界覆盖，浅合并到项目级的世界上（换档位、换语料、换数据集） */
+  world?: Partial<import('../llmlab/lab').TrainWorldSpec>;
+  /** 「运行」按钮跑哪个脚本。不写就沿用世界里的 */
+  entry?: string;
+  /**
+   * 本关禁用的 nanotorch 内建。
+   *
+   * 判定读 `llm.builtins.forbiddenCalls`，恒为 0。第 3 关禁
+   * `nn.functional.scaled_dot_product_attention`，第 12 关禁 `optim.AdamW` ——
+   * 「自己实现」这件事在这里是**精确**可判的，因为算子层是平台的。
+   */
+  forbidden?: string[];
+  /** 进入本关时先替学员跑一遍的命令 */
+  setupCommands?: string[];
+  /**
+   * 参考解：把这一关做对的那几份 .py。
+   *
+   * 反向验证靠它 —— 用参考解跑，用例与门槛必须全绿；用起始代码跑，必须挂。
+   */
+  referenceFiles?: Record<string, string>;
+  /** 参考解顺带要敲的命令 */
+  referenceCommands?: string[];
+}
+
+export type WorkspaceSpec =
+  | CodeWorkspaceSpec
+  | OpsWorkspaceSpec
+  | GpuWorkspaceSpec
+  | TrainWorkspaceSpec;
 
 export interface EngineeringProject {
   id: string;
@@ -607,6 +667,17 @@ export interface LabMetrics {
    * `getMetricValue` 本来就会一层层走下去，不用改解析。
    */
   gpu?: Record<string, unknown>;
+  /**
+   * train 关卡的指标树，形状与 `gpu` 完全一样。
+   *
+   * 门槛直接写路径，比如
+   * `{ metric: 'llm.grad.maxRelError', op: 'lte', value: 2e-3 }` ——
+   * `getMetricValue` 本来就会一层层走下去，不用改解析。
+   *
+   * 一条铁律（design/llmlab.md 第六节）：**`llm.timing.*` 只作展示，
+   * 永远不许出现在门槛里** —— 我们是真算，耗时取决于学员的机器。
+   */
+  llm?: Record<string, unknown>;
 }
 
 export interface GateResult {

@@ -13,12 +13,16 @@
  * 「用户点进去之后看得到什么」。
  *
  * 这条用例问的就是那件事，而且刻意问得很笨：
- * **projects.json 里出现过的每一种 kind，分发那一页里必须有对应的分支。**
+ * **`WorkspaceKind` 的每一支，分发那一页里必须有对应的分支。**
  * 它拦不住「组件写得难看」，但拦得住「组件根本不存在」——
  * 而后者才是那次真正发生的事。
+ *
+ * 判据从「projects.json 里出现过的 kind」改成「类型里声明的每一支」，
+ * 理由见下面 `kinds` 那一段。
  */
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { WORKSPACE_KINDS } from '../../src/lib/engineering/types';
 
 const ROOT = join(__dirname, '..', '..');
 
@@ -36,10 +40,28 @@ const dispatchSource = readFileSync(join(ROOT, 'pages', 'projects', '[id].tsx'),
 
 describe('工作台形态的分发', () => {
   const projects = readProjects();
-  const kinds = [...new Set(projects.map((project) => project.workspace?.kind ?? 'code'))];
+  const usedKinds = [...new Set(projects.map((project) => project.workspace?.kind ?? 'code'))];
+
+  /*
+   * 查的是 **WorkspaceKind 这个联合类型的每一支**，不是 projects.json 里出现过的那些。
+   *
+   * 原来这里用的是后者，于是「类型加了一支、组件还没写、题目也还没进 projects.json」
+   * 这段窗口期完全没有信号 —— 而 gpulab 那次整段都在窗口期里：
+   * 29 关的引擎与判题全做完了，题目却因为还没定稿没进 projects.json，
+   * 所以这条用例一直是绿的，直到发版才发现点进去是一堵墙。
+   *
+   * 按类型查，加一支就立刻红，接上才绿。
+   */
+  const kinds = WORKSPACE_KINDS;
 
   it('至少有一个项目声明了非 code 的形态 —— 否则这条用例是空转的', () => {
-    expect(kinds.some((kind) => kind !== 'code')).toBe(true);
+    expect(usedKinds.some((kind) => kind !== 'code')).toBe(true);
+  });
+
+  it('projects.json 里出现的形态都在 WorkspaceKind 里', () => {
+    for (const kind of usedKinds) {
+      expect(WORKSPACE_KINDS).toContain(kind as (typeof WORKSPACE_KINDS)[number]);
+    }
   });
 
   it.each(kinds)('kind = %s 有对应的工作台组件', (kind) => {

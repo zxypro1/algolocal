@@ -57,6 +57,11 @@ class TestRunner {
         description: 'The CUDA frontend, the warp-lockstep VM, coalescing/bank-conflict measurement, racecheck, and the nvcc/ncu toolchain'
       },
       {
+        name: 'Llmlab Training Workbench',
+        file: 'tests/llmlab',
+        description: 'The train workbench wiring, the WASM tensor kernels, nanotorch, and the Python runtime that trains a real model in the browser'
+      },
+      {
         name: 'Desktop Menus',
         file: 'tests/desktop',
         description: 'Application and context menus, including the edit roles that ⌘V depends on'
