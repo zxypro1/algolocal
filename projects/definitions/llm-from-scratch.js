@@ -15669,6 +15669,681 @@ const STAGE_GRPO_FIX = {
   ),
 };
 
+/* ================================================================== */
+/* 第 30 关：收官                                                       */
+/* ================================================================== */
+
+/** 前面各关验收过的零件，收官这一关直接组装 */
+const ACCEPTED_PY = code`
+  """前面各关验收过的零件。收官这一关不重写它们,把它们接起来。
+
+  | 来自 | 提供 |
+  | --- | --- |
+  | 第 22 关 | \`sft(model, pairs, steps)\`,loss 只算在回答上 |
+  | 第 28 关 | \`verify\` / \`group_advantages\` / \`grpo_loss\` |
+  | 第 29 关 | \`group_advantages_v2\` / \`grpo_loss_v2\`,三个修正 |
+
+  真实项目里这一步叫「把各个阶段串成一条流水线」。
+  它看起来只是调用顺序，而**每一处交接都可能丢掉一个不变量** ——
+  这一关的门槛就是把前面几关的关键门槛在**同一次运行里**再验一遍。
+  """
+  import math
+  import nanotorch as nt
+  from nanotorch import functional as F
+  import kit
+  import rollout as R
+
+
+  def sft(model, pairs, steps, batch_size=16, peak_lr=0.03):
+      """第 22 关：loss 只算在回答上。返回每 10 步一个的按 mask 的 loss。"""
+      opt = nt.optim.AdamW(model.parameters(), lr=peak_lr, betas=(0.9, 0.95),
+                           weight_decay=0.1, grad_clip=1.0)
+      idx = nt.zeros((batch_size * kit.S,), role="data", name="p.idx")
+      tgt = nt.zeros((batch_size * kit.S,), role="data", name="p.tgt")
+      msk = nt.zeros((batch_size * kit.S,), role="data", name="p.mask")
+      hist = []
+      base = nt.mark()
+      warmup = max(1, steps // 20)
+      for st in range(1, steps + 1):
+          nt.release(base)
+          bi, bt, bm = [], [], []
+          for k in range(batch_size):
+              p, a = pairs[(st * batch_size + k) % len(pairs)]
+              ri, rt, rm = kit.build_row(p, a)
+              bi.extend(ri)
+              bt.extend(rt)
+              bm.extend(rm)
+          idx.set_int_(bi)
+          tgt.set_int_(bt)
+          msk.set_(bm)
+          opt.zero_grad()
+          nt.phase("forward")
+          logits = model.logits(idx, batch_size, kit.S)
+          loss = F.cross_entropy(logits, tgt, batch_size * kit.S, kit.V, msk)
+          nt.phase("other")
+          loss.backward()
+          if st <= warmup:
+              lr = peak_lr * st / warmup
+          else:
+              pr = (st - warmup) / max(1, steps - warmup)
+              lr = peak_lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * pr)))
+          opt.step(lr=lr)
+          if st % 10 == 0:
+              probs = F.softmax(logits, batch_size * kit.S, kit.V).tolist()
+              total, count = 0.0, 0.0
+              for r in range(batch_size * kit.S):
+                  if bm[r] > 0:
+                      total += -math.log(max(probs[r * kit.V + bt[r]], 1e-30))
+                      count += 1.0
+              hist.append(total / max(1.0, count))
+      nt.release(base)
+      return hist
+
+
+  def verify(prompt, sample):
+      body = prompt[:-1]
+      if "+" in body:
+          a, b = body.split("+")
+          want = str(int(a) + int(b))
+      else:
+          a, b = body.split("-")
+          want = str(int(a) - int(b))
+      return 1.0 if sample == want else 0.0
+
+
+  def group_advantages_v2(rewards, group_size):
+      """第 29 关：只减均值，不除标准差。"""
+      out = []
+      for start in range(0, len(rewards), group_size):
+          grp = rewards[start:start + group_size]
+          mean = sum(grp) / len(grp)
+          out.extend([r - mean for r in grp])
+      return out
+
+
+  def _logp_per_token(model, idx, targets, batch, seq):
+      rows = batch * seq
+      lp = F.log_softmax(model.logits(idx, batch, seq), rows, kit.V)
+      sel = nt.zeros((rows,), name="p.sel")
+      sel.set_int_([r * kit.V + targets[r] for r in range(rows)])
+      return F.gather(lp, sel, rows, 1)
+
+
+  def grpo_loss_v2(logp, old_logp, advantages, mask, rows, eps_low=0.2, eps_high=0.28):
+      """第 29 关：token 级归一化 + 非对称裁剪。"""
+      ratio = F.exp(F.add(logp, F.scale(old_logp, -1.0)))
+      adv = nt.zeros((rows,), name="p.adv")
+      adv.set_(advantages)
+      unclipped = F.row_scale(ratio, adv, rows, 1)
+      rv = ratio.tolist()
+      clipped = nt.zeros((rows, 1), name="p.clipped")
+      clipped.set_([min(max(v, 1.0 - eps_low), 1.0 + eps_high) * a
+                    for v, a in zip(rv, advantages)])
+      un, cl = unclipped.tolist(), clipped.tolist()
+      pick = nt.zeros((rows,), name="p.pick")
+      pick.set_([1.0 if un[i] <= cl[i] else 0.0 for i in range(rows)])
+      keep = nt.zeros((rows,), name="p.keep")
+      keep.set_(mask)
+      per = F.row_scale(F.row_scale(unclipped, pick, rows, 1), keep, rows, 1)
+      seg = nt.zeros((rows,), name="p.seg")
+      seg.set_int_([0] * rows)
+      summed = F.scatter_add(per, seg, rows, 1, 1)
+      return F.scale(summed, -1.0 / max(1.0, sum(mask)))
+
+
+  def grpo(model, prompts, steps, group_size=8, inner_epochs=2, max_new=4,
+           peak_lr=0.002, seed=1):
+      """第 28 + 29 关：RLVR + 修正过的 GRPO。返回每步的 rollout 通过率。"""
+      opt = nt.optim.AdamW(model.parameters(), lr=peak_lr, betas=(0.9, 0.95),
+                           weight_decay=0.0, grad_clip=1.0)
+      per_step = min(6, len(prompts))
+      n = per_step * group_size
+      idx = nt.zeros((n * kit.S,), role="data", name="p.rl.idx")
+      pass_rate, adv_sums = [], []
+      base = nt.mark()
+      for st in range(1, steps + 1):
+          nt.release(base)
+          start = ((st - 1) * per_step) % len(prompts)
+          bp = [prompts[(start + k) % len(prompts)] for k in range(per_step)]
+          groups = R.rollout(model, bp, group_size, max_new, seed * 1000 + st)
+          flat, tg, mk, rewards = [], [], [], []
+          for grp in groups:
+              for smp in grp["samples"]:
+                  ri, rt, rm = kit.build_row(grp["prompt"], smp)
+                  flat.extend(ri)
+                  tg.extend(rt)
+                  mk.extend(rm)
+                  rewards.append(verify(grp["prompt"], smp))
+          idx.set_int_(flat)
+          pass_rate.append(sum(rewards) / len(rewards))
+          adv_seq = group_advantages_v2(rewards, group_size)
+          for s0 in range(0, len(adv_seq), group_size):
+              adv_sums.append(sum(adv_seq[s0:s0 + group_size]))
+          adv_tok = [adv_seq[r // kit.S] for r in range(n * kit.S)]
+          with nt.no_grad():
+              old_vals = _logp_per_token(model, idx, tg, n, kit.S).tolist()
+          old_t = nt.zeros((n * kit.S, 1), name="p.old")
+          old_t.set_(old_vals)
+          for _ in range(inner_epochs):
+              opt.zero_grad()
+              nt.phase("forward")
+              lp = _logp_per_token(model, idx, tg, n, kit.S)
+              loss = grpo_loss_v2(lp, old_t, adv_tok, mk, n * kit.S)
+              nt.phase("other")
+              loss.backward()
+              opt.step(lr=peak_lr)
+      nt.release(base)
+      return {"pass_rate": pass_rate, "adv_sums": adv_sums}
+`;
+
+const STAGE_FINALE = {
+  id: 'finale',
+  title: t('收官 —— 一条跑得通的流水线', 'The finale — one pipeline that runs end to end'),
+  goal: t(
+    code`
+      前面 29 关每一关都验过一件事。这一关只做一件事：
+      **把它们接起来，让那些结论在同一次运行里同时成立。**
+
+      零件都在 \`accepted.py\` 里（前面各关验收过的版本），你要写的是 \`pipeline.py\`：
+
+      \`\`\`python
+      def run(seed, pretrain_steps, sft_steps, rl_steps):
+          """从随机初始化跑到一个会做算术的模型。返回
+
+          {"pretrain": [...],      # 预训练的 loss 曲线
+           "sft": [...],           # SFT 按 mask 的 loss 曲线
+           "rl": [...],            # RL 每步的 rollout 通过率
+           "adv_sums": [...],      # 每组优势之和（该恒为 0）
+           "before_rl": float,     # RL 之前留出集的精确匹配
+           "after_rl": float,      # RL 之后
+           "prompt_grad_leak": int}  # SFT 时 prompt 位置上非零梯度的个数
+          """
+      \`\`\`
+
+      ## 三段
+
+      \`\`\`
+      预训练     在完整的算式上做下一个 token 预测,模型学会「数字、加号、等号」
+                 这些符号怎么排列，但不会「被问了就回答」
+        ↓
+      SFT        同样是下一个 token 预测，但 **loss 只算在答案上**,
+                 模型学会「看到 = 就该说出答案」
+        ↓
+      RL（RLVR） 采样、用规则判对错、按组内相对优势更新,
+                 模型学会「说对的那个答案」
+      \`\`\`
+
+      三段的目标函数其实只有两种（交叉熵、策略梯度），
+      而**区别全在数据和 mask 上**。这是整个项目最值得带走的一句话。
+
+      ## 这一关卡的是「交接处」
+
+      每一段单独跑通过了，接起来仍然可能出问题,
+      而出问题的地方几乎总是**交接**：
+
+      - SFT 的 mask 在流水线里还成立吗（还是被哪一步的重构弄丢了）
+      - RL 的分组还对吗（prompt 换成流水线生成的之后）
+      - 整条链还能重放吗（三段各自确定性，接起来未必）
+
+      所以这一关的门槛不是新的,它们是前面几关那些门槛，
+      **在同一次运行里再验一遍**。
+
+      ## 怎么算过
+
+      | | 对应 | 要求 |
+      | --- | --- | --- |
+      | 三段都跑了 | —— | 三条曲线都非空，且预训练与 SFT 的 loss 都在降 |
+      | prompt 不进 loss | 第 22 关 | 非零梯度的个数 = **0** |
+      | 每组优势和为 0 | 第 28 关 | 最大 \\|和\\| ≤ **1e-5** |
+      | RL 有效 | 第 28 关 | 留出集通过率提升 ≥ **0.1** |
+      | **整条链可重放** | 第 16、27 关 | 同 seed 两遍**逐位一致** |
+
+      最后一条最要紧。三段各自确定性，接起来**未必**,
+      任何一处用了全局随机状态、或者依赖了字典的遍历顺序，
+      整条链就不可重放了。而不可重放的流水线，出了问题只能从头猜。
+    `,
+    code`
+      Each of the previous 29 stages verified one thing. This stage does one thing only:
+      **connect them and make those conclusions hold simultaneously in a single run.**
+
+      The pieces live in \`accepted.py\` (the versions each stage accepted); what you write is
+      \`pipeline.py\`:
+
+      \`\`\`python
+      def run(seed, pretrain_steps, sft_steps, rl_steps):
+          """From random initialisation to a model that does arithmetic. Returns
+
+          {"pretrain": [...],      # pretraining loss curve
+           "sft": [...],           # SFT masked-loss curve
+           "rl": [...],            # rollout pass rate per RL step
+           "adv_sums": [...],      # per-group advantage sums (must be 0)
+           "before_rl": float,     # held-out exact match before RL
+           "after_rl": float,      # and after
+           "prompt_grad_leak": int}  # non-zero gradients at prompt positions during SFT
+          """
+      \`\`\`
+
+      ## Three phases
+
+      \`\`\`
+      pretraining  next-token prediction over whole equations — the model learns how
+                   digits, plus and equals arrange, but not that a question wants an answer
+        ↓
+      SFT          still next-token prediction, but **loss only on the answer** — the model
+                   learns that "=" is its cue to speak
+        ↓
+      RL (RLVR)    sample, judge by rule, update by group-relative advantage — the model
+                   learns to say the *correct* answer
+      \`\`\`
+
+      Only two objective functions appear across the three phases (cross-entropy and policy
+      gradient); **all the difference is in the data and the mask**. That is the single most
+      portable sentence in this project.
+
+      ## What this stage gates is the seams
+
+      Each phase passed on its own, and connecting them can still break things — almost
+      always at a **seam**:
+
+      - does SFT's mask still hold inside the pipeline, or did a refactor lose it
+      - is the RL grouping still right once prompts come from the pipeline
+      - is the whole chain still replayable (three deterministic phases need not compose)
+
+      So this stage's gates are not new: they are the earlier stages' gates, **verified again
+      in one run**.
+
+      ## What counts as passing
+
+      | | From | Requirement |
+      | --- | --- | --- |
+      | All three phases ran | — | Three non-empty curves, pretraining and SFT losses falling |
+      | No loss on the prompt | Stage 22 | Non-zero gradients = **0** |
+      | Group advantages sum to 0 | Stage 28 | Largest \\|sum\\| <= **1e-5** |
+      | RL worked | Stage 28 | Held-out pass rate up >= **0.1** |
+      | **The chain replays** | Stages 16, 27 | Two runs at one seed are **bit-identical** |
+
+      The last one matters most. Three deterministic phases **need not** compose: any global
+      random state anywhere, or a dependence on dictionary iteration order, and the chain
+      stops replaying. And a pipeline that cannot replay leaves you guessing from the start
+      whenever something goes wrong.
+    `
+  ),
+  checklist: [
+    t('三段按顺序跑，各自的曲线都在降', 'The three phases run in order with falling curves'),
+    t('SFT 的 mask 在流水线里仍然成立', "SFT's mask still holds inside the pipeline"),
+    t('RL 的分组仍然正确', 'The RL grouping is still correct'),
+    t('同 seed 两遍逐位一致', 'Two runs at one seed are bit-identical'),
+  ],
+  hints: [
+    t('accepted.py 里的 sft / grpo 直接调用，不用重写。',
+      "Call accepted.py's sft and grpo directly; there is no need to rewrite them."),
+    t('prompt_grad_leak 用一次前向 + 反向查：mask 为 0 的位置上 dlogits 必须是 0。',
+      'Measure prompt_grad_leak with one forward and backward: dlogits must be zero where the mask is.'),
+    t('所有随机性都要从 seed 派生 —— 别用全局状态，别依赖字典的遍历顺序。',
+      'Derive every source of randomness from seed; avoid global state and dictionary ordering.'),
+  ],
+  pitfalls: [
+    t(code`
+      **三段各自确定性，接起来不确定。** 最常见的两个来源：
+      某一段用了全局随机状态（换个调用顺序结果就变），
+      或者某处依赖了集合 / 字典的遍历顺序。
+      而不可重放的流水线，出了问题只能从头猜 ——
+      这也是为什么这一关把「两遍逐位一致」当成最要紧的一条。
+    `, code`
+      **Three deterministic phases that do not compose.** The two usual causes: one phase
+      draws from global random state (change the call order and results change), or something
+      depends on set or dictionary iteration order. A pipeline that cannot replay leaves you
+      guessing from the start whenever something breaks — which is why "two runs are
+      bit-identical" is this stage's most important gate.
+    `),
+    t(code`
+      **在流水线里把 mask 弄丢。** 单独跑 SFT 的时候 mask 是对的，
+      接进流水线之后某一处重构把它换成了 None,模型开始在 prompt 上算 loss。
+      loss 曲线**更好看**（问题比答案好预测），准确率略降,
+      而没有任何东西会报错。所以这一关把第 22 关那条门槛原样搬了过来。
+    `, code`
+      **Losing the mask inside the pipeline.** SFT alone had it right; a refactor in the
+      pipeline replaced it with None and the model starts computing loss on prompts. The loss
+      curve looks **better** (questions are easier to predict), accuracy dips slightly, and
+      nothing raises. Which is why stage 22's gate is carried over verbatim.
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_POST_PY,
+      'rollout.py': ROLLOUT_PY,
+      'accepted.py': ACCEPTED_PY,
+      'pipeline.py': code`
+        """第 30 关：把三段接成一条流水线。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import functional as F
+        import kit
+        import accepted as A
+
+
+        def run(seed=1, pretrain_steps=40, sft_steps=100, rl_steps=80):
+            """从随机初始化跑到一个会做算术的模型。"""
+            # TODO: 建模型 -> 预训练 -> SFT（顺带量一次 prompt 位置的梯度）->
+            #       量 RL 之前的通过率 -> RL -> 量 RL 之后的通过率
+            return {"pretrain": [], "sft": [], "rl": [], "adv_sums": [],
+                    "before_rl": 0.0, "after_rl": 0.0, "prompt_grad_leak": 0}
+
+
+        if __name__ == "__main__":
+            r = run(seed=1, pretrain_steps=40, sft_steps=60, rl_steps=6)
+            print("预训练 loss", [round(v, 3) for v in r["pretrain"][:3]], "...")
+            print("RL 之前", r["before_rl"], "-> 之后", r["after_rl"])
+      `,
+    },
+    referenceFiles: {
+      'pipeline.py': code`
+        """第 30 关的参考实现。"""
+        import math
+        import nanotorch as nt
+        from nanotorch import functional as F
+        import kit
+        import accepted as A
+
+
+        def _pretrain(model, pairs, steps, batch_size=16, peak_lr=0.03):
+            """在**完整的算式**上做下一个 token 预测 —— 没有 mask，全都算。
+
+            这一段教的是符号怎么排列，不是「被问了就回答」。
+            """
+            opt = nt.optim.AdamW(model.parameters(), lr=peak_lr, betas=(0.9, 0.95),
+                                 weight_decay=0.1, grad_clip=1.0)
+            idx = nt.zeros((batch_size * kit.S,), role="data", name="pt.idx")
+            tgt = nt.zeros((batch_size * kit.S,), role="data", name="pt.tgt")
+            msk = nt.zeros((batch_size * kit.S,), role="data", name="pt.mask")
+            hist = []
+            base = nt.mark()
+            warmup = max(1, steps // 20)
+            for st in range(1, steps + 1):
+                nt.release(base)
+                bi, bt, bm = [], [], []
+                for k in range(batch_size):
+                    p, a = pairs[(st * batch_size + k) % len(pairs)]
+                    ri, rt, _ = kit.build_row(p, a)
+                    bi.extend(ri)
+                    bt.extend(rt)
+                    # 预训练：只把 padding 排除掉，内容位置全都算
+                    bm.extend([1.0 if v != kit.PAD else 0.0 for v in rt])
+                idx.set_int_(bi)
+                tgt.set_int_(bt)
+                msk.set_(bm)
+                opt.zero_grad()
+                nt.phase("forward")
+                loss = F.cross_entropy(model.logits(idx, batch_size, kit.S), tgt,
+                                       batch_size * kit.S, kit.V, msk)
+                nt.phase("other")
+                loss.backward()
+                if st <= warmup:
+                    lr = peak_lr * st / warmup
+                else:
+                    pr = (st - warmup) / max(1, steps - warmup)
+                    lr = peak_lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * pr)))
+                opt.step(lr=lr)
+                # **报的数要自己按 mask 算**（第 22 关那条）——
+                # cross_entropy 返回的是全部位置的平均，padding 也算了进去，
+                # 而模型越训在 padding 上越「确定」，那个数会**往上走**
+                if st % 5 == 0:
+                    probs = F.softmax(model.logits(idx, batch_size, kit.S),
+                                      batch_size * kit.S, kit.V).tolist()
+                    total, count = 0.0, 0.0
+                    for r in range(batch_size * kit.S):
+                        if bm[r] > 0:
+                            total += -math.log(max(probs[r * kit.V + bt[r]], 1e-30))
+                            count += 1.0
+                    hist.append(total / max(1.0, count))
+            nt.release(base)
+            return hist
+
+
+        def _prompt_grad_leak(model, pairs, batch_size=8):
+            """第 22 关那条门槛，在流水线里再验一遍：
+            mask 为 0 的位置上，dlogits 必须逐位为 0。"""
+            bi, bt, bm = [], [], []
+            for k in range(batch_size):
+                p, a = pairs[k % len(pairs)]
+                ri, rt, rm = kit.build_row(p, a)
+                bi.extend(ri)
+                bt.extend(rt)
+                bm.extend(rm)
+            rows = batch_size * kit.S
+            idx = nt.zeros((rows,), role="data", name="leak.idx")
+            tgt = nt.zeros((rows,), role="data", name="leak.tgt")
+            msk = nt.zeros((rows,), role="data", name="leak.mask")
+            idx.set_int_(bi)
+            tgt.set_int_(bt)
+            msk.set_(bm)
+            model.zero_grad()
+            logits = model.logits(idx, batch_size, kit.S)
+            F.cross_entropy(logits, tgt, rows, kit.V, msk).backward()
+            g = logits.grad.tolist()
+            leak = 0
+            for r in range(rows):
+                if bm[r] == 0:
+                    for j in range(kit.V):
+                        if g[r * kit.V + j] != 0.0:
+                            leak += 1
+            return leak
+
+
+        def run(seed=1, pretrain_steps=40, sft_steps=100, rl_steps=80):
+            # 所有随机性都从 seed 派生 —— 三段各自确定性不代表接起来确定性
+            model = kit.LM(seed=seed)
+            corpus = kit.make_pairs(512, seed + 4, 20, "+")
+
+            pre = _pretrain(model, corpus, pretrain_steps)
+            sft = A.sft(model, corpus, sft_steps)
+            leak = _prompt_grad_leak(model, corpus)
+
+            held = kit.make_pairs(48, 777, 20, "+")
+            before = kit.exact_match(model, held)
+
+            prompts = [p for p, _ in kit.make_pairs(160, seed + 40, 20, "+")]
+            rl = A.grpo(model, prompts, rl_steps, seed=seed)
+            after = kit.exact_match(model, held)
+
+            return {"pretrain": pre, "sft": sft, "rl": rl["pass_rate"],
+                    "adv_sums": rl["adv_sums"], "before_rl": before,
+                    "after_rl": after, "prompt_grad_leak": leak}
+
+
+        if __name__ == "__main__":
+            r = run(seed=1, pretrain_steps=40, sft_steps=60, rl_steps=6)
+            print("预训练 loss", [round(v, 3) for v in r["pretrain"][:3]], "...")
+            print("RL 之前", r["before_rl"], "-> 之后", r["after_rl"])
+      `,
+    },
+  },
+  specs: [
+    spec('pipeline.spec.ts', code`
+      ${LAB}
+
+      function setup() {
+        lab.py(\`
+      import sys, json
+      sys.path.insert(0, "/lab")
+      import importlib, kit, rollout, accepted, pipeline
+      importlib.reload(kit)
+      importlib.reload(rollout)
+      importlib.reload(accepted)
+      importlib.reload(pipeline)
+      import nanotorch as nt
+      from nanotorch import functional as F
+
+      _cache = {}
+
+      def _full():
+          if "full" not in _cache:
+              _cache["full"] = pipeline.run(seed=1, pretrain_steps=40,
+                                            sft_steps=100, rl_steps=80)
+          return _cache["full"]
+      \`);
+      }
+
+      describe('收官：一条跑得通的流水线', () => {
+        it('三段都跑了，而且预训练与 SFT 的 loss 都在降', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _r = _full()
+      json.dumps({"pre": _r["pretrain"][::20] + _r["pretrain"][-1:],
+                  "sft": _r["sft"][::4] + _r["sft"][-1:],
+                  "rl": _r["rl"][::10] + _r["rl"][-1:],
+                  "n": [len(_r["pretrain"]), len(_r["sft"]), len(_r["rl"])]})
+      \`)));
+          console.log('预训练 loss ' + r.pre.map((v) => v.toFixed(3)).join(' -> '));
+          console.log('SFT（按 mask）' + r.sft.map((v) => v.toFixed(3)).join(' -> '));
+          console.log('RL rollout 通过率 ' + r.rl.map((v) => v.toFixed(2)).join(' -> '));
+          lab.publish('pipeline.stages', r.n.filter((v) => v > 0).length);
+          expect(r.n[0]).toBeGreaterThan(0);
+          expect(r.n[1]).toBeGreaterThan(0);
+          expect(r.n[2]).toBeGreaterThan(0);
+          expect(r.pre[r.pre.length - 1]).toBeLessThan(r.pre[0]);
+          expect(r.sft[r.sft.length - 1]).toBeLessThan(r.sft[0]);
+        });
+
+        /* 第 22 关那条门槛，在流水线里原样再验一遍 */
+        it('SFT 的 mask 在流水线里仍然成立', () => {
+          setup();
+          const leak = Number(lab.py('_full()["prompt_grad_leak"]'));
+          console.log('prompt 位置上非零梯度的个数 ' + leak);
+          lab.publish('pipeline.promptGradLeak', leak);
+          expect(leak).toBe(0);
+        });
+
+        /* 第 28 关那条门槛 */
+        it('RL 的分组仍然正确：每组优势之和为 0', () => {
+          setup();
+          const sums = JSON.parse(String(lab.py('json.dumps(_full()["adv_sums"])')));
+          let worst = 0;
+          for (const v of sums) worst = Math.max(worst, Math.abs(v));
+          console.log(sums.length + ' 组，|优势和| 的最大值 ' + worst.toExponential(2));
+          lab.publish('pipeline.groupAdvantageMax', worst);
+          expect(sums.length).toBeGreaterThan(30);
+          expect(worst).toBeLessThan(1e-5);
+        });
+
+        it('RL 把留出集的通过率抬上去了', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _x = _full()
+      json.dumps({"before": _x["before_rl"], "after": _x["after_rl"]})
+      \`)));
+          const gain = r.after - r.before;
+          console.log(
+            'RL 之前 ' + (r.before * 100).toFixed(1) + '% -> 之后 '
+            + (r.after * 100).toFixed(1) + '%（提高 ' + (gain * 100).toFixed(1) + ' 个点）'
+          );
+          lab.publish('pipeline.rlGain', gain);
+          lab.publish('pipeline.finalAccuracy', r.after);
+          expect(gain).toBeGreaterThanOrEqual(0.1);
+        });
+
+        /*
+         * 这一关最要紧的一条：三段各自确定性，接起来**未必**。
+         * 任何一处用了全局随机状态、或者依赖了字典的遍历顺序，整条链就不可重放。
+         * 为了不跑两遍完整流水线，这里用一个缩短版 —— 结构完全一样。
+         */
+        it('同一个 seed 跑两遍，整条链逐位一致', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _a = pipeline.run(seed=3, pretrain_steps=30, sft_steps=40, rl_steps=6)
+      _b = pipeline.run(seed=3, pretrain_steps=30, sft_steps=40, rl_steps=6)
+      _c = pipeline.run(seed=5, pretrain_steps=30, sft_steps=40, rl_steps=6)
+      def _flat(x):
+          return x["pretrain"] + x["sft"] + x["rl"] + [x["before_rl"], x["after_rl"]]
+      json.dumps({"a": _flat(_a), "b": _flat(_b), "c": _flat(_c)})
+      \`)));
+          let same = 0, diff = 0;
+          for (let i = 0; i < r.a.length; i++) {
+            if (r.a[i] !== r.b[i]) same += 1;
+            if (r.a[i] !== r.c[i]) diff += 1;
+          }
+          console.log(
+            '同 seed 两遍：' + r.a.length + ' 个数里对不上 ' + same + ' 个；'
+            + '换 seed 之后不同的 ' + diff + ' 个'
+          );
+          lab.publish('pipeline.replayMismatches', same);
+          expect(same).toBe(0);
+          // 换个 seed 必须真的不一样 —— 否则「一致」是因为什么都没随机
+          expect(diff).toBeGreaterThan(r.a.length / 2);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.pipeline.promptGradLeak', op: 'eq', value: 0,
+      zh: '流水线里 prompt 位置上非零梯度的个数（第 22 关）',
+      en: 'non-zero gradients at prompt positions inside the pipeline (stage 22)',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.pipeline.groupAdvantageMax', op: 'lte', value: 1e-5,
+      zh: '流水线里每组优势之和的最大绝对值（第 28 关）',
+      en: 'largest group-advantage sum inside the pipeline (stage 28)',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.pipeline.rlGain', op: 'gte', value: 0.1,
+      zh: 'RL 把留出集通过率抬高了多少', en: 'held-out pass-rate gain from RL',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.pipeline.replayMismatches', op: 'eq', value: 0,
+      zh: '同 seed 两遍整条链对不上的数值个数',
+      en: 'values differing between two runs of the whole chain at one seed',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness'],
+  extension: t(
+    code`
+      到这里，从一段字节到一个会跟随指令的模型，整条链你都自己写过一遍:
+      分词、注意力、位置编码、归一化、反向传播、优化器、调度、数据打包、
+      混合精度、显存、缩放律、MoE、Muon、SFT、奖励模型、DPO、rollout、GRPO。
+
+      **三段的目标函数其实只有两种**（交叉熵、策略梯度），而区别全在数据和 mask 上。
+      如果这个项目只留下一句话，是这句。
+
+      真实尺度上多出来的东西，绝大部分是**工程**而不是新的想法：
+      分布式（数据 / 张量 / 流水线 / 专家并行）、检查点与断点续训、
+      推理与训练的权重同步、以及一整套评测。
+      而每一样都建立在你刚写过的这些不变量上 ——
+      「反向是前向的两倍」「优势和为 0」「mask 挡住了 prompt」这些话，
+      在 671B 上和在这里是同一句话。
+
+      最后留一件事给你：**这条流水线现在是可重放的**。
+      拿它做点别的实验 —— 换个任务、换个优化器、把某个修正关掉看看会怎样。
+      一条可重放的流水线，才谈得上做实验。
+    `,
+    code`
+      From a stream of bytes to a model that follows instructions, you have now written the
+      whole chain yourself: tokenisation, attention, positional encoding, normalisation,
+      backpropagation, optimisers, schedules, data packing, mixed precision, memory, scaling
+      laws, MoE, Muon, SFT, reward models, DPO, rollout, GRPO.
+
+      **Only two objective functions appear across the three phases** — cross-entropy and
+      policy gradient — and all the difference lies in the data and the mask. If this project
+      leaves one sentence behind, it is that one.
+
+      What real scale adds is mostly **engineering** rather than new ideas: distribution
+      (data, tensor, pipeline and expert parallelism), checkpointing and resumption, weight
+      synchronisation between inference and training, and a full evaluation suite. Every one
+      of them rests on the invariants you just wrote — "the backward costs twice the
+      forward", "advantages sum to zero", "the mask keeps the prompt out" are the same
+      sentences at 671B as they are here.
+
+      One last thing to take with you: **this pipeline is replayable**. Use it for something
+      else — change the task, change the optimiser, switch one of the corrections off and see
+      what happens. Only a replayable pipeline makes experiments possible.
+    `
+  ),
+};
+
 /* ------------------------------------------------------------------ */
 
 module.exports = {
@@ -15898,6 +16573,6 @@ module.exports = {
     STAGE_SCHEDULE, STAGE_CLIP, STAGE_PACKING, STAGE_PRETRAIN,
     STAGE_AMP, STAGE_RECOMPUTE, STAGE_SCALING, STAGE_MOE, STAGE_MUON,
     STAGE_SFT, STAGE_MIXTURE, STAGE_RM, STAGE_DPO, STAGE_LENGTH, STAGE_ROLLOUT,
-    STAGE_GRPO, STAGE_GRPO_FIX,
+    STAGE_GRPO, STAGE_GRPO_FIX, STAGE_FINALE,
   ],
 };
