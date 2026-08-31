@@ -378,6 +378,276 @@ void FN(attn_bwd)(int dout_, int q_, int k_, int v_, int att_,
     }
 }
 
+/* -------------------------------------------------- 拆开的注意力（第 3–8 关） */
+
+/*
+ * `attn_fwd` 是**融合**的一整块。而第 3 关的全部内容就是「自己把注意力拼出来」，
+ * 所以必须有拆开的三步：算分数 → softmax → 加权求和。
+ *
+ * 融合那份在第 3 关是被禁用的算子（`builtins.forbiddenCalls` 数得到），
+ * 到第 8 关之后才放开 —— 那时它的意义变成「FlashAttention 式的融合实现」。
+ *
+ * 这三个算子还顺带解决了 KV cache：`Sq` 与 `Skv` 是分开的两个参数，
+ * 训练时相等，解码时 `Sq=1`、`Skv=t+1`。**同一套算子，不用另写一条解码路径**
+ * —— 而「解码和训练走的是不是同一段代码」正是真实推理引擎里最容易出错的地方。
+ */
+
+/**
+ * scores[b,h,i,j] = scale · q[b,i,h,:] · k[b,j,kh,:]
+ *
+ * q 是 [B, Sq, H, hd]，k 是 [B, Skv, KV, hd]，out 是 [B, H, Sq, Skv]。
+ * 这里**不做因果掩码** —— 掩码是 softmax 那一步的事，
+ * 拆开是为了让学员看清「掩码作用在分数上，不是作用在输出上」。
+ */
+void FN(attn_scores_fwd)(int q_, int k_, int out_,
+                         int B, int Sq, int Skv, int H, int KV, int hd, double scale) {
+  const SCALAR *q = CP(q_), *k = CP(k_);
+  SCALAR *out = P(out_);
+  int rep = H / KV;
+  for (int b = 0; b < B; b++)
+    for (int h = 0; h < H; h++) {
+      int kh = h / rep;
+      for (int i = 0; i < Sq; i++) {
+        const SCALAR *qo = q + ((((long)b * Sq + i) * H) + h) * hd;
+        SCALAR *o = out + ((((long)b * H + h) * Sq) + i) * Skv;
+        for (int j = 0; j < Skv; j++) {
+          const SCALAR *ko = k + ((((long)b * Skv + j) * KV) + kh) * hd;
+          double s = 0.0;
+          for (int x = 0; x < hd; x++) s += (double)qo[x] * (double)ko[x];
+          o[j] = (SCALAR)(s * scale);
+        }
+      }
+    }
+}
+
+void FN(attn_scores_bwd)(int dout_, int q_, int k_, int dq_, int dk_,
+                         int B, int Sq, int Skv, int H, int KV, int hd, double scale) {
+  const SCALAR *dout = CP(dout_), *q = CP(q_), *k = CP(k_);
+  SCALAR *dq = P(dq_), *dk = P(dk_);
+  int rep = H / KV;
+  for (long i = 0, n = (long)B * Sq * H * hd; i < n; i++) dq[i] = (SCALAR)0;
+  for (long i = 0, n = (long)B * Skv * KV * hd; i < n; i++) dk[i] = (SCALAR)0;
+
+  for (int b = 0; b < B; b++)
+    for (int h = 0; h < H; h++) {
+      int kh = h / rep;
+      for (int i = 0; i < Sq; i++) {
+        long qi = ((((long)b * Sq + i) * H) + h) * hd;
+        const SCALAR *d = dout + ((((long)b * H + h) * Sq) + i) * Skv;
+        for (int j = 0; j < Skv; j++) {
+          SCALAR g = (SCALAR)((double)d[j] * scale);
+          if (g == (SCALAR)0) continue;
+          long ki = ((((long)b * Skv + j) * KV) + kh) * hd;
+          for (int x = 0; x < hd; x++) {
+            dq[qi + x] += g * k[ki + x];
+            dk[ki + x] += g * q[qi + x];
+          }
+        }
+      }
+    }
+}
+
+/**
+ * out[b,i,h,:] = Σ_j p[b,h,i,j] · v[b,j,kh,:]
+ *
+ * p 是 [B, H, Sq, Skv]（softmax 之后的概率），v 是 [B, Skv, KV, hd]。
+ */
+void FN(attn_apply_fwd)(int p_, int v_, int out_,
+                        int B, int Sq, int Skv, int H, int KV, int hd) {
+  const SCALAR *p = CP(p_), *v = CP(v_);
+  SCALAR *out = P(out_);
+  int rep = H / KV;
+  for (long i = 0, n = (long)B * Sq * H * hd; i < n; i++) out[i] = (SCALAR)0;
+
+  for (int b = 0; b < B; b++)
+    for (int h = 0; h < H; h++) {
+      int kh = h / rep;
+      for (int i = 0; i < Sq; i++) {
+        const SCALAR *pr = p + ((((long)b * H + h) * Sq) + i) * Skv;
+        SCALAR *oo = out + ((((long)b * Sq + i) * H) + h) * hd;
+        for (int j = 0; j < Skv; j++) {
+          SCALAR w = pr[j];
+          if (w == (SCALAR)0) continue;
+          const SCALAR *vo = v + ((((long)b * Skv + j) * KV) + kh) * hd;
+          for (int x = 0; x < hd; x++) oo[x] += w * vo[x];
+        }
+      }
+    }
+}
+
+void FN(attn_apply_bwd)(int dout_, int p_, int v_, int dp_, int dv_,
+                        int B, int Sq, int Skv, int H, int KV, int hd) {
+  const SCALAR *dout = CP(dout_), *p = CP(p_), *v = CP(v_);
+  SCALAR *dp = P(dp_), *dv = P(dv_);
+  int rep = H / KV;
+  for (long i = 0, n = (long)B * H * Sq * Skv; i < n; i++) dp[i] = (SCALAR)0;
+  for (long i = 0, n = (long)B * Skv * KV * hd; i < n; i++) dv[i] = (SCALAR)0;
+
+  for (int b = 0; b < B; b++)
+    for (int h = 0; h < H; h++) {
+      int kh = h / rep;
+      for (int i = 0; i < Sq; i++) {
+        const SCALAR *oo = dout + ((((long)b * Sq + i) * H) + h) * hd;
+        const SCALAR *pr = p + ((((long)b * H + h) * Sq) + i) * Skv;
+        SCALAR *dpr = dp + ((((long)b * H + h) * Sq) + i) * Skv;
+        for (int j = 0; j < Skv; j++) {
+          long vi = ((((long)b * Skv + j) * KV) + kh) * hd;
+          double s = 0.0;
+          for (int x = 0; x < hd; x++) {
+            s += (double)oo[x] * (double)v[vi + x];
+            dv[vi + x] += pr[j] * oo[x];
+          }
+          dpr[j] = (SCALAR)s;
+        }
+      }
+    }
+}
+
+/* ------------------------------------------------------------ 行 softmax */
+
+/*
+ * 逐行 softmax，带一个**每行有效长度**。
+ *
+ * `valid` 是一个 i32 数组，valid[r] 表示第 r 行前多少列参与计算，
+ * 后面的一律置 0（不是「置成很小的数」—— 因果位置必须是硬 0，
+ * 第 3 关的探针查的就是这个）。传 `valid_ = -1` 表示整行都算。
+ *
+ * 因果掩码在这里表现成 valid[r] = i+1，由调用方填 —— 这样掩码是什么
+ * 完全由上层决定（因果、滑窗、文档边界都是同一套），算子不必认识它们。
+ */
+void FN(softmax_rows_fwd)(int x_, int valid_, int out_, int rows, int cols) {
+  const SCALAR *x = CP(x_);
+  const int *valid = valid_ >= 0 ? (const int *)(ll_mem + valid_) : 0;
+  SCALAR *out = P(out_);
+  for (int r = 0; r < rows; r++) {
+    const SCALAR *xr = x + (long)r * cols;
+    SCALAR *o = out + (long)r * cols;
+    int n = valid ? valid[r] : cols;
+    if (n > cols) n = cols;
+    if (n <= 0) {
+      for (int j = 0; j < cols; j++) o[j] = (SCALAR)0;
+      continue;
+    }
+    /* 减最大值：不减的话 seq 一长 exp 就溢出成 inf，然后 inf/inf = NaN */
+    double mx = -1e308;
+    for (int j = 0; j < n; j++) if ((double)xr[j] > mx) mx = (double)xr[j];
+    double sum = 0.0;
+    for (int j = 0; j < n; j++) {
+      double e = ll_exp((double)xr[j] - mx);
+      o[j] = (SCALAR)e;
+      sum += e;
+    }
+    double inv = 1.0 / sum;
+    for (int j = 0; j < n; j++) o[j] = (SCALAR)((double)o[j] * inv);
+    for (int j = n; j < cols; j++) o[j] = (SCALAR)0;
+  }
+}
+
+/** ds_j = p_j·(dp_j − Σ_k p_k·dp_k)。漏掉那个求和项是最常见的错，前向照样对 */
+void FN(softmax_rows_bwd)(int dout_, int out_, int valid_, int dx_, int rows, int cols) {
+  const SCALAR *dout = CP(dout_), *out = CP(out_);
+  const int *valid = valid_ >= 0 ? (const int *)(ll_mem + valid_) : 0;
+  SCALAR *dx = P(dx_);
+  for (int r = 0; r < rows; r++) {
+    const SCALAR *dr = dout + (long)r * cols, *o = out + (long)r * cols;
+    SCALAR *d = dx + (long)r * cols;
+    int n = valid ? valid[r] : cols;
+    if (n > cols) n = cols;
+    double dot = 0.0;
+    for (int j = 0; j < n; j++) dot += (double)dr[j] * (double)o[j];
+    for (int j = 0; j < n; j++) d[j] = (SCALAR)((double)o[j] * ((double)dr[j] - dot));
+    for (int j = n; j < cols; j++) d[j] = (SCALAR)0;
+  }
+}
+
+/* ------------------------------------------------------------ LayerNorm */
+
+/*
+ * 做它只为一个用途：第 6 关的对照。
+ *
+ * LayerNorm 比 RMSNorm 多减一个均值、多一个 bias。现代 LLM 全都换成了 RMSNorm，
+ * 而「换掉之后质量没掉、还快了一点」这件事，学员自己跑一遍两者才有体感。
+ */
+void FN(layernorm_fwd)(int x_, int g_, int b_, int out_, int mean_, int inv_,
+                       int rows, int d, double eps) {
+  const SCALAR *x = CP(x_), *g = CP(g_), *bi = CP(b_);
+  SCALAR *out = P(out_), *mean = P(mean_), *inv = P(inv_);
+  for (int t = 0; t < rows; t++) {
+    const SCALAR *xr = x + (long)t * d;
+    SCALAR *o = out + (long)t * d;
+    double m = 0.0;
+    for (int i = 0; i < d; i++) m += (double)xr[i];
+    m /= (double)d;
+    double var = 0.0;
+    for (int i = 0; i < d; i++) { double c = (double)xr[i] - m; var += c * c; }
+    var /= (double)d;
+    SCALAR r = (SCALAR)(1.0 / ll_sqrt(var + eps));
+    mean[t] = (SCALAR)m;
+    inv[t] = r;
+    for (int i = 0; i < d; i++) o[i] = (SCALAR)(((double)xr[i] - m) * (double)r * (double)g[i] + (double)bi[i]);
+  }
+}
+
+void FN(layernorm_bwd)(int dout_, int x_, int g_, int mean_, int inv_,
+                       int dg_, int db_, int dx_, int rows, int d) {
+  const SCALAR *dout = CP(dout_), *x = CP(x_), *g = CP(g_), *mean = CP(mean_), *inv = CP(inv_);
+  SCALAR *dg = P(dg_), *db = P(db_), *dx = P(dx_);
+  for (int t = 0; t < rows; t++) {
+    const SCALAR *dr = dout + (long)t * d, *xr = x + (long)t * d;
+    SCALAR *dxr = dx + (long)t * d;
+    double m = (double)mean[t], r = (double)inv[t];
+    double sum1 = 0.0, sum2 = 0.0;
+    for (int i = 0; i < d; i++) {
+      double xhat = ((double)xr[i] - m) * r;
+      dg[i] += (SCALAR)((double)dr[i] * xhat);
+      db[i] += dr[i];
+      double dxhat = (double)dr[i] * (double)g[i];
+      sum1 += dxhat;
+      sum2 += dxhat * xhat;
+    }
+    for (int i = 0; i < d; i++) {
+      double xhat = ((double)xr[i] - m) * r;
+      double dxhat = (double)dr[i] * (double)g[i];
+      dxr[i] = (SCALAR)(r * (dxhat - sum1 / (double)d - xhat * sum2 / (double)d));
+    }
+  }
+}
+
+/* ------------------------------------------------------------ 低精度模拟 */
+
+/** 就地舍到 bf16 的可表示集合上。存储仍是 SCALAR */
+void FN(quantize_bf16)(int x_, int n) {
+  SCALAR *x = P(x_);
+  for (int i = 0; i < n; i++) x[i] = (SCALAR)ll_round_bf16((float)x[i]);
+}
+
+/** 就地舍到 fp16。超过 65504 就是 inf —— 第 17 关要的正是这个 */
+void FN(quantize_fp16)(int x_, int n) {
+  SCALAR *x = P(x_);
+  for (int i = 0; i < n; i++) x[i] = (SCALAR)ll_round_fp16((float)x[i]);
+}
+
+/**
+ * 数一数有多少个非有限值。fp16 溢出关的门槛读它。
+ *
+ * 判据用 `v - v != 0`：有限数减自己是 0，inf 减自己是 NaN，NaN 减自己还是 NaN，
+ * 两种都落进「不等于 0」。
+ *
+ * **第一版写的是 `v > 1e300`，在 f32 实例化里恒为假** ——
+ * `(float)1e300` 本身就溢出成了 inf，而 `inf > inf` 是 false，
+ * 于是这个函数对 f32 永远返回 0。一个「永远说没问题」的检查器
+ * 比没有检查器更糟，是 fp16 那条用例把它顶出来的。
+ */
+int FN(count_nonfinite)(int x_, int n) {
+  const SCALAR *x = CP(x_);
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    SCALAR v = x[i];
+    if (!((v - v) == (SCALAR)0)) bad++;
+  }
+  return bad;
+}
+
 /* ---------------------------------------------------------------- 分类头 */
 
 /*

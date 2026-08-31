@@ -28,6 +28,11 @@ export type OpName =
   | 'swiglu_fwd' | 'swiglu_bwd'
   | 'rope_fwd' | 'rope_bwd'
   | 'attn_fwd' | 'attn_bwd'
+  | 'attn_scores_fwd' | 'attn_scores_bwd'
+  | 'attn_apply_fwd' | 'attn_apply_bwd'
+  | 'softmax_rows_fwd' | 'softmax_rows_bwd'
+  | 'layernorm_fwd' | 'layernorm_bwd'
+  | 'quantize_bf16' | 'quantize_fp16' | 'count_nonfinite'
   | 'cross_entropy' | 'cross_entropy_bwd'
   | 'embed_fwd' | 'embed_bwd'
   | 'adamw';
@@ -296,6 +301,137 @@ export class Ops {
         dout.off, q.off, k.off, v.off, att.off, dq.off, dk.off, dv.off, dp.off, B, S, H, KV, hd
       );
     });
+  }
+
+  /* ---------------- 拆开的注意力：第 3 关起学员自己拼 ---------------- */
+
+  /**
+   * scores = scale · q·kᵀ。FLOPs = 2·B·H·Sq·Skv·hd。
+   *
+   * **这里没有因果的折扣**（不像 `attnFwd` 按 Σ(i+1) 算）：
+   * 拆开之后分数矩阵是整块算的，掩码是下一步 softmax 的事。
+   * 这个差别本身就是第 3 关的一个观察点 —— 拆开写比融合写多算了一半的分数，
+   * 而 FlashAttention 之所以能省，一半原因就在它把掩码融进了计算里。
+   */
+  attnScores(
+    q: Tensor, k: Tensor, out: Tensor,
+    B: number, Sq: number, Skv: number, H: number, KV: number, hd: number, scale: number
+  ): void {
+    const dt = sameDType(q, k, out);
+    expect(H % KV === 0, `查询头数 ${H} 不能被键值头数 ${KV} 整除`);
+    expect(q.count >= B * Sq * H * hd, 'attn_scores 的 q 装不下');
+    expect(k.count >= B * Skv * KV * hd, 'attn_scores 的 k 装不下');
+    expect(out.count >= B * H * Sq * Skv, 'attn_scores 的 out 装不下');
+    this.call('attn_scores_fwd', 2 * B * H * Sq * Skv * hd, dt, (s) => {
+      this.kernels.fn[`attn_scores_fwd_${s}`](q.off, k.off, out.off, B, Sq, Skv, H, KV, hd, scale);
+    });
+  }
+
+  attnScoresBwd(
+    dout: Tensor, q: Tensor, k: Tensor, dq: Tensor, dk: Tensor,
+    B: number, Sq: number, Skv: number, H: number, KV: number, hd: number, scale: number
+  ): void {
+    const dt = sameDType(dout, q, k, dq, dk);
+    expect(dq.count >= B * Sq * H * hd && dk.count >= B * Skv * KV * hd, 'attn_scores_bwd 的输出装不下');
+    this.call('attn_scores_bwd', 4 * B * H * Sq * Skv * hd, dt, (s) => {
+      this.kernels.fn[`attn_scores_bwd_${s}`](dout.off, q.off, k.off, dq.off, dk.off, B, Sq, Skv, H, KV, hd, scale);
+    });
+  }
+
+  /** out = p·v。FLOPs = 2·B·H·Sq·Skv·hd */
+  attnApply(
+    p: Tensor, v: Tensor, out: Tensor,
+    B: number, Sq: number, Skv: number, H: number, KV: number, hd: number
+  ): void {
+    const dt = sameDType(p, v, out);
+    expect(p.count >= B * H * Sq * Skv, 'attn_apply 的 p 装不下');
+    expect(v.count >= B * Skv * KV * hd, 'attn_apply 的 v 装不下');
+    expect(out.count >= B * Sq * H * hd, 'attn_apply 的 out 装不下');
+    this.call('attn_apply_fwd', 2 * B * H * Sq * Skv * hd, dt, (s) => {
+      this.kernels.fn[`attn_apply_fwd_${s}`](p.off, v.off, out.off, B, Sq, Skv, H, KV, hd);
+    });
+  }
+
+  attnApplyBwd(
+    dout: Tensor, p: Tensor, v: Tensor, dp: Tensor, dv: Tensor,
+    B: number, Sq: number, Skv: number, H: number, KV: number, hd: number
+  ): void {
+    const dt = sameDType(dout, p, v, dp, dv);
+    expect(dp.count >= B * H * Sq * Skv && dv.count >= B * Skv * KV * hd, 'attn_apply_bwd 的输出装不下');
+    this.call('attn_apply_bwd', 4 * B * H * Sq * Skv * hd, dt, (s) => {
+      this.kernels.fn[`attn_apply_bwd_${s}`](dout.off, p.off, v.off, dp.off, dv.off, B, Sq, Skv, H, KV, hd);
+    });
+  }
+
+  /**
+   * 逐行 softmax。`valid` 是每行的有效长度（i32），传 null 表示整行都算。
+   *
+   * 因果掩码在这里表现成 `valid[r] = i+1`，由调用方填 ——
+   * 于是「因果」「滑窗」「文档边界」是同一套机制，算子不必分别认识它们。
+   */
+  softmaxRows(x: Tensor, valid: Tensor | null, out: Tensor, rows: number, cols: number): void {
+    const dt = sameDType(x, out);
+    expect(x.count >= rows * cols && out.count >= rows * cols, 'softmax_rows 的张量装不下');
+    if (valid) expect(valid.count >= rows, 'softmax_rows 的 valid 要每行一个');
+    this.call('softmax_rows_fwd', 5 * rows * cols, dt, (s) => {
+      this.kernels.fn[`softmax_rows_fwd_${s}`](x.off, valid ? valid.off : -1, out.off, rows, cols);
+    });
+  }
+
+  softmaxRowsBwd(
+    dout: Tensor, out: Tensor, valid: Tensor | null, dx: Tensor, rows: number, cols: number
+  ): void {
+    const dt = sameDType(dout, out, dx);
+    expect(dx.count >= rows * cols, 'softmax_rows_bwd 的 dx 装不下');
+    this.call('softmax_rows_bwd', 4 * rows * cols, dt, (s) => {
+      this.kernels.fn[`softmax_rows_bwd_${s}`](dout.off, out.off, valid ? valid.off : -1, dx.off, rows, cols);
+    });
+  }
+
+  /* ---------------- LayerNorm：只为第 6 关的对照 ---------------- */
+
+  layernormFwd(
+    x: Tensor, g: Tensor, b: Tensor, out: Tensor, mean: Tensor, inv: Tensor,
+    rows: number, d: number, eps = 1e-5
+  ): void {
+    const dt = sameDType(x, g, b, out, mean, inv);
+    expect(g.count >= d && b.count >= d, 'layernorm 的增益与偏置长度不对');
+    expect(mean.count >= rows && inv.count >= rows, 'layernorm 的 mean/inv 要每行一个');
+    this.call('layernorm_fwd', 6 * rows * d, dt, (s) => {
+      this.kernels.fn[`layernorm_fwd_${s}`](x.off, g.off, b.off, out.off, mean.off, inv.off, rows, d, eps);
+    });
+  }
+
+  layernormBwd(
+    dout: Tensor, x: Tensor, g: Tensor, mean: Tensor, inv: Tensor,
+    dg: Tensor, db: Tensor, dx: Tensor, rows: number, d: number
+  ): void {
+    const dt = sameDType(dout, x, g, mean, inv, dg, db, dx);
+    this.call('layernorm_bwd', 10 * rows * d, dt, (s) => {
+      this.kernels.fn[`layernorm_bwd_${s}`](dout.off, x.off, g.off, mean.off, inv.off, dg.off, db.off, dx.off, rows, d);
+    });
+  }
+
+  /* ---------------- 低精度模拟：第 17 关 ---------------- */
+
+  /** 就地舍到 bf16 的可表示集合上。不算 FLOPs —— 它是舍入，不是运算 */
+  quantizeBf16(x: Tensor, n = x.count): void {
+    expect(x.count >= n, 'quantize_bf16 的长度超出张量');
+    this.call('quantize_bf16', 0, x.dtype, (s) => this.kernels.fn[`quantize_bf16_${s}`](x.off, n));
+  }
+
+  /** 就地舍到 fp16。超过 65504 就是 inf */
+  quantizeFp16(x: Tensor, n = x.count): void {
+    expect(x.count >= n, 'quantize_fp16 的长度超出张量');
+    this.call('quantize_fp16', 0, x.dtype, (s) => this.kernels.fn[`quantize_fp16_${s}`](x.off, n));
+  }
+
+  /** 有多少个 NaN / inf。第 14、17 关的门槛读它 */
+  countNonFinite(x: Tensor, n = x.count): number {
+    this.meter.record('count_nonfinite', 0);
+    return x.dtype === 'f32'
+      ? this.kernels.fn.count_nonfinite_f32(x.off, n)
+      : this.kernels.fn.count_nonfinite_f64(x.off, n);
   }
 
   /** 返回**平均** loss。FLOPs ≈ 5·rows·vocab（一遍找最大、一遍 exp、一遍归一） */

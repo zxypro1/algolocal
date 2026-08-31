@@ -307,3 +307,174 @@ def cross_entropy(logits, targets, rows, vocab, mask=None):
     # Python 侧要拿这个数打印曲线，附在张量上省一次跨语言读
     loss.value = value  # type: ignore[attr-defined]
     return loss
+
+
+# ============================================================ 拆开的注意力
+#
+# `scaled_dot_product_attention` 是融合的一整块。第 3 关的全部内容是
+# **自己把注意力拼出来**，所以这里给出拆开的三步。
+#
+# 融合那份在第 3 关是禁用算子（`builtins.forbiddenCalls` 数得到）；
+# 到第 8 关之后放开，那时它的意义变成「FlashAttention 式的融合实现」。
+
+
+def attn_scores(q, k, batch, seq_q, seq_kv, heads, kv_heads, head_dim, scale=None):
+    """scores[b,h,i,j] = scale · q[b,i,h,:] · k[b,j,kh,:]，形状 [B, H, Sq, Skv]。
+
+    **不含因果掩码** —— 掩码是 softmax 那一步的事。拆开是为了让人看清
+    「掩码作用在分数上，不是作用在输出上」。
+
+    `seq_q` 与 `seq_kv` 是两个参数：训练时相等；解码时 `seq_q=1`、
+    `seq_kv=t+1`（KV cache）。**同一个算子，不用另写一条解码路径。**
+    """
+    if scale is None:
+        scale = 1.0 / (head_dim ** 0.5)
+    out = Tensor((batch, heads, seq_q, seq_kv), q.dtype, name="attn.scores")
+    B.attn_scores(q.handle, k.handle, out.handle,
+                  batch, seq_q, seq_kv, heads, kv_heads, head_dim, scale)
+
+    def backward():
+        go = out.grad
+        if go is None:
+            return
+        dq = zeros(q.shape, q.dtype, name="dq")
+        dk = zeros(k.shape, k.dtype, name="dk")
+        B.attn_scores_bwd(go.handle, q.handle, k.handle, dq.handle, dk.handle,
+                          batch, seq_q, seq_kv, heads, kv_heads, head_dim, scale)
+        if q.requires_grad:
+            B.add_inplace(q.ensure_grad().handle, dq.handle, q.numel)
+        if k.requires_grad:
+            B.add_inplace(k.ensure_grad().handle, dk.handle, k.numel)
+
+    out.requires_grad = q.requires_grad or k.requires_grad
+    if out.requires_grad:
+        out._backward = backward
+        out._parents = (q, k)
+    return out
+
+
+def causal_valid(batch, heads, seq_q, offset=0):
+    """因果掩码 —— 写成「每行能看到多少个键」。
+
+    第 (b,h,i) 行的有效长度是 `offset + i + 1`。`offset` 给 KV cache 用：
+    解码到第 t 步时 `seq_q=1`、`offset=t`。
+
+    掩码做成一个长度数组而不是一张布尔矩阵，是因为因果、滑窗、文档边界
+    三种掩码在这个表示下是同一套东西，算子不必分别认识它们。
+    """
+    valid = Tensor((batch * heads * seq_q,), "f32", role="data", name="causal.valid")
+    B.fill_causal_valid(valid.handle, batch, heads, seq_q, offset)
+    return valid
+
+
+def softmax(x, rows, cols, valid=None):
+    """逐行 softmax。`valid` 是每行的有效长度，不给就整行都算。
+
+    对应 `torch.softmax(x, dim=-1)` 加上一个掩码。
+    **被掩掉的位置是硬 0，不是「很小的数」** —— 第 3 关的因果性探针查的就是这个。
+    """
+    out = Tensor(x.shape, x.dtype, name="softmax")
+    B.softmax_rows(x.handle, valid.handle if valid is not None else -1,
+                   out.handle, rows, cols)
+
+    def backward():
+        go = out.grad
+        if go is None:
+            return
+        dx = Tensor(x.shape, x.dtype, name="dsoftmax")
+        B.softmax_rows_bwd(go.handle, out.handle,
+                           valid.handle if valid is not None else -1,
+                           dx.handle, rows, cols)
+        if x.requires_grad:
+            B.add_inplace(x.ensure_grad().handle, dx.handle, x.numel)
+
+    out.requires_grad = x.requires_grad
+    if out.requires_grad:
+        out._backward = backward
+        out._parents = (x,)
+    return out
+
+
+def attn_apply(probs, v, batch, seq_q, seq_kv, heads, kv_heads, head_dim, out_shape=None):
+    """out[b,i,h,:] = Σ_j probs[b,h,i,j] · v[b,j,kh,:]。"""
+    shape = out_shape if out_shape is not None else (batch * seq_q, heads * head_dim)
+    out = Tensor(shape, probs.dtype, name="attn.out")
+    B.attn_apply(probs.handle, v.handle, out.handle,
+                 batch, seq_q, seq_kv, heads, kv_heads, head_dim)
+
+    def backward():
+        go = out.grad
+        if go is None:
+            return
+        dp = zeros(probs.shape, probs.dtype, name="dprobs")
+        dv = zeros(v.shape, v.dtype, name="dv")
+        B.attn_apply_bwd(go.handle, probs.handle, v.handle, dp.handle, dv.handle,
+                         batch, seq_q, seq_kv, heads, kv_heads, head_dim)
+        if probs.requires_grad:
+            B.add_inplace(probs.ensure_grad().handle, dp.handle, probs.numel)
+        if v.requires_grad:
+            B.add_inplace(v.ensure_grad().handle, dv.handle, v.numel)
+
+    out.requires_grad = probs.requires_grad or v.requires_grad
+    if out.requires_grad:
+        out._backward = backward
+        out._parents = (probs, v)
+    return out
+
+
+# ============================================================ LayerNorm（对照用）
+
+
+def layer_norm(x, weight, bias, eps=1e-5):
+    """对应 `torch.nn.functional.layer_norm`。
+
+    比 RMSNorm 多减一个均值、多一个 bias。现代 LLM 全都换成了 RMSNorm ——
+    第 6 关让学员两个都跑一遍，自己看「换掉之后质量没掉、还快了一点」。
+    """
+    rows, d = _rows(x.shape)
+    out = Tensor(x.shape, x.dtype, name="layernorm")
+    mean = Tensor((rows,), x.dtype, name="ln.mean")
+    inv = Tensor((rows,), x.dtype, name="ln.inv")
+    B.layernorm_fwd(x.handle, weight.handle, bias.handle, out.handle,
+                    mean.handle, inv.handle, rows, d, eps)
+
+    def backward():
+        go = out.grad
+        if go is None:
+            return
+        dx = Tensor(x.shape, x.dtype, name="dlayernorm")
+        B.layernorm_bwd(go.handle, x.handle, weight.handle, mean.handle, inv.handle,
+                        weight.ensure_grad().handle, bias.ensure_grad().handle,
+                        dx.handle, rows, d)
+        if x.requires_grad:
+            B.add_inplace(x.ensure_grad().handle, dx.handle, x.numel)
+
+    out.requires_grad = x.requires_grad or weight.requires_grad
+    if out.requires_grad:
+        out._backward = backward
+        out._parents = (x, weight, bias)
+    return out
+
+
+# ============================================================ 低精度与诊断
+
+
+def quantize_(x, dtype):
+    """就地把张量舍到 bf16 或 fp16 的可表示集合上。存储仍是 f32。
+
+    浏览器里没有半精度硬件，所以这是**位级模拟** —— 尾数位数与指数范围
+    都按真格式来。于是「fp16 会溢出而 bf16 不会」是算出来的：
+    bf16 有 8 位指数（和 f32 一样），fp16 只有 5 位，最大值 65504。
+    """
+    if dtype == "bf16":
+        B.quantize_bf16(x.handle, x.numel)
+    elif dtype == "fp16":
+        B.quantize_fp16(x.handle, x.numel)
+    else:
+        raise ValueError(f"只支持 bf16 / fp16，拿到 {dtype!r}")
+    return x
+
+
+def count_nonfinite(x):
+    """有多少个 NaN / inf。训练炸了的第一手证据。"""
+    return B.count_nonfinite(x.handle, x.numel)

@@ -43,6 +43,17 @@ export interface KernelExports {
   embed_fwd_f32(table: number, idx: number, out: number, rows: number, d: number): void;
   embed_bwd_f32(dout: number, idx: number, dtable: number, rows: number, d: number): void;
   adamw_f32(w: number, g: number, m: number, v: number, n: number, lr: number, b1: number, b2: number, eps: number, decay: number, bc1: number, bc2: number, clip: number): void;
+  attn_scores_fwd_f32(q: number, k: number, out: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number, scale: number): void;
+  attn_scores_bwd_f32(dout: number, q: number, k: number, dq: number, dk: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number, scale: number): void;
+  attn_apply_fwd_f32(p: number, v: number, out: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number): void;
+  attn_apply_bwd_f32(dout: number, p: number, v: number, dp: number, dv: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number): void;
+  softmax_rows_fwd_f32(x: number, valid: number, out: number, rows: number, cols: number): void;
+  softmax_rows_bwd_f32(dout: number, out: number, valid: number, dx: number, rows: number, cols: number): void;
+  layernorm_fwd_f32(x: number, g: number, b: number, out: number, mean: number, inv: number, rows: number, d: number, eps: number): void;
+  layernorm_bwd_f32(dout: number, x: number, g: number, mean: number, inv: number, dg: number, db: number, dx: number, rows: number, d: number): void;
+  quantize_bf16_f32(x: number, n: number): void;
+  quantize_fp16_f32(x: number, n: number): void;
+  count_nonfinite_f32(x: number, n: number): number;
 
   /* f64 是同一套算法的双精度实例化，梯度检验走它 —— 理由见 ops.h 开头 */
   gemm_nn_f64(a: number, b: number, c: number, M: number, N: number, K: number): void;
@@ -66,10 +77,21 @@ export interface KernelExports {
   embed_fwd_f64(table: number, idx: number, out: number, rows: number, d: number): void;
   embed_bwd_f64(dout: number, idx: number, dtable: number, rows: number, d: number): void;
   adamw_f64(w: number, g: number, m: number, v: number, n: number, lr: number, b1: number, b2: number, eps: number, decay: number, bc1: number, bc2: number, clip: number): void;
+  attn_scores_fwd_f64(q: number, k: number, out: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number, scale: number): void;
+  attn_scores_bwd_f64(dout: number, q: number, k: number, dq: number, dk: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number, scale: number): void;
+  attn_apply_fwd_f64(p: number, v: number, out: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number): void;
+  attn_apply_bwd_f64(dout: number, p: number, v: number, dp: number, dv: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number): void;
+  softmax_rows_fwd_f64(x: number, valid: number, out: number, rows: number, cols: number): void;
+  softmax_rows_bwd_f64(dout: number, out: number, valid: number, dx: number, rows: number, cols: number): void;
+  layernorm_fwd_f64(x: number, g: number, b: number, out: number, mean: number, inv: number, rows: number, d: number, eps: number): void;
+  layernorm_bwd_f64(dout: number, x: number, g: number, mean: number, inv: number, dg: number, db: number, dx: number, rows: number, d: number): void;
+  quantize_bf16_f64(x: number, n: number): void;
+  quantize_fp16_f64(x: number, n: number): void;
+  count_nonfinite_f64(x: number, n: number): number;
 }
 
 /** 这一版算子的 ABI。改了算子语义就在 kernels.c 里 +1，两边对不上要立刻炸 */
-export const KERNEL_ABI_VERSION = 1;
+export const KERNEL_ABI_VERSION = 2;
 
 const PAGE = 65536;
 

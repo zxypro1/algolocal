@@ -34,6 +34,7 @@
       functional.py     算子 + 它们各自的反向
       nn.py             Module / Linear / RMSNorm / Embedding / 注意力 / MLP
       optim.py          AdamW 与学习率调度
+      generate.py       自回归采样与 KV cache
       _bridge.py        往下的那道缝（只传整数 id，不搬数）
          ↓
     JS 桥               张量、显存、**全部计量**
@@ -49,11 +50,12 @@ from . import functional
 from . import functional as F
 from . import nn
 from . import optim
+from . import generate
 from ._bridge import phase, add_tokens, mark, release
 
 __all__ = [
     "Tensor", "zeros", "parameter",
-    "functional", "F", "nn", "optim",
+    "functional", "F", "nn", "optim", "generate",
     "phase", "add_tokens", "mark", "release",
 ]
 

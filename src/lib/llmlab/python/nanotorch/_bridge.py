@@ -89,3 +89,22 @@ cross_entropy_bwd = _B.cross_entropy_bwd
 embed_fwd = _B.embed_fwd
 embed_bwd = _B.embed_bwd
 adamw = _B.adamw
+
+
+# ---- 第 3 关起要用的：拆开的注意力、行 softmax、低精度、采样 ----
+
+attn_scores = _B.attn_scores
+attn_scores_bwd = _B.attn_scores_bwd
+attn_apply = _B.attn_apply
+attn_apply_bwd = _B.attn_apply_bwd
+softmax_rows = _B.softmax_rows
+softmax_rows_bwd = _B.softmax_rows_bwd
+layernorm_fwd = _B.layernorm_fwd
+layernorm_bwd = _B.layernorm_bwd
+quantize_bf16 = _B.quantize_bf16
+quantize_fp16 = _B.quantize_fp16
+count_nonfinite = _B.count_nonfinite
+fill_causal_valid = _B.fill_causal_valid
+sample_token = _B.sample_token
+argmax_row = _B.argmax_row
+copy_at = _B.copy_at

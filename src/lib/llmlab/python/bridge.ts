@@ -57,6 +57,24 @@ export interface PythonBridge {
   embed_fwd(table: number, idx: number, out: number, rows: number, d: number): void;
   embed_bwd(dout: number, idx: number, dtable: number, rows: number, d: number): void;
   adamw(w: number, g: number, m: number, v: number, n: number, lr: number, b1: number, b2: number, eps: number, decay: number, step: number, clip: number): void;
+  attn_scores(q: number, k: number, out: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number, scale: number): void;
+  attn_scores_bwd(dout: number, q: number, k: number, dq: number, dk: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number, scale: number): void;
+  attn_apply(p: number, v: number, out: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number): void;
+  attn_apply_bwd(dout: number, p: number, v: number, dp: number, dv: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number): void;
+  softmax_rows(x: number, valid: number, out: number, rows: number, cols: number): void;
+  softmax_rows_bwd(dout: number, out: number, valid: number, dx: number, rows: number, cols: number): void;
+  layernorm_fwd(x: number, g: number, b: number, out: number, mean: number, inv: number, rows: number, d: number, eps: number): void;
+  layernorm_bwd(dout: number, x: number, g: number, mean: number, inv: number, dg: number, db: number, dx: number, rows: number, d: number): void;
+  quantize_bf16(x: number, n: number): void;
+  quantize_fp16(x: number, n: number): void;
+  count_nonfinite(x: number, n: number): number;
+  /** 填因果掩码的每行有效长度：第 r 行（查询位置 i）能看到 offset+i+1 个键 */
+  fill_causal_valid(valid: number, B: number, H: number, Sq: number, offset: number): void;
+  /** 从一行 logits 采样一个 token。确定性：种子与步数决定结果 */
+  sample_token(logits: number, row: number, vocab: number, temperature: number, topK: number, topP: number, seed: number): number;
+  argmax_row(logits: number, row: number, vocab: number): number;
+  /** 把 src 的一段拷进 dst 的某个偏移处 —— KV cache 的追加就是它 */
+  copy_at(dst: number, dstOff: number, src: number, srcOff: number, n: number): void;
   /* ---- 阶段标记：门槛要分开读前向 / 反向 / 优化器的 FLOPs ---- */
   phase(name: string): void;
   add_tokens(n: number): void;
@@ -178,6 +196,134 @@ export function createPythonBridge(rt: Runtime): PythonBridge {
       ops.adamw(T(w), T(g), T(m), T(v), n, {
         lr, beta1: b1, beta2: b2, eps, decay, step, clip,
       }),
+
+    attn_scores: (q, k, out, B, Sq, Skv, H, KV, hd, scale) =>
+      ops.attnScores(T(q), T(k), T(out), B, Sq, Skv, H, KV, hd, scale),
+    attn_scores_bwd: (dout, q, k, dq, dk, B, Sq, Skv, H, KV, hd, scale) =>
+      ops.attnScoresBwd(T(dout), T(q), T(k), T(dq), T(dk), B, Sq, Skv, H, KV, hd, scale),
+    attn_apply: (p, v, out, B, Sq, Skv, H, KV, hd) =>
+      ops.attnApply(T(p), T(v), T(out), B, Sq, Skv, H, KV, hd),
+    attn_apply_bwd: (dout, p, v, dp, dv, B, Sq, Skv, H, KV, hd) =>
+      ops.attnApplyBwd(T(dout), T(p), T(v), T(dp), T(dv), B, Sq, Skv, H, KV, hd),
+    softmax_rows: (x, valid, out, rows, cols) =>
+      ops.softmaxRows(T(x), valid >= 0 ? T(valid) : null, T(out), rows, cols),
+    softmax_rows_bwd: (dout, out, valid, dx, rows, cols) =>
+      ops.softmaxRowsBwd(T(dout), T(out), valid >= 0 ? T(valid) : null, T(dx), rows, cols),
+    layernorm_fwd: (x, g, b, out, mean, inv, rows, d, eps) =>
+      ops.layernormFwd(T(x), T(g), T(b), T(out), T(mean), T(inv), rows, d, eps),
+    layernorm_bwd: (dout, x, g, mean, inv, dg, db, dx, rows, d) =>
+      ops.layernormBwd(T(dout), T(x), T(g), T(mean), T(inv), T(dg), T(db), T(dx), rows, d),
+    quantize_bf16: (x, n) => ops.quantizeBf16(T(x), n),
+    quantize_fp16: (x, n) => ops.quantizeFp16(T(x), n),
+    count_nonfinite: (x, n) => ops.countNonFinite(T(x), n),
+
+    /*
+     * 因果掩码写成「每行的有效长度」。
+     *
+     * valid[(b*H+h)*Sq + i] = offset + i + 1
+     *
+     * `offset` 给 KV cache 用：解码到第 t 步时 Sq=1、offset=t，
+     * 于是那一行能看到 t+1 个键。**训练与解码共用同一套掩码逻辑**，
+     * 而「解码时掩码算错一格」正是真实推理引擎里最经典的一类 bug。
+     */
+    fill_causal_valid(valid, B, H, Sq, offset) {
+      const view = arena.i32(T(valid));
+      for (let b = 0; b < B; b++)
+        for (let h = 0; h < H; h++)
+          for (let i = 0; i < Sq; i++) view[(b * H + h) * Sq + i] = offset + i + 1;
+    },
+
+    /*
+     * 采样。
+     *
+     * 放在 JS 侧而不是 wasm 里：它要排序（top-p），而这不是热点 ——
+     * 一个 token 一次，vocab 量级几百到几千。而且这里只用比较与我们自己的
+     * PRNG，不碰任何超越函数，所以确定性不受影响。
+     *
+     * temperature=0 等价于贪心。top-k 与 top-p 可以叠加，顺序是先 k 后 p，
+     * 和 HuggingFace 的 `LogitsProcessor` 链一致。
+     */
+    sample_token(logits, row, vocab, temperature, topK, topP, seed) {
+      const view = arena.view(T(logits));
+      const base = row * vocab;
+      if (temperature <= 0) {
+        let best = 0;
+        for (let j = 1; j < vocab; j++) if (view[base + j] > view[base + best]) best = j;
+        return best;
+      }
+      const items: Array<{ id: number; p: number }> = [];
+      let mx = -Infinity;
+      for (let j = 0; j < vocab; j++) {
+        const z = view[base + j] / temperature;
+        if (z > mx) mx = z;
+      }
+      let sum = 0;
+      for (let j = 0; j < vocab; j++) {
+        const e = Math.exp(view[base + j] / temperature - mx);
+        items.push({ id: j, p: e });
+        sum += e;
+      }
+      for (const it of items) it.p /= sum;
+      // 概率相同的按 id 排，保证顺序确定 —— 否则同一份输入两次可能采不同的词
+      items.sort((a, b) => (b.p - a.p) || (a.id - b.id));
+
+      let pool = topK > 0 ? items.slice(0, topK) : items;
+      if (topP > 0 && topP < 1) {
+        const kept: typeof pool = [];
+        let acc = 0;
+        for (const it of pool) {
+          kept.push(it);
+          acc += it.p;
+          if (acc >= topP) break;   // 至少留一个，所以先 push 再判
+        }
+        pool = kept;
+      }
+      let total = 0;
+      for (const it of pool) total += it.p;
+
+      // xorshift32，和初始化那边同一套；种子先打散
+      let st = ((seed + 0x9e3779b9) >>> 0) || 1;
+      st = Math.imul(st ^ (st >>> 16), 0x21f0aaad) >>> 0;
+      st = Math.imul(st ^ (st >>> 15), 0x735a2d97) >>> 0;
+      st = ((st ^ (st >>> 15)) >>> 0) || 1;
+      st ^= st << 13; st >>>= 0;
+      st ^= st >>> 17;
+      st ^= st << 5; st >>>= 0;
+      let r = (st / 4294967296) * total;
+
+      for (const it of pool) {
+        r -= it.p;
+        if (r <= 0) return it.id;
+      }
+      return pool[pool.length - 1].id;
+    },
+
+    copy_at(dst, dstOff, src, srcOff, n) {
+      const dt = T(dst), st = T(src);
+      if (dstOff + n > dt.count) {
+        throw new Error(
+          `copy_at 写越界：往「${dt.name || dt.id}」的 ${dstOff} 处写 ${n} 个，` +
+          `但它只有 ${dt.count} 个`
+        );
+      }
+      if (srcOff + n > st.count) {
+        throw new Error(
+          `copy_at 读越界：从「${st.name || st.id}」的 ${srcOff} 处读 ${n} 个，` +
+          `但它只有 ${st.count} 个`
+        );
+      }
+      const d = arena.view(dt);
+      const v = arena.view(st);
+      for (let i = 0; i < n; i++) d[dstOff + i] = v[srcOff + i];
+    },
+
+    argmax_row(logits, row, vocab) {
+      const view = arena.view(T(logits));
+      const base = row * vocab;
+      let best = 0;
+      for (let j = 1; j < vocab; j++) if (view[base + j] > view[base + best]) best = j;
+      return best;
+    },
 
     /*
      * 阶段标记。Python 侧在前向/反向/优化器的入口各调一次，
