@@ -2946,6 +2946,44 @@ const primers = {
         'The larger 2026 shift is toward `online` methods: DPO is offline (preferences labelled in advance), while online preference optimisation samples and labels as it trains,noticeably better, at the cost of a full rollout infrastructure.'
       )
     ),
+    'length-bias': t(
+      p(
+        '偏好优化有一个几乎必然出现的副作用：`答案越来越长`。原因不神秘,如果偏好数据里「更好的那个」平均更长，那么「长」就是一个和「好」高度相关、而且**比「好」容易学**的特征。模型没有理由不去学它。',
+        '这不是假想。`AlpacaEval` 在 2.0 版专门引入了`长度受控胜率`，就是因为原始胜率被长度带偏得太厉害,一个学会写长的模型，在偏爱长答案的评委面前胜率会上升，而它并没有变得更好。',
+        '所以评测要做长度控制：只在长度可比的样本之间比，或者把长度当协变量回归掉。**一个上升的指标，先问它有没有别的解释。**',
+        '去偏有两条路。一是`改数据`:只留下 chosen 与 rejected 等长的对，混淆从源头消失，代价是数据少一半。二是`改损失`:`SimPO` 的长度归一化、`R-DPO` 的长度罚项，不丢数据但多一个超参。',
+        '还有一个方法论上的要点：**「模型没有变长」这个结果，只有在「不处理就会变长」被验证过之后才有意义**。少了对照，你不知道是去偏起了作用，还是这个任务本来就不会变长,而后一种情况下你写的去偏代码是死的，却看着像在工作。',
+        '长度只是最容易看见的那个混淆。同类的还有`格式偏好`（评委爱看列表，模型什么都列成条目）、`自信度`（爱看语气肯定的，模型学会不说「我不确定」,这直接伤害校准）、`谄媚`（爱看同意用户的，模型学会顺着说）。结构完全一样：一个和「好」相关、但比「好」容易学的特征，而 RLHF 会准确地找到并放大它。',
+        '`RLVR` 在这件事上有结构性优势：规则判对错不带这些偏好,`7+5=12` 就是对的，写得长不长、有没有列表、语气自不自信，规则都不看。但可验证的任务只覆盖数学、代码这一小块，「写一封得体的邮件」没有验证器。所以真实的后训练是两条路并用。'
+      ),
+      p(
+        'Preference optimisation has one near-inevitable side effect: `answers get longer`. The reason is not mysterious,if the "better" option in preference data is longer on average, "long" becomes a feature highly correlated with "good" and **easier to learn than "good"**. The model has no reason to ignore it.',
+        'This is not hypothetical. `AlpacaEval` introduced a `length-controlled win rate` in version 2.0 precisely because raw win rates were badly skewed,a model that learned to write longer scores higher with a length-preferring judge without being better.',
+        'So evaluation must control for length: compare only among comparable lengths, or regress length out as a covariate. **When a metric rises, first ask whether something else explains it.**',
+        'Debiasing has two routes. `Change the data`: keep only pairs whose chosen and rejected are equally long, removing the confound at the source at the cost of half the data. `Change the loss`: `SimPO`\'s length normalisation, `R-DPO`\'s length penalty,no data lost, one more hyperparameter gained.',
+        'One methodological point: **"the model did not lengthen" means something only after "it would have lengthened" has been verified**. Without the control you cannot tell whether debiasing worked or the task never lengthens,and in the latter case your debiasing code is dead while appearing to work.',
+        'Length is only the most visible confound. Others share its structure: `format preference` (judges like lists, so everything becomes bullet points), `confidence` (judges like assertive answers, so the model stops saying "I am not sure",directly damaging calibration), `sycophancy` (judges like agreement, so the model agrees). Each is a feature correlated with "good" but easier to learn, and RLHF finds and amplifies it accurately.',
+        '`RLVR` has a structural advantage: a rule carries none of these preferences,`7+5=12` is correct whether long or short, bulleted or not, confident or hedged. But verifiable tasks cover only mathematics and code, and "write a tactful email" has no verifier. Real post-training runs both routes together.'
+      )
+    ),
+    'rollout': t(
+      p(
+        '强化学习的每一步都要**先采样再学习**：给一批 prompt，每个采若干条，判对错，再按结果更新。这一层叫 `rollout`,而它在真实系统里占 RL 训练时间的六到八成。也就是说，RL 跑不跑得动，主要看这一层写得怎么样。',
+        '第一条硬要求是 `KV cache`。不带 cache 的解码每生成一个 token 都要把整段前缀重算一遍,同样生成 12 个 token，实测 FLOPs 是带 cache 的 7 倍多。而 RL 一步要采「prompt 数 × 组大小」条，这个倍数直接乘在整个训练时间上。',
+        '第二条是`撞到结束符就停`。不停的话，结束符之后那些 token 是纯浪费,不参与奖励、不参与更新，只消耗算力。在答案长度差异大的任务上，按最长的那条跑满，浪费的比算的还多。真实推理引擎里这件事叫 `continuous batching`：一条序列结束就换出去，空位立刻塞新的进来。',
+        '第三条是`确定性`，而且是比「跑两遍一样」更强的一种。RL 的调试几乎完全依赖重放：训练里某一步出了问题，你要能把那一步原样再跑一遍。所以随机性必须是**可寻址的**,同一个 (seed, prompt 下标, 样本下标) 永远给同一条输出，换个批大小、换个执行顺序都不变。用全局随机状态的实现做不到这一点。',
+        '真实系统里 rollout 和训练往往是两个进程，甚至在不同的卡上：推理引擎负责采样，训练框架负责更新，中间靠权重同步连起来。',
+        '这带来一个 2026 年才被认真对待的问题：`推理和训练的数值不一致`。推理引擎为了快用了不同的 kernel、不同的批处理、不同的精度，于是两边算出来的 log 概率不完全相等。而 PPO / GRPO 的比值项恰恰是两者相除,一点点不一致会被放大成一个假的比值，训练就此跑偏。解决办法要么让两边共用 kernel，要么在训练侧重算一遍。'
+      ),
+      p(
+        'Every reinforcement-learning step **samples before it learns**: take a batch of prompts, draw several samples each, judge them, update from the outcome. That layer is the `rollout`, and in real systems it consumes 60% to 80% of RL training time. Whether RL runs at all mostly comes down to how well this layer is written.',
+        'The first hard requirement is the `KV cache`. Uncached decoding recomputes the whole prefix for every token,generating the same 12 tokens measures over 7x the FLOPs. An RL step samples "prompts x group size" sequences, and that multiplier lands directly on total training time.',
+        'The second is `stopping at the end token`. Otherwise every token after it is pure waste,no reward, no update, only compute. On tasks with widely varying answer lengths, running everything to the longest wastes more than it computes. Real inference engines call this `continuous batching`: a finished sequence is evicted and a new one takes its slot.',
+        'The third is `determinism`, in a stronger sense than "two runs match". Debugging RL depends almost entirely on replay: when a step goes wrong you must rerun exactly that step. So randomness has to be **addressable**,the same (seed, prompt index, sample index) always yields the same output, unchanged by batch size or execution order. Implementations drawing from global random state cannot do this.',
+        'In real systems the rollout and training are separate processes, often on separate devices: an inference engine samples, a training framework updates, and weight synchronisation links them.',
+        'That creates a problem taken seriously only recently: `numerical mismatch between inference and training`. The inference engine uses different kernels, batching and precision for speed, so the two compute slightly different log probabilities. PPO and GRPO divide exactly those two quantities,a small inconsistency inflates into a spurious ratio and training drifts. The fixes are sharing kernels or recomputing on the training side.'
+      )
+    ),
   },
 };
 
