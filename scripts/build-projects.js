@@ -66,9 +66,11 @@ function main() {
     validate(project, name);
 
     // 题目只写一份 TypeScript，JS 版在这里自动派生，避免两份内容漂移。
-    // ops / gpu 形态没有「用另一种语言重做一遍」这回事 ——
-    // 学员写的是 YAML、命令，或者 CUDA C。
-    const machineBased = project.workspace?.kind === 'ops' || project.workspace?.kind === 'gpu';
+    // ops / gpu / train 形态没有「用另一种语言重做一遍」这回事 ——
+    // 学员写的是 YAML、命令、CUDA C，或者 Python。
+    const machineBased = project.workspace?.kind === 'ops'
+      || project.workspace?.kind === 'gpu'
+      || project.workspace?.kind === 'train';
     if (project.language !== 'javascript' && !machineBased) {
       project.variants = { javascript: deriveJavaScriptVariant(project) };
     }

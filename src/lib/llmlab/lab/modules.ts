@@ -42,6 +42,15 @@ export interface LlmLabApi {
   /* ---- 门槛读的那棵树 ---- */
 
   metrics(): LlmMetricTree;
+  /**
+   * 把判定算出来的值发布上去，门槛就能读。路径相对 `llm.`。
+   *
+   *     lab.publish('tokenizer.compression', ratio);
+   *
+   * **只有平台的代码能调它**（隐藏用例是平台的）。学员在 Python 里
+   * 报告的东西落在训练日志里，门槛读不到 —— 否则他自己报一个数就能过。
+   */
+  publish(path: string, value: unknown): void;
 
   /* ---- 平台探针：学员绕不过的证据 ---- */
 
@@ -99,6 +108,7 @@ export function createLlmLabApi(world: TrainWorld): LlmLabApi {
     },
 
     metrics: () => rt.metrics(),
+    publish: (path, value) => rt.publish(path, value),
 
     probe: {
       causality: (runLogits, idx, seqLen, vocab) => probeCausality(runLogits, idx, seqLen, vocab),

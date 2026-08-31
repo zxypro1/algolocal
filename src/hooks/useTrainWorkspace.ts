@@ -10,7 +10,9 @@
  * `revision` 加一，面板的投影挂在这个数上重算。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { buildWorld, mergeWorldSpec, type TrainWorld } from '../lib/llmlab/lab';
+import {
+  absolutePath, buildWorld, mergeWorldSpec, runCommand as runShell, type TrainWorld,
+} from '../lib/llmlab/lab';
 import type { TrainWorldSpec } from '../lib/llmlab/lab/spec';
 import type { TrainStageSpec } from '../lib/engineering/types';
 import type { TrainingLogView } from '../lib/llmlab/bridge';
@@ -109,7 +111,7 @@ export function useTrainWorkspace(options: UseTrainWorkspaceOptions): TrainWorks
         if (cancelled) return;
 
         for (const command of current.stage?.setupCommands ?? []) {
-          await runIn(built, command);
+          await runShell(built, command);
         }
         setWorld(built);
         setStatus('ready');
@@ -127,7 +129,7 @@ export function useTrainWorkspace(options: UseTrainWorkspaceOptions): TrainWorks
 
   const runCommand = useCallback(async (line: string): Promise<string> => {
     if (!world) return '世界还没起来\r\n';
-    const result = await runIn(world, line);
+    const result = await runShell(world, line);
     setHistory((h) => [...h, { command: line, output: result, ok: true }]);
     setRevision((n) => n + 1);
     return result.replace(/\n/g, '\r\n');
@@ -136,7 +138,7 @@ export function useTrainWorkspace(options: UseTrainWorkspaceOptions): TrainWorks
   const readFile = useCallback((path: string): string => {
     if (!world) return '';
     try {
-      return world.session.py.readFile(absolute(path));
+      return world.session.py.readFile(absolutePath(path));
     } catch {
       return '';
     }
@@ -144,7 +146,7 @@ export function useTrainWorkspace(options: UseTrainWorkspaceOptions): TrainWorks
 
   const writeFile = useCallback((path: string, content: string): void => {
     if (!world) return;
-    world.session.py.writeFile(absolute(path), content);
+    world.session.py.writeFile(absolutePath(path), content);
   }, [world]);
 
   const sourcePaths = useMemo(() => {
@@ -161,79 +163,4 @@ export function useTrainWorkspace(options: UseTrainWorkspaceOptions): TrainWorks
     log, runCommand, readFile, writeFile,
     reboot: () => setGeneration((n) => n + 1),
   };
-}
-
-function absolute(path: string): string {
-  return path.startsWith('/') ? path : `/lab/${path}`;
-}
-
-/**
- * 一个很小的命令处理器。
- *
- * **不是一个真 shell，这个边界要说清。** 支持的是 `python <file>`、
- * `ls` / `cat` / `head` / `pwd` 这几条，而且它们都是**转给 Python 执行的** ——
- * 文件系统的主人是 Pyodide，让它自己回答比在 JS 里镜像一份可靠。
- *
- * 为什么不接 labkit 那套完整 shell（opslab / gpulab 用的那个）：
- * 它管的是自己的 VFS，而这里的文件全在 Pyodide 的 FS 里。桥接两套文件系统
- * 的工作量远大于收益 —— 这个项目里终端的作用是「跑我的脚本、看看盘上有什么」，
- * 不是学 shell。真要 shell，那是 opslab 的内容。
- */
-async function runIn(world: TrainWorld, line: string): Promise<string> {
-  const trimmed = line.trim();
-  if (!trimmed) return '';
-  const [cmd, ...args] = trimmed.split(/\s+/);
-
-  try {
-    switch (cmd) {
-      case 'python':
-      case 'python3': {
-        if (!args[0]) return 'python: 要给一个脚本名\n';
-        if (args[0] === '-m') {
-          world.session.py.drainOutput();
-          world.session.py.run(`import runpy; runpy.run_module(${JSON.stringify(args[1] ?? '')}, run_name="__main__")`);
-          const out = world.session.py.drainOutput();
-          return out.stdout + out.stderr;
-        }
-        const path = absolute(args[0]);
-        const source = world.session.py.readFile(path);
-        const out = world.session.runScript(args[0], source);
-        world.revision += 1;
-        return out.stdout + out.stderr;
-      }
-      case 'ls': {
-        const dir = absolute(args[0] ?? '.').replace(/\/\.$/, '');
-        return String(world.session.py.run(`
-import os
-"\\n".join(sorted(os.listdir(${JSON.stringify(dir)}))) + "\\n"
-`));
-      }
-      case 'cat': {
-        if (!args[0]) return 'cat: 要给一个文件名\n';
-        return world.session.py.readFile(absolute(args[0]));
-      }
-      case 'head': {
-        const n = args[0] === '-n' ? Number(args[1]) : 20;
-        const file = args[0] === '-n' ? args[2] : args[0];
-        if (!file) return 'head: 要给一个文件名\n';
-        const text = world.session.py.readFile(absolute(file));
-        return `${text.split('\n').slice(0, n).join('\n')}\n`;
-      }
-      case 'pwd':
-        return '/lab\n';
-      case 'help':
-        return [
-          '这个终端支持的命令（不是一个完整的 shell）：',
-          '  python <文件>            跑你的脚本',
-          '  python -m <模块>         跑一个模块',
-          '  ls [目录] / cat <文件>   看看盘上有什么',
-          '  head [-n N] <文件>       看开头几行',
-          '',
-        ].join('\n');
-      default:
-        return `${cmd}: 这个终端不支持这条命令。敲 help 看支持哪些。\n`;
-    }
-  } catch (error) {
-    return `${error instanceof Error ? error.message : String(error)}\n`;
-  }
 }

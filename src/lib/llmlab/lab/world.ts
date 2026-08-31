@@ -115,6 +115,18 @@ export async function buildWorld(options: BuildWorldOptions): Promise<TrainWorld
   for (const [name, content] of Object.entries(corpus)) {
     session.writeFile(`data/${name}`, content);
   }
+  /*
+   * 训练 / 留出的切分也落一份到盘上。
+   *
+   * **平台与学员必须用同一份切分**，否则基线那一关算出来的数和判定算的对不上，
+   * 而两边都没错 —— 只是切在了不同的地方。与其让每个人各切各的，
+   * 不如平台切好写出去。
+   */
+  session.writeFile('data/split.json', JSON.stringify({
+    train: Array.from(tokens.subarray(0, holdoutAt)),
+    eval: Array.from(tokens.subarray(holdoutAt)),
+    vocab_size: vocab.size,
+  }));
   for (const [path, content] of Object.entries(spec.machine?.files ?? {})) {
     session.writeFile(path, content);
   }

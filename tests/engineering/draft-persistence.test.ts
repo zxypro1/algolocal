@@ -25,6 +25,7 @@ import path from 'node:path';
 import {
   allProjectFiles, applyDrafts, buildStageFiles, labDraftKey, labFilesOf, pruneDrafts,
 } from '../../src/lib/engineering/workspace';
+import { WORKSPACE_KINDS } from '../../src/lib/engineering/types';
 import type { EngineeringProject, ProjectStage } from '../../src/lib/engineering/types';
 
 const PROJECTS: EngineeringProject[] = JSON.parse(
@@ -39,7 +40,7 @@ interface Kind {
   pickFile(project: EngineeringProject): [string, string, number] | null;
 }
 
-function labPicker(field: 'ops' | 'gpu') {
+function labPicker(field: 'ops' | 'gpu' | 'train') {
   return (project: EngineeringProject): [string, string, number] | null => {
     const stages = project.stages || [];
     for (let index = 0; index < stages.length; index += 1) {
@@ -67,14 +68,23 @@ for (const project of PROJECTS) {
   KINDS.push({
     kind,
     project,
-    pickFile: kind === 'ops' ? labPicker('ops') : kind === 'gpu' ? labPicker('gpu') : codePicker,
+    pickFile: kind === 'ops' || kind === 'gpu' || kind === 'train'
+      ? labPicker(kind)
+      : codePicker,
   });
 }
 
 describe('每一种工作台形态的草稿往返', () => {
-  it('三种形态都要有代表工程，否则这组用例是空转', () => {
+  /*
+   * 判据从写死的清单换成「`WorkspaceKind` 的每一支都要有代表工程」。
+   *
+   * 写死清单的话，加一种形态时这条用例会红 —— 但红的原因是清单过期，
+   * 而不是「新形态没被覆盖」。改完清单它就绿了，**而新形态的草稿往返
+   * 一次都没被验过**。按类型比就没有这个空子。
+   */
+  it('每一种工作台形态都要有代表工程，否则下面几组是空转', () => {
     const kinds = KINDS.map((item) => item.kind).sort();
-    expect(kinds).toEqual(['code', 'gpu', 'ops']);
+    expect(kinds).toEqual([...WORKSPACE_KINDS].sort());
   });
 
   describe.each(KINDS.map((item) => [item.kind, item] as const))('%s 工作台', (_kind, entry) => {

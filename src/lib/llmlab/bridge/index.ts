@@ -39,6 +39,16 @@ export interface Runtime {
   readonly log: TrainingLog;
   /** 本关禁用哪些算子。判定开始时设一次 */
   forbid(ops: OpName[]): void;
+  /**
+   * 判定把自己算出来的值发布到指标树上，路径相对 `llm.`。
+   *
+   *     rt.publish('tokenizer.compression', 1.73);
+   *     // 门槛就能写 { metric: 'llm.tokenizer.compression', op: 'gte', value: 1.55 }
+   *
+   * 只给**平台的代码**用。学员的 `nt.log.report(...)` 落在日志里，不落在这里 ——
+   * 否则他自己报一个数就能过门槛。
+   */
+  publish(path: string, value: unknown): void;
   metrics(extra?: RuntimeMetricsInput): LlmMetricTree;
 }
 
@@ -53,13 +63,17 @@ function makeRuntime(kernels: Kernels): Runtime {
   const meter = new Meter();
   const ops = new Ops(kernels, arena, meter);
   const log = new TrainingLog();
+  const published: Record<string, unknown> = {};
   return {
     kernels, arena, ops, meter, log,
     forbid(list) {
       meter.forbidden = new Set(list);
     },
+    publish(path, value) {
+      published[path] = value;
+    },
     metrics(extra) {
-      return buildLlmMetrics({ meter, arena: arena.stats(), ...(extra ?? {}) });
+      return buildLlmMetrics({ meter, arena: arena.stats(), published, ...(extra ?? {}) });
     },
   };
 }
