@@ -2694,6 +2694,42 @@ const primers = {
         'A last number worth remembering: AdamW state is `twice` the parameters (one m and one v). Together with parameters and gradients, fp32 training needs four times the parameter count in floats for those three alone,112GB for a 7B model. Mixed precision, ZeRO sharding and 8-bit optimisers all target that number.'
       )
     ),
+    'lr-schedule': t(
+      p(
+        '学习率是训练里最要紧的一个超参。大了会震荡甚至发散，小了走不动,而且最优值在训练的不同阶段并不一样。所以现代训练几乎都不用固定学习率，而是排一条`曲线`。',
+        '曲线的第一段叫 `warmup`,从很小的值线性爬到峰值，通常占总步数的 1% 到 5%。它挡的是开头那几步：模型是随机的，梯度又大又没方向；而 Adam 的二阶动量从 0 起步，前几步对梯度量级的估计很不准。**分母不可靠而分子很大**，一步就能把权重推出很远，后面很久才走得回来。',
+        '第二段是`退火`。最常见的是余弦：从峰值沿半个余弦周期降到一个地板值（通常是峰值的 10%）。为什么要降,后期模型已经在一个不错的位置附近，大步长只会让它在附近来回跳，降下来才能落进去。',
+        '两段要在交界处`接上`。爬升段到顶正好是峰值，退火段从进度 0 起也正好是峰值。接不上的话曲线里有一个台阶,训练不会报错，只是比该有的慢，而没有对照实验的话你根本不会发现。',
+        '退火的地板取 10% 而不是 0：真降到 0 的话最后那些步等于白跑。',
+        '余弦不是唯一的。`WSD`（爬升-恒定-衰减）在 2026 年用得越来越多,它的恒定段可以随时延长，而余弦的形状取决于你一开始声明的总步数，中途想加训就得重排整条曲线。'
+      ),
+      p(
+        'The learning rate is the single most consequential hyperparameter. Too large and training oscillates or diverges; too small and it crawls,and the best value differs across phases of training. So modern training almost never uses a fixed rate; it follows a `curve`.',
+        'The first segment is `warmup`: a linear climb from near zero to the peak, typically 1% to 5% of total steps. It guards the opening steps, where the model is random and gradients are large and directionless, while Adam\'s second moment starts at zero and estimates gradient magnitude badly. **An unreliable denominator under a large numerator** can throw weights far in one step, and recovery takes a long time.',
+        'The second segment is `decay`, most often cosine: from the peak along half a cosine period down to a floor, usually a tenth of the peak. Why decay at all,late in training the model sits near a good region, and large steps only bounce it around; shrinking them lets it settle.',
+        'The two segments must `meet`. The ramp tops out exactly at the peak, and the decay starts from progress zero at exactly the peak. Failing to meet leaves a step in the curve,nothing errors, training is merely slower than it should be, and without a control run you will never notice.',
+        'The decay floor is 10% rather than 0: at a true zero the final steps accomplish nothing.',
+        'Cosine is not the only option. `WSD` (warmup-stable-decay) has grown common through 2026,its plateau can be extended at any time, while a cosine\'s shape depends on the total step count declared up front, so training longer means redrawing the whole curve.'
+      )
+    ),
+    'grad-clip': t(
+      p(
+        '训练偶尔会撞上一个特别陡的地方,某一步的梯度比平时大几十倍。照这个梯度走一步，权重被推得很远，模型可能要几百步才恢复，也可能再也回不来。`梯度裁剪`就是给这一步的长度设一个上限。',
+        '做法是算所有梯度拼成的那个大向量的长度（`全局范数`），超过阈值就整体乘一个小于 1 的系数缩回去。**关键是「整体」**,所有梯度乘同一个系数。',
+        '逐张量各裁各的是个常见的错。范数看着都合规，但各层之间的相对大小被抹平了,梯度的`方向`变了，而方向才是梯度携带的信息。（顺带一提，逐张量裁完的总范数是阈值乘以张量数的平方根，根本不是阈值。）',
+        '`clip_grad_norm_` 返回的是**裁剪前**的范数，PyTorch 也是这样。理由是诊断：训练曲线要看的是梯度本来有多大。返回裁剪后的值的话，那条曲线在裁剪生效时恒等于阈值，没有任何信息。',
+        '梯度范数长期贴着阈值不是「裁剪在起作用」，是**学习率偏大或者初始化不对**的信号。这时候该改的是那些，不是把阈值调大,裁剪掩盖问题的能力比解决问题的能力强得多。',
+        '另一类问题是梯度里出现 `inf` 或 `NaN`,低精度训练里这是常事。标准处理是**整步跳过**：参数不更新，优化器状态也不更新。不要清零之后照常 step,那样动量被一个假的零梯度污染，而且优化器的步数还往前走了一格，偏差修正的分母跟着变，后面每一步都受影响。'
+      ),
+      p(
+        'Training occasionally hits a very steep region where one step\'s gradient is tens of times the usual size. Following it moves the weights far, and the model may need hundreds of steps to recover, or never recover. `Gradient clipping` puts a ceiling on how far one step can go.',
+        'The method is to measure the length of all gradients taken as one large vector (the `global norm`) and, when it exceeds a threshold, scale everything by a factor below 1. **The word that matters is "everything"**,every gradient gets the same factor.',
+        'Clipping tensor by tensor is a common mistake. Each norm looks compliant, but relative magnitudes between layers are flattened,the gradient\'s `direction` changes, and direction is what a gradient carries. (Incidentally, per-tensor clipping leaves a total norm of the threshold times the square root of the tensor count, not the threshold.)',
+        '`clip_grad_norm_` returns the norm **before** clipping, as PyTorch does. The reason is diagnostic: the training curve should show how large the gradient really was. Returning the post-clip value yields a line identically equal to the threshold whenever clipping fires, carrying no information.',
+        'A gradient norm that sits against the threshold for a long time is not "clipping doing its job"; it signals **a learning rate that is too high or an initialisation that is wrong**. Those are what to fix, not the threshold,clipping is far better at hiding problems than at solving them.',
+        'A different problem is gradients turning into `inf` or `NaN`, routine in low precision. The standard response is to **skip the whole step**: leave parameters and optimiser state untouched. Do not zero them and step anyway,that pollutes momentum with a fake zero gradient, and the optimiser step counter still advances, shifting the bias-correction denominator and affecting every later step.'
+      )
+    ),
   },
 };
 

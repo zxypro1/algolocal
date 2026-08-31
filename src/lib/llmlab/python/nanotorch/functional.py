@@ -139,6 +139,16 @@ def linear(x, weight):
     return out
 
 
+def scale_(x, factor):
+    """就地乘一个标量。**不挂反向** —— 它改的是已经算好的数。
+
+    梯度裁剪就是它：`clip_grad_norm_` 算出缩放系数之后，
+    把每份梯度原地乘上去。对应 PyTorch 里 `p.grad.mul_(coef)`。
+    """
+    B.scale_inplace(x.handle, float(factor), x.numel)
+    return x
+
+
 def scale(x, factor):
     """乘一个标量常数。对应 PyTorch 里的 `x * factor`。
 
@@ -439,7 +449,12 @@ def causal_valid(batch, heads, seq_q, offset=0):
     掩码做成一个长度数组而不是一张布尔矩阵，是因为因果、滑窗、文档边界
     三种掩码在这个表示下是同一套东西，算子不必分别认识它们。
     """
-    valid = Tensor((batch * heads * seq_q,), "f32", role="data", name="causal.valid")
+    # 角色是 activation：这张表每次前向都按 (batch, heads, seq) 重算一次，
+    # 是个一次性的中间量。标成 data 的话它会落在训练循环那个 mark 之后，
+    # 而 data 是常驻角色 —— 第二步的 release 会当场报错。
+    # （这条是训练循环真的跑起来才暴露的：竖切用的是融合的注意力，
+    #   走不到 causal_valid，于是它在第 13 关之前一直没露过面。）
+    valid = Tensor((batch * heads * seq_q,), "f32", name="causal.valid")
     B.fill_causal_valid(valid.handle, batch, heads, seq_q, offset)
     return valid
 

@@ -4812,24 +4812,35 @@ const PARTS_FULL_PY = code`
 
 
   class RopeAttention(nn.Module):
-      def __init__(self, dim, n_head, n_kv_head, seed, base=10000.0, dtype="f32"):
+      def __init__(self, dim, n_head, n_kv_head, seed, base=10000.0, dtype="f32",
+                   max_seq=64):
           super().__init__()
           self.dim, self.n_head, self.n_kv_head = dim, n_head, n_kv_head
           self.head_dim = dim // n_head
           self.base = base
           self.dtype = dtype
+          self.max_seq = max_seq
           hd = self.head_dim
           self.wq = nt.parameter((dim, n_head * hd), seed + 1, dim ** -0.5, "wq", dtype=dtype)
           self.wk = nt.parameter((dim, n_kv_head * hd), seed + 2, dim ** -0.5, "wk", dtype=dtype)
           self.wv = nt.parameter((dim, n_kv_head * hd), seed + 3, dim ** -0.5, "wv", dtype=dtype)
           self.wo = nt.parameter((n_head * hd, dim), seed + 4, (n_head * hd) ** -0.5, "wo", dtype=dtype)
+          # 表只跟位置和头维有关，跟数据无关 —— 整个训练里算一次就够
+          # （Llama 里这块叫 rotary_emb，同样是预算好挂在模块上的）。
+          # 更要紧的是它**必须在训练循环那个 mark 之前建好**：role="data" 是常驻角色，
+          # 落在 mark 之后的话，每步的 release 会当场报错。
+          self._cos, self._sin = build_tables(list(range(max_seq)), hd, base, dtype)
 
       def forward(self, x, batch, seq, offset=0):
           rows, hd = batch * seq, self.head_dim
           q = F.linear(x, self.wq)
           k = F.linear(x, self.wk)
           v = F.linear(x, self.wv)
-          cos, sin = build_tables(list(range(offset, offset + seq)), hd, self.base, self.dtype)
+          if offset == 0 and seq <= self.max_seq:
+              # 表是按位置排的，前 seq 行正好就是 0..seq-1
+              cos, sin = self._cos, self._sin
+          else:
+              cos, sin = build_tables(list(range(offset, offset + seq)), hd, self.base, self.dtype)
           q = F.rope(q, cos, sin, batch, seq, self.n_head, hd)
           k = F.rope(k, cos, sin, batch, seq, self.n_kv_head, hd)
           scores = F.attn_scores(q, k, batch, seq, seq, self.n_head, self.n_kv_head, hd)
@@ -5882,6 +5893,1004 @@ const STAGE_ADAMW = {
   ),
 };
 
+/* ================================================================== */
+/* 第 13 关：学习率调度与 warmup                                        */
+/* ================================================================== */
+
+/** 平台给的训练套件：模型 + 训练循环。这几关只关心调度与裁剪 */
+const KIT_PY = code`
+  """平台给的训练套件：一个小语言模型 + 一条训练循环。
+
+  这几关不动模型,要写的是**外面那一层**：学习率怎么排、梯度怎么裁、
+  炸了怎么办。真实项目里模型代码往往是最稳定的部分，而训练循环是天天在改的。
+
+  模型就是第 11 关那个，只是配置小一点：
+  \`vocab=16, dim=32, n_layer=2, n_head=4, n_kv_head=2\`，
+  batch 8 × seq 16 = 每步 128 个 token。
+  """
+  import math
+  import nanotorch as nt
+  from nanotorch import nn, functional as F
+
+  V, D, L, H, KV, HID, B, S = 16, 32, 2, 4, 2, 88, 8, 16
+
+
+  def build_tables(positions, head_dim, base=10000.0):
+      half = head_dim // 2
+      cos = nt.zeros((len(positions), half), role="data", name="rope.cos")
+      sin = nt.zeros((len(positions), half), role="data", name="rope.sin")
+      cv, sv = [], []
+      for p in positions:
+          for i in range(half):
+              th = p * (base ** (-2.0 * i / head_dim))
+              cv.append(math.cos(th))
+              sv.append(math.sin(th))
+      cos.set_(cv)
+      sin.set_(sv)
+      return cos, sin
+
+
+  class Norm(nn.Module):
+      def __init__(self, dim):
+          super().__init__()
+          self.weight = nt.parameter((dim,), None, 0.0, "g")
+
+      def forward(self, x):
+          return F.rms_norm(x, self.weight, 1e-5)
+
+
+  class Attn(nn.Module):
+      def __init__(self, dim, nh, nkv, seed, max_seq=64):
+          super().__init__()
+          self.nh, self.nkv, self.hd = nh, nkv, dim // nh
+          hd = self.hd
+          self.wq = nt.parameter((dim, nh * hd), seed + 1, dim ** -0.5, "wq")
+          self.wk = nt.parameter((dim, nkv * hd), seed + 2, dim ** -0.5, "wk")
+          self.wv = nt.parameter((dim, nkv * hd), seed + 3, dim ** -0.5, "wv")
+          self.wo = nt.parameter((nh * hd, dim), seed + 4, (nh * hd) ** -0.5, "wo")
+          # 表在这里建好 —— 它是常驻的，落在训练循环的 mark 之后会被 release 拦下
+          self._cos, self._sin = build_tables(list(range(max_seq)), hd)
+
+      def forward(self, x, b, s):
+          hd = self.hd
+          q = F.linear(x, self.wq)
+          k = F.linear(x, self.wk)
+          v = F.linear(x, self.wv)
+          q = F.rope(q, self._cos, self._sin, b, s, self.nh, hd)
+          k = F.rope(k, self._cos, self._sin, b, s, self.nkv, hd)
+          sc = F.attn_scores(q, k, b, s, s, self.nh, self.nkv, hd)
+          valid = F.causal_valid(b, self.nh, s)
+          pr = F.softmax(sc, b * self.nh * s, s, valid)
+          o = F.attn_apply(pr, v, b, s, s, self.nh, self.nkv, hd,
+                           out_shape=(b * s, self.nh * hd))
+          return F.linear(o, self.wo)
+
+
+  class Mlp(nn.Module):
+      def __init__(self, dim, hid, seed):
+          super().__init__()
+          self.wg = nt.parameter((dim, hid), seed + 1, dim ** -0.5, "wg")
+          self.wu = nt.parameter((dim, hid), seed + 2, dim ** -0.5, "wu")
+          self.wd = nt.parameter((hid, dim), seed + 3, hid ** -0.5, "wd")
+
+      def forward(self, x):
+          return F.linear(F.swiglu(F.linear(x, self.wg), F.linear(x, self.wu)), self.wd)
+
+
+  class Block(nn.Module):
+      def __init__(self, dim, nh, nkv, hid, seed, nl):
+          super().__init__()
+          self.n1, self.at = Norm(dim), Attn(dim, nh, nkv, seed)
+          self.n2, self.mp = Norm(dim), Mlp(dim, hid, seed + 40)
+          self.sc = (2.0 * nl) ** -0.5
+
+      def forward(self, x, b, s):
+          x = F.add(x, F.scale(self.at(self.n1(x), b, s), self.sc))
+          return F.add(x, F.scale(self.mp(self.n2(x)), self.sc))
+
+
+  class LM(nn.Module):
+      def __init__(self, seed=1):
+          super().__init__()
+          self.embed = nt.parameter((V, D), seed, D ** -0.5, "embed")
+          self.blocks = nn.ModuleList([
+              Block(D, H, KV, HID, seed + 100 * (i + 1), L) for i in range(L)
+          ])
+          self.nf = Norm(D)
+
+      def forward(self, idx, tgt, b, s):
+          rows = b * s
+          x = F.embedding(self.embed, idx, rows, D)
+          for blk in self.blocks:
+              x = blk(x, b, s)
+          x = self.nf(x)
+          return F.cross_entropy(F.linear_tied(x, self.embed, rows, D, V), tgt, rows, V)
+
+
+  # 平台会把归纳任务的数据灌进来：_batches[seed] = (idx, tgt)
+  _batches = {}
+
+
+  def get_batch(seed):
+      return _batches[seed]
+`;
+
+const STAGE_SCHEDULE = {
+  id: 'lr-schedule',
+  title: t('学习率调度 —— 为什么开头要慢慢来', 'The learning-rate schedule — why the start has to be slow'),
+  goal: t(
+    code`
+      在 \`sched.py\` 里写学习率调度。模型和训练循环都在 \`kit.py\` 里，这一关只写这一个函数：
+
+      \`\`\`python
+      def lr_at(step, total_steps, base_lr, warmup, floor=0.1):
+          """第 step 步（**从 1 数起**）该用多大的学习率。"""
+      \`\`\`
+
+      **这一关不许用 \`nt.optim.cosine_with_warmup\`** —— 用例会把它换成报错的桩。
+
+      ## 两段
+
+      \`\`\`
+      step ≤ warmup:   base_lr · step / warmup                    ← 线性爬升
+      step > warmup:   base_lr · (floor + (1−floor)·½(1+cos(π·p)))
+                       其中 p = (step − warmup) / (total − warmup)  ← 余弦退火
+      \`\`\`
+
+      两段在 \`step = warmup\` 处接上：爬升段到顶正好是 \`base_lr\`，
+      退火段从 \`p = 0\` 起也正好是 \`base_lr\`。**接不上的调度在曲线上是一个台阶**，
+      而台阶处的那一步会把权重推出去一截。
+
+      \`floor\` 是退火的终点比例。取 0.1 而不是 0 —— 学习率真降到 0 的话，
+      最后那些步等于白跑；留一成还能继续微调。
+
+      ## warmup 到底在挡什么
+
+      开头的模型是随机的，梯度又大又没方向。而 Adam 的二阶动量 \`v\` 从 0 起步，
+      前几步估得很不准 —— **分母不可靠的时候分子还很大**，一步就能把权重推很远。
+      warmup 用一段小学习率把 \`v\` 喂到可信的量级，再放开。
+
+      这不是理论。同一个模型、同一份数据、同一个 seed，跑 300 步：
+
+      \`\`\`
+      带 warmup（20 步）    最后 10 步平均 loss  1.286
+      不带 warmup           最后 10 步平均 loss  1.964
+      信息论地板                                 1.213
+      均匀分布（什么都没学）                       2.773
+      \`\`\`
+
+      **差的不是一点半点** —— 不带 warmup 的那一路，走了三分之二的路程就停住了。
+      这两个数是这一关的用例真的跑出来的，你自己也会跑到。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | 公式 | 与参考在 60 个采样点上差 ≤ 1e-12 |
+      | 接得上 | \`step = warmup\` 处恰好是 \`base_lr\` |
+      | 训得动 | 300 步之后最后 10 步平均 loss ≤ **1.45** |
+      | 比得过对照 | 不带 warmup 的对照必须明显更差 |
+    `,
+    code`
+      Write the learning-rate schedule in \`sched.py\`. The model and training loop live in
+      \`kit.py\`; this stage is one function:
+
+      \`\`\`python
+      def lr_at(step, total_steps, base_lr, warmup, floor=0.1):
+          """The learning rate for step \`step\` (**counting from 1**)."""
+      \`\`\`
+
+      **\`nt.optim.cosine_with_warmup\` is forbidden here** — the hidden cases replace it
+      with a stub that raises.
+
+      ## Two segments
+
+      \`\`\`
+      step <= warmup:  base_lr · step / warmup                     <- linear ramp
+      step > warmup:   base_lr · (floor + (1−floor)·½(1+cos(π·p)))
+                       with p = (step − warmup) / (total − warmup)  <- cosine decay
+      \`\`\`
+
+      They meet at \`step = warmup\`: the ramp tops out at exactly \`base_lr\`, and the decay
+      starts from \`p = 0\` at exactly \`base_lr\`. **A schedule that fails to meet shows a
+      step in the curve**, and that one step shoves the weights outward.
+
+      \`floor\` is where the decay ends, as a fraction. It is 0.1 rather than 0 — at a
+      genuine zero the last steps do nothing, while a tenth still refines.
+
+      ## What warmup actually prevents
+
+      Early on the model is random and gradients are large and directionless. Adam's second
+      moment \`v\` starts at zero and is badly estimated for the first few steps —
+      **an unreliable denominator under a large numerator** can throw weights far in one
+      step. Warmup uses a stretch of small learning rates to feed \`v\` to a trustworthy
+      scale before opening up.
+
+      This is not theory. Same model, same data, same seed, 300 steps:
+
+      \`\`\`
+      with warmup (20 steps)    mean loss over the last 10 steps  1.286
+      without warmup            mean loss over the last 10 steps  1.964
+      information-theoretic floor                                 1.213
+      uniform (nothing learned)                                   2.773
+      \`\`\`
+
+      **That is not a small gap** — the run without warmup stops two thirds of the way
+      there. The hidden cases actually produce these two numbers, and so will you.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | Formula | Within 1e-12 of the reference at 60 sampled steps |
+      | Continuity | Exactly \`base_lr\` at \`step = warmup\` |
+      | It trains | Mean loss over the last 10 of 300 steps <= **1.45** |
+      | It beats the control | The no-warmup control must be clearly worse |
+    `
+  ),
+  checklist: [
+    t('step 从 1 数起，warmup 段是 base_lr · step / warmup',
+      'Steps count from 1; the ramp is base_lr · step / warmup'),
+    t('两段在 step = warmup 处接得上', 'The two segments meet at step = warmup'),
+    t('退火到 floor · base_lr 而不是 0', 'Decay ends at floor · base_lr, not zero'),
+    t('300 步之后 loss ≤ 1.45', 'Loss reaches 1.45 or below after 300 steps'),
+  ],
+  hints: [
+    t('余弦那段的 p 是 (step − warmup) / (total − warmup)，不是 step / total。',
+      "The cosine's p is (step − warmup) / (total − warmup), not step / total."),
+    t('total − warmup 可能是 0，用 max(1, ...) 兜一下。',
+      'total − warmup can be zero; guard it with max(1, ...).'),
+    t('warmup = 0 时整条曲线就只有余弦那一段 —— 对照组要用到。',
+      'With warmup = 0 the whole curve is just the cosine segment; the control needs that.'),
+  ],
+  pitfalls: [
+    t(code`
+      **余弦那段的进度用 \`step / total\` 算。** 曲线看着也是从高到低，
+      只是在 \`step = warmup\` 处有个**向下的台阶** —— 学习率突然掉一截。
+      训练不会炸，只是比该有的慢一点，而这个「慢一点」你没有对照就看不出来。
+    `, code`
+      **Computing the cosine's progress as \`step / total\`.** The curve still descends; it
+      just has a **downward step** at \`step = warmup\` where the rate suddenly drops.
+      Training does not break, it merely runs slower than it should — and without a control
+      run you will never notice.
+    `),
+    t(code`
+      **step 从 0 数起。** 第一步的学习率就是 0，那一步白跑；
+      更麻烦的是配上 AdamW 的偏差修正（分母 \`1 − β^t\`），\`t = 0\` 会直接除零。
+      调度和优化器**必须用同一套步数编号**。
+    `, code`
+      **Counting steps from zero.** The first step gets a learning rate of 0 and does
+      nothing; worse, paired with AdamW's bias correction (denominator \`1 − β^t\`) a
+      \`t = 0\` divides by zero. The schedule and the optimiser **must share one step
+      numbering**.
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_PY,
+      'sched.py': code`
+        """第 13 关：学习率调度。不许用 nt.optim.cosine_with_warmup。"""
+        import math
+
+
+        def lr_at(step, total_steps, base_lr, warmup, floor=0.1):
+            """第 step 步（从 1 数起）该用多大的学习率。"""
+            # TODO: step <= warmup 走线性爬升，之后走余弦退火到 floor · base_lr
+            return base_lr
+
+
+        if __name__ == "__main__":
+            for s in [1, 10, 20, 21, 100, 300]:
+                print(s, round(lr_at(s, 300, 0.03, 20), 6))
+      `,
+    },
+    referenceFiles: {
+      'sched.py': code`
+        """第 13 关的参考实现。"""
+        import math
+
+
+        def lr_at(step, total_steps, base_lr, warmup, floor=0.1):
+            if warmup > 0 and step <= warmup:
+                # 线性爬升。step 从 1 数起，所以 step == warmup 时正好是 base_lr
+                return base_lr * step / warmup
+            # 余弦退火。进度是「退火段内的进度」，不是「整段的进度」——
+            # 用 step / total 的话，两段在 step = warmup 处对不上，曲线上是个台阶
+            progress = (step - warmup) / max(1, total_steps - warmup)
+            return base_lr * (floor + (1 - floor) * 0.5 * (1 + math.cos(math.pi * progress)))
+
+
+        if __name__ == "__main__":
+            for s in [1, 10, 20, 21, 100, 300]:
+                print(s, round(lr_at(s, 300, 0.03, 20), 6))
+      `,
+    },
+  },
+  specs: [
+    spec('sched.spec.ts', code`
+      ${LAB}
+
+      const TOTAL = 300, PEAK = 0.03, WARMUP = 20, FLOOR = 0.1;
+
+      function setup() {
+        lab.py(\`
+      import sys, json, math
+      sys.path.insert(0, "/lab")
+      import importlib, kit, sched
+      importlib.reload(kit)
+      importlib.reload(sched)
+      import nanotorch as nt
+      from nanotorch import functional as F, optim
+
+      _SAVED_SCHED = getattr(optim, "_saved_sched", None) or optim.cosine_with_warmup
+      optim._saved_sched = _SAVED_SCHED
+
+      def _boom(*a, **k):
+          raise RuntimeError("这一关不许用 nt.optim.cosine_with_warmup，自己写一个")
+      optim.cosine_with_warmup = _boom
+      \`);
+        // 平台造归纳数据，灌进 kit
+        for (let s = 1; s <= TOTAL; s++) {
+          const d = lab.data.induction(8, 16, 16, 1000 + s);
+          lab.py('kit._batches[' + (1000 + s) + '] = ('
+            + JSON.stringify([...d.idx]) + ', ' + JSON.stringify([...d.tgt]) + ')');
+        }
+        lab.py(\`
+      def _train(use_student, warmup):
+          """跑 \${TOTAL} 步，返回 loss 序列。use_student 决定学习率谁说了算。"""
+          m = kit.LM(seed=1)
+          opt = nt.optim.AdamW(m.parameters(), lr=\${PEAK}, betas=(0.9, 0.95),
+                               weight_decay=0.1, grad_clip=1.0)
+          idx = nt.zeros((kit.B * kit.S,), role="data", name="idx")
+          tgt = nt.zeros((kit.B * kit.S,), role="data", name="tgt")
+          hist = []
+          base = nt.mark()
+          for st in range(1, \${TOTAL} + 1):
+              nt.release(base)
+              bi, bt = kit.get_batch(1000 + st)
+              idx.set_int_(bi)
+              tgt.set_int_(bt)
+              opt.zero_grad()
+              nt.phase("forward")
+              loss = m(idx, tgt, kit.B, kit.S)
+              nt.phase("other")
+              loss.backward()
+              if use_student:
+                  lr = sched.lr_at(st, \${TOTAL}, \${PEAK}, warmup, \${FLOOR})
+              else:
+                  # 平台自己的对照：完全不带 warmup
+                  p = (st - 1) / max(1, \${TOTAL} - 1)
+                  lr = \${PEAK} * (\${FLOOR} + (1 - \${FLOOR}) * 0.5 * (1 + math.cos(math.pi * p)))
+              opt.step(lr=lr)
+              hist.append(loss.value)
+          return hist
+      \`);
+      }
+
+      /** 平台侧的参考公式 */
+      function refLr(step) {
+        if (WARMUP > 0 && step <= WARMUP) return (PEAK * step) / WARMUP;
+        const p = (step - WARMUP) / Math.max(1, TOTAL - WARMUP);
+        return PEAK * (FLOOR + (1 - FLOOR) * 0.5 * (1 + Math.cos(Math.PI * p)));
+      }
+
+      describe('学习率调度', () => {
+        it('公式在 60 个采样点上与参考一致', () => {
+          setup();
+          const steps = [];
+          for (let i = 0; i < 60; i++) steps.push(1 + Math.floor((i * TOTAL) / 60));
+          const got = JSON.parse(String(lab.py(
+            'json.dumps([sched.lr_at(s, ' + TOTAL + ', ' + PEAK + ', ' + WARMUP + ', ' + FLOOR + ')'
+            + ' for s in ' + JSON.stringify(steps) + '])'
+          )));
+          let worst = 0;
+          for (let i = 0; i < steps.length; i++) {
+            worst = Math.max(worst, Math.abs(got[i] - refLr(steps[i])));
+          }
+          console.log(
+            'lr(1)=' + got[0].toExponential(3) + '，lr(' + WARMUP + ')=' + refLr(WARMUP).toExponential(3)
+            + '，lr(' + TOTAL + ')=' + refLr(TOTAL).toExponential(3)
+            + '；最大差 ' + worst.toExponential(2)
+          );
+          lab.publish('lr.scheduleError', worst);
+          expect(worst).toBeLessThan(1e-12);
+        });
+
+        /*
+         * 两段要在 step = warmup 处接上。接不上的话曲线里有个台阶,
+         * 训练不会炸，只会慢，而没有对照的话看不出来。
+         */
+        it('爬升段与退火段在 step = warmup 处接得上', () => {
+          setup();
+          const at = (s) => Number(lab.py(
+            'sched.lr_at(' + s + ', ' + TOTAL + ', ' + PEAK + ', ' + WARMUP + ', ' + FLOOR + ')'
+          ));
+          const peak = at(WARMUP);
+          const next = at(WARMUP + 1);
+          console.log(
+            'lr(warmup)=' + peak.toExponential(6) + '（该是 ' + PEAK + '），'
+            + '下一步 ' + next.toExponential(6)
+          );
+          lab.publish('lr.peakError', Math.abs(peak - PEAK));
+          expect(Math.abs(peak - PEAK)).toBeLessThan(1e-12);
+          // 退火段第一步应当只比顶点低一点点，不是掉一截
+          expect(next).toBeLessThan(peak);
+          expect(next).toBeGreaterThan(peak * 0.99);
+          // 终点是 floor · base_lr 附近，不是 0
+          expect(at(TOTAL)).toBeGreaterThan(PEAK * FLOOR * 0.9);
+        });
+
+        /*
+         * 真训一遍。这一关的门槛不是「公式对」而是「训得动」——
+         * 公式对但接不上的调度，能过上面那两条里的第一条，过不了这一条。
+         */
+        it('300 步之后 loss 掉到 1.45 以下，且明显好过没有 warmup 的对照', () => {
+          setup();
+          const mine = JSON.parse(String(lab.py('json.dumps(_train(True, ' + WARMUP + '))')));
+          const control = JSON.parse(String(lab.py('json.dumps(_train(False, 0))')));
+
+          const tail = (h) => h.slice(-10).reduce((a, c) => a + c, 0) / 10;
+          const mineLoss = tail(mine);
+          const ctrlLoss = tail(control);
+          const floor = lab.data.inductionFloor(16, 16);
+          // 归纳任务的均匀熵是 ln(16)。注意别用 lab.world.baselines().uniform ——
+          // 那是**语料字符表**的，和这个合成任务不是一个词表
+          const uniform = Math.log(16);
+
+          console.log(
+            '带 warmup ' + mineLoss.toFixed(4) + '，不带 ' + ctrlLoss.toFixed(4)
+            + '；信息论地板 ' + floor.toFixed(4) + '，均匀 ' + uniform.toFixed(4)
+          );
+          lab.publish('loss.final', mineLoss);
+          lab.publish('loss.noWarmupControl', ctrlLoss);
+          lab.publish('loss.overFloor', mineLoss / floor);
+
+          expect(mine.every((v) => Number.isFinite(v))).toBe(true);
+          expect(mineLoss).toBeLessThan(1.45);
+          // 对照必须明显更差 —— 否则这一关根本没在教 warmup
+          expect(ctrlLoss).toBeGreaterThan(mineLoss * 1.25);
+        });
+
+        it('没有偷用内建的调度', () => {
+          setup();
+          const blocked = lab.py(\`
+      try:
+          optim.cosine_with_warmup(1, 10, 0.1)
+          _ok = 0
+      except RuntimeError:
+          _ok = 1
+      _ok
+      \`);
+          expect(Number(blocked)).toBe(1);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.lr.scheduleError', op: 'lte', value: 1e-12,
+      zh: '调度公式与参考的最大差', en: 'max schedule difference from the reference',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.lr.peakError', op: 'lte', value: 1e-12,
+      zh: 'step = warmup 处与 base_lr 的差（两段接得上）',
+      en: 'gap from base_lr at step = warmup (the segments meet)', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.loss.final', op: 'lte', value: 1.45,
+      zh: '300 步之后最后 10 步的平均 loss', en: 'mean loss over the last 10 of 300 steps',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.loss.overFloor', op: 'lte', value: 1.2,
+      zh: '最终 loss 与信息论地板的比', en: 'final loss over the information-theoretic floor',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness'],
+  extension: t(
+    code`
+      余弦不是唯一的选择。2026 年用得越来越多的是 **WSD**
+      （Warmup–Stable–Decay）：爬升之后**保持恒定**很长一段，最后再快速衰减。
+      好处是「随时可以决定再多训一会儿」—— 余弦的形状取决于你一开始声明的
+      \`total_steps\`，中途想加训就得重排整条曲线，而 WSD 的恒定段可以一直延长。
+      MiniCPM 与 DeepSeek 都在用它。
+
+      另一件真实的事：**学习率和 batch 大小要一起调**。经验规律是
+      batch 翻倍、学习率乘 \`sqrt(2)\`（Adam 类优化器）。
+      单独把 batch 调大而不动学习率，等效于把学习率调小了。
+    `,
+    code`
+      Cosine is not the only option. **WSD** (Warmup–Stable–Decay) has grown common in
+      2026: ramp up, **hold constant** for a long stretch, then decay quickly at the end.
+      Its advantage is that you can decide later to train longer — a cosine's shape depends
+      on the \`total_steps\` you declared up front, so extending a run means redrawing the
+      whole curve, while a WSD plateau simply continues. MiniCPM and DeepSeek both use it.
+
+      Another real consideration: **learning rate and batch size are tuned together**. The
+      rule of thumb is that doubling the batch multiplies the rate by \`sqrt(2)\` for
+      Adam-family optimisers. Raising the batch alone, without touching the rate, is
+      equivalent to lowering the learning rate.
+    `
+  ),
+};
+
+/* ================================================================== */
+/* 第 14 关：梯度裁剪与训练稳定性                                        */
+/* ================================================================== */
+
+const STAGE_CLIP = {
+  id: 'grad-clip',
+  title: t('梯度裁剪 —— 只缩放，不改方向', 'Gradient clipping — rescale, never rotate'),
+  goal: t(
+    code`
+      在 \`clip.py\` 里写两个函数。模型和训练循环还是 \`kit.py\` 那一套。
+
+      \`\`\`python
+      def clip_grad_norm_(params, max_norm):
+          """就地裁剪，返回**裁剪前**的全局范数。
+
+          对应 torch.nn.utils.clip_grad_norm_ —— 名字、行为、返回值都一样。"""
+
+      def has_nonfinite_grad(params):
+          """梯度里有没有 NaN / inf。有就返回 True。"""
+      \`\`\`
+
+      ## 全局范数，不是逐张量
+
+      \`\`\`
+      total = sqrt( Σ_p ‖g_p‖² )                ← 所有梯度拼成一个向量的长度
+      coef  = max_norm / total   （total > max_norm 时）
+      每个 g_p 原地乘上同一个 coef
+      \`\`\`
+
+      要点是**同一个 coef**。逐张量各裁各的话，各层之间的相对大小被抹平了 ——
+      梯度的**方向变了**，而方向才是梯度携带的信息。
+      顺带一提，逐张量裁完的总范数是 \`max_norm · sqrt(张量数)\`，根本不是 \`max_norm\`。
+
+      这一关有一条门槛专门查方向：裁剪前后的梯度向量，**夹角余弦必须是 1**。
+
+      ## 返回裁剪前的值
+
+      \`clip_grad_norm_\` 返回的是**裁剪前**的范数,PyTorch 也是这样。
+      理由是诊断：训练曲线要看的是梯度本来有多大。返回裁剪后的值的话，
+      那个数在裁剪生效时恒等于 \`max_norm\`，是一条毫无信息量的直线。
+
+      ## 非有限的梯度：跳过，不是清零
+
+      bf16 / fp16 训练里，梯度出现 \`inf\` 或 \`NaN\` 是常事（溢出）。
+      标准做法是**跳过这一步**：不更新参数，也不更新优化器状态,
+      下一步照常。这就是混合精度里 \`GradScaler\` 干的事。
+
+      **不要清零之后照样 step。** 那样 AdamW 的动量会被一个假的「零梯度」污染，
+      而且优化器的步数 \`t\` 还往前走了一格,偏差修正的分母跟着变，
+      后面每一步都受影响。
+
+      \`F.count_nonfinite(t)\` 数得出一个张量里有多少个 NaN / inf。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | 裁剪之后 | 全局范数 ≤ \`max_norm\`（全程） |
+      | **只缩放不改方向** | 裁剪前后的夹角余弦与 1 差 ≤ 1e-6 |
+      | 真的裁到了 | 至少有一步触发了裁剪 |
+      | 炸了要跳过 | 注入一次 \`inf\` 之后，参数里非有限的个数 = **0** |
+      | 跳过的步数 | 恰好 **1**（就是注入的那一步） |
+    `,
+    code`
+      Write two functions in \`clip.py\`. The model and training loop are still \`kit.py\`.
+
+      \`\`\`python
+      def clip_grad_norm_(params, max_norm):
+          """Clip in place; return the **pre-clip** global norm.
+
+          Mirrors torch.nn.utils.clip_grad_norm_ in name, behaviour and return value."""
+
+      def has_nonfinite_grad(params):
+          """True if any gradient contains a NaN or an inf."""
+      \`\`\`
+
+      ## Global norm, not per tensor
+
+      \`\`\`
+      total = sqrt( Σ_p ‖g_p‖² )                <- length of all gradients as one vector
+      coef  = max_norm / total   (when total > max_norm)
+      multiply every g_p in place by the same coef
+      \`\`\`
+
+      The point is **the same coef**. Clipping tensor by tensor flattens the relative
+      magnitudes between layers — it **changes the gradient's direction**, and direction is
+      what a gradient carries. Incidentally, per-tensor clipping leaves a total norm of
+      \`max_norm · sqrt(tensors)\`, not \`max_norm\`.
+
+      One gate here checks direction specifically: the cosine between the pre-clip and
+      post-clip gradient vectors **must be 1**.
+
+      ## Return the pre-clip value
+
+      \`clip_grad_norm_\` returns the norm **before** clipping, as PyTorch does. The reason
+      is diagnostic: a training curve wants to show how large the gradient really was.
+      Returning the post-clip value gives a number that is identically \`max_norm\` whenever
+      clipping fires — a flat line carrying no information.
+
+      ## Non-finite gradients: skip, do not zero
+
+      Under bf16 / fp16, gradients turn into \`inf\` or \`NaN\` routinely (overflow). The
+      standard response is to **skip the step**: leave parameters and optimiser state
+      untouched and carry on. That is what \`GradScaler\` does in mixed precision.
+
+      **Do not zero them and step anyway.** That pollutes AdamW's momentum with a fake
+      "zero gradient", and the optimiser's step counter \`t\` still advances — changing the
+      bias-correction denominator and affecting every step that follows.
+
+      \`F.count_nonfinite(t)\` counts the NaNs and infs in a tensor.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | After clipping | Global norm <= \`max_norm\`, throughout |
+      | **Rescale only** | Pre/post cosine within 1e-6 of 1 |
+      | It actually clipped | At least one step triggered clipping |
+      | Blow-ups get skipped | After one injected \`inf\`, non-finite parameters = **0** |
+      | Steps skipped | Exactly **1** — the injected one |
+    `
+  ),
+  checklist: [
+    t('用全局范数算一个 coef，所有梯度乘同一个',
+      'One coef from the global norm, applied to every gradient'),
+    t('返回的是裁剪前的范数', 'The returned norm is the pre-clip one'),
+    t('total ≤ max_norm 时不动梯度', 'Gradients are untouched when total <= max_norm'),
+    t('梯度非有限时跳过整步，不清零硬走', 'Non-finite gradients skip the whole step rather than being zeroed'),
+  ],
+  hints: [
+    t('F.sumsq(g) 拿平方和，全部加起来再开方 —— 别把各自的范数平方回去。',
+      'Take F.sumsq(g), add them all, then take the root; do not square individual norms back.'),
+    t('F.scale_(g, coef) 就地乘。它不挂反向 —— 梯度本来就不需要再求导。',
+      'F.scale_(g, coef) multiplies in place. It attaches no backward; gradients need none.'),
+    t('F.count_nonfinite(g) > 0 就是有 NaN 或 inf。',
+      'F.count_nonfinite(g) > 0 means a NaN or an inf is present.'),
+  ],
+  pitfalls: [
+    t(code`
+      **逐张量裁剪。** 每个张量各自裁到 \`max_norm\`，看起来「都裁过了」，
+      但总范数变成 \`max_norm · sqrt(张量数)\` —— 20 个张量就是 4.5 倍。
+      更糟的是层与层之间的相对大小被抹平，**梯度的方向变了**。
+      这一关的余弦门槛专门抓它。
+    `, code`
+      **Clipping per tensor.** Each tensor gets clipped to \`max_norm\`, which looks
+      thorough, but the total norm becomes \`max_norm · sqrt(tensors)\` — 4.5x at 20
+      tensors. Worse, relative magnitudes between layers are flattened and **the gradient's
+      direction changes**. The cosine gate exists for this.
+    `),
+    t(code`
+      **梯度炸了就清零然后照常 step。** 参数确实没被推飞，看着像是「处理了」。
+      但 AdamW 的动量被一个假的零梯度污染了，而且步数 \`t\` 往前走了一格 ——
+      偏差修正的分母跟着变，**后面每一步都受影响**。正确的做法是整步跳过。
+    `, code`
+      **Zeroing a blown-up gradient and stepping anyway.** Parameters do not fly off, so it
+      looks handled. But AdamW's momentum is polluted by a fake zero gradient and the step
+      counter \`t\` still advances — the bias-correction denominator shifts and **every
+      later step is affected**. The correct response is to skip the whole step.
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_PY,
+      'clip.py': code`
+        """第 14 关：梯度裁剪与非有限梯度的处理。"""
+        import nanotorch as nt
+        from nanotorch import functional as F
+
+
+        def clip_grad_norm_(params, max_norm):
+            """就地裁剪，返回裁剪前的全局范数。"""
+            # TODO: 全局范数 -> 一个 coef -> 所有梯度乘同一个 coef
+            return 0.0
+
+
+        def has_nonfinite_grad(params):
+            """梯度里有没有 NaN / inf。"""
+            # TODO
+            return False
+
+
+        if __name__ == "__main__":
+            a = nt.parameter((4, 4), 1, 1.0, "a")
+            b = nt.parameter((4,), None, 0.0, "b")
+            a.ensure_grad().fill_(1.0)
+            b.ensure_grad().fill_(1.0)
+            print("裁剪前的范数", round(clip_grad_norm_([a, b], 1.0), 6))
+            print("裁剪后的范数", round((F.sumsq(a.grad) + F.sumsq(b.grad)) ** 0.5, 6))
+      `,
+    },
+    referenceFiles: {
+      'clip.py': code`
+        """第 14 关的参考实现。"""
+        import nanotorch as nt
+        from nanotorch import functional as F
+
+
+        def clip_grad_norm_(params, max_norm):
+            # 全局范数：先把各自的平方和加起来，再开一次方。
+            # 不是把各自的范数平方回去 —— sqrt(s)**2 和 s 在浮点下不是同一个数
+            total = 0.0
+            for p in params:
+                if p.grad is not None:
+                    total += F.sumsq(p.grad)
+            total = total ** 0.5
+
+            if max_norm > 0 and total > max_norm:
+                # 同一个 coef 乘给所有梯度：只缩放，不改方向
+                coef = max_norm / total
+                for p in params:
+                    if p.grad is not None:
+                        F.scale_(p.grad, coef)
+
+            # 返回裁剪前的值 —— 曲线要看的是梯度本来有多大
+            return total
+
+
+        def has_nonfinite_grad(params):
+            for p in params:
+                if p.grad is not None and F.count_nonfinite(p.grad) > 0:
+                    return True
+            return False
+
+
+        if __name__ == "__main__":
+            a = nt.parameter((4, 4), 1, 1.0, "a")
+            b = nt.parameter((4,), None, 0.0, "b")
+            a.ensure_grad().fill_(1.0)
+            b.ensure_grad().fill_(1.0)
+            print("裁剪前的范数", round(clip_grad_norm_([a, b], 1.0), 6))
+            print("裁剪后的范数", round((F.sumsq(a.grad) + F.sumsq(b.grad)) ** 0.5, 6))
+      `,
+    },
+  },
+  specs: [
+    spec('clip.spec.ts', code`
+      ${LAB}
+
+      const TOTAL = 250, PEAK = 0.03, CLIP = 1.0, BOOM_AT = 40;
+
+      function setup() {
+        lab.py(\`
+      import sys, json, math
+      sys.path.insert(0, "/lab")
+      import importlib, kit, clip
+      importlib.reload(kit)
+      importlib.reload(clip)
+      import nanotorch as nt
+      from nanotorch import functional as F
+      \`);
+        for (let s = 1; s <= TOTAL; s++) {
+          const d = lab.data.induction(8, 16, 16, 1000 + s);
+          lab.py('kit._batches[' + (1000 + s) + '] = ('
+            + JSON.stringify([...d.idx]) + ', ' + JSON.stringify([...d.tgt]) + ')');
+        }
+        lab.py(\`
+      def _flat_grads(ps):
+          out = []
+          for p in ps:
+              out.extend(p.grad.tolist())
+          return out
+
+      _runs = {}
+
+
+      def _train(boom_at):
+          """跑 \${TOTAL} 步。boom_at 那一步往梯度里注入一个 inf。
+
+          裁剪与「要不要跳过」都由学员的代码说了算 —— 优化器自己的裁剪关掉。
+          """
+          if boom_at in _runs:
+              return _runs[boom_at]
+          m = kit.LM(seed=1)
+          opt = nt.optim.AdamW(m.parameters(), lr=\${PEAK}, betas=(0.9, 0.95),
+                               weight_decay=0.1, grad_clip=0.0)
+          ps = m.parameters()
+          idx = nt.zeros((kit.B * kit.S,), role="data", name="idx")
+          tgt = nt.zeros((kit.B * kit.S,), role="data", name="tgt")
+
+          stats = {"clipped": 0, "skipped": 0, "maxPost": 0.0,
+                   "norms": [], "losses": [], "cosErr": 0.0, "sampled": 0}
+          base = nt.mark()
+          for st in range(1, \${TOTAL} + 1):
+              nt.release(base)
+              bi, bt = kit.get_batch(1000 + st)
+              idx.set_int_(bi)
+              tgt.set_int_(bt)
+              opt.zero_grad()
+              nt.phase("forward")
+              loss = m(idx, tgt, kit.B, kit.S)
+              nt.phase("other")
+              loss.backward()
+
+              if boom_at and st == boom_at:
+                  # 模拟一次溢出：往第一个梯度里塞一个 inf
+                  ps[0].grad.set_at_(0, float("inf"))
+
+              if clip.has_nonfinite_grad(ps):
+                  stats["skipped"] += 1
+                  stats["losses"].append(loss.value)
+                  continue
+
+              before = _flat_grads(ps) if st == 3 else None
+              pre = clip.clip_grad_norm_(ps, \${CLIP})
+              post = sum(F.sumsq(p.grad) for p in ps) ** 0.5
+              if pre > \${CLIP} + 1e-9:
+                  stats["clipped"] += 1
+              stats["maxPost"] = max(stats["maxPost"], post)
+              stats["norms"].append(pre)
+
+              if before is not None:
+                  # 只缩放不改方向：夹角余弦该是 1
+                  after = _flat_grads(ps)
+                  dot = sum(a * b for a, b in zip(before, after))
+                  na = sum(a * a for a in before) ** 0.5
+                  nb = sum(b * b for b in after) ** 0.5
+                  if na > 0 and nb > 0:
+                      stats["cosErr"] = abs(dot / (na * nb) - 1.0)
+                      stats["sampled"] = 1
+
+              # 平台自己的调度（第 13 关那条）—— 这一关的重点是裁剪，
+              # 但模型得真的在学，「跳过一步之后照常收敛」才说明得了问题
+              if st <= 20:
+                  lr = \${PEAK} * st / 20
+              else:
+                  pr = (st - 20) / max(1, \${TOTAL} - 20)
+                  lr = \${PEAK} * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * pr)))
+              opt.step(lr=lr)
+              stats["losses"].append(loss.value)
+
+          stats["nonfiniteParams"] = sum(F.count_nonfinite(p) for p in ps)
+          _runs[boom_at] = stats
+          return stats
+      \`);
+      }
+
+      describe('梯度裁剪与稳定性', () => {
+        it('裁剪之后全局范数不超过 max_norm，而且真的裁到了', () => {
+          setup();
+          const st = JSON.parse(String(lab.py('json.dumps(_train(0))')));
+          const norms = st.norms;
+          console.log(
+            '裁剪前的范数：第 1 步 ' + norms[0].toFixed(3)
+            + '，最大 ' + Math.max(...norms).toFixed(3)
+            + '；' + st.clipped + ' / ' + norms.length + ' 步触发了裁剪；'
+            + '裁剪后的最大范数 ' + st.maxPost.toFixed(6)
+          );
+          lab.publish('grad.postClipNorm', st.maxPost);
+          lab.publish('grad.clippedSteps', st.clipped);
+          expect(st.maxPost).toBeLessThan(CLIP + 1e-6);
+          // 一次都没裁到的话，上面那条是白测的
+          expect(st.clipped).toBeGreaterThan(0);
+        });
+
+        /*
+         * 只缩放，不改方向。逐张量裁剪会把层间的相对大小抹平 ——
+         * 范数照样 ≤ max_norm，但夹角变了，而梯度携带的信息就是方向。
+         */
+        it('裁剪只缩放，不改方向（夹角余弦 = 1）', () => {
+          setup();
+          const st = JSON.parse(String(lab.py('json.dumps(_train(0))')));
+          console.log('裁剪前后的夹角余弦与 1 的差 ' + st.cosErr.toExponential(2));
+          lab.publish('grad.clipDirectionError', st.cosErr);
+          expect(st.sampled).toBe(1);
+          expect(st.cosErr).toBeLessThan(1e-6);
+        });
+
+        /*
+         * 注入一次 inf。正确的处理是**整步跳过** ——
+         * 清零之后照走的话参数也不会飞，但 AdamW 的动量被污染了、t 还往前走了一格。
+         */
+        it('梯度里出现 inf 时跳过整步，参数保持有限', () => {
+          setup();
+          const st = JSON.parse(String(lab.py('json.dumps(_train(' + BOOM_AT + '))')));
+          console.log(
+            '跳过了 ' + st.skipped + ' 步（注入在第 ' + BOOM_AT + ' 步）；'
+            + '参数里非有限的有 ' + st.nonfiniteParams + ' 个；'
+            + '最后 10 步平均 loss ' + (st.losses.slice(-10).reduce((a, c) => a + c, 0) / 10).toFixed(4)
+            + '（均匀 ' + Math.log(16).toFixed(4) + '）'
+          );
+          lab.publish('train.skippedSteps', st.skipped);
+          lab.publish('nan.paramCount', st.nonfiniteParams);
+          const tail = st.losses.slice(-10).reduce((a, c) => a + c, 0) / 10;
+          lab.publish('loss.afterSkip', tail);
+          expect(st.skipped).toBe(1);
+          expect(st.nonfiniteParams).toBe(0);
+          expect(st.losses.every((v) => Number.isFinite(v))).toBe(true);
+          // 跳过那一步之后训练要照常往下走 —— 停在均匀熵上说明模型已经废了
+          expect(tail).toBeLessThan(Math.log(16) * 0.8);
+        });
+
+        it('total ≤ max_norm 时不动梯度，返回的是裁剪前的值', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _a = nt.parameter((4, 4), 1, 1.0, "a")
+      _a.ensure_grad().fill_(0.01)          # 范数 0.04，远小于 max_norm
+      _before = list(_a.grad.tolist())
+      _n1 = clip.clip_grad_norm_([_a], 1.0)
+      _after = list(_a.grad.tolist())
+
+      _a.grad.fill_(1.0)                    # 范数 4.0，会被裁
+      _n2 = clip.clip_grad_norm_([_a], 1.0)
+      _post = sum(F.sumsq(_a.grad) for _ in [0]) ** 0.5
+      json.dumps({"n1": _n1, "same": _before == _after, "n2": _n2, "post": _post})
+      \`)));
+          console.log(
+            '小梯度：返回 ' + r.n1.toFixed(6) + '，梯度没动 ' + r.same
+            + '；大梯度：返回 ' + r.n2.toFixed(6) + '（裁剪前），裁完 ' + r.post.toFixed(6)
+          );
+          expect(r.same).toBe(true);
+          expect(Math.abs(r.n1 - 0.04)).toBeLessThan(1e-6);
+          // 返回裁剪前的 4.0，不是裁完的 1.0
+          expect(Math.abs(r.n2 - 4)).toBeLessThan(1e-5);
+          expect(Math.abs(r.post - 1)).toBeLessThan(1e-6);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.grad.postClipNorm', op: 'lte', value: 1.000001,
+      zh: '裁剪之后的最大全局范数', en: 'largest post-clip global norm', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.grad.clipDirectionError', op: 'lte', value: 1e-6,
+      zh: '裁剪前后夹角余弦与 1 的差（只缩放不改方向）',
+      en: 'pre/post cosine gap from 1 (rescale only, no rotation)', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.train.skippedSteps', op: 'eq', value: 1,
+      zh: '因梯度非有限而跳过的步数', en: 'steps skipped for non-finite gradients',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.nan.paramCount', op: 'eq', value: 0,
+      zh: '训练结束时参数里非有限的个数', en: 'non-finite parameters at the end of training',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness', 'resilience'],
+  extension: t(
+    code`
+      \`max_norm = 1.0\` 是 LLM 预训练里最常见的取值,从 GPT-3 到今天基本没变过。
+      它不是调出来的最优值，而是一个「足够安全又不太干扰」的惯例。
+
+      裁剪的另一面是**它掩盖问题**。梯度范数长期贴着 clip 说明学习率偏大、
+      或者某处的初始化不对,这时候该改的是那些，不是把 clip 调大。
+      所以 \`clip_grad_norm_\` 返回裁剪前的值这件事很要紧：**那条曲线是诊断信息**。
+
+      非有限梯度的处理在混合精度里是一整套机制。fp16 的动态范围只有 ±65504，
+      梯度很容易下溢成 0 或上溢成 inf，于是有了 \`GradScaler\`:
+      把 loss 乘一个大系数再反向，反向完再除回去；一旦发现 inf 就跳过这一步
+      并把系数减半。bf16 的动态范围和 fp32 一样，基本不需要这套 ——
+      这正是第 17 关要讲的，**bf16 赢在动态范围，不是精度**。
+    `,
+    code`
+      \`max_norm = 1.0\` is the most common value in LLM pretraining, essentially unchanged
+      from GPT-3 onwards. It is not a tuned optimum but a convention that is safe enough
+      without interfering much.
+
+      The other side of clipping is that **it hides problems**. A gradient norm that sits
+      against the clip for a long time means the learning rate is too high or something is
+      initialised wrong — those are what to fix, not the clip threshold. Which is why
+      \`clip_grad_norm_\` returning the pre-clip value matters: **that curve is diagnostic**.
+
+      Handling non-finite gradients is a whole mechanism under mixed precision. fp16's
+      dynamic range is only ±65504, so gradients underflow to zero or overflow to inf
+      easily; hence \`GradScaler\`, which multiplies the loss by a large factor before the
+      backward, divides it back afterwards, and on seeing an inf skips the step and halves
+      the factor. bf16 has fp32's dynamic range and barely needs any of it — which is
+      stage 17's point: **bf16 wins on range, not on precision**.
+    `
+  ),
+};
+
 /* ------------------------------------------------------------------ */
 
 module.exports = {
@@ -6108,5 +7117,6 @@ module.exports = {
     STAGE_BPE, STAGE_BASELINE, STAGE_ATTENTION, STAGE_MHA,
     STAGE_ROPE, STAGE_NORM, STAGE_BLOCK, STAGE_KVCACHE,
     STAGE_MANUAL_BWD, STAGE_ENGINE, STAGE_MODEL_BWD, STAGE_ADAMW,
+    STAGE_SCHEDULE, STAGE_CLIP,
   ],
 };
