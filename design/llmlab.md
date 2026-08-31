@@ -929,8 +929,23 @@ gpulab 那份文档里「移动，不抽象」那条论证在这里原样成立�
 | 片 | 内容 | 状态 |
 | --- | --- | --- |
 | 1 | 平台接线与工作台分发：`WorkspaceKind` 加 `'train'`、`TrainWorkspaceSpec` / `TrainStageSpec`、`LabMetrics.llm`、草稿路径认 `stage.train.files`、分发页接上 `TrainWorkspace`（六块面板骨架，IDE 真能改文件）、原型入库、`tests/llmlab` 进测试清单 | ✅ |
-| 2 | WASM 算子核（C + clang）与构建链 | — |
+| 2 | WASM 算子核（C + clang）与构建链：25 个算子 × f32/f64 两份实例化、自写 exp/log、37KB 零 import 产物入库、`--check` 字节比对进 release.yml、打包白名单加闸门 | ✅ |
 | 3 | JS 桥：张量常驻内存、分配器、计量层 | — |
 | 4 | Pyodide 装配 + nanotorch 骨架 + **竖切：真训 300 步，一条门槛通过/失败** | — |
 
 **这一段的完成标准是「竖切跑通」，不是「组件写完」。**
+
+### 实测：真产物上的数字（第 2 片，2026-08-31）
+
+| 量 | 值 |
+| --- | --- |
+| `llmlab-kernels.wasm` | **36,999 字节**，零 import |
+| sgemm 512×256×256（f32，SIMD） | **37.3 GFLOP/s**（原型手写 WAT 是 42，差在 tail 处理与更大的形状） |
+| 重建 | 同一个钉死的 wasi-sdk 下**字节一致** |
+| 梯度检验（f64，中心差分 h=1e-5） | rmsnorm / swiglu / attention / cross-entropy 四组全部 < 2e-3 |
+
+**第 2 片自己抓到的一个 bug**：`ll_log` 的 Remez 系数分了奇偶两组，我把两组写反了。
+表现是 log 的相对误差从 1e-16 掉到 **2e-4** —— 而前向的 loss 看着完全正常
+（3.2 这种量级，谁也看不出少了几位）。是交叉熵那条对拍用例顶出来的。
+这正是「每个算子都要对着一份直白的参考实现对拍」这条规矩的价值：
+**数值上的错误不会让程序崩，只会让所有门槛量一个假的东西。**

@@ -15,3 +15,5 @@ public/gpulab/*.wasm
 public/opslab/*.wasm
 public/opslab/wasm_exec.js
 .opslab-build/
+# wasi-sdk 的下载与解压目录（约 180MB）。算子核产物本身是入库的，见 design/llmlab.md
+.llmlab-build/

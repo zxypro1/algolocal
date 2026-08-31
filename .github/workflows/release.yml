@@ -84,11 +84,31 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # 核对 llmlab 的算子核：仓库里那份 .wasm 是不是真的由仓库里那份 C 编出来的
+  #
+  # 和上面的 opslab 相反 —— 算子核只有 37KB，所以**产物是进仓库的**，
+  # CI 不需要现编，也就不需要往下游 job 传 artifact。
+  # 但入库的代价是它会过期：改了 .c 忘了重建，代码看着是新的、跑的是旧的，
+  # 而且不报任何错。这个 job 就是那道闸门。
+  #
+  # 它必须能复现，所以 wasi-sdk 的版本是钉死的，编译参数里也没有 -ffast-math
+  # （那东西允许浮点重结合，会同时毁掉字节一致与「训练两遍逐位一致」那条门槛）。
+  verify-kernels:
+    name: Verify llmlab kernels
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Rebuild and compare
+        run: bash scripts/build-llmlab-kernels.sh --check
+
   # 构建 macOS 版本
   build-macos:
     name: Build macOS
     runs-on: macos-latest
-    needs: [changelog, build-wasm]
+    needs: [changelog, build-wasm, verify-kernels]
     strategy:
       matrix:
         arch: [x64, arm64]
@@ -248,7 +268,7 @@ jobs:
   build-windows:
     name: Build Windows
     runs-on: windows-latest
-    needs: [changelog, build-wasm]
+    needs: [changelog, build-wasm, verify-kernels]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -301,7 +321,7 @@ jobs:
   build-linux:
     name: Build Linux
     runs-on: ubuntu-latest
-    needs: [changelog, build-wasm]
+    needs: [changelog, build-wasm, verify-kernels]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

@@ -58,6 +58,10 @@ module.exports = {
     'public/labkit/tree-sitter-bash.wasm',
     'public/gpulab/tree-sitter-cuda.wasm',
     'public/opslab/opslab-cli.wasm',
+    // llmlab 的算子核。和上面几个不同：它**在仓库里**（37KB，不是构建产物），
+    // 所以没有对应的 `!public/llmlab/*.wasm` 排除行 —— 那条排除是用来挡
+    // 别人工作区遗留的旧产物的，而这个文件根本不会有旧版本躺在那儿。
+    'public/llmlab/llmlab-kernels.wasm',
     'problems/**/*',
     'projects/**/*',
     'locales/**/*',
@@ -133,6 +137,9 @@ module.exports = {
     'public/labkit/web-tree-sitter.wasm',
     'public/labkit/tree-sitter-bash.wasm',
     'public/gpulab/tree-sitter-cuda.wasm',
+    // 算子核也解包：`createKernels` 走的是同步的 `new WebAssembly.Module`，
+    // 留在 asar 里要先整份读进内存。37KB 的代价不大，但没有理由不解。
+    'public/llmlab/llmlab-kernels.wasm',
     'public/icon.png',
     'public/favicon.ico'
   ],
