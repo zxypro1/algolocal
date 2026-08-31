@@ -2866,6 +2866,46 @@ const primers = {
         'Muon appeared in late 2024 and is in production by 2026: Kimi K2 and GLM-5 both use it. It also brought a new problem,training faster while pushing attention logits upward, which is why it ships alongside QK clipping.'
       )
     ),
+    'sft': t(
+      p(
+        '预训练教会模型「下一个 token 是什么」。它读了很多文本，学会了语言的统计规律,但它不知道「被问了一个问题就该回答」。`监督微调`（SFT）补的就是这一课。',
+        '技术上 SFT 和预训练是同一件事:还是下一个 token 预测，还是交叉熵。区别只有一个,**loss 只算在回答上，不算在问题上**。',
+        '为什么？在问题上算 loss，等于让模型学习「怎么生成问题」。它照样会收敛，曲线一样好看甚至更低（问题比回答好预测得多），但你要的能力被稀释了。真实对话数据里 prompt 常常比 completion 长好几倍,于是绝大部分梯度花在学「用户会怎么说话」上。',
+        '实现上就是一个 `loss mask`：一个和序列等长的 0/1 数组，标出哪些位置参与 loss。**边界差一位是最常见的错**,回答的第一个 token 是由「最后一个 prompt token」那个位置预测出来的，所以 mask 要从那里开始。差一位的模型学不到「看到问号该开口」，而 loss 曲线完全正常。',
+        '还有一个容易忽略的边界：`padding` 位置也要屏蔽。它们不是内容，让模型去预测 padding 等于教它一个不存在的规律。',
+        '`chat template` 是把这件事标准化的东西,它规定标记怎么写，于是多轮对话的 mask 可以从标记里算出来，而不是手工数位置。**训练和推理用的模板必须一致**，这是部署时最常见的坑之一：对不上的话模型表现会莫名其妙差一截，而没有任何报错。',
+        '2026 年 SFT 本身的地位在下降,越来越多的流程是「很少的 SFT 冷启动 + 大量的 RL」。因为 SFT 只能模仿数据里已有的东西，RL 能找到数据里没有的解法。但那一小步冷启动仍然必须：没有它，RL 一开始采不出任何格式正确的样本，奖励恒为 0，梯度也就恒为 0。'
+      ),
+      p(
+        'Pretraining teaches a model what the next token is. It reads a great deal of text and learns the statistics of language,but it does not know that being asked a question means answering it. `Supervised fine-tuning` (SFT) supplies that lesson.',
+        'Technically SFT is the same operation as pretraining: next-token prediction with cross-entropy. Exactly one thing differs,**the loss counts only on the answer, never on the question**.',
+        'Why? Computing loss on the question teaches the model to generate questions. It still converges, the curve looks as good or better (questions are far more predictable than answers), and the capability you wanted has been diluted. In real dialogue data the prompt is often several times longer than the completion,so most of the gradient goes into learning how users talk.',
+        'The implementation is a `loss mask`: a 0/1 array the length of the sequence marking which positions count. **Off-by-one at the boundary is the most common mistake**,the answer\'s first token is predicted at the position of the last prompt token, so that is where the mask starts. One position off and the model never learns that a question mark is its cue to speak, while the loss curve looks perfectly normal.',
+        'One more boundary is easy to miss: `padding` positions must be masked too. They are not content, and asking the model to predict padding teaches it a pattern that does not exist.',
+        'A `chat template` standardises all this: it fixes how markers are written so a multi-turn mask can be derived from markers rather than counted by hand. **Training and serving must use the same template**, one of the most common deployment traps: a mismatch makes the model inexplicably worse with nothing raising an error.',
+        'SFT\'s own standing has declined through 2026,more pipelines run a little SFT cold start plus a lot of RL, because SFT can only imitate what the data contains while RL can find what it does not. That small cold start stays necessary: without it RL samples nothing correctly formatted, every reward is zero, and so is every gradient.'
+      )
+    ),
+    'data-mixture': t(
+      p(
+        '教模型一个新任务最直接的做法是拿新任务的数据继续训。它会学会新的,同时把旧的忘掉。这个现象叫`灾难性遗忘`，而为了对齐付出的那部分能力损失，业内叫`对齐税`。',
+        '在小模型上这个现象非常干净：拿减法数据微调一个会加法的模型，减法学会了，加法直接塌掉。真实尺度上它一样存在，只是更隐蔽,不是完全不会了，而是某几个评测集悄悄掉几个点。而没人会在做完对齐之后把所有旧评测重跑一遍，除非流程里写死了要跑。',
+        '解法是`数据配比`：新数据里掺一部分旧数据。掺多少是个要量着调的数,掺太少还是会忘，掺太多新任务学不动。',
+        '这件事有个很重要的结构：**两个目标必须同时卡**。只卡「学会新的」，最省事的做法是全用新数据；只卡「别忘旧的」，最省事的做法是一条新数据都不加。**只有两条一起卡，配比这个问题才存在。**',
+        '混数据本身也有坑。`比例要准`,「每 k 条插一条」在比例不是 1/k 的时候会偏，而偏出来的配比你不会知道，除非量一遍。`顺序要确定`,同一个配置跑两遍必须给同一个结果，否则「配比 A 比 B 好」这个结论立不住：你不知道差异来自配比还是来自这一次的采样。',
+        '真实流程里还有两个常用手段。`回放`：后训练里掺 5% 到 20% 的预训练数据专门防遗忘，便宜且有效。`模型融合`：把擅长不同能力的两版权重按比例平均起来,听着不该有用，实际上很有用。',
+        '最后一句：**对齐税不是必然的**。它很多时候是「配比没调好」的症状，而不是「学新东西必须付出的代价」。区分这两者的唯一办法是量。'
+      ),
+      p(
+        'The direct way to teach a model a new task is to keep training on that task\'s data. It learns the new one,and forgets the old. That phenomenon is `catastrophic forgetting`, and the capability lost in exchange for alignment is called the `alignment tax`.',
+        'On a small model the effect is very clean: fine-tune an addition-capable model on subtraction and subtraction is learned while addition collapses. It exists at real scale too, only more subtly,not "cannot do it any more" but a few evaluation suites quietly losing points. And nobody reruns every old evaluation after alignment unless the pipeline mandates it.',
+        'The remedy is `data mixture`: blend some old data into the new. How much is a number you tune against measurements,too little and it still forgets, too much and the new task does not stick.',
+        'This has an important structure: **both objectives must be gated at once**. Gate only "learn the new" and the cheapest move is all-new data; gate only "keep the old" and the cheapest move is adding none. **Only requiring both makes the mixture question exist at all.**',
+        'Mixing has its own traps. `Proportions must be accurate`,"insert one every k" drifts whenever the ratio is not 1/k, and you will not know unless you measure. `Order must be deterministic`,the same configuration must give the same result twice, or "ratio A beats B" cannot be concluded: the difference might be the ratio or might be this run\'s sampling.',
+        'Real pipelines add two more tools. `Replay`: mix 5% to 20% pretraining data into post-training specifically to prevent forgetting, cheap and effective. `Model merging`: average the weights of two versions strong in different capabilities,it sounds like it should not work and works well.',
+        'One last point: **the alignment tax is not inevitable**. It is often a symptom of an untuned mixture rather than a price that must be paid. The only way to tell is to measure.'
+      )
+    ),
   },
 };
 
