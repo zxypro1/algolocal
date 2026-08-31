@@ -2730,6 +2730,44 @@ const primers = {
         'A different problem is gradients turning into `inf` or `NaN`, routine in low precision. The standard response is to **skip the whole step**: leave parameters and optimiser state untouched. Do not zero them and step anyway,that pollutes momentum with a fake zero gradient, and the optimiser step counter still advances, shifting the bias-correction denominator and affecting every later step.'
       )
     ),
+    'data-packing': t(
+      p(
+        '语料是一篇篇长短不一的文档，模型要的是定长的块。中间这一步叫`打包`,它看起来只是数据处理，实际上藏着一个能悄悄毁掉训练的陷阱。',
+        '最直白的做法是一篇一块，不够就填。它的问题是浪费：文档长度差异越大，填充占的比例越高。真实语料上这个比例经常超过 30%,三分之一的算力、显存、时间花在填充符上。',
+        '真实做法是`拼流`：每篇末尾加一个 `EOS` 标出边界，全部首尾相接，然后按块长切开。填充率接近 0。代价是**一块里可能横跨两三篇文档**。',
+        '陷阱就在这里。因果掩码只管「不许看未来」,它不知道文档边界。拼起来之后，第二篇的位置能看见第一篇的内容，于是模型学到了两篇不相干文档之间的「关系」。',
+        '而且这个错的表现是**训练 loss 变得更低**,上下文里多了信息，预测当然更准。但这些信息在真实使用时根本不存在，所以模型在实际场景里会更差。**指标变好反而是坏消息**，这类错最难发现。',
+        '解法是`块对角掩码`：只有同一篇之间才允许注意。注意它需要的是「区间」而不是「前缀」,「从第 3 列到第 5 列」这种约束，用「每行能看前多少个」是表达不出来的。所以掩码换成`加性`的形式：不许看的位置加一个很大的负数，softmax 之后是硬 0。PyTorch 的 `attn_mask` 就是这个形式。',
+        '顺带一提，块对角掩码让注意力矩阵变得稀疏且规则,FlashAttention 的变长接口能直接跳过不需要算的块。于是它不但更正确，还更快。'
+      ),
+      p(
+        'A corpus is documents of varying length; a model wants fixed-length blocks. The step between is called `packing`,it looks like plain data handling and hides a trap that can quietly ruin training.',
+        'The obvious approach is one document per block, padded. Its problem is waste: the more lengths vary, the higher the padding share. On real corpora it routinely exceeds 30%,a third of the compute, memory and time spent on padding symbols.',
+        'Real practice is to `concatenate`: append an `EOS` to each document to mark the boundary, join everything end to end, then cut at the block length. Padding drops to nearly zero. The cost is that **a block may span two or three documents**.',
+        'That is where the trap sits. A causal mask only enforces "no looking ahead",it knows nothing about document boundaries. After concatenation, positions in the second document can see the first, and the model learns "relationships" between unrelated texts.',
+        'Worse, the symptom is that **training loss improves**,more information in the context makes prediction easier. But that information does not exist at inference, so the model performs worse in practice. **A better metric is the bad news here**, which makes this class of bug the hardest to notice.',
+        'The fix is a `block-diagonal mask`: attention only within a document. Note that it needs an "interval" rather than a "prefix",a constraint like "columns 3 through 5" cannot be written as "how many keys this row may see". So the mask becomes `additive`: add a large negative number at forbidden positions and softmax turns them into hard zeros. PyTorch\'s `attn_mask` uses exactly this form.',
+        'Incidentally, a block-diagonal mask makes the attention matrix sparse and regular,FlashAttention\'s variable-length interface skips the blocks it does not need. So it is not only more correct but faster.'
+      )
+    ),
+    'pretraining-loop': t(
+      p(
+        '零件齐了之后，预训练就是把它们串成一条循环：取一批数据、前向、反向、裁剪梯度、按调度取学习率、更新参数,然后重复几万到几百万次。',
+        '这条循环的每一件事前面都单独做过。合起来的难点在于**它们必须同时对**。任何一件错了，loss 曲线看起来都还是在降,少了 warmup 是降得慢一点，掩码错了是降得快一点，评测用错数据集是看起来特别好。**曲线在降**这件事本身几乎不携带信息。',
+        '所以要有`基线`。字符级语料上有三条天然的基线：均匀分布（什么都不学）、unigram（只看字符频率）、bigram（只看前一个字符）。bigram 是「只看一个字符」能做到的极限,打穿它意味着模型真的用上了更长的上下文。这是「注意力在工作」最直接的证据，而不是「loss 在降」。',
+        '还要有`留出集`。训练 loss 只说明模型记住了训练数据，而那本来就是它在做的事。只有在没见过的数据上评，才分得开「学会了」和「背下来了」。',
+        '评测要在 `no_grad` 下跑。不加也能算出正确的数,代价是白白建了一整条反向的带。小模型上感觉不到，真实尺度上意味着要为一次根本不会发生的反向留住每一层的激活，显存差好几倍。',
+        '最后一件值得养成的习惯：真正开跑之前，先做一次`过拟合小批`检查。拿 8 条样本训 200 步，loss 应该掉到接近 0。掉不下去说明模型或反向有 bug。这个检查几秒钟，能省掉很多天。'
+      ),
+      p(
+        'Once the pieces exist, pretraining is stringing them into a loop: take a batch, forward, backward, clip gradients, pick a learning rate from the schedule, update,then repeat tens of thousands to millions of times.',
+        'Every item in that loop had its own stage. The difficulty of the whole is that **they must all be right at once**. Get any one wrong and the loss curve still descends,missing warmup makes it slower, a broken mask makes it faster, the wrong evaluation set makes it look excellent. **The curve descending** carries almost no information by itself.',
+        'So you need `baselines`. A character-level corpus has three natural ones: uniform (nothing learned), unigram (character frequency only), and bigram (previous character only). Bigram is the ceiling for looking at one character,beating it means the model genuinely uses longer context. That is direct evidence attention works, in a way "the loss is falling" never is.',
+        'You also need a `held-out set`. Training loss only shows the model memorised its training data, which is what it was asked to do. Only unseen data separates "learned" from "memorised".',
+        'Evaluation should run under `no_grad`. Without it the numbers are still correct; the cost is an entire backward tape built for nothing. Imperceptible on a small model, at real scale it means keeping every layer\'s activations alive for a backward that never happens,several times the memory.',
+        'One last habit worth forming: before a real run, do an `overfit a tiny batch` check. Train on 8 examples for 200 steps and the loss should approach zero. If it does not, the model or the backward has a bug. The check takes seconds and saves days.'
+      )
+    ),
   },
 };
 
