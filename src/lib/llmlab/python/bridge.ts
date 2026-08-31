@@ -75,6 +75,8 @@ export interface PythonBridge {
   attn_apply(p: number, v: number, out: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number): void;
   attn_apply_bwd(dout: number, p: number, v: number, dp: number, dv: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number): void;
   softmax_rows(x: number, valid: number, out: number, rows: number, cols: number): void;
+  log_softmax(x: number, valid: number, out: number, rows: number, cols: number): void;
+  log_softmax_bwd(dout: number, out: number, valid: number, dx: number, rows: number, cols: number): void;
   softmax_rows_bwd(dout: number, out: number, valid: number, dx: number, rows: number, cols: number): void;
   layernorm_fwd(x: number, g: number, b: number, out: number, mean: number, inv: number, rows: number, d: number, eps: number): void;
   layernorm_bwd(dout: number, x: number, g: number, mean: number, inv: number, dg: number, db: number, dx: number, rows: number, d: number): void;
@@ -246,6 +248,10 @@ export function createPythonBridge(rt: Runtime): PythonBridge {
       ops.attnApply(T(p), T(v), T(out), B, Sq, Skv, H, KV, hd),
     attn_apply_bwd: (dout, p, v, dp, dv, B, Sq, Skv, H, KV, hd) =>
       ops.attnApplyBwd(T(dout), T(p), T(v), T(dp), T(dv), B, Sq, Skv, H, KV, hd),
+    log_softmax: (x, valid, out, rows, cols) =>
+      ops.logSoftmaxRows(T(x), valid >= 0 ? T(valid) : null, T(out), rows, cols),
+    log_softmax_bwd: (dout, out, valid, dx, rows, cols) =>
+      ops.logSoftmaxRowsBwd(T(dout), T(out), valid >= 0 ? T(valid) : null, T(dx), rows, cols),
     softmax_rows: (x, valid, out, rows, cols) =>
       ops.softmaxRows(T(x), valid >= 0 ? T(valid) : null, T(out), rows, cols),
     softmax_rows_bwd: (dout, out, valid, dx, rows, cols) =>

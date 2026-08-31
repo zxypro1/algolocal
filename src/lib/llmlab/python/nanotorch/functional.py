@@ -581,6 +581,36 @@ def softmax(x, rows, cols, valid=None):
     return out
 
 
+def log_softmax(x, rows, cols, valid=None):
+    """逐行 log-softmax。对应 `torch.log_softmax(x, dim=-1)`。
+
+    **不是 `log(softmax(x))`。** softmax 之后小概率会下溢成 0，再取 log 就是 −inf；
+    合成一步之后不必显式算出概率，小概率对应的只是一个很负的数。
+
+    强化学习里 log-prob 到处都是 —— DPO 的隐式奖励、PPO / GRPO 的重要性比值，
+    而那些地方的概率常常很小。所以这一步的稳定性不是可选项。
+    """
+    out = Tensor(x.shape, x.dtype, name="log_softmax")
+    B.log_softmax_fwd(x.handle, valid.handle if valid is not None else -1,
+                      out.handle, rows, cols)
+
+    def backward():
+        go = out.grad
+        if go is None or not x.requires_grad:
+            return
+        dx = Tensor(x.shape, x.dtype, name="dlog_softmax")
+        B.log_softmax_bwd(go.handle, out.handle,
+                          valid.handle if valid is not None else -1,
+                          dx.handle, rows, cols)
+        B.add_inplace(x.ensure_grad().handle, dx.handle, x.numel)
+
+    out.requires_grad = is_grad_enabled() and x.requires_grad
+    if out.requires_grad:
+        out._backward = backward
+        out._parents = (x,)
+    return out
+
+
 def attn_apply(probs, v, batch, seq_q, seq_kv, heads, kv_heads, head_dim, out_shape=None):
     """out[b,i,h,:] = Σ_j probs[b,h,i,j] · v[b,j,kh,:]。"""
     shape = out_shape if out_shape is not None else (batch * seq_q, heads * head_dim)

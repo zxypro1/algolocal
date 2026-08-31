@@ -2906,6 +2906,46 @@ const primers = {
         'One last point: **the alignment tax is not inevitable**. It is often a symptom of an untuned mixture rather than a price that must be paid. The only way to tell is to measure.'
       )
     ),
+    'reward-model': t(
+      p(
+        '强化学习需要一个`奖励`。可对于「这个回答好不好」，人类标不出「值 7.3 分」,但标得出「A 比 B 好」。`奖励模型`要解决的就是这个错配：从成对的偏好里学出一个标量分数。',
+        '做法是给语言模型接一个`标量头`：每个位置输出一个数，整条序列取一个。然后用 `Bradley-Terry` 模型把「A 胜过 B」写成两者分数之差过 sigmoid,`P(A ≻ B) = σ(r_A − r_B)`，损失是它的负对数。',
+        '有个漂亮的等价：`−log σ(Δ)` 正好就是**两类 softmax 的交叉熵**。把两个奖励当成两个 logit、正确类是 0，算出来一模一样。所以成对损失不需要单独实现 sigmoid,它就是分类。',
+        '分数要从`最后一个内容 token` 上读，不是最后一个位置。读最后一个位置读到的是 padding，不同长度的序列偏移不同，于是分数偷偷变成了长度的函数。这个错在准确率上未必看得出来,因为长度和对错本来就常常相关，模型顺着捷径走，而你以为它学会了判断。',
+        '`排序对了不等于校准好了`。把所有分数差乘十，排序一模一样、成对准确率一分不掉，而模型会说每一对都是 99.99%。RLHF 里奖励是被当成数值用的（要减基线、要算优势），过度自信的奖励模型会让策略往一个方向冲过头。',
+        '奖励模型是 RLHF 最脆的一环。它会被`钻空子`：策略找到「奖励模型给高分但人类不喜欢」的输出,最经典的是把答案越写越长。它也会`分布漂移`：RL 把策略推离奖励模型训练时见过的分布，越往后打分越不可信。',
+        '所以 2026 年最重要的转向是 `RLVR`,可验证的任务（数学、代码）直接用规则判对错，根本不训奖励模型。没有奖励模型，就没有被钻空子的问题。'
+      ),
+      p(
+        'Reinforcement learning needs a `reward`. But for "is this answer good", people cannot label "worth 7.3",they can label "A is better than B". A `reward model` bridges that gap: learn a scalar score from pairwise preferences.',
+        'The construction adds a `scalar head` to a language model: one number per position, one taken per sequence. The `Bradley-Terry` model then writes "A beats B" as the sigmoid of their score difference,`P(A ≻ B) = σ(r_A − r_B)`, with the loss its negative log.',
+        'There is a neat equivalence: `−log σ(Δ)` is exactly the **cross-entropy of a two-class softmax**. Treat the two rewards as two logits with class 0 correct and the numbers match. So a pairwise loss needs no separate sigmoid,it is classification.',
+        'The score is read at the `last content token`, not the last position. The last position holds padding, sequences of different lengths land at different offsets, and the score quietly becomes a function of length. Accuracy may not reveal it,length and correctness often correlate, so the model takes the shortcut while you believe it learned to judge.',
+        '`Correct ranking does not imply good calibration`. Multiply every score difference by ten: identical ranking, identical pairwise accuracy, and the model now claims 99.99% on every pair. RLHF uses reward as a number (baselines subtracted, advantages computed), and an overconfident reward model pushes the policy too far.',
+        'The reward model is RLHF\'s most fragile link. It gets `hacked`: the policy finds outputs it scores highly and humans dislike,classically by writing longer and longer answers. It also suffers `distribution drift`: RL pushes the policy away from what the reward model was trained on, and its scores grow less trustworthy the further it goes.',
+        'Hence the most important shift of 2026, `RLVR`: verifiable tasks (mathematics, code) judge correctness by rule and train no reward model at all. No reward model, no reward hacking.'
+      )
+    ),
+    'dpo': t(
+      p(
+        'RLHF 那条路要三个模型（策略、奖励模型、参考）加一整套 PPO，工程量很大。`DPO` 的发现是：如果奖励模型是 Bradley-Terry 的，那么最优策略和奖励之间有一个闭式关系,于是奖励模型可以被消掉，偏好数据可以直接拿来训策略。',
+        '损失长这样：`−log σ( β·(Δ_w − Δ_l) )`，其中 `Δ = log π − log π_ref`。那个 `β·Δ` 就是 DPO 的`隐式奖励`,它不是训出来的，是推出来的。而 `−log σ(·)` 又是那个两类 softmax，所以 DPO 和奖励模型在形状上是同一个东西，区别只在分数从哪来。',
+        '`参考模型是冻结的`。它在损失里只作为基准出现，算它的 log-prob 要在 no_grad 下。忘了这一点的话，梯度会同时推策略和参考往相反方向走,`Δ_w − Δ_l` 涨得飞快，loss 掉得特别漂亮，而模型什么也没学到。**loss 掉得比预期快**在 DPO 里几乎总是这个错。',
+        '参考项本身是一个隐式的 `KL` 约束。没有它的话，模型可以靠把所有概率都压低来拉开差距,赢是赢了，而语言模型本身垮掉。`β` 控制允许离参考多远：越小越放得开。',
+        '还有一个容易写错又很难发现的地方：序列的 log-prob 是**和**不是平均。改成平均的话，平均值不随长度增长，长答案被系统性地偏袒,这是 DPO 让答案越写越长的直接来源之一。而它看起来更合理（「归一化一下总没错吧」），所有常规的门槛也都过得去。',
+        'DPO 之后有一大批变体，各自动同一个式子的不同部分：`IPO` 换掉 σ 防过拟合，`KTO` 只要单条好坏标注不要成对数据，`SimPO` 干脆去掉参考模型。',
+        '而 2026 年更大的变化是`在线`：DPO 是离线的（偏好事先标好），在线的偏好优化边训边采样边标注，效果明显更好，代价是要一整套 rollout 基础设施。'
+      ),
+      p(
+        'The RLHF route needs three models (policy, reward model, reference) plus all of PPO, which is a great deal of engineering. `DPO`\'s insight: if the reward model is Bradley-Terry, a closed-form relation links the optimal policy to the reward,so the reward model can be eliminated and preference data can train the policy directly.',
+        'The loss reads `−log σ( β·(Δ_w − Δ_l) )` with `Δ = log π − log π_ref`. That `β·Δ` is DPO\'s `implicit reward`,not trained but derived. And `−log σ(·)` is that two-class softmax again, so DPO and a reward model share a shape and differ only in where the score comes from.',
+        'The `reference model is frozen`. It appears only as a baseline, so its log-probabilities are computed under no_grad. Forget that and the gradient pushes policy and reference apart,`Δ_w − Δ_l` grows fast, the loss falls beautifully, and the model learns nothing. **A loss falling faster than expected** is almost always this in DPO.',
+        'The reference term is itself an implicit `KL` constraint. Without it the model can widen the gap simply by pushing all probabilities down,it wins the objective while the language model collapses. `β` sets how far the policy may stray: smaller is looser.',
+        'One more easy-to-write, hard-to-notice mistake: a sequence log-probability is a **sum**, not a mean. A mean does not grow with length, so long answers are systematically favoured,a direct source of DPO lengthening answers. And it looks more reasonable ("normalising can\'t hurt") while every ordinary gate still passes.',
+        'A family of variants followed, each altering a different part: `IPO` replaces σ to prevent overfitting, `KTO` needs only single good/bad labels instead of pairs, `SimPO` drops the reference model entirely.',
+        'The larger 2026 shift is toward `online` methods: DPO is offline (preferences labelled in advance), while online preference optimisation samples and labels as it trains,noticeably better, at the cost of a full rollout infrastructure.'
+      )
+    ),
   },
 };
 

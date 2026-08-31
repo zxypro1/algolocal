@@ -543,6 +543,65 @@ void FN(softmax_rows_fwd)(int x_, int valid_, int out_, int rows, int cols) {
   }
 }
 
+/*
+ * log_softmax：`out_j = x_j − max − log Σ exp(x_k − max)`
+ *
+ * 为什么不写成 `log(softmax(x))`：softmax 之后有些概率会下溢成 0，
+ * 再取 log 就是 −inf。合成一步之后不必显式算出概率，
+ * 小概率对应的只是一个很负的数，不是 −inf。
+ * 强化学习里 log-prob 到处都是（DPO 的隐式奖励、PPO / GRPO 的比值），
+ * 而那些地方的概率常常很小 —— 这一步的稳定性不是可选项。
+ *
+ * 被 valid 挡在外面的位置填一个很负的数，而不是 0：
+ * 0 在 log 空间里代表概率 1，是这里最糟的取值。
+ */
+void FN(log_softmax_fwd)(int x_, int valid_, int out_, int rows, int cols) {
+  const SCALAR *x = CP(x_);
+  const int *valid = valid_ >= 0 ? (const int *)(ll_mem + valid_) : 0;
+  SCALAR *out = P(out_);
+  for (int r = 0; r < rows; r++) {
+    const SCALAR *xr = x + (long)r * cols;
+    SCALAR *o = out + (long)r * cols;
+    int n = valid ? valid[r] : cols;
+    if (n > cols) n = cols;
+    if (n <= 0) {
+      for (int j = 0; j < cols; j++) o[j] = (SCALAR)(-1e30);
+      continue;
+    }
+    double mx = -1e308;
+    for (int j = 0; j < n; j++) if ((double)xr[j] > mx) mx = (double)xr[j];
+    double sum = 0.0;
+    for (int j = 0; j < n; j++) sum += ll_exp((double)xr[j] - mx);
+    double lse = mx + ll_log(sum);
+    for (int j = 0; j < n; j++) o[j] = (SCALAR)((double)xr[j] - lse);
+    for (int j = n; j < cols; j++) o[j] = (SCALAR)(-1e30);
+  }
+}
+
+/*
+ * dx_j = dout_j − exp(out_j)·Σ_k dout_k
+ *
+ * 和 softmax 的反向形状很像，区别是这里乘的是 `exp(out)`（也就是概率），
+ * 而求和项**不带权重**。写成 softmax 那一版的话前向照样对、梯度悄悄错。
+ */
+void FN(log_softmax_bwd)(int dout_, int out_, int valid_, int dx_, int rows, int cols) {
+  const SCALAR *dout = CP(dout_), *out = CP(out_);
+  const int *valid = valid_ >= 0 ? (const int *)(ll_mem + valid_) : 0;
+  SCALAR *dx = P(dx_);
+  for (int r = 0; r < rows; r++) {
+    const SCALAR *dr = dout + (long)r * cols, *orow = out + (long)r * cols;
+    SCALAR *d = dx + (long)r * cols;
+    int n = valid ? valid[r] : cols;
+    if (n > cols) n = cols;
+    double total = 0.0;
+    for (int j = 0; j < n; j++) total += (double)dr[j];
+    for (int j = 0; j < n; j++) {
+      d[j] = (SCALAR)((double)dr[j] - ll_exp((double)orow[j]) * total);
+    }
+    for (int j = n; j < cols; j++) d[j] = (SCALAR)0;
+  }
+}
+
 /** ds_j = p_j·(dp_j − Σ_k p_k·dp_k)。漏掉那个求和项是最常见的错，前向照样对 */
 void FN(softmax_rows_bwd)(int dout_, int out_, int valid_, int dx_, int rows, int cols) {
   const SCALAR *dout = CP(dout_), *out = CP(out_);
