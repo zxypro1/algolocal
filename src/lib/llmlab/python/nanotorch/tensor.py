@@ -144,6 +144,20 @@ class Tensor:
             self.grad.fill_(0.0)
         return self.grad
 
+    def detach(self):
+        """一份**同值但不连图**的拷贝。对应 `torch.Tensor.detach()`。
+
+        激活重算要用它：重算那一遍要从一个干净的叶子出发，
+        不然新算出来的子图会接回原来的图上，反向会走两遍。
+
+        角色恒为 `activation`,拷贝出来的这一份是个临时值，不承担长期所有权。
+        跟着原张量走的话，`detach()` 一个参数就会在训练循环里造出一个
+        `param` 角色的临时张量，而它落在每步的 mark 之后，release 会当场报错。
+        """
+        out = Tensor(self.shape, self.dtype, name=self._name + ".detached")
+        B.copy(out.handle, self.handle, self.numel)
+        return out
+
     def zero_grad(self):
         if self.grad is not None:
             self.grad.fill_(0.0)

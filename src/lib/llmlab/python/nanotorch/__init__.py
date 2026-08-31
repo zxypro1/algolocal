@@ -54,13 +54,13 @@ from . import optim
 from . import autograd
 from . import generate
 from . import log
-from ._bridge import phase, add_tokens, mark, release
+from ._bridge import phase, add_tokens, mark, release, reset_peak
 
 __all__ = [
     "Tensor", "zeros", "parameter",
     "no_grad", "enable_grad", "is_grad_enabled",
     "functional", "F", "nn", "optim", "autograd", "generate", "log",
-    "phase", "add_tokens", "mark", "release",
+    "phase", "add_tokens", "mark", "release", "reset_peak",
 ]
 
 __version__ = "0.1.0"

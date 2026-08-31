@@ -8000,6 +8000,1132 @@ const STAGE_PRETRAIN = {
   ),
 };
 
+/* ================================================================== */
+/* 第 17 关：混合精度                                                   */
+/* ================================================================== */
+
+/** 第 17 / 18 关的模型：6 层，深一点才看得出重算省了多少 */
+const KIT_DEEP_PY = code`
+  """平台给的模型。和前面几关同一套，只是**深到 6 层** ——
+  激活重算省下来的东西正比于层数，两层的模型上看不出来。
+
+  \`vocab=16, dim=32, n_layer=6, n_head=4, n_kv_head=2, hidden=88\`，
+  batch 8 × seq 16。
+  """
+  import math
+  import nanotorch as nt
+  from nanotorch import nn, functional as F
+
+  V, D, L, H, KV, HID, B, S = 16, 32, 6, 4, 2, 88, 8, 16
+
+
+  def build_tables(n, head_dim, base=10000.0):
+      half = head_dim // 2
+      cos = nt.zeros((n, half), role="data", name="rope.cos")
+      sin = nt.zeros((n, half), role="data", name="rope.sin")
+      cv, sv = [], []
+      for p in range(n):
+          for i in range(half):
+              th = p * (base ** (-2.0 * i / head_dim))
+              cv.append(math.cos(th))
+              sv.append(math.sin(th))
+      cos.set_(cv)
+      sin.set_(sv)
+      return cos, sin
+
+
+  class Norm(nn.Module):
+      def __init__(self, dim):
+          super().__init__()
+          self.weight = nt.parameter((dim,), None, 0.0, "g")
+
+      def forward(self, x):
+          return F.rms_norm(x, self.weight, 1e-5)
+
+
+  class Attn(nn.Module):
+      def __init__(self, dim, nh, nkv, seed, max_seq=64):
+          super().__init__()
+          self.nh, self.nkv, self.hd = nh, nkv, dim // nh
+          hd = self.hd
+          self.wq = nt.parameter((dim, nh * hd), seed + 1, dim ** -0.5, "wq")
+          self.wk = nt.parameter((dim, nkv * hd), seed + 2, dim ** -0.5, "wk")
+          self.wv = nt.parameter((dim, nkv * hd), seed + 3, dim ** -0.5, "wv")
+          self.wo = nt.parameter((nh * hd, dim), seed + 4, (nh * hd) ** -0.5, "wo")
+          self._cos, self._sin = build_tables(max_seq, hd)
+
+      def forward(self, x, b, s):
+          hd = self.hd
+          q = F.linear(x, self.wq)
+          k = F.linear(x, self.wk)
+          v = F.linear(x, self.wv)
+          q = F.rope(q, self._cos, self._sin, b, s, self.nh, hd)
+          k = F.rope(k, self._cos, self._sin, b, s, self.nkv, hd)
+          sc = F.attn_scores(q, k, b, s, s, self.nh, self.nkv, hd)
+          pr = F.softmax(sc, b * self.nh * s, s, F.causal_valid(b, self.nh, s))
+          o = F.attn_apply(pr, v, b, s, s, self.nh, self.nkv, hd,
+                           out_shape=(b * s, self.nh * hd))
+          return F.linear(o, self.wo)
+
+
+  class Mlp(nn.Module):
+      def __init__(self, dim, hid, seed):
+          super().__init__()
+          self.wg = nt.parameter((dim, hid), seed + 1, dim ** -0.5, "wg")
+          self.wu = nt.parameter((dim, hid), seed + 2, dim ** -0.5, "wu")
+          self.wd = nt.parameter((hid, dim), seed + 3, hid ** -0.5, "wd")
+
+      def forward(self, x):
+          return F.linear(F.swiglu(F.linear(x, self.wg), F.linear(x, self.wu)), self.wd)
+
+
+  class Block(nn.Module):
+      def __init__(self, dim, nh, nkv, hid, seed, nl):
+          super().__init__()
+          self.n1, self.at = Norm(dim), Attn(dim, nh, nkv, seed)
+          self.n2, self.mp = Norm(dim), Mlp(dim, hid, seed + 40)
+          self.sc = (2.0 * nl) ** -0.5
+
+      def forward(self, x, b, s):
+          x = F.add(x, F.scale(self.at(self.n1(x), b, s), self.sc))
+          return F.add(x, F.scale(self.mp(self.n2(x)), self.sc))
+
+
+  class LM(nn.Module):
+      """\`wrap\` 给第 18 关用：把每层包一层重算。第 17 关不用管它。"""
+
+      def __init__(self, seed=1, wrap=None):
+          super().__init__()
+          self.wrap = wrap
+          self.embed = nt.parameter((V, D), seed, D ** -0.5, "embed")
+          self.blocks = nn.ModuleList([
+              Block(D, H, KV, HID, seed + 100 * (i + 1), L) for i in range(L)
+          ])
+          self.nf = Norm(D)
+
+      def forward(self, idx, tgt, b, s):
+          rows = b * s
+          x = F.embedding(self.embed, idx, rows, D)
+          for blk in self.blocks:
+              x = self.wrap(blk, x, b, s) if self.wrap else blk(x, b, s)
+          x = self.nf(x)
+          return F.cross_entropy(F.linear_tied(x, self.embed, rows, D, V), tgt, rows, V)
+
+
+  _batches = {}
+
+
+  def get_batch(seed):
+      return _batches[seed]
+`;
+
+const STAGE_AMP = {
+  id: 'mixed-precision',
+  title: t('混合精度 —— bf16 赢在动态范围', 'Mixed precision — bf16 wins on range'),
+  goal: t(
+    code`
+      在 \`amp.py\` 里写一个 \`autocast\`：**参数留在 fp32，算的时候降到低精度**。
+
+      \`\`\`python
+      class Cast(nt.autograd.Function):
+          """把张量舍入到 bf16 / fp16 能表示的值上。反向**直通**。"""
+
+      class autocast:
+          """with autocast("bf16"): ... —— 里面的矩阵乘走低精度。
+
+          对应 torch.autocast。"""
+          def __init__(self, dtype="bf16", enabled=True):
+          def __enter__(self):   # 把 F.linear 换成先降精度再算的版本
+          def __exit__(self, *a):  # 换回来
+      \`\`\`
+
+      \`F.quantize_(x, "bf16")\` 已经有了 —— 它**就地**把每个数舍入到该精度
+      能表示的最近的值（位级模拟，不是乘个系数糊弄）。
+
+      ## 三种格式，差的不是一件事
+
+      \`\`\`
+              指数位   尾数位   动态范围            相对精度
+      fp32      8       23     ±3.4e38            2⁻²⁴ ≈ 6e-8
+      bf16      8        7     ±3.4e38（同 fp32） 2⁻⁸  ≈ 3.9e-3
+      fp16      5       10     ±65504             2⁻¹¹ ≈ 4.9e-4
+      \`\`\`
+
+      **bf16 比 fp16 精度更差，却是训练的默认选择。** 因为它保住了 fp32 的
+      指数位数,动态范围一模一样。而训练里真正会出事的是**范围**不是精度：
+      梯度动辄跨十几个数量级，fp16 的上限 65504 很容易撞上，下限那头则悄悄下溢成 0。
+
+      fp16 要用起来得配一整套 \`GradScaler\`（loss 先乘一个大系数，
+      反向完再除回去，撞到 inf 就跳过这步并把系数减半）。
+      bf16 什么都不用配。**省掉的复杂度才是 bf16 真正的价值。**
+
+      这一关会拿一组 \`1e5\` 量级的数验一遍：fp16 全部溢出成 inf，bf16 一个都不溢。
+
+      ## 主权重必须留在 fp32
+
+      \`autocast\` 只在**算的时候**降精度,参数本身、梯度、优化器状态都留在 fp32。
+      理由是更新量太小：\`lr · m̂/√v̂\` 常常在 \`1e-6\` 量级，
+      而 bf16 在 1.0 附近的分辨率是 \`3.9e-3\` —— **加上去等于没加**，
+      模型会静静地停止学习。
+
+      所以 \`Cast\` 必须**返回一份拷贝**，不能就地把参数改掉。
+      这一关的门槛专门查这件事：训练结束之后，参数的值必须**还不是** bf16 能表示的值。
+
+      ## 反向为什么是直通
+
+      舍入这个操作几乎处处导数为 0（阶梯函数），照实求导的话梯度全是 0。
+      标准做法是**直通估计**（straight-through）：前向照舍，反向当它是恒等。
+      量化感知训练里的那个 STE 就是同一个东西。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | bf16 的舍入 | 最大相对误差 ≤ **2⁻⁸ = 3.907e-3**，且明显大于 0 |
+      | 动态范围 | \`1e5\` 量级下 bf16 溢出 **0** 个（fp16 全溢） |
+      | **主权重完好** | 训练完的参数与它的 bf16 版本之差 > 0 |
+      | 质量 | 250 步之后 bf16 与 fp32 的 loss 差 ≤ **0.05** |
+    `,
+    code`
+      Write an \`autocast\` in \`amp.py\`: **parameters stay in fp32, arithmetic drops to low
+      precision**.
+
+      \`\`\`python
+      class Cast(nt.autograd.Function):
+          """Round a tensor to the nearest value the target format can hold.
+          The backward is **straight-through**."""
+
+      class autocast:
+          """with autocast("bf16"): ... — matmuls inside run in low precision.
+
+          Mirrors torch.autocast."""
+          def __init__(self, dtype="bf16", enabled=True):
+          def __enter__(self):   # swap F.linear for a version that casts first
+          def __exit__(self, *a):  # swap it back
+      \`\`\`
+
+      \`F.quantize_(x, "bf16")\` already exists — it rounds every value **in place** to the
+      nearest representable one (bit-level, not a scale factor).
+
+      ## Three formats, differing in different ways
+
+      \`\`\`
+              exponent  mantissa  dynamic range      relative precision
+      fp32       8         23      ±3.4e38           2⁻²⁴ ≈ 6e-8
+      bf16       8          7      ±3.4e38 (= fp32)  2⁻⁸  ≈ 3.9e-3
+      fp16       5         10      ±65504            2⁻¹¹ ≈ 4.9e-4
+      \`\`\`
+
+      **bf16 is less precise than fp16 and yet the default for training.** It keeps fp32's
+      exponent width, so the dynamic range is identical. What actually breaks training is
+      **range**, not precision: gradients span a dozen orders of magnitude, fp16's ceiling
+      of 65504 is easy to hit, and the low end quietly underflows to zero.
+
+      Using fp16 requires the whole \`GradScaler\` apparatus (multiply the loss by a large
+      factor, divide it back after the backward, and on hitting an inf skip the step and
+      halve the factor). bf16 needs none of that. **The complexity it removes is bf16's real
+      value.**
+
+      This stage checks it on a batch of values around \`1e5\`: fp16 turns every one into
+      inf, bf16 none.
+
+      ## Master weights stay in fp32
+
+      \`autocast\` lowers precision **only for the arithmetic**; parameters, gradients and
+      optimiser state stay fp32. The reason is that updates are tiny: \`lr · m̂/√v̂\` often
+      sits around \`1e-6\`, while bf16's resolution near 1.0 is \`3.9e-3\` — **adding it
+      changes nothing**, and the model silently stops learning.
+
+      So \`Cast\` must **return a copy** rather than modifying the parameter in place. One
+      gate checks exactly this: after training, parameter values must **not** be values bf16
+      could represent.
+
+      ## Why the backward is straight-through
+
+      Rounding has zero derivative almost everywhere (it is a step function), so
+      differentiating it honestly gives zero gradients everywhere. The standard answer is
+      the **straight-through estimator**: round in the forward, treat it as the identity in
+      the backward. The STE in quantisation-aware training is the same idea.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | bf16 rounding | Max relative error <= **2⁻⁸ = 3.907e-3**, and clearly above 0 |
+      | Dynamic range | Around \`1e5\`, bf16 overflows **0** values (fp16 overflows all) |
+      | **Master weights intact** | Trained parameters differ from their bf16 rounding |
+      | Quality | After 250 steps, bf16 within **0.05** of fp32's loss |
+    `
+  ),
+  checklist: [
+    t('Cast 返回拷贝，不就地改参数', 'Cast returns a copy and never modifies the parameter in place'),
+    t('Cast 的反向是直通', "Cast's backward is straight-through"),
+    t('autocast 出了作用域要把 F.linear 换回来',
+      'autocast restores F.linear on exit'),
+    t('参数、梯度、优化器状态都留在 fp32',
+      'Parameters, gradients and optimiser state all stay in fp32'),
+  ],
+  hints: [
+    t('x.detach() 给你一份同值的拷贝，再 F.quantize_ 就不会碰到原张量。',
+      'x.detach() gives a same-valued copy; F.quantize_ on it never touches the original.'),
+    t('__exit__ 里一定要还原 —— 用 try/finally 的思路，别只在正常路径上还。',
+      'Always restore in __exit__; think try/finally rather than only the happy path.'),
+    t('enabled=False 时什么都不做 —— 对照组要用它。',
+      'With enabled=False do nothing at all; the control run needs that.'),
+  ],
+  pitfalls: [
+    t(code`
+      **就地量化参数。** \`F.quantize_(w, "bf16")\` 直接改的是主权重。
+      前几步看不出来 —— loss 照样降。等到更新量掉到 \`1e-6\` 量级，
+      而 bf16 在 1.0 附近的分辨率是 \`3.9e-3\`，**每一次更新都被舍回原值**，
+      模型静静地停止学习，loss 曲线变成一条水平线，而没有任何错误。
+    `, code`
+      **Quantising parameters in place.** \`F.quantize_(w, "bf16")\` rewrites the master
+      weights. Nothing shows for the first steps — the loss still falls. Then updates shrink
+      to around \`1e-6\` while bf16's resolution near 1.0 is \`3.9e-3\`, so **every update
+      rounds back to where it started**, the model silently stops learning, and the loss
+      curve flattens with no error anywhere.
+    `),
+    t(code`
+      **反向照实求导。** 舍入几乎处处导数为 0，于是梯度全是 0 —— 模型完全不动。
+      这个错反而**容易发现**（loss 一步都不降），比上面那个好得多。
+      正确做法是直通：前向照舍，反向当恒等。
+    `, code`
+      **Differentiating the rounding honestly.** Its derivative is zero almost everywhere,
+      so every gradient is zero and the model does not move at all. This failure is
+      **easy to spot** (the loss never drops), which makes it far kinder than the previous
+      one. The fix is straight-through: round forward, identity backward.
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_DEEP_PY,
+      'amp.py': code`
+        """第 17 关：混合精度。参数留 fp32，算的时候降精度。"""
+        import nanotorch as nt
+        from nanotorch import functional as F
+
+
+        class Cast(nt.autograd.Function):
+            """舍入到 dtype 能表示的值。反向直通。"""
+
+            @staticmethod
+            def forward(ctx, x, dtype):
+                # TODO: 拷一份再量化 —— 别碰原张量
+                return x
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                # TODO: 直通
+                return None
+
+
+        class autocast:
+            """with autocast("bf16"): ... 里面的 F.linear 走低精度。"""
+
+            def __init__(self, dtype="bf16", enabled=True):
+                self.dtype, self.enabled = dtype, enabled
+
+            def __enter__(self):
+                # TODO: 把 F.linear 换成「先把 x 和 w 降精度，再调原来的」
+                return self
+
+            def __exit__(self, *exc):
+                # TODO: 换回来
+                return False
+
+
+        if __name__ == "__main__":
+            x = nt.zeros((8,), role="data").normal_(1, 1.0)
+            before = list(x.tolist())
+            y = Cast.apply(x, "bf16")
+            print("原值", [round(v, 6) for v in before[:3]])
+            print("bf16", [round(v, 6) for v in y.tolist()[:3]])
+            print("原张量没被改", before == x.tolist())
+      `,
+    },
+    referenceFiles: {
+      'amp.py': code`
+        """第 17 关的参考实现。"""
+        import nanotorch as nt
+        from nanotorch import functional as F
+
+
+        class Cast(nt.autograd.Function):
+            @staticmethod
+            def forward(ctx, x, dtype):
+                # detach 拿一份拷贝再量化。**就地量化参数会毁掉主权重** ——
+                # 更新量在 1e-6 量级，而 bf16 在 1.0 附近的分辨率是 3.9e-3，
+                # 每次更新都被舍回原值，模型静静地停止学习
+                y = x.detach()
+                F.quantize_(y, dtype)
+                return y
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                # 直通：舍入几乎处处导数为 0，照实求导的话梯度全是 0。
+                # 量化感知训练里的 STE 是同一个东西
+                return grad_output
+
+
+        class autocast:
+            def __init__(self, dtype="bf16", enabled=True):
+                self.dtype, self.enabled = dtype, enabled
+
+            def __enter__(self):
+                if not self.enabled:
+                    return self
+                self._orig = F.linear
+                dtype, orig = self.dtype, F.linear
+
+                def low_precision_linear(x, weight):
+                    return orig(Cast.apply(x, dtype), Cast.apply(weight, dtype))
+
+                F.linear = low_precision_linear
+                return self
+
+            def __exit__(self, *exc):
+                if self.enabled:
+                    F.linear = self._orig
+                return False
+
+
+        if __name__ == "__main__":
+            x = nt.zeros((8,), role="data").normal_(1, 1.0)
+            before = list(x.tolist())
+            y = Cast.apply(x, "bf16")
+            print("原值", [round(v, 6) for v in before[:3]])
+            print("bf16", [round(v, 6) for v in y.tolist()[:3]])
+            print("原张量没被改", before == x.tolist())
+      `,
+    },
+  },
+  specs: [
+    spec('amp.spec.ts', code`
+      ${LAB}
+
+      const STEPS = 250;
+
+      function setup() {
+        lab.py(\`
+      import sys, json, math
+      sys.path.insert(0, "/lab")
+      import importlib, kit, amp
+      importlib.reload(kit)
+      importlib.reload(amp)
+      import nanotorch as nt
+      from nanotorch import functional as F
+      \`);
+        for (let s = 1; s <= 10; s++) {
+          const d = lab.data.induction(8, 16, 16, 1000 + s);
+          lab.py('kit._batches[' + (1000 + s) + '] = ('
+            + JSON.stringify([...d.idx]) + ', ' + JSON.stringify([...d.tgt]) + ')');
+        }
+        lab.py(\`
+      def _train(dtype, enabled, steps):
+          m = kit.LM(seed=1)
+          opt = nt.optim.AdamW(m.parameters(), lr=0.03, betas=(0.9, 0.95),
+                               weight_decay=0.1, grad_clip=1.0)
+          idx = nt.zeros((kit.B * kit.S,), role="data", name="idx")
+          tgt = nt.zeros((kit.B * kit.S,), role="data", name="tgt")
+          hist = []
+          base = nt.mark()
+          for st in range(1, steps + 1):
+              nt.release(base)
+              bi, bt = kit.get_batch(1000 + ((st - 1) % 10) + 1)
+              idx.set_int_(bi)
+              tgt.set_int_(bt)
+              opt.zero_grad()
+              nt.phase("forward")
+              with amp.autocast(dtype, enabled):
+                  loss = m(idx, tgt, kit.B, kit.S)
+              nt.phase("other")
+              loss.backward()
+              w = max(1, steps // 20)
+              if st <= w:
+                  lr = 0.03 * st / w
+              else:
+                  pr = (st - w) / max(1, steps - w)
+                  lr = 0.03 * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * pr)))
+              opt.step(lr=lr)
+              hist.append(loss.value)
+
+          # 主权重有没有被就地毁掉：和它的 bf16 版本比，应当还有差
+          intact = 0.0
+          for p in m.parameters():
+              c = p.detach()
+              F.quantize_(c, "bf16")
+              for u, v in zip(p.tolist(), c.tolist()):
+                  intact = max(intact, abs(u - v))
+          return {"last": sum(hist[-10:]) / 10, "intact": intact,
+                  "finite": all(v == v for v in hist)}
+      \`);
+      }
+
+      describe('混合精度', () => {
+        it('bf16 的舍入误差正好卡在 2⁻⁸ 上', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _x = nt.zeros((256,), role="data").normal_(5, 1.0)
+      _ref = list(_x.tolist())
+      _y = amp.Cast.apply(_x, "bf16")
+      _q = list(_y.tolist())
+      _worst = 0.0
+      for _a, _b in zip(_ref, _q):
+          if _a != 0:
+              _worst = max(_worst, abs(_a - _b) / abs(_a))
+      json.dumps({"worst": _worst, "untouched": _ref == _x.tolist()})
+      \`)));
+          const bound = Math.pow(2, -8);
+          console.log(
+            'bf16 最大相对误差 ' + r.worst.toExponential(3)
+            + '，理论界 2⁻⁸ = ' + bound.toExponential(3)
+            + '；原张量没被改 ' + r.untouched
+          );
+          lab.publish('precision.bf16MaxRelError', r.worst);
+          expect(r.worst).toBeLessThanOrEqual(bound);
+          // 真的舍了才算数 —— 原样返回的话这条也会「过」
+          expect(r.worst).toBeGreaterThan(1e-3);
+          // Cast 必须返回拷贝
+          expect(r.untouched).toBe(true);
+        });
+
+        /*
+         * bf16 比 fp16 精度更差，却是训练的默认选择 —— 差别在**动态范围**。
+         * 这一条用一组 1e5 量级的数把这件事量出来。
+         */
+        it('1e5 量级下 fp16 全部溢出，bf16 一个都不溢', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _big = nt.zeros((64,), role="data")
+      _big.set_([1e5 * (i + 1) for i in range(64)])
+      _f16 = amp.Cast.apply(_big, "fp16")
+      _b16 = amp.Cast.apply(_big, "bf16")
+      json.dumps({"fp16": F.count_nonfinite(_f16), "bf16": F.count_nonfinite(_b16)})
+      \`)));
+          console.log(
+            '1e5 ~ 6.4e6 这 64 个数：fp16 溢出 ' + r.fp16
+            + ' 个（上限 65504），bf16 溢出 ' + r.bf16 + ' 个（上限 3.4e38）'
+          );
+          lab.publish('precision.bf16NonFinite', r.bf16);
+          lab.publish('precision.fp16NonFinite', r.fp16);
+          expect(r.bf16).toBe(0);
+          expect(r.fp16).toBe(64);
+        });
+
+        it('训练完主权重还在 fp32 —— 没被就地量化掉', () => {
+          setup();
+          const r = JSON.parse(String(lab.py('json.dumps(_train("bf16", True, 60))')));
+          console.log(
+            '参数与它的 bf16 版本的最大差 ' + r.intact.toExponential(2)
+            + '（就地量化掉的话这个数会是 0）'
+          );
+          lab.publish('precision.masterWeightsIntact', r.intact);
+          expect(r.intact).toBeGreaterThan(1e-6);
+        });
+
+        it('250 步之后 bf16 与 fp32 的 loss 差 ≤ 0.05', () => {
+          setup();
+          const fp32 = JSON.parse(String(lab.py('json.dumps(_train("bf16", False, ' + STEPS + '))')));
+          const bf16 = JSON.parse(String(lab.py('json.dumps(_train("bf16", True, ' + STEPS + '))')));
+          const gap = Math.abs(bf16.last - fp32.last);
+          console.log(
+            'fp32 ' + fp32.last.toFixed(4) + '，bf16 ' + bf16.last.toFixed(4)
+            + '，差 ' + gap.toFixed(4)
+          );
+          lab.publish('loss.bf16Gap', gap);
+          expect(fp32.finite && bf16.finite).toBe(true);
+          expect(gap).toBeLessThan(0.05);
+          // 两边都要真的训下来了，否则「差不多」是因为两边都没学
+          expect(bf16.last).toBeLessThan(1.0);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.precision.bf16MaxRelError', op: 'lte', value: 0.00390625,
+      zh: 'bf16 舍入的最大相对误差（界是 2⁻⁸）', en: 'max bf16 rounding error (bound 2⁻⁸)',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.precision.bf16NonFinite', op: 'eq', value: 0,
+      zh: '1e5 量级下 bf16 溢出的个数（fp16 全溢）',
+      en: 'bf16 overflows around 1e5 (fp16 overflows all)', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.precision.masterWeightsIntact', op: 'gte', value: 1e-6,
+      zh: '参数与其 bf16 版本的差（主权重没被就地量化）',
+      en: 'gap between parameters and their bf16 rounding (master weights survived)',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.loss.bf16Gap', op: 'lte', value: 0.05,
+      zh: 'bf16 与 fp32 的最终 loss 差', en: 'final loss gap between bf16 and fp32',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness', 'efficiency'],
+  extension: t(
+    code`
+      这一关的模型太小，**fp16 在这里也能训下来** —— 激活和梯度都远够不到 65504。
+      范围的问题要到真实尺度才出现，而那时候它出现得非常突然：
+      某一层的某个梯度撞上上限，整步变成 NaN。
+      所以这一关把范围单独拿一组 \`1e5\` 的数来量,**不假装小模型上 fp16 会炸**。
+
+      2026 年还在往更低走。\`fp8\`（E4M3 / E5M2 两种）在 H100 起的硬件上
+      有原生支持，训练里已经在用了 —— 但**不是整网 fp8**：
+      通常只有矩阵乘的输入降到 fp8，累加仍然在 fp32，
+      而且要配**逐张量或逐块的缩放系数**把值挪进 fp8 那个很窄的窗口里。
+      DeepSeek-V3 的技术报告里这一段写得很细。
+
+      再往下是推理侧的 \`int4\` / \`int8\` 量化，那是另一条线 ——
+      训练要梯度，推理不要，所以推理能压得比训练狠得多。
+    `,
+    code`
+      The model here is small enough that **fp16 trains fine too** — activations and
+      gradients never approach 65504. Range problems appear only at real scale, and when
+      they do they appear abruptly: one gradient in one layer hits the ceiling and the whole
+      step becomes NaN. That is why this stage measures range on a separate batch of
+      \`1e5\` values instead of **pretending fp16 breaks on a toy model**.
+
+      2026 keeps going lower. \`fp8\` (in E4M3 and E5M2 flavours) has native hardware
+      support from H100 onward and is used in training — but **never as whole-network
+      fp8**: typically only matmul inputs drop to fp8 while accumulation stays fp32, plus
+      **per-tensor or per-block scaling factors** to move values into fp8's narrow window.
+      DeepSeek-V3's technical report covers this in detail.
+
+      Below that sits inference-side \`int4\` / \`int8\` quantisation, a separate line of
+      work — training needs gradients and inference does not, so inference compresses far
+      more aggressively than training can.
+    `
+  ),
+};
+
+/* ================================================================== */
+/* 第 18 关：激活重算                                                   */
+/* ================================================================== */
+
+const STAGE_RECOMPUTE = {
+  id: 'activation-recompute',
+  title: t('激活重算 —— 拿算力换显存', 'Activation recomputation — trading compute for memory'),
+  goal: t(
+    code`
+      前向算出来的中间量，反向要用,所以它们得一直留到反向。
+      这些**激活**在真实训练里是显存的大头，而且正比于层数。
+
+      \`激活重算\`（也叫 gradient checkpointing）换了个做法：
+      前向**只留每层的边界**，中间量算完就扔；反向走到那一层时**重新算一遍**。
+      代价是多一次前向的算力，收益是显存降一个量级。
+
+      在 \`recompute.py\` 里实现它：
+
+      \`\`\`python
+      class Checkpoint(nt.autograd.Function):
+          @staticmethod
+          def forward(ctx, block, x, batch, seq):
+              """只留输出，中间量全放掉。"""
+
+          @staticmethod
+          def backward(ctx, grad_output):
+              """重新前向一遍，然后从 grad_output 倒着走。"""
+
+      def checkpoint(block, x, batch, seq):
+          return Checkpoint.apply(block, x, batch, seq)
+      \`\`\`
+
+      对应 \`torch.utils.checkpoint.checkpoint\`。
+
+      ## 前向：留边界，扔中间
+
+      竞技场是**按标记回退**的：\`nt.mark()\` 记下当前位置，
+      \`nt.release(mark)\` 把之后分配的全部放掉。所以：
+
+      \`\`\`python
+      out = nt.zeros(x.shape)      # 边界张量，要在 mark 之前分配
+      m = nt.mark()
+      y = block(x, batch, seq)     # 中间量都落在 m 之后
+      out.copy_(y)
+      nt.release(m)                # 中间量一把放掉，只剩 out
+      \`\`\`
+
+      注意 \`Function.forward\` **本来就跑在 \`no_grad\` 里**（第 9 关那条），
+      所以这一遍不会建带 —— 这正是我们要的。
+
+      ## 反向：重算，然后倒着走
+
+      \`\`\`python
+      xd = ctx.x.detach()          # 干净的叶子，不接回原来的图
+      xd.requires_grad = True
+      with nt.enable_grad():       # 这一遍要建带
+          y = ctx.block(xd, ...)
+      nt.autograd.backward(y, grad_output)
+      return xd.grad
+      \`\`\`
+
+      \`detach()\` 不能省。不 detach 的话重算出来的子图会接回原图，
+      反向会**沿着同一条路走两遍**,梯度直接翻倍。
+
+      块里的**参数**梯度在重算的那一遍里就已经累加好了（它们不是 \`apply\` 的输入），
+      所以 \`backward\` 只需要返回 \`x\` 那一份。
+
+      ## 量的是「留存」，不是「峰值」
+
+      这一关的门槛读 \`memory.currentActivationBytes\` —— **前向刚结束、反向还没开始**
+      那一刻还占着的激活。这才是重算省下来的东西。
+
+      峰值不行：峰值里混着反向自己的临时量，而那部分重算不但不省，
+      还因为多算一遍而略高。**量错对象的话，一个完全正确的实现会显示成「没省」。**
+
+      ## 算力那一侧
+
+      重算发生在反向阶段，所以 \`前向 FLOPs\` 不变，涨的是 \`反向 / 前向\` 这个比：
+
+      \`\`\`
+      不重算   反向 / 前向 ≈ 2      （每个 gemm 算 dX 和 dW）
+      重算     反向 / 前向 ≈ 3      （多了一整遍前向）
+      一步合计  6N  ->  8N
+      \`\`\`
+
+      **前向 FLOPs 涨了说明重算跑到前向里去了** —— 那不是重算，那是白算。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | **留存的激活** | 重算 / 不重算 ≤ **0.4** |
+      | 反向 / 前向 | 在 **2.4 ~ 3.6** 之间 |
+      | 前向 FLOPs | 与不重算**完全相同** |
+      | **梯度** | 与不重算**逐位相同** |
+
+      最后一条值得说：重算跑的是同一串算子、同一个顺序，
+      所以结果**应当**逐位相同 —— 不是「差不多」。差了说明 detach 漏了、
+      或者重算那一遍的输入不是原来那个。
+    `,
+    code`
+      The forward pass produces intermediates the backward needs, so they must stay alive
+      until then. Those **activations** dominate memory in real training, and they scale
+      with depth.
+
+      \`Activation recomputation\` (also called gradient checkpointing) takes another route:
+      the forward **keeps only the boundary of each layer** and discards everything in
+      between; when the backward reaches that layer it **computes the forward again**. The
+      cost is one extra forward pass, the gain is an order of magnitude less memory.
+
+      Implement it in \`recompute.py\`:
+
+      \`\`\`python
+      class Checkpoint(nt.autograd.Function):
+          @staticmethod
+          def forward(ctx, block, x, batch, seq):
+              """Keep only the output; drop every intermediate."""
+
+          @staticmethod
+          def backward(ctx, grad_output):
+              """Recompute the forward, then walk back from grad_output."""
+
+      def checkpoint(block, x, batch, seq):
+          return Checkpoint.apply(block, x, batch, seq)
+      \`\`\`
+
+      This mirrors \`torch.utils.checkpoint.checkpoint\`.
+
+      ## Forward: keep the boundary, drop the middle
+
+      The arena rewinds **to a mark**: \`nt.mark()\` records the position and
+      \`nt.release(mark)\` frees everything allocated after it. So:
+
+      \`\`\`python
+      out = nt.zeros(x.shape)      # the boundary tensor, allocated before the mark
+      m = nt.mark()
+      y = block(x, batch, seq)     # intermediates all land after m
+      out.copy_(y)
+      nt.release(m)                # drop them all at once, keeping only out
+      \`\`\`
+
+      Note that \`Function.forward\` **already runs under \`no_grad\`** (stage 9), so this
+      pass builds no tape — exactly what is wanted.
+
+      ## Backward: recompute, then walk
+
+      \`\`\`python
+      xd = ctx.x.detach()          # a clean leaf, not attached to the original graph
+      xd.requires_grad = True
+      with nt.enable_grad():       # this pass does need a tape
+          y = ctx.block(xd, ...)
+      nt.autograd.backward(y, grad_output)
+      return xd.grad
+      \`\`\`
+
+      \`detach()\` is not optional. Without it the recomputed subgraph reconnects to the
+      original, and the backward **walks the same path twice** — gradients come out doubled.
+
+      Gradients for the block's **parameters** are already accumulated during the recompute
+      (they are not inputs to \`apply\`), so \`backward\` only returns the one for \`x\`.
+
+      ## What gets measured is what is **kept**, not the peak
+
+      The gate reads \`memory.currentActivationBytes\` — what is still held **the moment the
+      forward ends and before the backward starts**. That is precisely what recomputation
+      saves.
+
+      The peak will not do: it mixes in the backward's own temporaries, which recomputation
+      does not reduce and in fact slightly increases. **Measure the wrong thing and a
+      perfectly correct implementation reads as "no saving".**
+
+      ## The compute side
+
+      Recomputation happens during the backward, so \`forward FLOPs\` are unchanged and what
+      rises is the \`backward / forward\` ratio:
+
+      \`\`\`
+      without   backward / forward ≈ 2      (each gemm produces dX and dW)
+      with      backward / forward ≈ 3      (one extra full forward)
+      per step  6N  ->  8N
+      \`\`\`
+
+      **Rising forward FLOPs means the recompute leaked into the forward** — that is not
+      recomputation, that is wasted work.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | **Activations kept** | with / without <= **0.4** |
+      | backward / forward | Between **2.4 and 3.6** |
+      | Forward FLOPs | **Identical** to the non-recomputing run |
+      | **Gradients** | **Bit-identical** to the non-recomputing run |
+
+      That last row is worth stating: recomputation runs the same operators in the same
+      order, so results **should** be bit-identical, not merely close. A difference means a
+      missing detach, or that the recompute used a different input.
+    `
+  ),
+  checklist: [
+    t('边界张量在 mark 之前分配', 'The boundary tensor is allocated before the mark'),
+    t('重算那一遍从 detach 出来的叶子出发', 'The recompute starts from a detached leaf'),
+    t('重算跑在 enable_grad 里', 'The recompute runs under enable_grad'),
+    t('梯度与不重算逐位相同', 'Gradients are bit-identical to the non-recomputing run'),
+  ],
+  hints: [
+    t('Function.forward 已经在 no_grad 里了，前向那一遍不用自己加。',
+      'Function.forward already runs under no_grad; the forward pass needs nothing extra.'),
+    t('nt.autograd.backward(y, grad) 能从非标量出发 —— 这一关要的就是它。',
+      'nt.autograd.backward(y, grad) starts from a non-scalar, which is what this needs.'),
+    t('block 与 batch / seq 不是张量，apply 不会把它们算进输入 —— backward 只返回一份梯度。',
+      'block and batch/seq are not tensors, so apply ignores them; backward returns one gradient.'),
+  ],
+  pitfalls: [
+    t(code`
+      **重算那一遍直接用 \`ctx.x\`，没有 detach。** 新算出来的子图接回了原图，
+      于是反向沿着同一条路走两遍,**梯度正好翻倍**。
+      loss 照样降（只是等效学习率大了一倍），一切看起来正常。
+      这一关拿「与不重算逐位相同」把它抓出来。
+    `, code`
+      **Recomputing directly from \`ctx.x\` without detaching.** The new subgraph reconnects
+      to the original, so the backward walks the same path twice and **gradients double**.
+      The loss still falls (the effective learning rate merely doubled) and everything looks
+      normal. The bit-identity check against the non-recomputing run catches it.
+    `),
+    t(code`
+      **边界张量在 mark 之后分配。** \`nt.release(mark)\` 会把它一起放掉,
+      下一层拿到的是一块已经被回收的显存。
+      报出来的错是「张量已经被 release 掉了」,这次算是运气好，
+      竞技场有守卫；换个不查的实现，读到的就是别人的数据。
+    `, code`
+      **Allocating the boundary tensor after the mark.** \`nt.release(mark)\` frees it too,
+      and the next layer receives reclaimed memory. The error reads "this tensor was already
+      released" — which is the lucky outcome, since the arena checks. An implementation
+      without that guard would quietly read someone else's data.
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_DEEP_PY,
+      'recompute.py': code`
+        """第 18 关：激活重算。前向留边界，反向重新算一遍。"""
+        import nanotorch as nt
+        from nanotorch import functional as F
+
+
+        class Checkpoint(nt.autograd.Function):
+            @staticmethod
+            def forward(ctx, block, x, batch, seq):
+                ctx.block, ctx.x = block, x
+                ctx.batch, ctx.seq = batch, seq
+                # TODO: 边界张量在 mark 之前分配 -> mark -> 跑 block ->
+                #       把结果拷进边界张量 -> release 掉中间量
+                return block(x, batch, seq)
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                # TODO: detach 出一个干净的叶子 -> enable_grad 里重算 ->
+                #       nt.autograd.backward(y, grad_output) -> 返回叶子的梯度
+                return None
+
+
+        def checkpoint(block, x, batch, seq):
+            return Checkpoint.apply(block, x, batch, seq)
+
+
+        if __name__ == "__main__":
+            import kit
+            m = kit.LM(seed=1, wrap=checkpoint)
+            idx = nt.zeros((kit.B * kit.S,), role="data")
+            tgt = nt.zeros((kit.B * kit.S,), role="data")
+            idx.set_int_([i % kit.V for i in range(kit.B * kit.S)])
+            tgt.set_int_([(i + 1) % kit.V for i in range(kit.B * kit.S)])
+            loss = m(idx, tgt, kit.B, kit.S)
+            loss.backward()
+            print("loss %.6f" % loss.value)
+      `,
+    },
+    referenceFiles: {
+      'recompute.py': code`
+        """第 18 关的参考实现。"""
+        import nanotorch as nt
+        from nanotorch import functional as F
+
+
+        class Checkpoint(nt.autograd.Function):
+            @staticmethod
+            def forward(ctx, block, x, batch, seq):
+                ctx.block, ctx.x = block, x
+                ctx.batch, ctx.seq = batch, seq
+
+                # 边界张量要在 mark **之前**分配 —— 之后分配的话会被 release 一起放掉
+                out = nt.zeros(x.shape, x.dtype, name="ckpt.out")
+                mark = nt.mark()
+                # Function.forward 本来就跑在 no_grad 里，这一遍不建带
+                y = block(x, batch, seq)
+                out.copy_(y)
+                # 中间量一把放掉，只留边界
+                nt.release(mark)
+                return out
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                # detach：重算要从一个干净的叶子出发。
+                # 不 detach 的话新子图会接回原图，反向沿同一条路走两遍,梯度翻倍
+                xd = ctx.x.detach()
+                xd.requires_grad = True
+                with nt.enable_grad():
+                    y = ctx.block(xd, ctx.batch, ctx.seq)
+                # 起点不是标量，所以要用 autograd.backward 播种
+                nt.autograd.backward(y, grad_output)
+                # 块里参数的梯度在上面那一遍就累加好了（它们不是 apply 的输入）
+                return xd.grad
+
+
+        def checkpoint(block, x, batch, seq):
+            return Checkpoint.apply(block, x, batch, seq)
+
+
+        if __name__ == "__main__":
+            import kit
+            m = kit.LM(seed=1, wrap=checkpoint)
+            idx = nt.zeros((kit.B * kit.S,), role="data")
+            tgt = nt.zeros((kit.B * kit.S,), role="data")
+            idx.set_int_([i % kit.V for i in range(kit.B * kit.S)])
+            tgt.set_int_([(i + 1) % kit.V for i in range(kit.B * kit.S)])
+            loss = m(idx, tgt, kit.B, kit.S)
+            loss.backward()
+            print("loss %.6f" % loss.value)
+      `,
+    },
+  },
+  specs: [
+    spec('recompute.spec.ts', code`
+      ${LAB}
+
+      function setup() {
+        lab.py(\`
+      import sys, json
+      sys.path.insert(0, "/lab")
+      import importlib, kit, recompute
+      importlib.reload(kit)
+      importlib.reload(recompute)
+      import nanotorch as nt
+      from nanotorch import functional as F
+
+      _state = {}
+
+      def step_forward(use_ckpt):
+          """跑到反向之前就停 —— 判定要在这里读「还为反向留着多少激活」。"""
+          m = kit.LM(seed=1, wrap=recompute.checkpoint if use_ckpt else None)
+          idx = nt.zeros((kit.B * kit.S,), role="data", name="idx")
+          tgt = nt.zeros((kit.B * kit.S,), role="data", name="tgt")
+          _bi = [(i * 7 + 3) % kit.V for i in range(kit.B * kit.S)]
+          idx.set_int_(_bi)
+          tgt.set_int_([(v + 1) % kit.V for v in _bi])
+          for p in m.parameters():
+              p.ensure_grad()
+          base = nt.mark()
+          nt.reset_peak()
+          m.zero_grad()
+          nt.phase("forward")
+          loss = m(idx, tgt, kit.B, kit.S)
+          nt.phase("other")
+          _state.update({"m": m, "loss": loss, "base": base})
+          return loss.value
+
+      def step_backward():
+          m, loss = _state["m"], _state["loss"]
+          loss.backward()
+          grads = []
+          for _, p in m.named_parameters():
+              grads.extend(p.grad.tolist())
+          nt.release(_state["base"])
+          return grads
+      \`);
+      }
+
+      /** 跑一整步，中途把「留存的激活」读出来 */
+      function step(useCkpt) {
+        const m0 = lab.metrics();
+        const loss = Number(lab.py('step_forward(' + (useCkpt ? 'True' : 'False') + ')'));
+        // 前向刚完、反向还没开始 —— 这一刻占着的激活就是「为反向留着的」
+        const kept = lab.metrics().memory.currentActivationBytes;
+        const grads = JSON.parse(String(lab.py('json.dumps(step_backward())')));
+        const m1 = lab.metrics();
+        return {
+          loss, kept, grads,
+          fwd: m1.flops.forward - m0.flops.forward,
+          bwd: m1.flops.backward - m0.flops.backward,
+        };
+      }
+
+      describe('激活重算', () => {
+        it('前向为反向留着的激活降到四成以下', () => {
+          setup();
+          const plain = step(false);
+          const ck = step(true);
+          const ratio = ck.kept / plain.kept;
+          console.log(
+            '不重算留着 ' + (plain.kept / 1024).toFixed(0) + ' KB，'
+            + '重算留着 ' + (ck.kept / 1024).toFixed(0) + ' KB，比 ' + ratio.toFixed(3)
+            + '（模型 ' + Number(lab.py('kit.L')) + ' 层）'
+          );
+          lab.publish('memory.keptRatio', ratio);
+          expect(plain.kept).toBeGreaterThan(0);
+          expect(ratio).toBeLessThan(0.4);
+        });
+
+        /*
+         * 重算跑的是同一串算子、同一个顺序 —— 结果**应当**逐位相同。
+         * 差了一般是 detach 漏了：新子图接回原图，反向沿同一条路走两遍，梯度翻倍。
+         */
+        it('梯度与不重算逐位相同', () => {
+          setup();
+          const plain = step(false);
+          const ck = step(true);
+          let mismatch = 0;
+          let worst = 0;
+          for (let i = 0; i < plain.grads.length; i++) {
+            if (plain.grads[i] !== ck.grads[i]) mismatch += 1;
+            worst = Math.max(worst, Math.abs(plain.grads[i] - ck.grads[i]));
+          }
+          console.log(
+            'loss ' + plain.loss + ' / ' + ck.loss + '；'
+            + plain.grads.length + ' 个梯度里对不上的 ' + mismatch
+            + ' 个，最大差 ' + worst.toExponential(2)
+          );
+          lab.publish('grad.recomputeMismatches', mismatch);
+          expect(plain.grads.length).toBeGreaterThan(1000);
+          expect(plain.loss).toBe(ck.loss);
+          expect(mismatch).toBe(0);
+        });
+
+        /*
+         * 重算发生在反向阶段，所以前向 FLOPs 一点不该变，
+         * 涨的是反向 / 前向那个比：2 -> 3。
+         * 前向涨了说明重算跑到前向里去了 —— 那不是重算，是白算。
+         */
+        it('前向 FLOPs 不变，反向 / 前向从 2 涨到 3', () => {
+          setup();
+          const plain = step(false);
+          const ck = step(true);
+          const r0 = plain.bwd / plain.fwd;
+          const r1 = ck.bwd / ck.fwd;
+          console.log(
+            '不重算 前向 ' + plain.fwd + ' 反向 ' + plain.bwd + ' 比 ' + r0.toFixed(3)
+            + '；重算 前向 ' + ck.fwd + ' 反向 ' + ck.bwd + ' 比 ' + r1.toFixed(3)
+          );
+          lab.publish('flops.backwardOverForward', r1);
+          lab.publish('flops.forwardDelta', ck.fwd - plain.fwd);
+          expect(ck.fwd).toBe(plain.fwd);
+          expect(r0).toBeGreaterThan(1.8);
+          expect(r0).toBeLessThan(2.2);
+          expect(r1).toBeGreaterThan(2.4);
+          expect(r1).toBeLessThan(3.6);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.memory.keptRatio', op: 'lte', value: 0.4,
+      zh: '前向留给反向的激活（重算 / 不重算）',
+      en: 'activations kept for the backward (with / without recomputation)',
+      dimension: 'efficiency',
+    }),
+    gate({
+      metric: 'llm.grad.recomputeMismatches', op: 'eq', value: 0,
+      zh: '与不重算对不上的梯度个数', en: 'gradients differing from the non-recomputing run',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.flops.forwardDelta', op: 'eq', value: 0,
+      zh: '前向 FLOPs 的变化（重算不该落在前向里）',
+      en: 'change in forward FLOPs (recomputation must not land in the forward)',
+      dimension: 'efficiency',
+    }),
+    gate({
+      metric: 'llm.flops.backwardOverForward', op: 'lte', value: 3.6,
+      zh: '重算之后的反向 / 前向（理论 3）',
+      en: 'backward over forward with recomputation (theory says 3)', dimension: 'efficiency',
+    }),
+  ],
+  focus: ['efficiency', 'correctness'],
+  extension: t(
+    code`
+      这一关是「整层重算」，最省显存也最费算力。真实框架有更细的档位：
+      **选择性重算**只重算便宜的那些（归一化、激活函数），
+      把贵的（注意力那块 \`O(S²)\`）留着,显存降大半而算力只多一点。
+      \`torch.utils.checkpoint\` 的 \`SAC\`（selective activation checkpointing）
+      就是干这个的。
+
+      另一条完全不同的路是**别产生那么多激活**。
+      FlashAttention 不存那块 \`[B, H, S, S]\` 的注意力矩阵 ——
+      它分块地算，边算边把结果累加出去。省下的不是「重算换来的」，
+      是**根本没生成**。这两条可以叠加，而 FlashAttention 那条更划算。
+
+      顺带回答一个常见的困惑：**重算和梯度累积不是一回事**。
+      重算省的是激活（一次前向内部），梯度累积省的是 batch 那一维
+      （多个小 batch 攒一次更新）。两者常常一起用，解决的是不同的瓶颈。
+    `,
+    code`
+      This stage recomputes whole layers, which saves the most memory and costs the most
+      compute. Real frameworks offer finer settings: **selective recomputation** recomputes
+      only the cheap parts (normalisation, activation functions) while keeping the expensive
+      ones (attention's \`O(S²)\` block) — most of the memory saving at a fraction of the
+      compute. That is what \`torch.utils.checkpoint\`'s SAC (selective activation
+      checkpointing) does.
+
+      A completely different route is **not producing the activations at all**.
+      FlashAttention never materialises the \`[B, H, S, S]\` attention matrix; it computes
+      in tiles and accumulates as it goes. The saving is not "bought back by recomputing" —
+      the data is **never generated**. The two compose, and FlashAttention's route is the
+      better bargain.
+
+      One common confusion worth settling: **recomputation and gradient accumulation are not
+      the same thing.** Recomputation saves activations within one forward pass; gradient
+      accumulation saves along the batch dimension (several small batches per update). They
+      are often used together and address different bottlenecks.
+    `
+  ),
+};
+
 /* ------------------------------------------------------------------ */
 
 module.exports = {
@@ -8227,5 +9353,6 @@ module.exports = {
     STAGE_ROPE, STAGE_NORM, STAGE_BLOCK, STAGE_KVCACHE,
     STAGE_MANUAL_BWD, STAGE_ENGINE, STAGE_MODEL_BWD, STAGE_ADAMW,
     STAGE_SCHEDULE, STAGE_CLIP, STAGE_PACKING, STAGE_PRETRAIN,
+    STAGE_AMP, STAGE_RECOMPUTE,
   ],
 };

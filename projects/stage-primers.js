@@ -2768,6 +2768,46 @@ const primers = {
         'One last habit worth forming: before a real run, do an `overfit a tiny batch` check. Train on 8 examples for 200 steps and the loss should approach zero. If it does not, the model or the backward has a bug. The check takes seconds and saves days.'
       )
     ),
+    'mixed-precision': t(
+      p(
+        '浮点数用位数换两样东西：`动态范围`（能表示多大到多小）和`精度`（相邻两个数隔多远）。指数位管范围，尾数位管精度。fp32 是 8 + 23。',
+        '训练时把 32 位降到 16 位，显存和带宽直接减半。问题是砍哪边的位。`fp16` 砍指数留尾数（5 + 10），`bf16` 砍尾数留指数（8 + 7）。',
+        'bf16 的精度**明显更差**,相对分辨率只有 3.9e-3，fp16 是 4.9e-4。但今天训练的默认选择是 bf16。',
+        '原因是训练里真正会出事的是`范围`不是精度。梯度动辄跨十几个数量级：fp16 的上限 65504 很容易撞上（撞上就是 inf），下限那头则悄悄下溢成 0。而 bf16 的指数位和 fp32 一样多,范围一模一样，换句话说**能表示的东西一个不少，只是每个都粗一点**。',
+        '要用 fp16 就得配一整套 `GradScaler`：loss 先乘一个大系数把梯度抬进可表示的区间，反向完再除回去，撞到 inf 就跳过这一步并把系数减半。bf16 什么都不用配。**省掉的复杂度才是它真正的价值。**',
+        '还有一条铁律：`主权重留在 fp32`。低精度只用在算的时候,参数本身、梯度、优化器状态都是 fp32。因为更新量常常在 1e-6 量级，而 bf16 在 1.0 附近的分辨率是 3.9e-3，加上去等于没加。就地把参数量化掉的模型会**静静地停止学习**，loss 曲线变成一条水平线而不报任何错。',
+        '最后：舍入这个操作几乎处处导数为 0，照实求导梯度全是 0。标准做法是`直通估计`,前向照舍，反向当它是恒等。'
+      ),
+      p(
+        'A floating-point format spends its bits on two things: `dynamic range` (how large and how small) and `precision` (how far apart adjacent values are). Exponent bits buy range, mantissa bits buy precision. fp32 is 8 + 23.',
+        'Dropping from 32 to 16 bits during training halves memory and bandwidth. The question is which half to cut. `fp16` cuts the exponent and keeps mantissa (5 + 10); `bf16` cuts the mantissa and keeps exponent (8 + 7).',
+        'bf16 is **noticeably less precise**,a relative resolution of 3.9e-3 against fp16\'s 4.9e-4. Yet bf16 is the default for training today.',
+        'The reason is that what breaks training is `range`, not precision. Gradients span a dozen orders of magnitude: fp16\'s ceiling of 65504 is easy to hit (and hitting it means inf), while the low end quietly underflows to zero. bf16 has fp32\'s exponent width,identical range. In other words **nothing becomes unrepresentable; everything is just coarser**.',
+        'Using fp16 requires the whole `GradScaler` apparatus: multiply the loss by a large factor to lift gradients into representable territory, divide it back after the backward, and on hitting an inf skip the step and halve the factor. bf16 needs none of it. **The complexity it removes is its real value.**',
+        'One more rule: `master weights stay in fp32`. Low precision applies only to the arithmetic,parameters, gradients and optimiser state remain fp32. Updates often sit around 1e-6 while bf16\'s resolution near 1.0 is 3.9e-3, so adding one changes nothing. A model whose parameters were quantised in place **silently stops learning**, flattening the loss curve without raising anything.',
+        'Finally: rounding has zero derivative almost everywhere, so differentiating it honestly gives zero gradients. The standard answer is the `straight-through estimator`,round in the forward, identity in the backward.'
+      )
+    ),
+    'activation-recompute': t(
+      p(
+        '前向算出来的中间量，反向要用,所以它们得一直留到反向。这些`激活`在真实训练里是显存的大头，而且正比于层数：层数翻倍，留着的激活也翻倍。',
+        '`激活重算`换了个做法：前向只留每层的边界，中间量算完就扔；反向走到那一层时重新算一遍。显存降一个量级，代价是多一遍前向的算力。',
+        '这是一笔**明码标价的交易**：一步训练的浮点运算量从大约 6N 涨到 8N（N 是参数量），换来激活显存降到几分之一。在显存不够的档位上，不换就根本训不了,所以它不是「优化」，是「能不能跑」。',
+        '实现上有两个容易错的地方。第一是`边界张量要先分配`：中间量是按标记一把回收的，边界张量落在标记之后的话会被一起放掉，下一层拿到的是已经回收的显存。',
+        '第二是重算那一遍**必须从一个 detach 出来的叶子出发**。不 detach 的话，新算出来的子图会接回原来的图，反向沿同一条路走两遍,**梯度正好翻倍**。而 loss 照样降（等效学习率大了一倍），看起来完全正常。抓它的办法是和不重算的结果**逐位**比：同一串算子、同一个顺序，本来就该一位不差。',
+        '量的时候也有个坑：该看的是`前向结束、反向开始之前`还留着多少，不是整步的峰值。峰值里混着反向自己的临时量，那部分重算不但不省还略高,量错对象的话，一个完全正确的实现会显示成「没省」。',
+        '还有一条完全不同的路：**别产生那么多激活**。FlashAttention 不存那块注意力矩阵，分块地算、边算边累加。省下的不是重算换来的，是根本没生成。两条可以叠加，而后者更划算。'
+      ),
+      p(
+        'The forward pass produces intermediates the backward needs, so they stay alive until then. These `activations` dominate memory in real training and scale with depth: double the layers and double what is held.',
+        '`Activation recomputation` takes another route: the forward keeps only each layer\'s boundary and discards the middle; when the backward arrives it computes the layer again. Memory drops by an order of magnitude at the cost of one extra forward.',
+        'It is a **transparently priced trade**: floating-point work per training step rises from about 6N to 8N (N being the parameter count) in exchange for a fraction of the activation memory. At memory-bound scales, not trading means not training,so this is not an optimisation but a precondition.',
+        'Two things are easy to get wrong. First, the `boundary tensor must be allocated first`: intermediates are reclaimed back to a mark, and a boundary tensor allocated after that mark gets freed with them, handing the next layer reclaimed memory.',
+        'Second, the recompute **must start from a detached leaf**. Without detaching, the new subgraph reconnects to the original and the backward walks the same path twice,**gradients double**. The loss still falls (the effective learning rate merely doubled) and nothing looks wrong. The way to catch it is a **bit-exact** comparison against the non-recomputing run: same operators, same order, so the results should match exactly.',
+        'Measurement has its own trap: what matters is how much is held `after the forward and before the backward`, not the peak across the whole step. The peak mixes in the backward\'s own temporaries, which recomputation does not reduce and slightly increases,measure the wrong thing and a perfectly correct implementation reads as "no saving".',
+        'And a wholly different route: **do not produce the activations at all**. FlashAttention never stores the attention matrix, computing in tiles and accumulating as it goes. That saving is not bought back by recomputing; the data is never generated. The two compose, and the latter is the better bargain.'
+      )
+    ),
   },
 };
 

@@ -22,6 +22,11 @@ def mark():
     return _B.mark()
 
 
+def reset_peak():
+    """把激活峰值清零。量「这一段的峰值」时用 —— 参数和优化器状态是上一段就在的。"""
+    _B.reset_peak()
+
+
 def release(m):
     _B.release(m)
 

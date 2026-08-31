@@ -26,6 +26,8 @@ export interface PythonBridge {
   /* ---- 张量的生命周期 ---- */
   alloc(count: number, dtype: DType, role: TensorRole, name: string): number;
   mark(): number;
+  /** 把激活峰值清零（不动当前占用）—— 量「这一段的峰值」时用 */
+  reset_peak(): void;
   release(mark: number): void;
   /* ---- 小批量数据进出（大块永远不过边界）---- */
   set_i32(id: number, values: ArrayLike<number>): void;
@@ -144,6 +146,7 @@ export function createPythonBridge(rt: Runtime): PythonBridge {
     alloc(count, dtype, role, name) {
       return arena.zeros([count], dtype, role, name).id;
     },
+    reset_peak: () => arena.resetPeak(),
     mark: () => arena.mark(),
     release: (m) => arena.release(m),
 
