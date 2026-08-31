@@ -100,11 +100,21 @@ export function buildStageFiles(project: EngineeringProject, stageIndex: number)
   return files;
 }
 
-/** 一关的实战文件（机器磁盘上的初始内容）。code 形态没有这一项，返回空对象 */
+/**
+ * 一关的实战文件（机器磁盘上的初始内容）。code 形态没有这一项，返回空对象。
+ *
+ * **新增一种实战形态就要在这里加一行。** 漏了的话草稿存不住 ——
+ * 学员改的文件切走再切回来就变回初始内容，而且不报任何错。
+ * gpu 形态曾经就是这么漏掉的（#108）。
+ */
 export function labFilesOf(stage: ProjectStage | undefined): Record<string, string> {
   if (!stage) return {};
-  const lab = stage as ProjectStage & { ops?: { files?: Record<string, string> }; gpu?: { files?: Record<string, string> } };
-  return { ...(lab.ops?.files ?? {}), ...(lab.gpu?.files ?? {}) };
+  const lab = stage as ProjectStage & {
+    ops?: { files?: Record<string, string> };
+    gpu?: { files?: Record<string, string> };
+    train?: { files?: Record<string, string> };
+  };
+  return { ...(lab.ops?.files ?? {}), ...(lab.gpu?.files ?? {}), ...(lab.train?.files ?? {}) };
 }
 
 /**
@@ -157,17 +167,18 @@ export function allProjectFiles(project: EngineeringProject): Record<string, str
   for (const stage of project.stages || []) {
     collect(stage.starterFiles);
     /*
-     * 实战关卡的文件放在 stage.ops.files / stage.gpu.files 里
-     * （机器磁盘上的 manifest、kernel 源码），一并收进来 ——
+     * 实战关卡的文件放在 stage.ops / stage.gpu / stage.train 的 files 里
+     * （机器磁盘上的 manifest、kernel 源码、训练脚本），一并收进来 ——
      * 这个函数的契约是「这个工程有的全部文件」，少一类就不成立。
      *
-     * **注意别再把草稿的清理逻辑挂在这上面。** 曾经是那样的：ops 这一行的旧注释
-     * 写着「不收进来草稿会被当成孤儿清掉」，而 gpu 那一行漏了整整一个工作台，
-     * 于是 CUDA 关卡改的 kernel 每次载入都被清空。现在实战文件的草稿键带关卡 id，
-     * 由 pruneDrafts 里的 labKnown 单独比对，不再走这里。
+     * **走 labFilesOf 而不是在这里逐个形态列一遍**：原来这里是两行硬编码，
+     * 加 gpu 的时候漏了一整个工作台，于是 CUDA 关卡改的 kernel 每次载入都被清空。
+     * 现在「哪些形态有实战文件」只有 labFilesOf 一处知道，漏不了第二次。
+     *
+     * **注意别再把草稿的清理逻辑挂在这上面。** 实战文件的草稿键带关卡 id，
+     * 由 pruneDrafts 里的 labKnown 单独比对，不走这里。
      */
-    for (const [path, content] of Object.entries(stage.ops?.files ?? {})) files[path] = content;
-    for (const [path, content] of Object.entries(stage.gpu?.files ?? {})) files[path] = content;
+    for (const [path, content] of Object.entries(labFilesOf(stage))) files[path] = content;
   }
 
   for (const variant of Object.values(project.variants || {})) {

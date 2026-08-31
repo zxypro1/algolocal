@@ -32,6 +32,12 @@ const OpsWorkspace = dynamic(() => import('../../src/components/opslab/OpsWorksp
  */
 const GpuWorkspace = dynamic(() => import('../../src/components/gpulab/GpuWorkspace'), { ssr: false });
 
+/**
+ * train 工作台同样按需加载：它将带着 xterm、Monaco、13.5MB 的 Pyodide
+ * 与我们的 WASM 算子核。只做代码关卡的人不该付这份代价。
+ */
+const TrainWorkspace = dynamic(() => import('../../src/components/llmlab/TrainWorkspace'), { ssr: false });
+
 export default function ProjectWorkspacePage() {
   const router = useRouter();
   const { id } = router.query;
@@ -115,6 +121,9 @@ export default function ProjectWorkspacePage() {
   }
   if (kind === 'gpu') {
     return <GpuWorkspace session={session} registerClearResults={registerClearResults} />;
+  }
+  if (kind === 'train') {
+    return <TrainWorkspace session={session} registerClearResults={registerClearResults} />;
   }
 
   /**
