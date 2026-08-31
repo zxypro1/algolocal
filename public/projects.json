@@ -28954,6 +28954,260 @@
           "zh": "每个算子都知道自己那一步的反向之后，还缺一个`调度`：谁先算、谁后算、谁的梯度什么时候算齐。这就是自动微分引擎干的事,十几行代码，但顺序错了不会报错，只会给出偏小的梯度。\n\n前向的每一步都在偷偷记账：算出来的张量记着「我是谁算出来的」（parents）和「怎么把梯度散回去」（backward 函数）。这张记账本叫`带`（tape），反向就是倒着读它一遍。\n\n关键约束是：一个节点要往上散梯度之前，它自己的梯度必须**已经攒齐**,所有用到它的下游都得先算完。满足这个约束的顺序就是`拓扑序`，而后序遍历天然给出一个。\n\n分水岭是`菱形图`:同一个中间结果被两处用到。这时它的梯度是两条路的**和**。一个在遍历时没有去重的实现，会把这个节点的 backward 调两次，梯度正好翻倍,而在一条直链上完全正常。所以「只在链上验过」是不够的。\n\n播种也别忘：起点的梯度是 1，因为 `d(loss)/d(loss) = 1`。少了这一步整张图的梯度全是 0,不报错，表现和「学习率设成了 0」一模一样。\n\n你写的这十几行就是 PyTorch autograd 的骨架。真实的那个多了跨线程的依赖计数、`retain_graph`、钩子、以及对不需要梯度的子图的剪枝,骨架是一样的。",
           "en": "Once every operator knows its own backward step, one thing is still missing: `scheduling`,who goes first, who goes last, and when a gradient is complete. That is what an autograd engine does. It is a dozen lines, and getting the order wrong raises no error; it simply produces gradients that are too small.\n\nEvery forward step quietly keeps a ledger: each resulting tensor records who produced it (its parents) and how to scatter gradients back (its backward function). That ledger is the `tape`, and the backward pass reads it in reverse.\n\nThe key constraint is that a node may only scatter once its own gradient is **complete**,every downstream user must have finished. An order satisfying that is a `topological order`, and a post-order traversal produces one for free.\n\nThe dividing line is the `diamond`: one intermediate used in two places. Its gradient is the **sum** of both paths. A traversal without deduplication calls that node backward twice and doubles the gradient,while behaving perfectly on a straight chain. Testing only on a chain is not enough.\n\nDo not forget to seed: the root gradient is 1, because `d(loss)/d(loss) = 1`. Without it every gradient in the graph stays zero,no error, and symptoms identical to setting the learning rate to zero.\n\nThe dozen lines you write here are the skeleton of PyTorch autograd. The real one adds cross-thread dependency counting, `retain_graph`, hooks, and pruning of subgraphs that need no gradient,the skeleton is the same."
         }
+      },
+      {
+        "id": "model-backward",
+        "title": {
+          "zh": "整个模型的反向 —— 每一个参数都得对",
+          "en": "The whole model backward — every parameter has to be right"
+        },
+        "goal": {
+          "zh": "前面所有零件都在 `parts.py` 里了。这一关在 `lm.py` 里把它们接成一个\n**能训的语言模型**，并让每一个参数的梯度都经得起查。\n\n```python\nclass LM(nn.Module):\n    def __init__(self, vocab, dim, n_layer, n_head, n_kv_head, seed, dtype=\"f32\"):\n        # 嵌入表 -> n_layer 个 Block -> 最后一次归一化 -> 输出头\n    def forward(self, idx, targets, batch, seq):\n        \"\"\"返回一个标量 loss。\"\"\"\n```\n\n## 权重绑定\n\n输出头**用嵌入表本身**，不另开一块：`F.linear_tied(x, self.embed, ...)`。\nGPT-2 起就是这么做的。在小模型上这省掉的是一大块 —— 本关\n`vocab · dim = 256`，占总参数的 4%；到 vocab 15 万的模型上，\n不绑定的话光输出头就是几亿个参数。\n\n注意 `parameters()` **不许把它数两遍**。\n\n## 怎么算过\n\n| | 要求 |\n| --- | --- |\n| 参数量 | 恰好 **6480**（解析式见下） |\n| **每一个参数张量都查过** | `checkedTensors` = **20** |\n| 梯度检验 | f64 中心差分，最大相对误差 ≤ 2e-3 |\n| **没有哪个张量的梯度全是 0** | 全零的张量数 = 0 |\n| 反向的代价 | `backward / forward` FLOPs ≤ **2.2** |\n\n```\n嵌入 16·16 = 256\n每层 注意力 768 + 前馈 3·16·48 = 2304 + 两个 norm 32 = 3104\n2 层 6208，加最后一个 norm 16，加嵌入 256  ->  6480\n张量数 1 + 2·9 + 1 = 20\n```\n\n## 「梯度全是 0」为什么单独查\n\n一个模块建出来了、前向也用上了，但**没被登记进 `parameters()`** ——\n这是最常见的一类错。表现是：模型跑得通，loss 也降，只是那一部分从来没被更新过。\n放进普通 `list` 的子模块就是这样，`nn.ModuleList` 存在的全部理由就是它。\n\n另一种是某个分支根本没接进计算图（写了但没用上），梯度自然是 0。\n两种都不报错，两种都只能靠**逐张量查一遍**发现。\n\n## `backward / forward ≤ 2.2` 是什么意思\n\n理论值是 **2**：每个矩阵乘在反向里要算两个（`dX` 和 `dW`），\n而逐元素的那些算子反向和前向同阶。留 0.2 的余量给\nsoftmax 反向、归一化反向这类稍贵一点的。\n\n**明显超过 2.2 说明反向里重算了前向。** 这个错不会让梯度出问题 ——\n结果完全正确，只是算力白花了一大半，而在 loss 曲线上一点痕迹都没有。\n",
+          "en": "All the earlier pieces live in `parts.py`. This stage assembles them in `lm.py`\ninto a **trainable language model** whose every parameter gradient survives checking.\n\n```python\nclass LM(nn.Module):\n    def __init__(self, vocab, dim, n_layer, n_head, n_kv_head, seed, dtype=\"f32\"):\n        # embedding -> n_layer Blocks -> a final normalisation -> output head\n    def forward(self, idx, targets, batch, seq):\n        \"\"\"Returns a scalar loss.\"\"\"\n```\n\n## Weight tying\n\nThe output head **is the embedding table**, not a separate matrix:\n`F.linear_tied(x, self.embed, ...)`. GPT-2 onwards does this. Here\n`vocab · dim = 256` is 4% of the parameters; at a 150k vocabulary an untied output\nhead alone would be hundreds of millions.\n\nNote that `parameters()` must **not count it twice**.\n\n## What counts as passing\n\n| | Requirement |\n| --- | --- |\n| Parameters | Exactly **6480** (formula below) |\n| **Every parameter tensor checked** | `checkedTensors` = **20** |\n| Gradient check | f64 central differences, max relative error ≤ 2e-3 |\n| **No tensor with an all-zero gradient** | zero-gradient tensors = 0 |\n| Cost of the backward | `backward / forward` FLOPs ≤ **2.2** |\n\n```\nembedding 16·16 = 256\nper layer: attention 768 + MLP 3·16·48 = 2304 + two norms 32 = 3104\n2 layers 6208, plus the final norm 16, plus the embedding 256  ->  6480\ntensors 1 + 2·9 + 1 = 20\n```\n\n## Why \"all-zero gradient\" gets its own check\n\nA module gets built and used in the forward pass, but is **never registered in\n`parameters()`** — the most common failure of its kind. The model runs, the loss\nfalls, and that part is simply never updated. Submodules dropped into a plain\n`list` behave exactly this way; avoiding it is the entire reason `nn.ModuleList`\nexists.\n\nThe other variant is a branch that never joined the graph at all (written but not\nused), whose gradient is naturally zero. Neither raises an error, and only a\n**per-tensor sweep** finds them.\n\n## What `backward / forward ≤ 2.2` means\n\nThe theoretical value is **2**: every matmul needs two in the backward (`dX` and\n`dW`), while elementwise operators cost the same either way. The 0.2 of slack covers\nslightly pricier backwards like softmax and normalisation.\n\n**Clearly above 2.2 means the backward recomputed the forward.** That bug does not\ncorrupt gradients — results stay perfectly correct, more than half the compute is\nsimply wasted, and no loss curve shows a trace of it.\n"
+        },
+        "checklist": [
+          {
+            "zh": "参数量恰好等于解析式，权重绑定没被数两遍",
+            "en": "The parameter count matches the formula; tying is not double-counted"
+          },
+          {
+            "zh": "每一个参数张量的梯度都查过且非零",
+            "en": "Every parameter tensor has a checked, non-zero gradient"
+          },
+          {
+            "zh": "f64 下整模型的梯度检验通过",
+            "en": "The whole-model f64 gradient check passes"
+          },
+          {
+            "zh": "反向的 FLOPs 不超过前向的 2.2 倍",
+            "en": "Backward FLOPs stay within 2.2x of the forward"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "blocks 用 nn.ModuleList 装 —— 普通 list 里的子模块不会被 parameters() 数到。",
+            "en": "Hold the blocks in nn.ModuleList; submodules in a plain list never reach parameters()."
+          },
+          {
+            "zh": "F.linear_tied(x, table, rows, dim, vocab) 就是「输出头 = 嵌入表转置」。",
+            "en": "F.linear_tied(x, table, rows, dim, vocab) is exactly \"output head = embedding transposed\"."
+          },
+          {
+            "zh": "dtype 要一路传下去 —— 混着 f32 和 f64 的话矩阵乘会当场报错。",
+            "en": "Thread dtype all the way down; mixing f32 and f64 makes the matmul raise immediately."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**把 blocks 放进普通 `list`。** 前向完全正常，loss 也降 ——\n降的是嵌入表和最后那个 norm 在学。中间那些层**一次都没被更新过**，\n而且不报任何错。这一关逐张量查梯度就是为了它。\n",
+            "en": "**Putting the blocks in a plain `list`.** The forward pass is fine and the loss\nfalls — because the embedding and the final norm are learning. The middle layers are\n**never updated once**, and nothing raises. The per-tensor gradient sweep exists for\nthis.\n"
+          },
+          {
+            "zh": "**输出头另开一块权重。** 这不是错，只是没绑定 —— 参数量对不上，\n而且在真实尺度上多出来的是几亿个参数。\n反过来，绑定了却让 `parameters()` 数了两遍也是个坑：\n优化器会把同一份权重更新两次，等效于那一块的学习率翻倍。\n",
+            "en": "**Allocating a separate output head.** Not wrong, just untied — the parameter count\nmisses, and at real scale that is hundreds of millions of extra parameters. The\nreverse trap is tying it but letting `parameters()` count it twice: the optimiser\nupdates the same weights twice, effectively doubling the learning rate there.\n"
+          }
+        ],
+        "train": {
+          "files": {
+            "parts.py": "\"\"\"前面几关验收过的零件。这一关直接用。\n\n和第 7 关那份比，这里有两处变化：\n\n1. 每个构造函数多了一个 `dtype` —— 对应 PyTorch 的 `model.double()`。\n   梯度检验必须在 f64 上做，所以模型得能整体切过去。\n\n2. **权重按扇入初始化**：`std = fan_in ** -0.5`，而不是到处写 0.02。\n   这是第 6 关那条结论的直接应用 —— 0.02 是给 `dim = 768` 调的\n   （`0.02 · sqrt(768) ≈ 0.55`），搬到 `dim = 16` 上支路输出的量级只剩 0.08，\n   残差流几乎不动。**初始化的尺度得跟着宽度走。**\n\"\"\"\nimport math\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\n\n\ndef build_tables(positions, head_dim, base=10000.0, dtype=\"f32\"):\n    half = head_dim // 2\n    cos = nt.zeros((len(positions), half), dtype, role=\"data\", name=\"rope.cos\")\n    sin = nt.zeros((len(positions), half), dtype, role=\"data\", name=\"rope.sin\")\n    cv, sv = [], []\n    for p in positions:\n        for i in range(half):\n            theta = p * (base ** (-2.0 * i / head_dim))\n            cv.append(math.cos(theta))\n            sv.append(math.sin(theta))\n    cos.set_(cv)\n    sin.set_(sv)\n    return cos, sin\n\n\nclass RMSNorm(nn.Module):\n    def __init__(self, dim, eps=1e-5, dtype=\"f32\"):\n        super().__init__()\n        self.dim, self.eps = dim, eps\n        self.weight = nt.parameter((dim,), None, 0.0, \"norm.weight\", dtype=dtype)\n\n    def forward(self, x, rows=0):\n        return F.rms_norm(x, self.weight, self.eps)\n\n\nclass RopeAttention(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed, base=10000.0, dtype=\"f32\"):\n        super().__init__()\n        self.dim, self.n_head, self.n_kv_head = dim, n_head, n_kv_head\n        self.head_dim = dim // n_head\n        self.base = base\n        self.dtype = dtype\n        hd = self.head_dim\n        self.wq = nt.parameter((dim, n_head * hd), seed + 1, dim ** -0.5, \"wq\", dtype=dtype)\n        self.wk = nt.parameter((dim, n_kv_head * hd), seed + 2, dim ** -0.5, \"wk\", dtype=dtype)\n        self.wv = nt.parameter((dim, n_kv_head * hd), seed + 3, dim ** -0.5, \"wv\", dtype=dtype)\n        self.wo = nt.parameter((n_head * hd, dim), seed + 4, (n_head * hd) ** -0.5, \"wo\", dtype=dtype)\n\n    def forward(self, x, batch, seq, offset=0):\n        rows, hd = batch * seq, self.head_dim\n        q = F.linear(x, self.wq)\n        k = F.linear(x, self.wk)\n        v = F.linear(x, self.wv)\n        cos, sin = build_tables(list(range(offset, offset + seq)), hd, self.base, self.dtype)\n        q = F.rope(q, cos, sin, batch, seq, self.n_head, hd)\n        k = F.rope(k, cos, sin, batch, seq, self.n_kv_head, hd)\n        scores = F.attn_scores(q, k, batch, seq, seq, self.n_head, self.n_kv_head, hd)\n        valid = F.causal_valid(batch, self.n_head, seq, offset)\n        probs = F.softmax(scores, batch * self.n_head * seq, seq, valid)\n        out = F.attn_apply(\n            probs, v, batch, seq, seq, self.n_head, self.n_kv_head, hd,\n            out_shape=(rows, self.n_head * hd)\n        )\n        return F.linear(out, self.wo)\n\n\ndef swiglu_hidden(dim, multiple_of=8):\n    hidden = int(2 * (4 * dim) / 3)\n    return (hidden + multiple_of - 1) // multiple_of * multiple_of\n\n\nclass SwiGLU(nn.Module):\n    def __init__(self, dim, hidden, seed, dtype=\"f32\"):\n        super().__init__()\n        self.dim, self.hidden = dim, hidden\n        self.w_gate = nt.parameter((dim, hidden), seed + 1, dim ** -0.5, \"w_gate\", dtype=dtype)\n        self.w_up = nt.parameter((dim, hidden), seed + 2, dim ** -0.5, \"w_up\", dtype=dtype)\n        self.w_down = nt.parameter((hidden, dim), seed + 3, hidden ** -0.5, \"w_down\", dtype=dtype)\n\n    def forward(self, x, rows=0):\n        return F.linear(F.swiglu(F.linear(x, self.w_gate), F.linear(x, self.w_up)), self.w_down)\n\n\nclass Block(nn.Module):\n    def __init__(self, dim, n_head, n_kv_head, seed, n_layer=1, dtype=\"f32\"):\n        super().__init__()\n        self.dim, self.n_layer = dim, n_layer\n        self.norm1 = RMSNorm(dim, dtype=dtype)\n        self.attn = RopeAttention(dim, n_head, n_kv_head, seed, dtype=dtype)\n        self.norm2 = RMSNorm(dim, dtype=dtype)\n        self.mlp = SwiGLU(dim, swiglu_hidden(dim), seed + 10, dtype=dtype)\n\n    def forward(self, x, batch, seq, offset=0):\n        rows = batch * seq\n        scale = (2.0 * self.n_layer) ** -0.5\n        x = F.add(x, F.scale(self.attn(self.norm1(x, rows), batch, seq, offset), scale))\n        x = F.add(x, F.scale(self.mlp(self.norm2(x, rows), rows), scale))\n        return x\n",
+            "lm.py": "\"\"\"第 11 关：把零件接成一个能训的语言模型。\"\"\"\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\nfrom parts import Block, RMSNorm\n\n\nclass LM(nn.Module):\n    def __init__(self, vocab, dim, n_layer, n_head, n_kv_head, seed, dtype=\"f32\"):\n        super().__init__()\n        self.vocab, self.dim, self.n_layer = vocab, dim, n_layer\n        # TODO: 嵌入表、n_layer 个 Block（用 nn.ModuleList）、最后一个 RMSNorm\n        self.embed = nt.parameter((vocab, dim), seed, dim ** -0.5, \"embed\", dtype=dtype)\n\n    def forward(self, idx, targets, batch, seq):\n        rows = batch * seq\n        # TODO: 查表 -> 逐层 -> 最后归一化 -> 输出头（权重绑定）-> 交叉熵\n        x = F.embedding(self.embed, idx, rows, self.dim)\n        return F.cross_entropy(\n            F.linear_tied(x, self.embed, rows, self.dim, self.vocab),\n            targets, rows, self.vocab\n        )\n\n\nif __name__ == \"__main__\":\n    V, D, L, H, KV, B, S = 16, 16, 2, 2, 1, 2, 4\n    m = LM(V, D, L, H, KV, seed=5)\n    print(\"参数量\", m.num_parameters(), \"张量数\", len(m.parameters()))\n    idx = nt.zeros((B * S,), role=\"data\"); idx.set_int_([1, 2, 3, 4, 5, 6, 7, 8])\n    tgt = nt.zeros((B * S,), role=\"data\"); tgt.set_int_([2, 3, 4, 5, 6, 7, 8, 9])\n    loss = m(idx, tgt, B, S)\n    loss.backward()\n    print(\"loss %.4f\" % loss.value)\n"
+          },
+          "referenceFiles": {
+            "lm.py": "\"\"\"第 11 关的参考实现。\"\"\"\nimport nanotorch as nt\nfrom nanotorch import nn, functional as F\nfrom parts import Block, RMSNorm\n\n\nclass LM(nn.Module):\n    def __init__(self, vocab, dim, n_layer, n_head, n_kv_head, seed, dtype=\"f32\"):\n        super().__init__()\n        self.vocab, self.dim, self.n_layer = vocab, dim, n_layer\n        # 扇入初始化：这张表同时是输出头，那一侧的扇入就是 dim\n        self.embed = nt.parameter((vocab, dim), seed, dim ** -0.5, \"embed\", dtype=dtype)\n        # ModuleList，不是普通 list —— 普通 list 里的子模块不会被登记，\n        # 于是 parameters() 数不到它们，中间那些层一次都不会被更新\n        self.blocks = nn.ModuleList([\n            Block(dim, n_head, n_kv_head, seed + 100 * (i + 1), n_layer, dtype)\n            for i in range(n_layer)\n        ])\n        self.norm_f = RMSNorm(dim, dtype=dtype)\n\n    def forward(self, idx, targets, batch, seq):\n        rows = batch * seq\n        x = F.embedding(self.embed, idx, rows, self.dim)\n        for blk in self.blocks:\n            x = blk(x, batch, seq)\n        x = self.norm_f(x, rows)\n        # 权重绑定：输出头就是嵌入表转置，不另开一块\n        logits = F.linear_tied(x, self.embed, rows, self.dim, self.vocab)\n        return F.cross_entropy(logits, targets, rows, self.vocab)\n\n\nif __name__ == \"__main__\":\n    V, D, L, H, KV, B, S = 16, 16, 2, 2, 1, 2, 4\n    m = LM(V, D, L, H, KV, seed=5)\n    print(\"参数量\", m.num_parameters(), \"张量数\", len(m.parameters()))\n    idx = nt.zeros((B * S,), role=\"data\"); idx.set_int_([1, 2, 3, 4, 5, 6, 7, 8])\n    tgt = nt.zeros((B * S,), role=\"data\"); tgt.set_int_([2, 3, 4, 5, 6, 7, 8, 9])\n    loss = m(idx, tgt, B, S)\n    loss.backward()\n    print(\"loss %.4f\" % loss.value)\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "lm.spec.ts",
+            "content": "const lab = require('@llm/lab');\n\nconst V = 16, D = 16, L = 2, H = 2, KV = 1, B = 2, S = 4;\nconst HIDDEN = 48;\nconst PER_BLOCK = D * (H * 8) + 2 * D * (KV * 8) + (H * 8) * D + 3 * D * HIDDEN + 2 * D;\nconst PARAMS = V * D + L * PER_BLOCK + D;\nconst TENSORS = 1 + L * 9 + 1;\n\nfunction setup(dtype) {\n  lab.py(`\nimport sys, json\nsys.path.insert(0, \"/lab\")\nimport importlib, parts, lm\nimportlib.reload(parts)\nimportlib.reload(lm)\nimport nanotorch as nt\nfrom nanotorch import functional as F\n\nV, D, L, H, KV, B, S = ${V}, ${D}, ${L}, ${H}, ${KV}, ${B}, ${S}\n_m = lm.LM(V, D, L, H, KV, seed=5, dtype=\"${dtype}\")\n_idx = nt.zeros((B * S,), role=\"data\", name=\"idx\")\n_tgt = nt.zeros((B * S,), role=\"data\", name=\"tgt\")\n_idx.set_int_([1, 2, 3, 4, 5, 6, 7, 8])\n_tgt.set_int_([2, 3, 4, 5, 6, 7, 8, 9])\n\n_plist = [p for _, p in _m.named_parameters()]\n_pnames = [n for n, _ in _m.named_parameters()]\n_sizes = [p.numel for p in _plist]\n\ndef _poke(changes):\n    for i, val in changes:\n        k = 0\n        while i >= _sizes[k]:\n            i -= _sizes[k]\n            k += 1\n        _plist[k].set_at_(i, val)\n\ndef _loss_only():\n    with nt.no_grad():\n        return _m(_idx, _tgt, B, S).value\n\ndef _run():\n    _m.zero_grad()\n    nt.phase(\"forward\")\n    _loss = _m(_idx, _tgt, B, S)\n    nt.phase(\"other\")\n    _loss.backward()\n    return _loss.value\n`);\n}\n\ndescribe('整个模型的反向', () => {\n  it('参数量与张量数都等于解析式', () => {\n    setup('f32');\n    const params = Number(lab.py('_m.num_parameters()'));\n    const tensors = Number(lab.py('len(_m.parameters())'));\n    const names = JSON.parse(String(lab.py('json.dumps(_pnames)')));\n    console.log('参数量 ' + params + '（解析式 ' + PARAMS + '），张量 ' + tensors + ' 个');\n    console.log('张量名 ' + JSON.stringify(names));\n    lab.publish('params.total', params);\n    lab.publish('params.tensors', tensors);\n    expect(params).toBe(PARAMS);\n    // 权重绑定不许被数两遍\n    expect(tensors).toBe(TENSORS);\n  });\n\n  /*\n   * 逐张量查梯度。**这一条抓的是「建了但没登记」** ——\n   * 前向完全正常、loss 也降，只是那些层从来没被更新过，而且不报错。\n   */\n  it('每个参数张量的梯度都不是全零', () => {\n    setup('f32');\n    lab.py('_run()');\n    const zeros = JSON.parse(String(lab.py(`\njson.dumps([n for n, p in _m.named_parameters()\n            if p.grad is None or all(v == 0.0 for v in p.grad.tolist())])\n`)));\n    console.log('梯度全零的张量：' + (zeros.length ? JSON.stringify(zeros) : '没有'));\n    lab.publish('grad.zeroGradTensors', zeros.length);\n    expect(zeros.length).toBe(0);\n  });\n\n  it('f64 下整模型的梯度检验：最大相对误差 ≤ 2e-3', () => {\n    setup('f64');\n    const loss = Number(lab.py('_run()'));\n    const flat = JSON.parse(String(lab.py(`\njson.dumps({\"names\": _pnames,\n            \"values\": [v for p in _plist for v in p.tolist()],\n            \"grads\": [v for p in _plist for v in p.grad.tolist()],\n            \"sizes\": _sizes})\n`)));\n\n    const values = Float64Array.from(flat.values);\n    const grads = Float64Array.from(flat.grads);\n\n    /*\n     * 中心差分一次只动一个元素 —— 整块重写要跨语言搬 6480 个 float，\n     * 一次检验就是上百万个。所以只发变化的那几个。\n     *\n     * **要比的是「Python 那边现在是什么」，不是「原始值是什么」。**\n     * 探针在 (+h, −h) 两次取值之后会把 JS 这边的元素还原，\n     * 但那次还原后面没有跟一次 loss()，所以 Python 那边还停在 −h 上。\n     * 拿原始值当基准的话，这个 −h 就再也发不过去了 ——\n     * 每查一个元素模型就永久地偏一点，160 个元素之后偏出一个假的误差。\n     */\n    const pyState = Float64Array.from(flat.values);\n    const evalLoss = () => {\n      const changes = [];\n      for (let i = 0; i < values.length; i++) {\n        if (values[i] !== pyState[i]) {\n          changes.push([i, values[i]]);\n          pyState[i] = values[i];\n        }\n      }\n      return Number(lab.py('_poke(' + JSON.stringify(changes) + '); _loss_only()'));\n    };\n\n    const params = [];\n    let at = 0;\n    for (let k = 0; k < flat.names.length; k++) {\n      const n = flat.sizes[k];\n      params.push({\n        name: flat.names[k],\n        values: values.subarray(at, at + n),\n        grad: grads.subarray(at, at + n),\n      });\n      at += n;\n    }\n\n    // 每个张量抽 4 个点：20 个张量共 80 个元素、160 次前向。\n    const report = lab.probe.gradCheck(params, evalLoss, 4);\n    console.log(\n      'loss ' + loss.toFixed(6) + '；查了 ' + report.checkedTensors + ' 个张量 / '\n      + report.checkedElements + ' 个元素，最大相对误差 '\n      + report.maxRelError.toExponential(2) + '（最差在 ' + report.worstTensor + '）'\n    );\n    lab.publish('grad.checkedTensors', report.checkedTensors);\n    lab.publish('grad.maxRelError', report.maxRelError);\n    expect(report.checkedTensors).toBe(TENSORS);\n    expect(report.maxRelError).toBeLessThan(2e-3);\n  });\n\n  /*\n   * 反向大约是前向的两倍：每个矩阵乘在反向里要算 dX 和 dW 两个。\n   * 明显超过 2.2 说明反向里重算了前向 —— 梯度完全正确，\n   * 只是算力白花了一大半，而 loss 曲线上没有任何痕迹。\n   */\n  it('反向的 FLOPs 不超过前向的 2.2 倍', () => {\n    setup('f32');\n    const before = lab.metrics().flops;\n    lab.py('_run()');\n    const after = lab.metrics().flops;\n    const fwd = after.forward - before.forward;\n    const bwd = after.backward - before.backward;\n    const ratio = fwd > 0 ? bwd / fwd : 0;\n    console.log(\n      '前向 ' + fwd + '，反向 ' + bwd + '，比值 ' + ratio.toFixed(3) + '（理论 2）'\n    );\n    lab.publish('flops.backwardOverForward', ratio);\n    expect(fwd).toBeGreaterThan(0);\n    expect(ratio).toBeGreaterThan(1.2);\n    expect(ratio).toBeLessThan(2.2);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "llm.params.total",
+            "op": "eq",
+            "value": 6480,
+            "label": {
+              "zh": "模型的参数量（解析式）",
+              "en": "model parameter count (analytic)"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.grad.checkedTensors",
+            "op": "eq",
+            "value": 20,
+            "label": {
+              "zh": "梯度检验覆盖的张量数（要全覆盖）",
+              "en": "parameter tensors covered by the gradient check"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.grad.maxRelError",
+            "op": "lte",
+            "value": 0.002,
+            "label": {
+              "zh": "f64 中心差分的最大相对误差",
+              "en": "max relative error of the f64 central-difference check"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.grad.zeroGradTensors",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "梯度全零的参数张量数",
+              "en": "parameter tensors with an all-zero gradient"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.flops.backwardOverForward",
+            "op": "lte",
+            "value": 2.2,
+            "label": {
+              "zh": "反向与前向的 FLOPs 比（理论 2）",
+              "en": "backward-over-forward FLOPs (theory says 2)"
+            },
+            "dimension": "efficiency"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "encapsulation",
+          "efficiency"
+        ],
+        "extension": {
+          "zh": "`6N` 那个式子的来历，到这一关就完整了：前向 `2N`、反向 `4N`。\n反向是前向的两倍，因为每个矩阵乘要算两个梯度。\n\n真实训练里还有第四块 —— **激活重算**（第 18 关）。\n为了省显存，反向时把一部分前向重新算一遍，于是比值从 2 涨到 3 左右，\n`6N` 变成 `8N`。**这是拿算力换显存，而且是自愿的**：\n在显存不够的档位上，不换就根本训不了。\n\n逐张量查梯度这件事，PyTorch 里对应 `torch.autograd.gradcheck`。\n它默认要求 `double` 输入，理由和这里一样。真实项目里它一般只在\n自定义算子上跑,整模型跑一次太慢，但**新写的每一个 `autograd.Function`\n都该过一遍**。\n",
+          "en": "The `6N` rule is now complete: `2N` forward, `4N` backward. The backward is twice\nthe forward because each matmul produces two gradients.\n\nReal training adds a fourth piece — **activation recomputation** (stage 18). To save\nmemory the backward recomputes part of the forward, pushing the ratio from 2 to about\n3 and `6N` to `8N`. **That trades compute for memory, deliberately**: at memory-bound\nscales, not trading means not training at all.\n\nPer-tensor gradient checking corresponds to `torch.autograd.gradcheck` in PyTorch,\nwhich likewise requires `double` inputs for the same reason. Real projects usually run\nit only on custom operators — a whole model is too slow — but **every newly written\n`autograd.Function` should go through it**.\n"
+        },
+        "primer": {
+          "zh": "零件各自对了，接起来不一定对。整模型这一关要回答的是：**每一个参数都真的在学吗**。\n\n最常见的一类错不是算错，是`没接上`。一个模块建出来了、前向也用上了，但它没被登记进 `parameters()`,于是优化器根本看不见它。模型跑得通、loss 也降（嵌入表和最后那层在学），中间那些层一次都没被更新过。这个错不报任何异常。\n\nPyTorch 里防这件事的机制是 `nn.ModuleList` / `nn.ParameterList`：放进普通 `list` 的子模块不会被登记，放进 ModuleList 的才会。这不是风格问题,是「能不能学」的问题。\n\n查出来的办法很直接：**逐个参数张量看它的梯度是不是全零**。全零只有两种可能,要么没登记，要么那条分支根本没进计算图。两种都该修。\n\n第二件要查的是`代价`。反向的浮点运算量理论上是前向的两倍:每个矩阵乘在反向里要算两个梯度（对输入的和对权重的），而逐元素的算子反向和前向同阶。明显超过 2 说明反向里重算了前向,梯度完全正确，只是算力白花了一半，而 loss 曲线上一点痕迹都没有。\n\n这也补全了那个 `6N` 的式子：前向 `2N`、反向 `4N`，一个训练步约 `6N` 次浮点运算每 token。所有的算力预算都从它算起。\n\n`权重绑定`（输出头复用嵌入表）值得一提：小模型上它省掉的比例不大，但在 vocab 十几万的模型上，不绑定光输出头就是几亿参数。绑定之后要注意 `parameters()` 别把同一份权重数两遍,数两遍的话优化器会更新它两次，等效于那一块的学习率翻倍。",
+          "en": "Correct pieces do not guarantee a correct assembly. The whole-model stage answers one question: **is every parameter actually learning**.\n\nThe most common failure is not miscomputation but `not being connected`. A module gets built and used in the forward pass, yet never registered in `parameters()`,so the optimiser cannot see it. The model runs and the loss falls (the embedding and the final layer are learning) while the middle layers are never updated once. Nothing raises.\n\nPyTorch guards this with `nn.ModuleList` / `nn.ParameterList`: submodules in a plain `list` are not registered, those in a ModuleList are. This is not a style question,it decides whether the thing learns.\n\nFinding it is direct: **check each parameter tensor for an all-zero gradient**. All-zero has only two causes,either it was never registered, or that branch never entered the graph. Both need fixing.\n\nThe second thing to check is `cost`. The backward should cost about twice the forward: every matmul produces two gradients (one for the input, one for the weights), while elementwise operators cost the same either way. Clearly above 2 means the backward recomputed the forward,gradients stay perfectly correct, half the compute is wasted, and no loss curve shows it.\n\nThis also completes the `6N` rule: `2N` forward, `4N` backward, so one training step is about `6N` floating-point operations per token. Every compute budget starts there.\n\n`Weight tying` (reusing the embedding as the output head) deserves a mention: on small models it saves little, but at a vocabulary of a hundred thousand an untied head alone is hundreds of millions of parameters. Once tied, make sure `parameters()` does not count the same weights twice,doing so makes the optimiser update them twice, effectively doubling the learning rate there."
+        }
+      },
+      {
+        "id": "adamw",
+        "title": {
+          "zh": "AdamW —— 偏差修正与解耦的权重衰减",
+          "en": "AdamW — bias correction and decoupled weight decay"
+        },
+        "goal": {
+          "zh": "在 `opt.py` 里自己写一个 AdamW。**这一关不许用 `nt.optim.AdamW`** ——\n用例会把它换成一个当场报错的桩。\n\n```python\nclass MyAdamW:\n    def __init__(self, params, lr=3e-3, betas=(0.9, 0.95), eps=1e-8,\n                 weight_decay=0.1, grad_clip=1.0):\n    def zero_grad(self):\n    def grad_norm(self):\n    def step(self, lr=None):\n        \"\"\"走一步，返回**裁剪前**的梯度范数。\"\"\"\n```\n\n逐元素的那一步用 `F.adamw_(p, g, m, v, lr, beta1, beta2, eps, decay, t, clip)` ——\n它对应一次融合的优化器 kernel（真实框架里叫 `fused` 或 `foreach`）。\n**你要写的是它外面那一层**：状态怎么开、`t` 怎么数、哪些参数衰减、裁剪怎么算。\n而这一层正是真实训练代码里出错的地方。\n\n## 偏差修正：为什么第一步的步长恰好是 lr\n\n一阶动量从 0 起步：`m₁ = (1−β₁)·g`。β₁ = 0.9 的话它只有梯度的 **1/10**。\n二阶同理，`v₁ = (1−β₂)·g²`。直接拿去更新的话第一步会小得离谱：\n\n```\n不修正   lr · (1−β₁)g / sqrt((1−β₂)g²) = lr · 0.1/0.2236 ≈ 0.447 · lr\n修正后   m̂ = m₁/(1−β₁) = g，v̂ = v₁/(1−β₂) = g²\n         lr · g / |g| = lr        ← 恰好一个 lr\n```\n\n所以**梯度恒定时，第一步的参数变化幅度恰好是 `lr`**（先不算衰减）。\n这一关就用它来验偏差修正接没接对：量出 0.447 说明没修正，量出 nan 说明 `t` 从 0 数起。\n\n修正的分母是 `1 − β^t`,`t` 从 **1** 开始数，不是 0。\n\n## 解耦的权重衰减：AdamW 里的那个 W\n\nAdam 加 L2 正则是把 `λ·w` 加进**梯度**里，于是它也被 `sqrt(v)` 除了一道 ——\n梯度大的参数被衰减得少，梯度小的被衰减得多，**和「衰减」的本意正好相反**。\n\nAdamW 把它**解耦**出来，直接作用在参数上：\n\n```\nw ← w − lr · ( m̂/(sqrt(v̂)+ε) + λ·w )\n                                ↑ 不经过 sqrt(v)\n```\n\n## 一维参数不衰减\n\n归一化的增益、以及（如果有的话）bias，都是一维的。它们**不该被衰减**：\n增益的作用就是把某一层整体放大或缩小，衰减它等于持续往「缩小」推，\n而 loss 在前几百步看不出区别。\n\n这一关的探针：给一维参数**零梯度**跑 100 步。\n写对了它们的范数**一点都不变**；把它们一起衰减掉的话，\n`lr=0.1, λ=0.1` 下 100 步之后只剩 `(1−0.01)¹⁰⁰ ≈ 37%`。\n\n## 怎么算过\n\n| | 要求 |\n| --- | --- |\n| 与参考实现 | 20 步之后**逐位相同** |\n| **偏差修正** | 恒定梯度下第一步的幅度与 `lr` 的相对差 ≤ 0.02 |\n| **一维不衰减** | 零梯度跑 100 步，一维参数的范数比 ≥ 0.999 |\n| 状态显存 | 恰好是参数的 **2 倍**（m 和 v） |\n\n最后一条顺带回答一个常被问到的问题：**AdamW 的优化器状态是参数的两倍。**\n加上参数本身和梯度，fp32 训练光这三样就是 `4N` 个 float,\n一个 7B 模型 112GB，而这还没算激活。混合精度和分片存在的理由就在这里。\n",
+          "en": "Write your own AdamW in `opt.py`. **`nt.optim.AdamW` is forbidden here** — the\nhidden cases replace it with a stub that raises.\n\n```python\nclass MyAdamW:\n    def __init__(self, params, lr=3e-3, betas=(0.9, 0.95), eps=1e-8,\n                 weight_decay=0.1, grad_clip=1.0):\n    def zero_grad(self):\n    def grad_norm(self):\n    def step(self, lr=None):\n        \"\"\"Take a step; return the gradient norm **before** clipping.\"\"\"\n```\n\nThe elementwise part is\n`F.adamw_(p, g, m, v, lr, beta1, beta2, eps, decay, t, clip)`, corresponding to a\nfused optimiser kernel (`fused` or `foreach` in real frameworks). **Your job is the\nlayer around it**: how state is allocated, how `t` is counted, which parameters\ndecay, how clipping is computed. That layer is where real training code goes wrong.\n\n## Bias correction: why the first step is exactly lr\n\nThe first moment starts at zero: `m₁ = (1−β₁)·g`, which at β₁ = 0.9 is only **a\ntenth** of the gradient. The second follows suit, `v₁ = (1−β₂)·g²`. Used directly,\nthe first step is absurdly small:\n\n```\nuncorrected   lr · (1−β₁)g / sqrt((1−β₂)g²) = lr · 0.1/0.2236 ≈ 0.447 · lr\ncorrected     m̂ = m₁/(1−β₁) = g,  v̂ = v₁/(1−β₂) = g²\n              lr · g / |g| = lr        <- exactly one lr\n```\n\nSo **with a constant gradient the first step moves each parameter by exactly `lr`**\n(ignoring decay). This stage uses that to verify bias correction: measuring 0.447\nmeans no correction, and a nan means `t` started at 0.\n\nThe correction denominator is `1 − β^t`, with `t` counting from **1**, not 0.\n\n## Decoupled weight decay: the W in AdamW\n\nAdam with L2 regularisation adds `λ·w` into the **gradient**, so it too gets divided\nby `sqrt(v)` — parameters with large gradients decay less and those with small\ngradients decay more, **the opposite of what decay is for**.\n\nAdamW **decouples** it, applying it straight to the parameter:\n\n```\nw <- w − lr · ( m̂/(sqrt(v̂)+ε) + λ·w )\n                                ^ never passes through sqrt(v)\n```\n\n## One-dimensional parameters are not decayed\n\nNormalisation gains, and biases where they exist, are one-dimensional. They **should\nnot decay**: a gain exists to scale a layer up or down, and decaying it pushes\npermanently toward \"down\" — with no visible difference in the loss for hundreds of\nsteps.\n\nThe probe here gives one-dimensional parameters **zero gradients** for 100 steps.\nDone right their norm does not move at all; decayed along with everything else, at\n`lr=0.1, λ=0.1` only `(1−0.01)¹⁰⁰ ≈ 37%` remains after 100 steps.\n\n## What counts as passing\n\n| | Requirement |\n| --- | --- |\n| Versus the reference | **Bit-identical** after 20 steps |\n| **Bias correction** | With a constant gradient, first-step size within 0.02 of `lr` |\n| **No decay on 1-D** | Zero gradients for 100 steps; 1-D norm ratio >= 0.999 |\n| Optimiser state | Exactly **2x** the parameters (m and v) |\n\nThat last row answers a frequently asked question: **AdamW's optimiser state is twice\nthe parameters.** Together with the parameters and gradients, fp32 training needs\n`4N` floats for those three alone — 112GB for a 7B model, before any activations.\nThat is the reason mixed precision and sharding exist.\n"
+        },
+        "checklist": [
+          {
+            "zh": "m 和 v 的角色是 optimizer，梯度在 __init__ 里就分配掉",
+            "en": "m and v carry the optimizer role, and gradients are allocated in __init__"
+          },
+          {
+            "zh": "t 从 1 开始数，偏差修正的分母是 1 − β^t",
+            "en": "t counts from 1, and the correction denominator is 1 − β^t"
+          },
+          {
+            "zh": "一维参数不做权重衰减",
+            "en": "One-dimensional parameters are not weight-decayed"
+          },
+          {
+            "zh": "裁剪用的是全局范数，step 返回裁剪前的值",
+            "en": "Clipping uses the global norm; step returns the pre-clip value"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "Tensor(p.shape, p.dtype, role=\"optimizer\") 建 m 与 v，建完 fill_(0.0)。",
+            "en": "Build m and v with Tensor(p.shape, p.dtype, role=\"optimizer\"), then fill_(0.0)."
+          },
+          {
+            "zh": "全局范数：把每个梯度的 F.sumsq 加起来再开方，不是逐张量各裁各的。",
+            "en": "Global norm: add up F.sumsq of every gradient then take the root, not per-tensor clipping."
+          },
+          {
+            "zh": "一维的判据是 len(p.shape) == 1。",
+            "en": "One-dimensional means len(p.shape) == 1."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "**梯度留到第一次反向才分配。** 训练循环每步 `release` 一次激活，\n而懒分配出来的梯度会落在那个 mark 之后 —— **第二步就被推平了**。\n报出来的错是「没有 id 为 105 的张量」，一个和病因毫无关系的数字。\n这个坑这个项目自己踩过，所以 `__init__` 里就得把梯度开好。\n",
+            "en": "**Allocating gradients lazily at the first backward.** The training loop releases\nactivations every step, and lazily allocated gradients land after that mark — so\n**step two wipes them**. The error reads \"no tensor with id 105\", a number with no\nrelation to the cause. This project hit exactly that, which is why gradients get\nallocated in `__init__`.\n"
+          },
+          {
+            "zh": "**逐张量裁剪而不是全局裁剪。** 每个张量各自裁到 clip 的话，\n裁完的总范数是 `clip · sqrt(张量数)` —— 20 个张量就是 4.5 倍，\n而且**各层之间的相对大小被抹平了**，梯度的方向都变了。\n全局裁剪只缩放，不改方向。\n",
+            "en": "**Clipping per tensor instead of globally.** Clipping each tensor to `clip` leaves a\ntotal norm of `clip · sqrt(tensors)` — 4.5x at 20 tensors — and **flattens the\nrelative magnitudes between layers**, changing the gradient's direction. Global\nclipping only rescales; it never rotates.\n"
+          }
+        ],
+        "train": {
+          "files": {
+            "opt.py": "\"\"\"第 12 关：自己写 AdamW。不许用 nt.optim.AdamW。\"\"\"\nimport nanotorch as nt\nfrom nanotorch import functional as F\nfrom nanotorch.tensor import Tensor\n\n\nclass MyAdamW:\n    def __init__(self, params, lr=3e-3, betas=(0.9, 0.95), eps=1e-8,\n                 weight_decay=0.1, grad_clip=1.0):\n        self.params = list(params)\n        self.lr = lr\n        self.beta1, self.beta2 = betas\n        self.eps = eps\n        self.weight_decay = weight_decay\n        self.grad_clip = grad_clip\n        self.t = 0\n        # TODO: 一阶动量 m 与二阶动量 v，角色是 \"optimizer\"，初值全 0\n        self._m = []\n        self._v = []\n        # TODO: 梯度也在这里分配掉，别留到第一次反向\n\n    def zero_grad(self):\n        for p in self.params:\n            p.zero_grad()\n\n    def grad_norm(self):\n        \"\"\"全局梯度范数。\"\"\"\n        # TODO\n        return 0.0\n\n    def step(self, lr=None):\n        \"\"\"走一步，返回裁剪前的梯度范数。\"\"\"\n        nt.phase(\"optimizer\")\n        # TODO: t += 1 -> 算全局范数 -> 算裁剪系数 -> 逐张量调 F.adamw_\n        #       一维参数的 decay 是 0\n        nt.phase(\"other\")\n        return 0.0\n\n\nif __name__ == \"__main__\":\n    w = nt.parameter((4, 4), 1, 0.5, \"w\")\n    g = nt.parameter((4,), None, 0.0, \"gain\")\n    opt = MyAdamW([w, g], lr=0.1)\n    before = F.norm(w)\n    w.grad.fill_(1.0)\n    print(\"范数\", round(opt.step(), 6))\n    print(\"第一步走了\", round(abs(F.norm(w) - before), 6))\n"
+          },
+          "referenceFiles": {
+            "opt.py": "\"\"\"第 12 关的参考实现。\"\"\"\nimport nanotorch as nt\nfrom nanotorch import functional as F\nfrom nanotorch.tensor import Tensor\n\n\nclass MyAdamW:\n    def __init__(self, params, lr=3e-3, betas=(0.9, 0.95), eps=1e-8,\n                 weight_decay=0.1, grad_clip=1.0):\n        self.params = list(params)\n        self.lr = lr\n        self.beta1, self.beta2 = betas\n        self.eps = eps\n        self.weight_decay = weight_decay\n        self.grad_clip = grad_clip\n        self.t = 0\n        # role=\"optimizer\"：这两块要出现在 memory.optimizerStateBytes 里,\n        # AdamW 的 2 倍状态是显存关的主角之一\n        self._m = [Tensor(p.shape, p.dtype, role=\"optimizer\", name=\"m\") for p in self.params]\n        self._v = [Tensor(p.shape, p.dtype, role=\"optimizer\", name=\"v\") for p in self.params]\n        for t in self._m + self._v:\n            t.fill_(0.0)\n        # 梯度在这里就分配掉。懒分配的话它会落在训练循环那个 mark 之后，\n        # 第二步的 release 会把它推平\n        for p in self.params:\n            p.ensure_grad()\n\n    def zero_grad(self):\n        for p in self.params:\n            p.zero_grad()\n\n    def grad_norm(self):\n        total = 0.0\n        for p in self.params:\n            if p.grad is not None:\n                # 先把平方和加起来再开方。用 F.norm 各自平方回去的话，\n                # sqrt(s)**2 和 s 在浮点下不是同一个数,而裁剪系数是拿它除出来的\n                total += F.sumsq(p.grad)\n        return total ** 0.5\n\n    def step(self, lr=None):\n        nt.phase(\"optimizer\")\n        self.t += 1\n        rate = self.lr if lr is None else lr\n        norm = self.grad_norm()\n        # 全局裁剪：只缩放，不改方向。逐张量各裁各的会把层间的相对大小抹平\n        scale = 1.0\n        if self.grad_clip > 0 and norm > self.grad_clip:\n            scale = self.grad_clip / norm\n\n        for i, p in enumerate(self.params):\n            if p.grad is None:\n                continue\n            # 一维的不衰减：norm 的增益、bias 都在这一类里\n            decay = self.weight_decay if len(p.shape) > 1 else 0.0\n            F.adamw_(p, p.grad, self._m[i], self._v[i],\n                     rate, self.beta1, self.beta2, self.eps, decay, self.t, scale)\n        nt.phase(\"other\")\n        # 返回裁剪前的值：曲线要看的是梯度本来有多大，\n        # 而不是裁完那个恒等于 clip 的数\n        return norm\n\n\nif __name__ == \"__main__\":\n    w = nt.parameter((4, 4), 1, 0.5, \"w\")\n    g = nt.parameter((4,), None, 0.0, \"gain\")\n    opt = MyAdamW([w, g], lr=0.1)\n    before = F.norm(w)\n    w.grad.fill_(1.0)\n    print(\"范数\", round(opt.step(), 6))\n    print(\"第一步走了\", round(abs(F.norm(w) - before), 6))\n"
+          }
+        },
+        "specs": [
+          {
+            "path": "opt.spec.ts",
+            "content": "const lab = require('@llm/lab');\n\nfunction setup() {\n  lab.py(`\nimport sys, json\nsys.path.insert(0, \"/lab\")\nimport importlib, opt\nimportlib.reload(opt)\nimport nanotorch as nt\nfrom nanotorch import functional as F, optim\n\ndef _pair(seed):\n    \"\"\"一个矩阵 + 一个一维增益。两者的衰减待遇不一样。\"\"\"\n    w = nt.parameter((4, 4), seed, 0.5, \"w\")\n    g = nt.parameter((4,), None, 0.0, \"gain\")\n    return [w, g]\n\n# 换掉内建的 AdamW —— 这一关要自己写，不许转手。\n# 换之前先存一份：判定自己还要拿它当参考跑一遍。\n_SAVED_ADAMW = getattr(optim, \"_saved_adamw\", None) or optim.AdamW\noptim._saved_adamw = _SAVED_ADAMW\n\ndef _forbid_builtin():\n    class _Boom:\n        def __init__(self, *a, **k):\n            raise RuntimeError(\"这一关不许用 nt.optim.AdamW，自己写一个\")\n    optim.AdamW = _Boom\n\ndef _allow_builtin():\n    optim.AdamW = _SAVED_ADAMW\n`);\n}\n\ndescribe('AdamW', () => {\n  /*\n   * 20 步之后逐位相同。用同一串梯度喂两边 ——\n   * 这条同时管住偏差修正、解耦衰减、裁剪、以及 t 从几开始数。\n   */\n  it('跑 20 步之后与参考实现逐位相同', () => {\n    setup();\n    const run = (which) => JSON.parse(String(lab.py(`\n_ps = _pair(11)\n${which === 'mine' ? '_forbid_builtin()\\n_o = opt.MyAdamW(_ps, lr=0.05, weight_decay=0.1, grad_clip=1.0)'\n                    : '_allow_builtin()\\n_o = optim.AdamW(_ps, lr=0.05, weight_decay=0.1, grad_clip=1.0)'}\n_norms = []\nfor _s in range(20):\n    _o.zero_grad()\n    # 每步换一串确定的梯度，量级故意跨过 grad_clip\n    for _j, _p in enumerate(_ps):\n        _p.grad.set_([((_i * 7 + _s * 13 + _j * 3) % 11 - 5) * 0.11\n                      for _i in range(_p.numel)])\n    _norms.append(_o.step())\njson.dumps({\"w\": _ps[0].tolist(), \"g\": _ps[1].tolist(), \"norms\": _norms})\n`)));\n\n    const mine = run('mine');\n    const ref = run('builtin');\n    let mismatches = 0;\n    for (let i = 0; i < ref.w.length; i++) if (mine.w[i] !== ref.w[i]) mismatches += 1;\n    for (let i = 0; i < ref.g.length; i++) if (mine.g[i] !== ref.g[i]) mismatches += 1;\n    for (let i = 0; i < ref.norms.length; i++) {\n      if (Math.abs(mine.norms[i] - ref.norms[i]) > 1e-12) mismatches += 1;\n    }\n    console.log(\n      '20 步之后 w[0] 自己写的 ' + mine.w[0] + '，参考 ' + ref.w[0]\n      + '；对不上的位置 ' + mismatches + ' 个'\n    );\n    lab.publish('optim.referenceMismatches', mismatches);\n    expect(mismatches).toBe(0);\n  });\n\n  /*\n   * 偏差修正接对了的话，恒定梯度下第一步的幅度恰好是 lr。\n   * 没修正是 0.447·lr；t 从 0 数起会得到 nan。\n   */\n  it('恒定梯度下，第一步的幅度恰好是 lr', () => {\n    setup();\n    const r = JSON.parse(String(lab.py(`\n_forbid_builtin()\n_w = nt.parameter((4, 4), 3, 0.5, \"w\")\n_o = opt.MyAdamW([_w], lr=0.1, weight_decay=0.0, grad_clip=0.0)\n_before = list(_w.tolist())\n_w.grad.fill_(1.0)\n_o.step()\n_after = list(_w.tolist())\njson.dumps({\"before\": _before, \"after\": _after})\n`)));\n\n    let worst = 0;\n    for (let i = 0; i < r.before.length; i++) {\n      worst = Math.max(worst, Math.abs(Math.abs(r.after[i] - r.before[i]) / 0.1 - 1));\n    }\n    console.log(\n      '第一步的幅度 / lr，最差偏离 1 的程度 ' + worst.toFixed(6)\n      + '（不做偏差修正会是 0.553）'\n    );\n    lab.publish('optim.firstStepError', worst);\n    expect(worst).toBeLessThan(0.02);\n  });\n\n  /*\n   * 一维参数不衰减。零梯度跑 100 步：\n   * 写对了范数一点不变；一起衰减掉的话只剩 37%。\n   * 同时验矩阵**确实**被衰减了 —— 否则「所有参数都不衰减」也能过。\n   */\n  it('零梯度跑 100 步：一维不衰减，矩阵衰减', () => {\n    setup();\n    const r = JSON.parse(String(lab.py(`\n_forbid_builtin()\n_ps = _pair(7)\n_o = opt.MyAdamW(_ps, lr=0.1, weight_decay=0.1, grad_clip=0.0)\n_w0, _g0 = F.norm(_ps[0]), F.norm(_ps[1])\nfor _ in range(100):\n    _o.zero_grad()          # 梯度全 0，只剩衰减在起作用\n    _o.step()\njson.dumps({\"w\": F.norm(_ps[0]) / _w0, \"g\": F.norm(_ps[1]) / _g0})\n`)));\n    console.log(\n      '100 步之后 矩阵剩 ' + (r.w * 100).toFixed(1) + '%，一维剩 '\n      + (r.g * 100).toFixed(1) + '%（一起衰减的话一维会剩 36.6%）'\n    );\n    lab.publish('optim.gainNormRatio', r.g);\n    lab.publish('optim.matrixNormRatio', r.w);\n    expect(r.g).toBeGreaterThan(0.999);\n    // 矩阵必须真的被衰减，否则「全都不衰减」也能过上面那条\n    expect(r.w).toBeLessThan(0.99);\n  });\n\n  it('优化器状态恰好是参数的 2 倍', () => {\n    setup();\n    const before = lab.metrics().memory.optimizerStateBytes;\n    const paramBytes = Number(lab.py(`\n_forbid_builtin()\n_ps = _pair(5)\n_o = opt.MyAdamW(_ps, lr=0.05)\nsum(p.numel for p in _ps) * 4\n`));\n    const after = lab.metrics().memory.optimizerStateBytes;\n    const ratio = (after - before) / paramBytes;\n    console.log(\n      '参数 ' + paramBytes + ' 字节，优化器状态 ' + (after - before)\n      + ' 字节，比值 ' + ratio.toFixed(3)\n    );\n    lab.publish('optim.stateOverParamBytes', ratio);\n    expect(ratio).toBe(2);\n  });\n});\n"
+          }
+        ],
+        "gates": [
+          {
+            "metric": "llm.optim.referenceMismatches",
+            "op": "eq",
+            "value": 0,
+            "label": {
+              "zh": "20 步之后与参考实现对不上的位置数",
+              "en": "positions differing from the reference after 20 steps"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.optim.firstStepError",
+            "op": "lte",
+            "value": 0.02,
+            "label": {
+              "zh": "第一步的幅度与 lr 的相对差（偏差修正）",
+              "en": "first-step size relative to lr (bias correction)"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.optim.gainNormRatio",
+            "op": "gte",
+            "value": 0.999,
+            "label": {
+              "zh": "零梯度 100 步后一维参数的范数比",
+              "en": "1-D parameter norm ratio after 100 zero-gradient steps"
+            },
+            "dimension": "correctness"
+          },
+          {
+            "metric": "llm.optim.stateOverParamBytes",
+            "op": "eq",
+            "value": 2,
+            "label": {
+              "zh": "优化器状态与参数的字节比",
+              "en": "optimiser state bytes over parameter bytes"
+            },
+            "dimension": "efficiency"
+          }
+        ],
+        "focus": [
+          "correctness",
+          "efficiency"
+        ],
+        "extension": {
+          "zh": "`betas=(0.9, 0.95)` 而不是 PyTorch 默认的 `(0.9, 0.999)` —— LLM 预训练普遍用\n0.95。二阶动量跟得太慢的话，loss 出尖峰之后要很久才恢复，\n而尖峰在大规模预训练里是常态。\n\n优化器状态是显存关的主角。fp32 下参数 + 梯度 + m + v = `4N` 个 float，\n7B 就是 112GB —— 一张 H100 装不下。真实做法有三条：\n**混合精度**（第 17 关）把激活和梯度降到 bf16；\n**ZeRO / FSDP** 把优化器状态按数据并行的秩切开，每张卡只存 1/N；\n**8-bit 优化器**（bitsandbytes）把 m 和 v 量化到 8 位，状态直接省 4 倍。\n\n2026 年还有一条新的：**Muon** 在大规模上取代了 AdamW 的一部分。\n它对矩阵参数做一次正交化（Newton–Schulz 迭代）再更新，\n同样的 token 预算下 loss 更低。Kimi K2 与 GLM-5 都在用。\n注意它**只管矩阵** —— 嵌入表和一维参数仍然走 Adam，第 21 关做这件事。\n",
+          "en": "`betas=(0.9, 0.95)` rather than PyTorch's default `(0.9, 0.999)` is standard for LLM\npretraining. A second moment that adapts too slowly makes recovery from a loss spike\ntake a long time, and spikes are routine at scale.\n\nOptimiser state dominates memory. In fp32, parameters + gradients + m + v is `4N`\nfloats — 112GB at 7B, more than one H100 holds. Real practice has three answers:\n**mixed precision** (stage 17) drops activations and gradients to bf16; **ZeRO /\nFSDP** shards optimiser state across data-parallel ranks so each holds 1/N; and\n**8-bit optimisers** (bitsandbytes) quantise m and v to 8 bits, cutting state\nfourfold.\n\n2026 adds one more: **Muon** has displaced part of AdamW at scale. It orthogonalises\nmatrix parameters (via Newton-Schulz iterations) before updating, reaching a lower\nloss at the same token budget; Kimi K2 and GLM-5 both use it. Note it applies **only\nto matrices** — embeddings and 1-D parameters stay on Adam, which is stage 21's work.\n"
+        },
+        "primer": {
+          "zh": "有了梯度还得决定`怎么走`。最朴素的是梯度下降：往梯度的反方向走一个固定的步长。它在真实模型上几乎没法用,不同参数的梯度量级差着好几个数量级，一个统一的步长要么把大的走飞，要么把小的走不动。\n\n`Adam` 的做法是给每个参数各自估一个步长：一阶动量 `m` 是梯度的滑动平均（方向），二阶动量 `v` 是梯度平方的滑动平均（量级），更新量是 `m / sqrt(v)`,量级被除掉了，剩下的是方向。于是每个参数都走差不多大的一步。\n\n两个动量都从 0 起步，所以最开始它们`偏小`。β₁ = 0.9 时第一步的 `m` 只有梯度的十分之一。`偏差修正`把它们各除以 `1 − β^t` 补回来,做对了的话，梯度恒定时第一步的步长恰好是一个学习率。不修正的话大约是 0.45 倍。\n\n`权重衰减`是把参数往 0 拉一点，防止它们越长越大。Adam 时代的做法是把 `λ·w` 加进梯度里,但那样它也会被 `sqrt(v)` 除一道，结果是梯度大的参数衰减得少、梯度小的衰减得多，和衰减的本意正好相反。\n\n`AdamW` 里的那个 W 就是把衰减`解耦`出来：不进梯度，直接作用在参数上。一行的改动，效果差别很大,今天所有的 LLM 训练都用 AdamW 而不是 Adam。\n\n还有一条经验规矩：**一维参数不衰减**。归一化的增益、bias 都属于这一类。增益的作用就是把某一层整体放大或缩小，持续衰减它等于一直往「缩小」推,而 loss 在前几百步看不出任何区别。\n\n最后一个要记住的数：AdamW 的优化器状态是参数的`两倍`（m 和 v 各一份）。加上参数和梯度，fp32 训练光这三样就是 4 倍参数量的浮点数,一个 7B 模型 112GB。混合精度、ZeRO 分片、8-bit 优化器，都是冲着这个数去的。",
+          "en": "Having gradients still leaves the question of `how to move`. The simplest answer is gradient descent: step a fixed distance opposite the gradient. It barely works on real models,gradient magnitudes differ by orders of magnitude across parameters, so one step size either overshoots the large ones or fails to move the small ones.\n\n`Adam` estimates a step size per parameter: the first moment `m` is a moving average of the gradient (direction), the second moment `v` a moving average of its square (magnitude), and the update is `m / sqrt(v)`,magnitude divided out, direction left. Every parameter then takes a step of similar size.\n\nBoth moments start at zero, so early on they are `too small`. At β₁ = 0.9 the first `m` is a tenth of the gradient. `Bias correction` divides each by `1 − β^t` to compensate,done right, a constant gradient makes the first step exactly one learning rate. Without it the step is roughly 0.45 of that.\n\n`Weight decay` pulls parameters slightly toward zero so they do not grow without bound. The Adam-era approach added `λ·w` into the gradient,but then it too gets divided by `sqrt(v)`, so parameters with large gradients decay less and those with small gradients decay more, the opposite of the intent.\n\nThe W in `AdamW` is that decay `decoupled`: it never enters the gradient and applies straight to the parameter. A one-line change with a large effect,every LLM today trains with AdamW rather than Adam.\n\nOne more rule of thumb: **one-dimensional parameters are not decayed**. Normalisation gains and biases fall in this class. A gain exists to scale a layer up or down, and decaying it forever pushes toward \"down\",with no visible difference in the loss for hundreds of steps.\n\nA last number worth remembering: AdamW state is `twice` the parameters (one m and one v). Together with parameters and gradients, fp32 training needs four times the parameter count in floats for those three alone,112GB for a 7B model. Mixed precision, ZeRO sharding and 8-bit optimisers all target that number."
+        }
       }
     ]
   },

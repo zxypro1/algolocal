@@ -557,6 +557,32 @@ def count_nonfinite(x):
     return B.count_nonfinite(x.handle, x.numel)
 
 
+def sumsq(x):
+    """平方和 `Σ x²`，一个普通的 float。观测量，不进计算图。
+
+    全局梯度范数是 `sqrt(Σ 各张量的 sumsq)` —— 注意是**先把平方和加起来再开方**，
+    不是把各自的范数平方回去：`sqrt(s)**2` 和 `s` 在浮点下不是同一个数，
+    而裁剪系数是拿这个数除出来的。
+    """
+    return B.sumsq(x.handle, x.numel)
+
+
+def adamw_(param, grad, m, v, lr, beta1, beta2, eps, decay, step, clip=1.0):
+    """AdamW 的逐元素更新，**就地改 param / m / v**。
+
+    对应真实框架里的融合优化器 kernel（PyTorch 的 `fused=True` / `foreach=True`）。
+    一次调用做完：动量更新、偏差修正（分母 `1 − β^step`，`step` 从 1 数起）、
+    以及**解耦的**权重衰减（`decay` 不经过 `sqrt(v)`）。
+
+    `clip` 是全局裁剪系数，乘在梯度上。`decay=0` 就是不衰减 ——
+    一维参数（norm 的增益、bias）该传 0。
+    """
+    assert step >= 1, f"偏差修正的 step 从 1 数起，拿到 {step}"
+    B.adamw(param.handle, grad.handle, m.handle, v.handle, param.numel,
+            lr, beta1, beta2, eps, decay, step, clip)
+    return param
+
+
 def norm(x):
     """L2 范数 `sqrt(Σ x²)`。
 

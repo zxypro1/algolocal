@@ -108,6 +108,14 @@ class Tensor:
         B.set_f(self.handle, values)
         return self
 
+    def set_at_(self, index, value):
+        """写单个元素。对应 PyTorch 里的 `t.view(-1)[i] = v`。
+
+        梯度检验一次只扰动一个数,整块重写的话，一次检验要跨语言搬几十万个 float。
+        """
+        B.set_item(self.handle, index, float(value))
+        return self
+
     def set_int_(self, values):
         """写 token id。整数张量按 4 字节一格存，和 f32 共用同一块。"""
         B.set_i32(self.handle, values)

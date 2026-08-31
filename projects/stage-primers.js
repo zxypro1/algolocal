@@ -2654,6 +2654,46 @@ const primers = {
         'The dozen lines you write here are the skeleton of PyTorch autograd. The real one adds cross-thread dependency counting, `retain_graph`, hooks, and pruning of subgraphs that need no gradient,the skeleton is the same.'
       )
     ),
+    'model-backward': t(
+      p(
+        '零件各自对了，接起来不一定对。整模型这一关要回答的是：**每一个参数都真的在学吗**。',
+        '最常见的一类错不是算错，是`没接上`。一个模块建出来了、前向也用上了，但它没被登记进 `parameters()`,于是优化器根本看不见它。模型跑得通、loss 也降（嵌入表和最后那层在学），中间那些层一次都没被更新过。这个错不报任何异常。',
+        'PyTorch 里防这件事的机制是 `nn.ModuleList` / `nn.ParameterList`：放进普通 `list` 的子模块不会被登记，放进 ModuleList 的才会。这不是风格问题,是「能不能学」的问题。',
+        '查出来的办法很直接：**逐个参数张量看它的梯度是不是全零**。全零只有两种可能,要么没登记，要么那条分支根本没进计算图。两种都该修。',
+        '第二件要查的是`代价`。反向的浮点运算量理论上是前向的两倍:每个矩阵乘在反向里要算两个梯度（对输入的和对权重的），而逐元素的算子反向和前向同阶。明显超过 2 说明反向里重算了前向,梯度完全正确，只是算力白花了一半，而 loss 曲线上一点痕迹都没有。',
+        '这也补全了那个 `6N` 的式子：前向 `2N`、反向 `4N`，一个训练步约 `6N` 次浮点运算每 token。所有的算力预算都从它算起。',
+        '`权重绑定`（输出头复用嵌入表）值得一提：小模型上它省掉的比例不大，但在 vocab 十几万的模型上，不绑定光输出头就是几亿参数。绑定之后要注意 `parameters()` 别把同一份权重数两遍,数两遍的话优化器会更新它两次，等效于那一块的学习率翻倍。'
+      ),
+      p(
+        'Correct pieces do not guarantee a correct assembly. The whole-model stage answers one question: **is every parameter actually learning**.',
+        'The most common failure is not miscomputation but `not being connected`. A module gets built and used in the forward pass, yet never registered in `parameters()`,so the optimiser cannot see it. The model runs and the loss falls (the embedding and the final layer are learning) while the middle layers are never updated once. Nothing raises.',
+        "PyTorch guards this with `nn.ModuleList` / `nn.ParameterList`: submodules in a plain `list` are not registered, those in a ModuleList are. This is not a style question,it decides whether the thing learns.",
+        'Finding it is direct: **check each parameter tensor for an all-zero gradient**. All-zero has only two causes,either it was never registered, or that branch never entered the graph. Both need fixing.',
+        'The second thing to check is `cost`. The backward should cost about twice the forward: every matmul produces two gradients (one for the input, one for the weights), while elementwise operators cost the same either way. Clearly above 2 means the backward recomputed the forward,gradients stay perfectly correct, half the compute is wasted, and no loss curve shows it.',
+        'This also completes the `6N` rule: `2N` forward, `4N` backward, so one training step is about `6N` floating-point operations per token. Every compute budget starts there.',
+        '`Weight tying` (reusing the embedding as the output head) deserves a mention: on small models it saves little, but at a vocabulary of a hundred thousand an untied head alone is hundreds of millions of parameters. Once tied, make sure `parameters()` does not count the same weights twice,doing so makes the optimiser update them twice, effectively doubling the learning rate there.'
+      )
+    ),
+    'adamw': t(
+      p(
+        '有了梯度还得决定`怎么走`。最朴素的是梯度下降：往梯度的反方向走一个固定的步长。它在真实模型上几乎没法用,不同参数的梯度量级差着好几个数量级，一个统一的步长要么把大的走飞，要么把小的走不动。',
+        '`Adam` 的做法是给每个参数各自估一个步长：一阶动量 `m` 是梯度的滑动平均（方向），二阶动量 `v` 是梯度平方的滑动平均（量级），更新量是 `m / sqrt(v)`,量级被除掉了，剩下的是方向。于是每个参数都走差不多大的一步。',
+        '两个动量都从 0 起步，所以最开始它们`偏小`。β₁ = 0.9 时第一步的 `m` 只有梯度的十分之一。`偏差修正`把它们各除以 `1 − β^t` 补回来,做对了的话，梯度恒定时第一步的步长恰好是一个学习率。不修正的话大约是 0.45 倍。',
+        '`权重衰减`是把参数往 0 拉一点，防止它们越长越大。Adam 时代的做法是把 `λ·w` 加进梯度里,但那样它也会被 `sqrt(v)` 除一道，结果是梯度大的参数衰减得少、梯度小的衰减得多，和衰减的本意正好相反。',
+        '`AdamW` 里的那个 W 就是把衰减`解耦`出来：不进梯度，直接作用在参数上。一行的改动，效果差别很大,今天所有的 LLM 训练都用 AdamW 而不是 Adam。',
+        '还有一条经验规矩：**一维参数不衰减**。归一化的增益、bias 都属于这一类。增益的作用就是把某一层整体放大或缩小，持续衰减它等于一直往「缩小」推,而 loss 在前几百步看不出任何区别。',
+        '最后一个要记住的数：AdamW 的优化器状态是参数的`两倍`（m 和 v 各一份）。加上参数和梯度，fp32 训练光这三样就是 4 倍参数量的浮点数,一个 7B 模型 112GB。混合精度、ZeRO 分片、8-bit 优化器，都是冲着这个数去的。'
+      ),
+      p(
+        'Having gradients still leaves the question of `how to move`. The simplest answer is gradient descent: step a fixed distance opposite the gradient. It barely works on real models,gradient magnitudes differ by orders of magnitude across parameters, so one step size either overshoots the large ones or fails to move the small ones.',
+        '`Adam` estimates a step size per parameter: the first moment `m` is a moving average of the gradient (direction), the second moment `v` a moving average of its square (magnitude), and the update is `m / sqrt(v)`,magnitude divided out, direction left. Every parameter then takes a step of similar size.',
+        'Both moments start at zero, so early on they are `too small`. At β₁ = 0.9 the first `m` is a tenth of the gradient. `Bias correction` divides each by `1 − β^t` to compensate,done right, a constant gradient makes the first step exactly one learning rate. Without it the step is roughly 0.45 of that.',
+        '`Weight decay` pulls parameters slightly toward zero so they do not grow without bound. The Adam-era approach added `λ·w` into the gradient,but then it too gets divided by `sqrt(v)`, so parameters with large gradients decay less and those with small gradients decay more, the opposite of the intent.',
+        'The W in `AdamW` is that decay `decoupled`: it never enters the gradient and applies straight to the parameter. A one-line change with a large effect,every LLM today trains with AdamW rather than Adam.',
+        'One more rule of thumb: **one-dimensional parameters are not decayed**. Normalisation gains and biases fall in this class. A gain exists to scale a layer up or down, and decaying it forever pushes toward "down",with no visible difference in the loss for hundreds of steps.',
+        'A last number worth remembering: AdamW state is `twice` the parameters (one m and one v). Together with parameters and gradients, fp32 training needs four times the parameter count in floats for those three alone,112GB for a 7B model. Mixed precision, ZeRO sharding and 8-bit optimisers all target that number.'
+      )
+    ),
   },
 };
 

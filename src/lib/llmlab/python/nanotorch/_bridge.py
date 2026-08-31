@@ -69,6 +69,7 @@ def fill_rope(cos_h, sin_h, block_size, head_dim, base):
 
 # ---- 算子。参数与 JS 那边一一对应，不做任何加工 ----
 
+set_item = _B.set_item
 fill_one_hot = _B.fill_one_hot
 gemm_nn = _B.gemm_nn
 gemm_tn_acc = _B.gemm_tn_acc
