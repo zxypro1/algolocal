@@ -11043,6 +11043,27 @@ const KIT_POST_PY = code`
       return cos, sin
 
 
+  def build_tables_at(offset, n, head_dim, base=10000.0):
+      """从 offset 起算的 n 行 RoPE 表。解码时用。
+
+      角色是 activation 而不是 data：这张表是**每步现造**的（offset 每步都变），
+      标成 data 的话它落在解码循环那个 mark 之后，第二步的 release 会当场报错。
+      \`__init__\` 里那张预算好的表才是常驻的。
+      """
+      half = head_dim // 2
+      cos = nt.zeros((n, half), name="rope.cos.at")
+      sin = nt.zeros((n, half), name="rope.sin.at")
+      cv, sv = [], []
+      for p in range(offset, offset + n):
+          for i in range(half):
+              th = p * (base ** (-2.0 * i / head_dim))
+              cv.append(math.cos(th))
+              sv.append(math.sin(th))
+      cos.set_(cv)
+      sin.set_(sv)
+      return cos, sin
+
+
   class Norm(nn.Module):
       def __init__(self, dim):
           super().__init__()
@@ -11063,16 +11084,30 @@ const KIT_POST_PY = code`
           self.wo = nt.parameter((nh * hd, dim), seed + 4, (nh * hd) ** -0.5, "wo")
           self._cos, self._sin = build_tables(max_seq, hd)
 
-      def forward(self, x, b, s):
+      def forward(self, x, b, s, cache=None, offset=0):
+          """cache 给解码用（第 8 关那一套）：位置从 offset 起算，
+          k/v 追加进缓存之后对缓存里全部位置做注意力。"""
           hd = self.hd
           q = F.linear(x, self.wq)
           k = F.linear(x, self.wk)
           v = F.linear(x, self.wv)
-          q = F.rope(q, self._cos, self._sin, b, s, self.nh, hd)
-          k = F.rope(k, self._cos, self._sin, b, s, self.nkv, hd)
-          sc = F.attn_scores(q, k, b, s, s, self.nh, self.nkv, hd)
-          pr = F.softmax(sc, b * self.nh * s, s, F.causal_valid(b, self.nh, s))
-          o = F.attn_apply(pr, v, b, s, s, self.nh, self.nkv, hd,
+          if offset == 0 and s <= self._cos.shape[0]:
+              cos, sin = self._cos, self._sin
+          else:
+              cos, sin = build_tables_at(offset, s, hd)
+          q = F.rope(q, cos, sin, b, s, self.nh, hd)
+          k = F.rope(k, cos, sin, b, s, self.nkv, hd)
+
+          if cache is None:
+              keys, values, skv = k, v, s
+          else:
+              cache.append(k, v, s)
+              keys, values, skv = cache.k, cache.v, cache.max_seq
+
+          sc = F.attn_scores(q, keys, b, s, skv, self.nh, self.nkv, hd)
+          pr = F.softmax(sc, b * self.nh * s, skv,
+                         F.causal_valid(b, self.nh, s, offset))
+          o = F.attn_apply(pr, values, b, s, skv, self.nh, self.nkv, hd,
                            out_shape=(b * s, self.nh * hd))
           return F.linear(o, self.wo)
 
@@ -11095,8 +11130,8 @@ const KIT_POST_PY = code`
           self.n2, self.mp = Norm(dim), Mlp(dim, hid, seed + 40)
           self.sc = (2.0 * nl) ** -0.5
 
-      def forward(self, x, b, s):
-          x = F.add(x, F.scale(self.at(self.n1(x), b, s), self.sc))
+      def forward(self, x, b, s, cache=None, offset=0):
+          x = F.add(x, F.scale(self.at(self.n1(x), b, s, cache, offset), self.sc))
           return F.add(x, F.scale(self.mp(self.n2(x)), self.sc))
 
 
@@ -11109,13 +11144,18 @@ const KIT_POST_PY = code`
           ])
           self.nf = Norm(D)
 
-      def logits(self, idx, b, s):
+      def logits(self, idx, b, s, caches=None, offset=0):
+          """caches 是每层一个 KVCache（不给就走整段重算那条路）。"""
           rows = b * s
           x = F.embedding(self.embed, idx, rows, D)
-          for blk in self.blocks:
-              x = blk(x, b, s)
+          for i, blk in enumerate(self.blocks):
+              x = blk(x, b, s, caches[i] if caches else None, offset)
           x = self.nf(x)
           return F.linear_tied(x, self.embed, rows, D, V)
+
+      def make_caches(self, batch, max_seq):
+          """每层一块 KV cache。role 是 data —— 整段生成里都在。"""
+          return [nt.generate.KVCache(batch, max_seq, KV, D // H) for _ in range(L)]
 
       def forward(self, idx, tgt, b, s, mask=None):
           return F.cross_entropy(self.logits(idx, b, s), tgt, b * s, V, mask)
@@ -11207,6 +11247,27 @@ const KIT_POST_PY = code`
               wrong = int(answer) + delta
           else:
               wrong = int(answer) - delta
+          out.append((prompt, answer, str(wrong)))
+      return out
+
+
+  def make_length_biased_pairs(n, seed, max_value=20, op="+"):
+      """**带长度混淆**的偏好对：错的那个永远是一位数。
+
+      正确答案可能是一位也可能是两位，于是「更长」和「更好」在数据里绑在一起。
+      第 26 关要先量出这个混淆，再把它去掉。
+
+      现实里没人故意这么造数据 —— 但人类标注、模型标注、规则构造
+      都很容易**无意**带上同一个结构，而结果是一样的。
+      """
+      base = make_pairs(n, seed, max_value, op)
+      out = []
+      st = (seed * 22695477 + 7) & 0x7fffffff
+      for prompt, answer in base:
+          st = (st * 22695477 + 7) & 0x7fffffff
+          wrong = st % 10
+          if str(wrong) == answer:
+              wrong = (wrong + 1) % 10
           out.append((prompt, answer, str(wrong)))
       return out
 
@@ -13338,6 +13399,960 @@ const STAGE_DPO = {
   ),
 };
 
+/* ================================================================== */
+/* 第 26 关：长度偏置                                                   */
+/* ================================================================== */
+
+const STAGE_LENGTH = {
+  id: 'length-bias',
+  title: t('长度偏置 —— 赢了，但不是靠变长赢的', 'Length bias — winning, but not by getting longer'),
+  goal: t(
+    code`
+      偏好优化有一个几乎必然出现的副作用：**答案越来越长**。
+
+      原因不神秘。如果偏好数据里「更好的那个」平均更长
+      （人类标注、模型标注、规则构造，都容易带上这个），
+      那么「长」就是一个和「好」高度相关的特征,
+      而模型没有理由不去学这个更容易学的特征。
+
+      这一关的数据是**故意构造成有长度混淆的**：正确答案可能是一位也可能是两位，
+      而错误答案永远是一位。于是「更长」和「更好」在数据里绑在一起。
+
+      在 \`length.py\` 里做三件事：
+
+      \`\`\`python
+      def length_stats(pairs):
+          """量一量数据里的长度混淆：chosen 与 rejected 的平均长度差。"""
+
+      def debias(pairs):
+          """去掉混淆。要求：留下来的对里 chosen 与 rejected **等长**。"""
+
+      def overlong_rate(model, prompts_with_short_answers, max_new):
+          """本该一位的题里，模型吐出两位及以上的比例。"""
+      \`\`\`
+
+      ## 为什么要「长度受控」的评测
+
+      直接比胜率是不行的:如果模型学会了「写长一点」，
+      而评委（人或奖励模型）也偏爱长的，那么胜率上升**什么都不能说明**。
+
+      标准做法是 \`长度受控胜率\`（length-controlled win rate）——
+      只在长度可比的样本之间比较，或者把长度作为协变量回归掉。
+      AlpacaEval 2 从 2.0 版起就是这么做的，理由正是原始胜率被长度带偏得太厉害。
+
+      这一关用的是最直接的那种：**只在等长的对之间比**。
+
+      ## 去偏怎么做
+
+      最直接的一种是**让数据本身不带混淆**:
+      只保留 chosen 与 rejected 等长的那些对。代价是数据量变少。
+
+      另一类做法是改损失（\`SimPO\` 的长度归一化、\`R-DPO\` 的长度罚项），
+      好处是不丢数据，代价是引入一个新的超参。
+      这一关走第一条,它最容易验证，而且**先确认混淆存在、再去掉它**
+      这个顺序本身就是要教的东西。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | **先确认混淆存在** | 原始数据里 chosen 比 rejected 平均长 ≥ **0.3** 个 token |
+      | 去偏之后 | 留下来的对**全部等长** |
+      | 不变长 | 本该一位的题里吐两位的比例 ≤ **0.1** |
+      | **对照** | 不去偏的那一路，这个比例要明显更高 |
+
+      最后一条是这一关的骨架：**一个「没有变长」的结果，只有在
+      「不处理就会变长」被验证过之后才有意义。**
+      否则你不知道是去偏起了作用，还是这个任务本来就不会变长。
+    `,
+    code`
+      Preference optimisation has one near-inevitable side effect: **answers get longer**.
+
+      The reason is not mysterious. If the "better" option in preference data is longer on
+      average — human labelling, model labelling and rule-based construction all tend to
+      introduce this — then "long" is a feature highly correlated with "good", and the model
+      has no reason not to learn the easier feature.
+
+      This stage's data is **deliberately constructed with a length confound**: correct
+      answers may be one or two digits while wrong answers are always one digit. "Longer" and
+      "better" are tied together in the data.
+
+      Do three things in \`length.py\`:
+
+      \`\`\`python
+      def length_stats(pairs):
+          """Measure the confound: mean length difference between chosen and rejected."""
+
+      def debias(pairs):
+          """Remove it. Requirement: every surviving pair has **equal lengths**."""
+
+      def overlong_rate(model, prompts_with_short_answers, max_new):
+          """Fraction of one-digit questions where the model emits two or more digits."""
+      \`\`\`
+
+      ## Why evaluation must be length-controlled
+
+      Comparing raw win rates does not work: if the model learned to write longer and the
+      judge (human or reward model) prefers longer, a rising win rate **shows nothing**.
+
+      The standard answer is a \`length-controlled win rate\` — compare only among samples of
+      comparable length, or regress length out as a covariate. AlpacaEval has done this since
+      version 2.0, precisely because raw win rates were skewed by length.
+
+      This stage uses the most direct form: **compare only within equal-length pairs**.
+
+      ## How to debias
+
+      The most direct approach removes the confound **from the data**: keep only pairs whose
+      chosen and rejected have equal length. The cost is less data.
+
+      Another family changes the loss (\`SimPO\`'s length normalisation, \`R-DPO\`'s length
+      penalty), keeping the data at the price of a new hyperparameter. This stage takes the
+      first route: it is the easiest to verify, and the ordering — **confirm the confound
+      exists, then remove it** — is itself part of the lesson.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | **Confirm the confound first** | Chosen exceeds rejected by >= **0.3** tokens on average |
+      | After debiasing | Every surviving pair has equal lengths |
+      | No lengthening | Two-or-more-digit rate on one-digit questions <= **0.1** |
+      | **Control** | The un-debiased run must show a clearly higher rate |
+
+      That last row is the stage's backbone: **a "did not get longer" result means something
+      only after "it would have gotten longer" has been verified.** Otherwise you cannot tell
+      whether debiasing worked or the task simply never lengthens.
+    `
+  ),
+  checklist: [
+    t('先量出原始数据里的长度混淆', 'Measure the length confound in the raw data first'),
+    t('去偏之后留下来的对全部等长', 'Every pair surviving debiasing has equal lengths'),
+    t('吐两位的比例降下来了', 'The two-digit rate comes down'),
+    t('对照组确实会变长', 'The control genuinely lengthens'),
+  ],
+  hints: [
+    t('长度用 len(answer) 就行 —— 这一关的答案都是数字串。',
+      'len(answer) suffices here; every answer is a digit string.'),
+    t('kit.generate_answer(model, prompt, max_new) 的 max_new 放宽一点才看得出变长。',
+      'Give kit.generate_answer a larger max_new or lengthening stays invisible.'),
+    t('去偏之后数据会少一半左右，这是它的代价，不是 bug。',
+      'Debiasing roughly halves the data; that is its cost, not a bug.'),
+  ],
+  pitfalls: [
+    t(code`
+      **只看胜率不看长度。** 模型学会「写长一点」之后，
+      在偏爱长答案的评委面前胜率会上升,而它并没有变得更好。
+      这不是假想：\`AlpacaEval\` 就是因为这个才在 2.0 版引入长度受控胜率的。
+      **一个上升的指标，先问它有没有别的解释。**
+    `, code`
+      **Watching the win rate without watching length.** Once the model learns to write
+      longer, its win rate rises in front of a judge that prefers length — while it has not
+      gotten better. This is not hypothetical: \`AlpacaEval\` introduced a length-controlled
+      win rate in version 2.0 for exactly this reason. **When a metric rises, first ask
+      whether something else explains it.**
+    `),
+    t(code`
+      **去偏之后就不验对照了。** 「模型没有变长」这个结果，
+      只有在「不去偏就会变长」被验证过之后才有意义。
+      少了对照的话，你不知道是去偏起了作用，还是这个任务本来就不会变长 ——
+      而后一种情况下，你写的去偏代码是死的，却看着像在工作。
+    `, code`
+      **Skipping the control after debiasing.** "The model did not lengthen" means something
+      only once "it would have lengthened" has been verified. Without the control you cannot
+      tell whether debiasing worked or the task never lengthens anyway — and in the latter
+      case your debiasing code is dead while appearing to work.
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_POST_PY,
+      'length.py': code`
+        """第 26 关：长度偏置。"""
+        import kit
+
+
+        def length_stats(pairs):
+            """返回 {"chosen": 平均长度, "rejected": 平均长度, "gap": 差}。"""
+            # TODO
+            return {"chosen": 0.0, "rejected": 0.0, "gap": 0.0}
+
+
+        def debias(pairs):
+            """只留下 chosen 与 rejected 等长的对。"""
+            # TODO
+            return list(pairs)
+
+
+        def overlong_rate(model, pairs, max_new=5):
+            """答案本该是一位的那些题里，模型吐出两位及以上的比例。"""
+            # TODO: 只看 len(answer) == 1 的题
+            return 0.0
+
+
+        if __name__ == "__main__":
+            ps = kit.make_length_biased_pairs(64, 5, 20)
+            print("原始", length_stats(ps))
+            print("去偏之后", length_stats(debias(ps)), "剩", len(debias(ps)), "条")
+      `,
+    },
+    referenceFiles: {
+      'length.py': code`
+        """第 26 关的参考实现。"""
+        import kit
+
+
+        def length_stats(pairs):
+            if not pairs:
+                return {"chosen": 0.0, "rejected": 0.0, "gap": 0.0}
+            c = sum(len(ch) for _, ch, _ in pairs) / len(pairs)
+            r = sum(len(rj) for _, _, rj in pairs) / len(pairs)
+            return {"chosen": c, "rejected": r, "gap": c - r}
+
+
+        def debias(pairs):
+            # 最直接的去偏：让数据本身不带混淆。
+            # 代价是数据少一半左右 —— 这是它的代价，不是 bug
+            return [p for p in pairs if len(p[1]) == len(p[2])]
+
+
+        def overlong_rate(model, pairs, max_new=5):
+            short = [(p, a) for p, a, _ in pairs if len(a) == 1]
+            if not short:
+                return 0.0
+            over = 0
+            for prompt, _ in short:
+                out = kit.generate_answer(model, prompt, max_new)
+                if len(out) >= 2:
+                    over += 1
+            return over / len(short)
+
+
+        if __name__ == "__main__":
+            ps = kit.make_length_biased_pairs(64, 5, 20)
+            print("原始", length_stats(ps))
+            print("去偏之后", length_stats(debias(ps)), "剩", len(debias(ps)), "条")
+      `,
+    },
+  },
+  specs: [
+    spec('length.spec.ts', code`
+      ${LAB}
+
+      const SFT_STEPS = 120, DPO_STEPS = 140, BETA = 0.1, MAXV = 20, LR = 0.01;
+
+      function setup() {
+        lab.py(\`
+      import sys, json, math
+      sys.path.insert(0, "/lab")
+      import importlib, kit, length
+      importlib.reload(kit)
+      importlib.reload(length)
+      import nanotorch as nt
+      from nanotorch import functional as F
+
+      _cache = {}
+
+      def _sft():
+          m = kit.LM(seed=1)
+          kit.sft_train(m, kit.make_pairs(512, 5, \${MAXV}, "+"), \${SFT_STEPS}, 16)
+          return m
+
+      def _seq_logp(model, idx, tg, mk, n):
+          rows = n * kit.S
+          lp = F.log_softmax(model.logits(idx, n, kit.S), rows, kit.V)
+          sel = nt.zeros((rows,)); sel.set_int_([r * kit.V + tg[r] for r in range(rows)])
+          per = F.gather(lp, sel, rows, 1)
+          m2 = nt.zeros((rows,)); m2.set_(mk)
+          per = F.row_scale(per, m2, rows, 1)
+          seg = nt.zeros((rows,)); seg.set_int_([r // kit.S for r in range(rows)])
+          return F.scatter_add(per, seg, rows, 1, n)
+
+      def _dpo(pairs, steps):
+          """平台版的 DPO（第 25 关那一套）。这一关只关心数据。"""
+          pol, ref = _sft(), _sft()
+          opt = nt.optim.AdamW(pol.parameters(), lr=\${LR}, betas=(0.9, 0.95),
+                               weight_decay=0.0, grad_clip=1.0)
+          bp = 8
+          n = bp * 2
+          idx = nt.zeros((n * kit.S,), role="data", name="len.idx")
+          base = nt.mark()
+          for st in range(1, steps + 1):
+              nt.release(base)
+              flat, tg, mk = [], [], []
+              for k in range(bp):
+                  p, c, r = pairs[(st * bp + k) % len(pairs)]
+                  for ans in (c, r):
+                      ri, rt, rm = kit.build_row(p, ans)
+                      flat.extend(ri); tg.extend(rt); mk.extend(rm)
+              idx.set_int_(flat)
+              opt.zero_grad()
+              nt.phase("forward")
+              with nt.no_grad():
+                  rl = _seq_logp(ref, idx, tg, mk, n)
+              pl = _seq_logp(pol, idx, tg, mk, n)
+              d = F.scale(F.add(pl, F.scale(rl, -1.0)), \${BETA})
+              t2 = nt.zeros((bp,)); t2.set_int_([0] * bp)
+              loss = F.cross_entropy(d, t2, bp, 2)
+              nt.phase("other")
+              loss.backward()
+              opt.step(lr=\${LR})
+          nt.release(base)
+          return pol
+
+      def _run(debiased):
+          key = "d" if debiased else "n"
+          if key in _cache:
+              return _cache[key]
+          raw = kit.make_length_biased_pairs(512, 5, \${MAXV})
+          data = length.debias(raw) if debiased else raw
+          model = _dpo(data, \${DPO_STEPS})
+          held = kit.make_length_biased_pairs(96, 777, \${MAXV})
+          out = {
+              "n_data": len(data),
+              "overlong": length.overlong_rate(model, held, 5),
+              "acc_matched": kit.exact_match(
+                  model, [(p, a) for p, a, r in held if len(a) == len(r)]),
+          }
+          _cache[key] = out
+          return out
+      \`);
+      }
+
+      describe('长度偏置', () => {
+        it('原始数据里确实有长度混淆', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _raw = kit.make_length_biased_pairs(512, 5, \${MAXV})
+      _st = length.length_stats(_raw)
+      _db = length.debias(_raw)
+      _st2 = length.length_stats(_db)
+      _all_equal = all(len(c) == len(j) for _, c, j in _db)
+      json.dumps({"raw": _st, "debiased": _st2, "equal": _all_equal,
+                  "n_raw": len(_raw), "n_db": len(_db)})
+      \`)));
+          console.log(
+            '原始 ' + r.n_raw + ' 条：chosen 平均 ' + r.raw.chosen.toFixed(3)
+            + '，rejected ' + r.raw.rejected.toFixed(3) + '，差 ' + r.raw.gap.toFixed(3)
+          );
+          console.log(
+            '去偏之后剩 ' + r.n_db + ' 条：差 ' + r.debiased.gap.toFixed(3)
+            + '，全部等长 ' + r.equal
+          );
+          lab.publish('length.confoundInData', r.raw.gap);
+          lab.publish('length.debiasedGap', Math.abs(r.debiased.gap));
+          // 先确认混淆存在 —— 不存在的话这一关没有对象
+          expect(r.raw.gap).toBeGreaterThanOrEqual(0.3);
+          expect(r.equal).toBe(true);
+          expect(Math.abs(r.debiased.gap)).toBeLessThan(1e-9);
+          expect(r.n_db).toBeGreaterThan(50);
+        });
+
+        /*
+         * 「模型没有变长」只有在「不去偏就会变长」被验证过之后才有意义。
+         * 所以两路都跑，而且对照必须真的变长。
+         */
+        it('去偏之后不变长，而不去偏的对照会变长', () => {
+          setup();
+          const debiased = JSON.parse(String(lab.py('json.dumps(_run(True))')));
+          const naive = JSON.parse(String(lab.py('json.dumps(_run(False))')));
+          console.log(
+            '去偏（' + debiased.n_data + ' 条）：吐两位的比例 '
+            + (debiased.overlong * 100).toFixed(1) + '%'
+          );
+          console.log(
+            '不去偏（' + naive.n_data + ' 条）：吐两位的比例 '
+            + (naive.overlong * 100).toFixed(1) + '%'
+          );
+          lab.publish('length.overlongRate', debiased.overlong);
+          lab.publish('length.overlongRateNaive', naive.overlong);
+          expect(debiased.overlong).toBeLessThanOrEqual(0.1);
+          // 对照必须真的更差，否则这一关在教一件不存在的事
+          expect(naive.overlong).toBeGreaterThan(debiased.overlong + 0.1);
+        });
+
+        it('长度受控的准确率没有被牺牲掉', () => {
+          setup();
+          const debiased = JSON.parse(String(lab.py('json.dumps(_run(True))')));
+          console.log(
+            '等长样本上的精确匹配 ' + (debiased.acc_matched * 100).toFixed(1) + '%'
+          );
+          lab.publish('length.controlledWinRate', debiased.acc_matched);
+          expect(debiased.acc_matched).toBeGreaterThanOrEqual(0.4);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.length.confoundInData', op: 'gte', value: 0.3,
+      zh: '原始数据里 chosen 比 rejected 长多少（先确认混淆存在）',
+      en: 'how much longer chosen is than rejected in the raw data (confirm the confound)',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.length.debiasedGap', op: 'lte', value: 1e-9,
+      zh: '去偏之后的长度差（要恰好为 0）', en: 'length gap after debiasing (must be exactly 0)',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.length.overlongRate', op: 'lte', value: 0.1,
+      zh: '本该一位的题里吐两位的比例', en: 'two-digit rate on one-digit questions',
+      dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.length.controlledWinRate', op: 'gte', value: 0.4,
+      zh: '等长样本上的准确率（长度受控）', en: 'accuracy on length-matched samples',
+      dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness'],
+  extension: t(
+    code`
+      长度只是**最容易看见**的那个混淆。同一类问题还有很多：
+
+      **格式偏好。** 评委偏爱带 markdown 列表的回答，于是模型什么都列成条目。
+      **自信度。** 偏爱语气肯定的回答，于是模型学会不说「我不确定」——
+      这一条直接伤害校准，也是幻觉的来源之一。
+      **谄媚（sycophancy）。** 偏爱同意用户的回答，于是模型学会顺着用户说。
+
+      这些的共同结构和长度一模一样：**一个和「好」相关、但比「好」容易学的特征**。
+      而 RLHF 会准确地找到并放大它。
+
+      \`RLVR\` 在这件事上有结构性的优势:规则判对错不带这些偏好。
+      \`7+5=12\` 就是对的，写得长不长、有没有列表、语气自不自信，规则都不看。
+      这也是 2026 年可验证任务这条路走得快的原因之一。
+
+      但它也有自己的问题:可验证的任务只覆盖数学、代码、形式推理这一小块，
+      而「写一封得体的邮件」没有验证器。所以真实的后训练是两条路并用的。
+    `,
+    code`
+      Length is only the **most visible** confound. The same structure appears elsewhere:
+
+      **Format preference.** Judges favour markdown lists, so the model turns everything
+      into bullet points.
+      **Confidence.** Judges favour assertive answers, so the model learns never to say "I am
+      not sure" — directly damaging calibration and feeding hallucination.
+      **Sycophancy.** Judges favour agreement, so the model learns to agree with the user.
+
+      All share length's structure: **a feature correlated with "good" but easier to learn
+      than "good"**. RLHF finds and amplifies it accurately.
+
+      \`RLVR\` has a structural advantage here: a rule carries none of these preferences.
+      \`7+5=12\` is correct whether it is long or short, bulleted or not, confident or
+      hedged. That is part of why verifiable tasks moved so fast through 2026.
+
+      It has its own limitation: verifiable tasks cover only mathematics, code and formal
+      reasoning, and "write a tactful email" has no verifier. Real post-training runs both
+      routes together.
+    `
+  ),
+};
+
+/* ================================================================== */
+/* 第 27 关：rollout 基础设施                                           */
+/* ================================================================== */
+
+const STAGE_ROLLOUT = {
+  id: 'rollout',
+  title: t('rollout —— 强化学习跑不跑得动，看这一层', 'Rollout — whether RL runs at all comes down to this layer'),
+  goal: t(
+    code`
+      强化学习的每一步都要**先采样再学习**：给一批 prompt，每个采 \`G\` 条，
+      判对错，然后按结果更新。这一层叫 \`rollout\`,
+      而它在真实系统里占 RL 训练时间的 **60% 到 80%**。
+
+      在 \`rollout.py\` 里实现：
+
+      \`\`\`python
+      def rollout(model, prompts, group_size, max_new, seed,
+                  temperature=1.0, top_k=0):
+          """每个 prompt 采 group_size 条。返回
+
+          [{"prompt": p,
+            "samples": ["12", "13", ...],     # group_size 条
+            "steps":   [n1, n2, ...]}, ...]   # 每条实际跑了几步解码
+
+          三条硬要求：**用 KV cache**、**撞到 EOS 就停**、**确定性**。"""
+      \`\`\`
+
+      ## 为什么必须用 KV cache
+
+      不带 cache 的解码，每生成一个 token 都要把整段前缀重算一遍。
+      第 8 关量过：同样生成 12 个 token，**不带 cache 的 FLOPs 是带 cache 的 7.26 倍**。
+
+      而 RL 的一步要采 \`prompt 数 × G\` 条,这个倍数直接乘在整个训练时间上。
+      这不是「优化」，是这一关能不能在预算里跑完的分界。
+
+      这一关的门槛：你的 rollout 的 FLOPs 必须 ≤ 平台那份**不带 cache** 的 **0.6 倍**。
+
+      ## 为什么必须撞到 EOS 就停
+
+      不停的话，EOS 之后那些 token 是**纯浪费**,它们不参与奖励、不参与更新，
+      只消耗算力。在答案长度差异大的任务上（有的两个 token，有的两百个），
+      按最长的那条跑满，浪费的比算的还多。
+
+      真实推理引擎里这件事叫 \`continuous batching\`：一条序列结束就把它换出去，
+      空出来的位置立刻塞新的进来。这一关做的是它的最小形式,**记录每条实际跑了几步**。
+
+      ## 为什么必须确定性
+
+      RL 的调试极其依赖重放。一次训练里出了问题（奖励忽然掉、
+      某一步的梯度爆了），你要能**把那一步原样再跑一遍**。
+      采样带随机性，所以随机性必须是**可寻址的**:
+      同一个 (seed, prompt 下标, 样本下标) 永远给同一条输出。
+
+      拿全局随机状态的实现做不到这一点,换个 batch 大小、换个执行顺序，
+      同一个 seed 就给出不同的结果。
+
+      ## 怎么算过
+
+      | | 要求 |
+      | --- | --- |
+      | 数量 | 恰好 \`prompt 数 × group_size\` 条 |
+      | **KV cache** | FLOPs ≤ 不带 cache 的 **0.6 倍** |
+      | **提前停** | 每条的步数 = 答案长度 + 1（撞到 EOS），或者 max_new |
+      | **确定性** | 同 seed 两遍逐条相同；换 seed 要有不同的样本 |
+    `,
+    code`
+      Every reinforcement-learning step **samples before it learns**: take a batch of
+      prompts, draw \`G\` samples each, judge them, then update from the outcome. That layer
+      is the \`rollout\`, and in real systems it consumes **60% to 80%** of RL training time.
+
+      Implement in \`rollout.py\`:
+
+      \`\`\`python
+      def rollout(model, prompts, group_size, max_new, seed,
+                  temperature=1.0, top_k=0):
+          """Draw group_size samples per prompt. Returns
+
+          [{"prompt": p,
+            "samples": ["12", "13", ...],     # group_size of them
+            "steps":   [n1, n2, ...]}, ...]   # decode steps each actually ran
+
+          Three hard requirements: **use the KV cache**, **stop at EOS**,
+          **be deterministic**."""
+      \`\`\`
+
+      ## Why the KV cache is mandatory
+
+      Uncached decoding recomputes the whole prefix for every token. Stage 8 measured it:
+      generating the same 12 tokens, **the uncached path costs 7.26x the FLOPs**.
+
+      An RL step samples \`prompts × G\` sequences, and that multiplier lands directly on
+      total training time. This is not an optimisation but the line between finishing within
+      budget and not.
+
+      The gate: your rollout's FLOPs must be at most **0.6x** the platform's **uncached**
+      version.
+
+      ## Why stopping at EOS is mandatory
+
+      Otherwise every token after EOS is **pure waste** — it earns no reward, joins no
+      update, and only burns compute. On tasks where answer lengths vary widely (two tokens
+      here, two hundred there), running everything to the longest length wastes more than it
+      computes.
+
+      Real inference engines call this \`continuous batching\`: a finished sequence is
+      evicted and a new one takes its slot immediately. This stage builds the minimal form —
+      **record how many steps each sample actually ran**.
+
+      ## Why determinism is mandatory
+
+      Debugging RL depends heavily on replay. When something goes wrong mid-run (reward
+      suddenly drops, one step's gradient explodes) you must be able to **rerun that exact
+      step**. Sampling is random, so the randomness has to be **addressable**: the same
+      (seed, prompt index, sample index) must always produce the same output.
+
+      An implementation drawing from global random state cannot do that — change the batch
+      size or the execution order and the same seed yields something different.
+
+      ## What counts as passing
+
+      | | Requirement |
+      | --- | --- |
+      | Count | Exactly \`prompts × group_size\` samples |
+      | **KV cache** | FLOPs <= **0.6x** the uncached version |
+      | **Early stop** | Steps per sample = answer length + 1 (EOS), or max_new |
+      | **Determinism** | Two runs at one seed match sample for sample; a new seed differs |
+    `
+  ),
+  checklist: [
+    t('每个 prompt 采满 group_size 条', 'Exactly group_size samples per prompt'),
+    t('用 KV cache 解码', 'Decoding goes through the KV cache'),
+    t('撞到 EOS 就停，并记下实际步数', 'Stop at EOS and record the actual step count'),
+    t('随机性是可寻址的：(seed, i, j) 决定一条输出',
+      'Randomness is addressable: (seed, i, j) determines one output'),
+  ],
+  hints: [
+    t('model.make_caches(1, max_seq) 给每层一块缓存；model.logits(..., caches, offset)。',
+      'model.make_caches(1, max_seq) allocates per-layer caches; pass them to model.logits(..., caches, offset).'),
+    t('prefill 一次把整段 prompt 塞进缓存，之后每步只喂一个 token。',
+      'Prefill pushes the whole prompt in once; after that feed one token per step.'),
+    t('采样的 seed 要按 prompt 的**内容**算，不按它在这一批里的下标 —— 否则单独重跑一条会变。',
+      "Derive the sampling seed from the prompt's content, not its index in the batch, or rerunning one alone changes it."),
+  ],
+  pitfalls: [
+    t(code`
+      **忘了 KV cache。** 功能完全正确,采出来的样本一模一样，
+      只是慢了七倍。而 rollout 占 RL 训练时间的六到八成，
+      于是整个训练慢了五倍以上。**功能对而代价错**，
+      是这一层最典型的问题,它不会让任何测试变红，只会让预算耗光。
+    `, code`
+      **Forgetting the KV cache.** Functionally perfect — the samples are identical, it is
+      merely seven times slower. And since rollout is 60–80% of RL training time, the whole
+      run slows by more than fivefold. **Correct behaviour at the wrong cost** is this
+      layer's characteristic failure: no test turns red, the budget simply runs out.
+    `),
+    t(code`
+      **采样用全局随机状态。** 同一个 seed，换个 batch 大小或者换个循环顺序
+      就给出不同的结果,于是「把出问题那一步再跑一遍」做不到。
+      RL 的调试几乎完全依赖重放，而这一条把重放废掉了。
+      随机性要**可寻址**：(seed, prompt 下标, 样本下标) 算出一个种子。
+    `, code`
+      **Sampling from global random state.** The same seed gives different results if the
+      batch size or loop order changes, so "rerun the step that went wrong" becomes
+      impossible. RL debugging depends almost entirely on replay, and this destroys it.
+      Randomness must be **addressable**: derive a seed from (seed, prompt index, sample
+      index).
+    `),
+  ],
+  train: {
+    files: {
+      'kit.py': KIT_POST_PY,
+      'rollout.py': code`
+        """第 27 关：批量 rollout。KV cache、提前停、确定性。"""
+        import nanotorch as nt
+        from nanotorch import functional as F
+        import kit
+
+
+        def rollout(model, prompts, group_size, max_new, seed,
+                    temperature=1.0, top_k=0):
+            """返回 [{"prompt", "samples", "steps"}]。"""
+            # TODO: 每个 prompt 采 group_size 条。
+            #       prefill 一次 -> 逐 token 解码（带 cache）-> 撞 EOS 就停
+            #       种子由 (seed, prompt 内容, j) 算出来，别用全局状态、也别用批内下标
+            return []
+
+
+        if __name__ == "__main__":
+            m = kit.LM(seed=1)
+            g = rollout(m, ["7+5=", "1+2="], 4, 4, seed=3)
+            for grp in g:
+                print(grp["prompt"], grp["samples"], grp["steps"])
+      `,
+    },
+    referenceFiles: {
+      'rollout.py': code`
+        """第 27 关的参考实现。"""
+        import nanotorch as nt
+        from nanotorch import functional as F
+        import kit
+
+
+        def prompt_seed(prompt):
+            """按 prompt 的内容算一个确定性的整数。不能用 Python 的 hash() ——
+            它在不同进程里可能不同，而这里要的正是跨进程也稳的东西。"""
+            h = 2166136261
+            for t in kit.encode(prompt):
+                h = ((h ^ (t + 1)) * 16777619) & 0x7fffffff
+            return h
+
+
+        def rollout(model, prompts, group_size, max_new, seed,
+                    temperature=1.0, top_k=0):
+            out = []
+            max_seq = kit.S
+            buf = nt.zeros((max_seq,), role="data", name="roll.idx")
+            for i, prompt in enumerate(prompts):
+                samples, steps = [], []
+                for j in range(group_size):
+                    # **可寻址的随机性**：同一个 (seed, prompt 内容, j) 永远给同一条输出。
+                    #
+                    # 注意是按**内容**算，不是按它在这一批里的下标算 ——
+                    # 按下标的话，单独重跑其中一个 prompt 会得到另一条输出，
+                    # 而「把出问题那一条再跑一遍」正是重放要做的事
+                    sub = seed * 100003 + prompt_seed(prompt) * 101 + j
+                    ids = kit.encode(prompt)
+                    caches = model.make_caches(1, max_seq)
+                    mk = nt.mark()
+                    got, used = [], 0
+                    with nt.no_grad():
+                        for step in range(max_new):
+                            nt.release(mk)
+                            # 第一步把整段 prompt 塞进缓存，之后每步只喂新来的那一个
+                            feed = ids if step == 0 else ids[-1:]
+                            offset = caches[0].length
+                            if offset + len(feed) > max_seq:
+                                break
+                            buf.set_int_(feed + [kit.PAD] * (max_seq - len(feed)))
+                            lg = model.logits(buf, 1, len(feed), caches, offset)
+                            nxt = nt.generate.sample(
+                                lg, len(feed) - 1, kit.V,
+                                temperature=temperature, top_k=top_k, seed=sub + step
+                            )
+                            used += 1
+                            if nxt == kit.EOS:
+                                break          # 撞到 EOS 就停 —— 之后的 token 是纯浪费
+                            got.append(nxt)
+                            ids.append(nxt)
+                    nt.release(mk)
+                    samples.append(kit.decode(got))
+                    steps.append(used)
+                out.append({"prompt": prompt, "samples": samples, "steps": steps})
+            return out
+
+
+        if __name__ == "__main__":
+            m = kit.LM(seed=1)
+            g = rollout(m, ["7+5=", "1+2="], 4, 4, seed=3)
+            for grp in g:
+                print(grp["prompt"], grp["samples"], grp["steps"])
+      `,
+    },
+  },
+  specs: [
+    spec('rollout.spec.ts', code`
+      ${LAB}
+
+      const SFT_STEPS = 120, MAXV = 20, GROUP = 4, MAX_NEW = 4;
+
+      function setup() {
+        lab.py(\`
+      import sys, json
+      sys.path.insert(0, "/lab")
+      import importlib, kit, rollout
+      importlib.reload(kit)
+      importlib.reload(rollout)
+      import nanotorch as nt
+      from nanotorch import functional as F
+
+      _cache = {}
+
+      def _model():
+          if "m" not in _cache:
+              m = kit.LM(seed=1)
+              kit.sft_train(m, kit.make_pairs(512, 5, \${MAXV}, "+"), \${SFT_STEPS}, 16)
+              _cache["m"] = m
+          return _cache["m"]
+
+      def _naive(model, prompts, group_size, max_new, seed, temperature=1.0, top_k=0):
+          """平台的对照：完全一样的采样，只是**不带 cache**（每步整段重算）。"""
+          out = []
+          buf = nt.zeros((kit.S,), role="data", name="naive.idx")
+          for i, prompt in enumerate(prompts):
+              samples, steps = [], []
+              for j in range(group_size):
+                  sub = seed * 100003 + rollout.prompt_seed(prompt) * 101 + j
+                  ids = kit.encode(prompt)
+                  mk = nt.mark()
+                  got, used = [], 0
+                  with nt.no_grad():
+                      for step in range(max_new):
+                          nt.release(mk)
+                          if len(ids) >= kit.S:
+                              break
+                          buf.set_int_(ids + [kit.PAD] * (kit.S - len(ids)))
+                          lg = model.logits(buf, 1, len(ids))
+                          nxt = nt.generate.sample(lg, len(ids) - 1, kit.V,
+                                                   temperature=temperature, top_k=top_k,
+                                                   seed=sub + step)
+                          used += 1
+                          if nxt == kit.EOS:
+                              break
+                          got.append(nxt)
+                          ids.append(nxt)
+                  nt.release(mk)
+                  samples.append(kit.decode(got))
+                  steps.append(used)
+              out.append({"prompt": prompt, "samples": samples, "steps": steps})
+          return out
+
+      _prompts = [p for p, _ in kit.make_pairs(8, 41, \${MAXV}, "+")]
+      \`);
+      }
+
+      describe('rollout 基础设施', () => {
+        it('每个 prompt 采满 group_size 条，且撞到 EOS 就停', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _g = rollout.rollout(_model(), _prompts, \${GROUP}, \${MAX_NEW}, seed=7)
+      json.dumps(_g)
+      \`)));
+          expect(r.length).toBe(8);
+          let total = 0, early = 0, bad = 0;
+          for (const grp of r) {
+            expect(grp.samples.length).toBe(GROUP);
+            expect(grp.steps.length).toBe(GROUP);
+            for (let j = 0; j < GROUP; j++) {
+              total += 1;
+              const len = grp.samples[j].length;
+              const steps = grp.steps[j];
+              // 撞到 EOS：步数 = 答案长度 + 1（那一步采到的是 EOS）
+              // 没撞到：跑满 max_new，此时长度就等于 max_new
+              if (steps === len + 1) early += 1;
+              else if (!(steps === MAX_NEW && len === MAX_NEW)) bad += 1;
+            }
+          }
+          console.log(
+            r.length + ' 组 × ' + GROUP + ' 条：提前停的 ' + early + ' 条，'
+            + '步数对不上的 ' + bad + ' 条；前两组 '
+            + JSON.stringify(r.slice(0, 2).map((g) => g.samples))
+          );
+          lab.publish('rollout.count', total);
+          lab.publish('rollout.badSteps', bad);
+          lab.publish('rollout.earlyStopped', early);
+          expect(total).toBe(8 * GROUP);
+          expect(bad).toBe(0);
+          // 训练过的模型会好好停下来 —— 一条都不提前停的话这条门槛是白测的
+          expect(early).toBeGreaterThan(total / 2);
+        });
+
+        /*
+         * 用没用 KV cache 不能靠声明，要靠数 FLOPs。
+         * 对照是平台自己的那份 —— 采样完全一样，只是每步整段重算。
+         */
+        it('FLOPs 不到不带 cache 的 0.6 倍', () => {
+          setup();
+          // 先把模型建好 —— 它要训 120 步，那些 FLOPs 不该算进任何一边
+          lab.py('_m = _model()');
+          const before = lab.metrics().flops.total;
+          lab.py('_a = rollout.rollout(_m, _prompts, ' + GROUP + ', ' + MAX_NEW + ', seed=7)');
+          const withCache = lab.metrics().flops.total - before;
+
+          const b2 = lab.metrics().flops.total;
+          lab.py('_b = _naive(_m, _prompts, ' + GROUP + ', ' + MAX_NEW + ', seed=7)');
+          const naive = lab.metrics().flops.total - b2;
+
+          const ratio = withCache / naive;
+          console.log(
+            '带 cache ' + withCache + ' FLOPs，不带 ' + naive
+            + '，比值 ' + ratio.toFixed(3)
+          );
+          lab.publish('flops.rolloutOverNaive', ratio);
+          expect(withCache).toBeGreaterThan(0);
+          expect(ratio).toBeLessThan(0.6);
+
+          // 顺带：两边采出来的样本应当一模一样（同一个采样过程，只是算法不同）
+          const same = JSON.parse(String(lab.py(\`
+      json.dumps(sum(1 for x, y in zip(_a, _b)
+                     for u, v in zip(x["samples"], y["samples"]) if u != v))
+      \`)));
+          console.log('两条路采出来不同的样本数 ' + same);
+          lab.publish('rollout.cacheMismatches', same);
+          expect(same).toBe(0);
+        });
+
+        /*
+         * RL 的调试几乎完全依赖重放。随机性必须是**可寻址的**：
+         * 同一个 (seed, i, j) 永远给同一条输出，换 batch 大小也不变。
+         */
+        it('同 seed 两遍逐条相同，换 seed 会不同', () => {
+          setup();
+          const r = JSON.parse(String(lab.py(\`
+      _x = rollout.rollout(_model(), _prompts, \${GROUP}, \${MAX_NEW}, seed=11)
+      _y = rollout.rollout(_model(), _prompts, \${GROUP}, \${MAX_NEW}, seed=11)
+      _z = rollout.rollout(_model(), _prompts, \${GROUP}, \${MAX_NEW}, seed=99)
+      # 换个「批」的划分：一次只跑一个 prompt，结果也该一样
+      _split = []
+      for _i, _p in enumerate(_prompts):
+          _one = rollout.rollout(_model(), [_p], \${GROUP}, \${MAX_NEW}, seed=11)
+          _split.append(_one[0]["samples"])
+      json.dumps({"x": [g["samples"] for g in _x], "y": [g["samples"] for g in _y],
+                  "z": [g["samples"] for g in _z], "split": _split})
+      \`)));
+          let same = 0, diff = 0, splitBad = 0;
+          for (let i = 0; i < r.x.length; i++) {
+            for (let j = 0; j < GROUP; j++) {
+              if (r.x[i][j] !== r.y[i][j]) same += 1;
+              if (r.x[i][j] !== r.z[i][j]) diff += 1;
+              if (r.x[i][j] !== r.split[i][j]) splitBad += 1;
+            }
+          }
+          console.log(
+            '同 seed 两遍对不上 ' + same + ' 条；换 seed 不同的 ' + diff + ' 条；'
+            + '换批划分对不上 ' + splitBad + ' 条'
+          );
+          lab.publish('rollout.determinismMismatches', same + splitBad);
+          expect(same).toBe(0);
+          // 换了批的划分也必须一样 —— 这才叫「可寻址」，而不只是「跑两遍一样」
+          expect(splitBad).toBe(0);
+          expect(diff).toBeGreaterThan(0);
+        });
+      });
+    `),
+  ],
+  gates: [
+    gate({
+      metric: 'llm.rollout.badSteps', op: 'eq', value: 0,
+      zh: '步数与「撞 EOS 就停」对不上的样本数',
+      en: 'samples whose step count contradicts stopping at EOS', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.flops.rolloutOverNaive', op: 'lte', value: 0.6,
+      zh: 'rollout 与不带 cache 版本的 FLOPs 比',
+      en: 'rollout FLOPs over the uncached version', dimension: 'efficiency',
+    }),
+    gate({
+      metric: 'llm.rollout.cacheMismatches', op: 'eq', value: 0,
+      zh: '带 cache 与不带 cache 采出来不同的样本数',
+      en: 'samples differing between the cached and uncached paths', dimension: 'correctness',
+    }),
+    gate({
+      metric: 'llm.rollout.determinismMismatches', op: 'eq', value: 0,
+      zh: '重放与换批划分之后对不上的样本数',
+      en: 'samples differing on replay or under a different batching', dimension: 'correctness',
+    }),
+  ],
+  focus: ['correctness', 'efficiency'],
+  extension: t(
+    code`
+      真实的 RL 系统里，rollout 和训练是**两个独立的进程**，
+      常常跑在不同的卡上：推理引擎（vLLM / SGLang）负责采样，
+      训练框架负责更新，中间靠**权重同步**连起来。
+
+      这带来一个 2026 年才被认真对待的问题：**推理和训练的数值不一致**。
+      推理引擎为了快用了不同的 kernel、不同的批处理、不同的精度，
+      于是它算出来的 \`log π\` 和训练框架算出来的**不完全相等**。
+      而 PPO / GRPO 的比值项 \`π_new / π_old\` 恰恰是两者相除,
+      一点点不一致会被放大成一个假的比值，训练就此跑偏。
+      解决办法要么是让两边用同一套 kernel，要么是在训练侧**重算一遍** log π。
+
+      另外两件真实的事：
+
+      **partial rollout。** 长序列采到一半可以先存下来，下一轮接着采,
+      不必等最长的那条跑完。这让批的利用率高很多。
+
+      **异步。** 采样和更新重叠起来跑，代价是用来采样的策略比当前策略旧几步
+      （\`off-policy\` 的程度变高）。这正是 GRPO 那些修正项要处理的东西。
+    `,
+    code`
+      In real RL systems the rollout and the training loop are **two separate processes**,
+      often on different devices: an inference engine (vLLM / SGLang) samples, a training
+      framework updates, and **weight synchronisation** links them.
+
+      This creates a problem taken seriously only recently: **numerical mismatch between
+      inference and training**. The inference engine uses different kernels, batching and
+      precision for speed, so its \`log π\` is **not exactly equal** to the training
+      framework's. PPO and GRPO divide precisely these two quantities in \`π_new / π_old\`,
+      so a small inconsistency inflates into a spurious ratio and training drifts. The fixes
+      are either sharing kernels between the two or **recomputing** log π on the training
+      side.
+
+      Two more realities:
+
+      **Partial rollout.** A long sequence can be checkpointed mid-generation and continued
+      next round, rather than holding the batch until the longest one finishes. Batch
+      utilisation improves substantially.
+
+      **Asynchrony.** Overlap sampling with updating, at the cost of the sampling policy
+      lagging the current one by a few steps (more \`off-policy\`). That is exactly what
+      GRPO's correction terms are built to handle.
+    `
+  ),
+};
+
 /* ------------------------------------------------------------------ */
 
 module.exports = {
@@ -13566,6 +14581,6 @@ module.exports = {
     STAGE_MANUAL_BWD, STAGE_ENGINE, STAGE_MODEL_BWD, STAGE_ADAMW,
     STAGE_SCHEDULE, STAGE_CLIP, STAGE_PACKING, STAGE_PRETRAIN,
     STAGE_AMP, STAGE_RECOMPUTE, STAGE_SCALING, STAGE_MOE, STAGE_MUON,
-    STAGE_SFT, STAGE_MIXTURE, STAGE_RM, STAGE_DPO,
+    STAGE_SFT, STAGE_MIXTURE, STAGE_RM, STAGE_DPO, STAGE_LENGTH, STAGE_ROLLOUT,
   ],
 };
