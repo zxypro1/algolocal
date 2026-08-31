@@ -2984,6 +2984,46 @@ const primers = {
         'That creates a problem taken seriously only recently: `numerical mismatch between inference and training`. The inference engine uses different kernels, batching and precision for speed, so the two compute slightly different log probabilities. PPO and GRPO divide exactly those two quantities,a small inconsistency inflates into a spurious ratio and training drifts. The fixes are sharing kernels or recomputing on the training side.'
       )
     ),
+    'grpo-rlvr': t(
+      p(
+        '强化学习要一个`基线`来降方差:策略梯度里减去任何与动作无关的量，都不改变梯度的期望，却能显著降低它的方差。PPO 用一个学出来的价值网络（critic）当基线,而 critic 和策略一样大，要单独训、单独存、单独调。',
+        '`GRPO` 把 critic 去掉了：**同一个 prompt 采一组，用组内的平均奖励当基线**。好处不只是省一个网络,组内均值天然是无偏的（同分布采出来的），而 critic 训不准的时候会引入偏差，且「critic 训不准」在长序列上是常态。代价是方差更大，所以组要够大（一般 8 起）。',
+        '`RLVR` 把奖励模型也去掉了：可验证的任务**直接用规则判对错**,数学答案对不对、代码跑不跑得过测试。两个一起，整条链上只剩策略一个模型。而且没有奖励模型，就没有奖励被钻空子的问题。',
+        '组内归一化之后有一个必须恒成立的等式：**每一组的优势之和是 0**。这不是巧合，是「减去均值」的定义。它也是一条极好的自查,分错组（把整个 batch 当一组）的实现照样能训，只是基线变成了「所有 prompt 的平均」，GRPO 退化成方差更大的 REINFORCE，而组内和不为 0 会当场暴露它。',
+        '一组里全对或全错的话，组内标准差是 0，优势也全是 0,**这一组对梯度没有贡献**。这不是 bug，是 GRPO 的固有性质：稳定做对的题没什么可学的。但它有个实际后果，训练后期大部分组都全对、有效 batch 越来越小，所以真实系统要按难度筛题。',
+        '重要性比值 `ρ = π_new / π_old` 要在 **log 空间里减再 exp 回来**,两个小概率相除会失去精度。而且只跑一个内层轮次的话 ρ 恒等于 1、裁剪不起作用，这时 GRPO 就是带基线的 REINFORCE。',
+        'DeepSeek-R1 把 RLVR 推到了一个反直觉的地方：**只用 RLVR、不做 SFT** 也能训出很强的推理能力，模型会自己长出「先想一想再回答」这种行为,没有人教它，是奖励逼出来的。但可验证的任务只是所有任务的一小块，所以真实流程是两条路并用。'
+      ),
+      p(
+        'Reinforcement learning needs a `baseline` to reduce variance: subtracting anything independent of the action leaves the gradient\'s expectation unchanged while lowering its variance substantially. PPO learns a value network (critic) for this,as large as the policy, separately trained, stored and tuned.',
+        '`GRPO` removes the critic: **sample a group per prompt and use the group mean as the baseline**. Beyond saving a network, a group mean is naturally unbiased (drawn from the same distribution), whereas an inaccurate critic introduces bias,and inaccuracy is the norm on long sequences. The cost is variance, so groups must be reasonably large (8 and up).',
+        '`RLVR` removes the reward model too: verifiable tasks **judge correctness by rule**,does the mathematical answer match, does the code pass its tests. Together, only the policy remains. And with no reward model, there is no reward hacking.',
+        'After group normalisation one identity must always hold: **each group\'s advantages sum to zero**. Not a coincidence but the definition of subtracting a mean. It also makes an excellent self-check,an implementation that groups wrongly (treating the whole batch as one group) still trains, its baseline becomes "the average across all prompts", GRPO degenerates into a higher-variance REINFORCE, and a non-zero group sum exposes it immediately.',
+        'When a group is all-correct or all-wrong its standard deviation is zero and so are its advantages,**that group contributes nothing to the gradient**. Not a bug but an inherent property: reliably-solved questions have nothing left to teach. It has a practical consequence though, since late in training most groups are all-correct and the effective batch shrinks, so real systems filter by difficulty.',
+        'The importance ratio `ρ = π_new / π_old` must be computed by **subtracting in log space and exponentiating back**,dividing two small probabilities loses precision. And with a single inner epoch ρ is identically 1 and clipping does nothing, leaving GRPO as REINFORCE with a baseline.',
+        'DeepSeek-R1 pushed RLVR somewhere counter-intuitive: **RLVR alone, without SFT**, produces strong reasoning, and the model grows "think before answering" behaviour by itself,nobody taught it, the reward forced it out. But verifiable tasks are a small slice of all tasks, so real pipelines run both routes.'
+      )
+    ),
+    'grpo-fixes': t(
+      p(
+        'GRPO 能训，但它有三个已经被反复记录下来的毛病。2025 到 2026 年间三篇工作各自指出了一个,而三个修正加起来只有几行。它们有一个共同的形状：**都不是「算错了」，而是「归一化选错了」**。',
+        '第一个：`不要除标准差`。把优势写成 z-score 看着最标准，但它引入了偏置,同样的「对了一个」，在几乎全错的组里被放大（那一组标准差小），在对错各半的组里被压小。于是模型被推着去优先攻克几乎做不出来的题，而那些题往往是噪声。Dr.GRPO 的结论是只减均值。**减均值那一半必须留着**,它才是基线，去掉就没有方差缩减了。',
+        '第二个：`token 级归一化，不是序列级`。「先在每条序列内平均，再在序列之间平均」看起来更公平（每条一票），后果却是短序列里每个 token 的更新被放大，倍数正好是长度比。而在推理任务上短的往往是蒙的、长的才是一步步推的,这个偏置正好推反了方向。',
+        '第三个：`clip-higher`。对称裁剪下，一个概率 0.01 的 token 即使优势为正也最多涨到 0.012，而概率 0.9 的可以涨到 1.0。低概率的选项永远追不上来，策略越训越确定、探索越来越少,这叫`熵坍缩`。DAPO 的做法是只把上界放宽（0.2 → 0.28），给低概率的 token 留出上升空间。',
+        '这三个错的共同之处还在于：**都不会在 loss 曲线上表现出来**。发现它们靠的是盯着一个具体的量,优势的分布、每个 token 的梯度、低概率 token 的熵。',
+        '这条线还在继续。`GSPO` 指出 token 级的重要性比值在长序列上会累积出巨大的方差，主张在序列层面做裁剪,这和「token 级归一化」不矛盾（一个说归一化，一个说比值的粒度），但怎么配仍然在争。',
+        '还有一条更基本的问题：**RL 到底在教模型新东西，还是只在放大它已经会的**。有工作指出 RLVR 主要是把基座里已有的解法挑出来并加强，而不是发明新解法。如果这是对的，RL 的上限取决于预训练。'
+      ),
+      p(
+        'GRPO trains, but it has three well-documented ailments. Between 2025 and 2026 three papers each identified one, and all three corrections together are a few lines. They share a shape: **none is a miscalculation; each is a wrong choice of normalisation**.',
+        'First: `do not divide by the standard deviation`. Writing the advantage as a z-score looks most standard, yet it introduces a bias,the same "one correct answer" is magnified in a nearly-all-wrong group (small std) and suppressed in a half-and-half one. The model is pushed to prioritise near-impossible questions, which are usually noise. Dr.GRPO subtracts the mean only. **The mean subtraction must stay**,it is the baseline, and removing it removes variance reduction.',
+        'Second: `token-level normalisation, not sequence-level`. Averaging within each sequence then across sequences looks fairer (one vote each), but each token of a short sequence then receives an amplified update, by exactly the length ratio. In reasoning tasks short responses tend to be guesses and long ones do the step-by-step work,so the bias points the wrong way.',
+        'Third: `clip-higher`. Under symmetric clipping a token at probability 0.01 can rise at most to 0.012 even with positive advantage, while one at 0.9 can reach 1.0. Low-probability options never catch up, the policy grows ever more certain and exploration disappears,this is `entropy collapse`. DAPO loosens only the upper bound (0.2 to 0.28), leaving room for low-probability tokens to rise.',
+        'What these three also share: **none shows up in the loss curve**. Finding them takes watching a specific quantity,the distribution of advantages, per-token gradients, the entropy of low-probability tokens.',
+        'The line continues. `GSPO` argues token-level importance ratios accumulate enormous variance on long sequences and that clipping belongs at the sequence level,which does not contradict token-level normalisation (one concerns normalisation, the other the ratio\'s granularity), though how they combine is contested.',
+        'And a more fundamental question: **is RL teaching the model anything new, or only amplifying what it already had?** Work suggests RLVR mainly selects and strengthens solutions already in the base model rather than inventing new ones. If so, RL\'s ceiling is set by pretraining.'
+      )
+    ),
   },
 };
 

@@ -42,6 +42,8 @@ export interface KernelExports {
   cross_entropy_bwd_f32(probs: number, targets: number, mask: number, dlogits: number, rows: number, vocab: number, scale: number): void;
   embed_fwd_f32(table: number, idx: number, out: number, rows: number, d: number): void;
   mul_f32(a: number, b: number, out: number, n: number): void;
+  exp_fwd_f32(x: number, out: number, n: number): void;
+  exp_bwd_f32(go: number, out: number, dx: number, n: number): void;
   row_scale_f32(x: number, s: number, out: number, rows: number, d: number): void;
   row_scale_bwd_s_f32(go: number, x: number, ds: number, rows: number, d: number): void;
   embed_bwd_f32(dout: number, idx: number, dtable: number, rows: number, d: number): void;
@@ -81,6 +83,8 @@ export interface KernelExports {
   cross_entropy_bwd_f64(probs: number, targets: number, mask: number, dlogits: number, rows: number, vocab: number, scale: number): void;
   embed_fwd_f64(table: number, idx: number, out: number, rows: number, d: number): void;
   mul_f64(a: number, b: number, out: number, n: number): void;
+  exp_fwd_f64(x: number, out: number, n: number): void;
+  exp_bwd_f64(go: number, out: number, dx: number, n: number): void;
   row_scale_f64(x: number, s: number, out: number, rows: number, d: number): void;
   row_scale_bwd_s_f64(go: number, x: number, ds: number, rows: number, d: number): void;
   embed_bwd_f64(dout: number, idx: number, dtable: number, rows: number, d: number): void;
@@ -101,7 +105,7 @@ export interface KernelExports {
 }
 
 /** 这一版算子的 ABI。改了算子语义就在 kernels.c 里 +1，两边对不上要立刻炸 */
-export const KERNEL_ABI_VERSION = 4;
+export const KERNEL_ABI_VERSION = 5;
 
 const PAGE = 65536;
 

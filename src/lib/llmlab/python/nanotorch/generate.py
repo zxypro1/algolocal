@@ -35,9 +35,15 @@ class KVCache:
         self.kv_heads = kv_heads
         self.head_dim = head_dim
         self.width = kv_heads * head_dim
-        # role="data"：整段生成里都在，不该被每步的 release 推平
-        self.k = zeros((batch, max_seq, self.width), dtype, role="data", name="kv.k")
-        self.v = zeros((batch, max_seq, self.width), dtype, role="data", name="kv.v")
+        # 角色是 activation，不是 data。
+        #
+        # 缓存要活过**解码循环内部**的 release —— 这靠「在 mark 之前分配」做到，
+        # 和角色无关（release 只放掉 mark 之后的）。
+        # 而标成 data 的话它就活过了**外层**的 release：
+        # rollout 被放进 RL 的训练循环里时，每步造一批缓存，外层 release 撞上
+        # 一个 data 角色的张量就当场报错。一次性的东西就该标成一次性的。
+        self.k = zeros((batch, max_seq, self.width), dtype, name="kv.k")
+        self.v = zeros((batch, max_seq, self.width), dtype, name="kv.v")
         self.length = 0
 
     def reset(self):

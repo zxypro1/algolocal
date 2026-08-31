@@ -37,6 +37,7 @@ export type OpName =
   | 'cross_entropy' | 'cross_entropy_bwd'
   | 'embed_fwd' | 'embed_bwd'
   | 'mul' | 'row_scale' | 'row_scale_bwd_s'
+  | 'exp_fwd' | 'exp_bwd'
   | 'adamw';
 
 /** 一次调用记的账 */
@@ -527,6 +528,18 @@ export class Ops {
     const dt = sameDType(a, b, out);
     expect(a.count >= n && b.count >= n && out.count >= n, 'mul 的三块长度不齐');
     this.call('mul', n, dt, (s) => this.kernels.fn[`mul_${s}`](a.off, b.off, out.off, n));
+  }
+
+  /** out = exp(x)。重要性比值 `exp(log π_new − log π_old)` 用它 */
+  expFwd(x: Tensor, out: Tensor, n: number): void {
+    const dt = sameDType(x, out);
+    this.call('exp_fwd', 2 * n, dt, (s) => this.kernels.fn[`exp_fwd_${s}`](x.off, out.off, n));
+  }
+
+  /** exp 的反向：dx = out · go —— 导数就是它自己 */
+  expBwd(go: Tensor, out: Tensor, dx: Tensor, n: number): void {
+    const dt = sameDType(go, out, dx);
+    this.call('exp_bwd', n, dt, (s) => this.kernels.fn[`exp_bwd_${s}`](go.off, out.off, dx.off, n));
   }
 
   /** out[r][c] = x[r][c] · s[r]。一行一个系数 —— 路由权重 / 样本掩码 / 优势加权 */

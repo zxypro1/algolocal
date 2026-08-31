@@ -790,6 +790,25 @@ void FN(embed_bwd)(int dout_, int idx_, int dtable_, int rows, int d) {
 
 /* ---------------------------------------------------------------- 逐元素 */
 
+/*
+ * out = exp(x)。反向是 `dx = out · go` —— 导数就是它自己，不必重算。
+ *
+ * 强化学习里它只有一个用处，但那个用处绕不开：
+ * 重要性比值 `ρ = exp(log π_new − log π_old)`。
+ * 写成两个概率相除会在小概率上失去精度，所以是「在 log 空间里减，再 exp 回来」。
+ */
+void FN(exp_fwd)(int x_, int out_, int n) {
+  const SCALAR *x = CP(x_);
+  SCALAR *out = P(out_);
+  for (int i = 0; i < n; i++) out[i] = (SCALAR)ll_exp((double)x[i]);
+}
+
+void FN(exp_bwd)(int go_, int out_, int dx_, int n) {
+  const SCALAR *go = CP(go_), *out = CP(out_);
+  SCALAR *dx = P(dx_);
+  for (int i = 0; i < n; i++) dx[i] = (SCALAR)((double)go[i] * (double)out[i]);
+}
+
 /* out = a * b。PyTorch 里的 `a * b`。反向是 (b·go, a·go) */
 void FN(mul)(int a_, int b_, int out_, int n) {
   const SCALAR *a = CP(a_), *b = CP(b_);
