@@ -76,6 +76,9 @@ def fill_rope(cos_h, sin_h, block_size, head_dim, base):
 
 set_item = _B.set_item
 fill_one_hot = _B.fill_one_hot
+mul = _B.mul
+row_scale = _B.row_scale
+row_scale_bwd_s = _B.row_scale_bwd_s
 gemm_nn = _B.gemm_nn
 gemm_tn_acc = _B.gemm_tn_acc
 gemm_nt = _B.gemm_nt

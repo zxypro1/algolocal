@@ -729,6 +729,44 @@ void FN(embed_bwd)(int dout_, int idx_, int dtable_, int rows, int d) {
   }
 }
 
+/* ---------------------------------------------------------------- 逐元素 */
+
+/* out = a * b。PyTorch 里的 `a * b`。反向是 (b·go, a·go) */
+void FN(mul)(int a_, int b_, int out_, int n) {
+  const SCALAR *a = CP(a_), *b = CP(b_);
+  SCALAR *out = P(out_);
+  for (int i = 0; i < n; i++) out[i] = a[i] * b[i];
+}
+
+/*
+ * 每一行乘一个自己的系数：out[r][c] = x[r][c] * s[r]。
+ *
+ * MoE 的路由权重、SFT 的样本掩码、GRPO 的优势加权都是这个形状 ——
+ * 「一行一个标量」在这些地方比通用的逐元素乘更常见，也省掉一块 [rows, dim] 的广播。
+ */
+void FN(row_scale)(int x_, int s_, int out_, int rows, int d) {
+  const SCALAR *x = CP(x_), *s = CP(s_);
+  SCALAR *out = P(out_);
+  for (int r = 0; r < rows; r++) {
+    SCALAR k = s[r];
+    const SCALAR *src = x + (long)r * d;
+    SCALAR *dst = out + (long)r * d;
+    for (int i = 0; i < d; i++) dst[i] = src[i] * k;
+  }
+}
+
+/* row_scale 对 s 的反向：ds[r] = Σ_c x[r][c] · go[r][c] */
+void FN(row_scale_bwd_s)(int go_, int x_, int ds_, int rows, int d) {
+  const SCALAR *go = CP(go_), *x = CP(x_);
+  SCALAR *ds = P(ds_);
+  for (int r = 0; r < rows; r++) {
+    double acc = 0.0;
+    const SCALAR *g = go + (long)r * d, *v = x + (long)r * d;
+    for (int i = 0; i < d; i++) acc += (double)g[i] * (double)v[i];
+    ds[r] += (SCALAR)acc;
+  }
+}
+
 /* ---------------------------------------------------------------- 优化器 */
 
 /*

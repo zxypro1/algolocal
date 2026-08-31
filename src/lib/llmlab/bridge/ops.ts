@@ -35,6 +35,7 @@ export type OpName =
   | 'quantize_bf16' | 'quantize_fp16' | 'count_nonfinite'
   | 'cross_entropy' | 'cross_entropy_bwd'
   | 'embed_fwd' | 'embed_bwd'
+  | 'mul' | 'row_scale' | 'row_scale_bwd_s'
   | 'adamw';
 
 /** 一次调用记的账 */
@@ -496,6 +497,32 @@ export class Ops {
   }
 
   /** FLOPs ≈ 11n（两个动量各 3、偏差修正 2、更新 3） */
+  /** out = a ⊙ b。逐元素乘 —— MoE 的门控、GRPO 的 ratio×advantage 都是它 */
+  mul(a: Tensor, b: Tensor, out: Tensor, n: number): void {
+    const dt = sameDType(a, b, out);
+    expect(a.count >= n && b.count >= n && out.count >= n, 'mul 的三块长度不齐');
+    this.call('mul', n, dt, (s) => this.kernels.fn[`mul_${s}`](a.off, b.off, out.off, n));
+  }
+
+  /** out[r][c] = x[r][c] · s[r]。一行一个系数 —— 路由权重 / 样本掩码 / 优势加权 */
+  rowScale(x: Tensor, s: Tensor, out: Tensor, rows: number, d: number): void {
+    const dt = sameDType(x, s, out);
+    expect(x.count >= rows * d && out.count >= rows * d, 'row_scale 的张量装不下');
+    expect(s.count >= rows, 'row_scale 的系数要每行一个');
+    this.call('row_scale', rows * d, dt, (suf) => {
+      this.kernels.fn[`row_scale_${suf}`](x.off, s.off, out.off, rows, d);
+    });
+  }
+
+  /** row_scale 对系数的反向：ds[r] += Σ_c x[r][c]·go[r][c] */
+  rowScaleBwdS(go: Tensor, x: Tensor, ds: Tensor, rows: number, d: number): void {
+    const dt = sameDType(go, x, ds);
+    expect(ds.count >= rows, 'row_scale_bwd_s 的 ds 要每行一个');
+    this.call('row_scale_bwd_s', 2 * rows * d, dt, (suf) => {
+      this.kernels.fn[`row_scale_bwd_s_${suf}`](go.off, x.off, ds.off, rows, d);
+    });
+  }
+
   adamw(
     w: Tensor, g: Tensor, m: Tensor, v: Tensor, n: number,
     opts: { lr: number; beta1: number; beta2: number; eps: number; decay: number; step: number; clip: number }

@@ -41,6 +41,9 @@ export interface KernelExports {
   cross_entropy_f32(logits: number, targets: number, probs: number, rows: number, vocab: number): number;
   cross_entropy_bwd_f32(probs: number, targets: number, mask: number, dlogits: number, rows: number, vocab: number, scale: number): void;
   embed_fwd_f32(table: number, idx: number, out: number, rows: number, d: number): void;
+  mul_f32(a: number, b: number, out: number, n: number): void;
+  row_scale_f32(x: number, s: number, out: number, rows: number, d: number): void;
+  row_scale_bwd_s_f32(go: number, x: number, ds: number, rows: number, d: number): void;
   embed_bwd_f32(dout: number, idx: number, dtable: number, rows: number, d: number): void;
   adamw_f32(w: number, g: number, m: number, v: number, n: number, lr: number, b1: number, b2: number, eps: number, decay: number, bc1: number, bc2: number, clip: number): void;
   attn_scores_fwd_f32(q: number, k: number, out: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number, scale: number): void;
@@ -75,6 +78,9 @@ export interface KernelExports {
   cross_entropy_f64(logits: number, targets: number, probs: number, rows: number, vocab: number): number;
   cross_entropy_bwd_f64(probs: number, targets: number, mask: number, dlogits: number, rows: number, vocab: number, scale: number): void;
   embed_fwd_f64(table: number, idx: number, out: number, rows: number, d: number): void;
+  mul_f64(a: number, b: number, out: number, n: number): void;
+  row_scale_f64(x: number, s: number, out: number, rows: number, d: number): void;
+  row_scale_bwd_s_f64(go: number, x: number, ds: number, rows: number, d: number): void;
   embed_bwd_f64(dout: number, idx: number, dtable: number, rows: number, d: number): void;
   adamw_f64(w: number, g: number, m: number, v: number, n: number, lr: number, b1: number, b2: number, eps: number, decay: number, bc1: number, bc2: number, clip: number): void;
   attn_scores_fwd_f64(q: number, k: number, out: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number, scale: number): void;
@@ -91,7 +97,7 @@ export interface KernelExports {
 }
 
 /** 这一版算子的 ABI。改了算子语义就在 kernels.c 里 +1，两边对不上要立刻炸 */
-export const KERNEL_ABI_VERSION = 2;
+export const KERNEL_ABI_VERSION = 3;
 
 const PAGE = 65536;
 

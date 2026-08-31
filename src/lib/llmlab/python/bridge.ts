@@ -65,6 +65,9 @@ export interface PythonBridge {
   cross_entropy(logits: number, targets: number, probs: number, rows: number, vocab: number): number;
   cross_entropy_bwd(probs: number, targets: number, mask: number, dlogits: number, rows: number, vocab: number, scale: number): void;
   embed_fwd(table: number, idx: number, out: number, rows: number, d: number): void;
+  mul(a: number, b: number, out: number, n: number): void;
+  row_scale(x: number, s: number, out: number, rows: number, d: number): void;
+  row_scale_bwd_s(go: number, x: number, ds: number, rows: number, d: number): void;
   embed_bwd(dout: number, idx: number, dtable: number, rows: number, d: number): void;
   adamw(w: number, g: number, m: number, v: number, n: number, lr: number, b1: number, b2: number, eps: number, decay: number, step: number, clip: number): void;
   attn_scores(q: number, k: number, out: number, B: number, Sq: number, Skv: number, H: number, KV: number, hd: number, scale: number): void;
@@ -225,6 +228,9 @@ export function createPythonBridge(rt: Runtime): PythonBridge {
       ops.crossEntropy(T(logits), T(targets), T(probs), rows, vocab),
     cross_entropy_bwd: (probs, targets, mask, dlogits, rows, vocab, scale) =>
       ops.crossEntropyBwd(T(probs), T(targets), mask >= 0 ? T(mask) : null, T(dlogits), rows, vocab, scale),
+    mul: (a, b, out, n) => ops.mul(T(a), T(b), T(out), n),
+    row_scale: (x, sc, out, rows, d) => ops.rowScale(T(x), T(sc), T(out), rows, d),
+    row_scale_bwd_s: (go, x, ds, rows, d) => ops.rowScaleBwdS(T(go), T(x), T(ds), rows, d),
     embed_fwd: (table, idx, out, rows, d) => ops.embedFwd(T(table), T(idx), T(out), rows, d),
     embed_bwd: (dout, idx, dtable, rows, d) => ops.embedBwd(T(dout), T(idx), T(dtable), rows, d),
     adamw: (w, g, m, v, n, lr, b1, b2, eps, decay, step, clip) =>

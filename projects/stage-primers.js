@@ -2808,6 +2808,44 @@ const primers = {
         'And a wholly different route: **do not produce the activations at all**. FlashAttention never stores the attention matrix, computing in tiles and accumulating as it goes. That saving is not bought back by recomputing; the data is never generated. The two compose, and the latter is the better bargain.'
       )
     ),
+    'scaling-laws': t(
+      p(
+        '训一个大模型很贵，而贵的东西不能靠试。`缩放定律`回答的是：跑几个便宜的小档，能不能预测一个还没跑过的大档。',
+        '经验上，语言模型的 loss 随参数量、数据量、算力都近似遵循`幂律`:`L = B · D^(−β)`。幂律最有用的性质是它取对数之后是一条`直线`,于是「拟合幂律」变成「在 log-log 上拟合一条直线」，闭式最小二乘两行就写完。',
+        '这里有个常见的错：直接在线性坐标上拟直线。幂律在线性坐标下是一条曲线，直线会在两端都偏,而**外推恰恰发生在端点外面**，误差在你最需要它准的地方最大。内插看起来还行，这让这个错更难发现。',
+        '取曲线的时候还要注意`学习率调度`。余弦退火后期 loss 掉得快，那是学习率在降，不是数据在起作用。拿那段去拟合，指数会偏大，外推到更远处偏得更多。数据轴的曲线要在恒定学习率下取。',
+        'Chinchilla（2022）的结论是参数量和数据量要一起涨：给定算力预算 `C ≈ 6ND`，最优配比大约是 20 token / 参数。在那之前的模型普遍训得太少。',
+        '而 2026 年实践中的配比远高于 20,Llama 3 的 8B 训了 15T token。原因是**推理成本正比于参数量而不是数据量**：训练一次、推理无数次，所以人们愿意在训练上超额投入来换更小的模型。Chinchilla 最优的是「这一次训练的 loss」，不是「部署之后的总成本」。',
+        '最后：外推要谨慎。缩放律在拟合区间附近很准，跨几个数量级之后会遇到没被建模的东西,数据枯竭、架构在某个尺度上的行为变化、以及那个绕不开的不可约损失。'
+      ),
+      p(
+        'Training a large model is expensive, and expensive things cannot be found by trial. `Scaling laws` answer whether a few cheap small runs can predict a large one nobody has done.',
+        'Empirically, language model loss follows approximate `power laws` in parameters, data and compute: `L = B · D^(−β)`. The most useful property of a power law is that taking logs turns it into a `straight line`,so "fit a power law" becomes "fit a line in log-log", and closed-form least squares is two lines of code.',
+        'A common mistake is fitting a line in linear coordinates. A power law is curved there, so a straight fit misses at both ends,and **extrapolation happens precisely beyond those ends**, putting the largest error exactly where accuracy matters most. Interpolation still looks fine, which makes it harder to notice.',
+        'Also mind the `learning-rate schedule` when taking the curve. Loss falls quickly late in a cosine decay because the rate is dropping, not because data is helping. Fitting that segment inflates the exponent, and the further you extrapolate the worse it gets. Data-axis curves must be measured at a constant learning rate.',
+        'Chinchilla (2022) concluded that parameters and data should grow together: for a compute budget `C ≈ 6ND` the optimum is around 20 tokens per parameter. Models before it were generally undertrained.',
+        'By 2026, practice pushes that ratio far past 20,Llama 3\'s 8B trained on 15T tokens. The reason is that **inference cost scales with parameters, not data**: you train once and serve forever, so overspending on training buys a smaller model. Chinchilla optimises one training run\'s loss, not total cost after deployment.',
+        'Finally, extrapolate carefully. Scaling laws are accurate near the fitted range and meet unmodelled effects several orders of magnitude out,data exhaustion, architecture behaving differently at scale, and the irreducible loss that no amount of data removes.'
+      )
+    ),
+    'moe': t(
+      p(
+        '稠密模型里每个 token 都要过一遍全部参数。`MoE`（混合专家）把一个大前馈换成很多个小的，每个 token 只走其中几个,**参数量涨了几倍，而每个 token 的算力不变**。DeepSeek-V3 是总参数 671B、激活 37B，18 倍的稀疏度。',
+        '决定谁去哪的是`路由器`:一个小线性层，把每个 token 映射到每个专家的分数，softmax 之后取最大的几个。权重要在这几个里**重新归一化**,不归一化的话，这一层的输出量级会跟着路由器的置信度飘。',
+        '`容量`是这里最反直觉的一件事。每个专家有一个接收上限，超出的 token 会被**丢掉**（那个 token 就少走一个专家）。为什么不干脆不设上限？因为在真实的分布式实现里，每个专家在一张卡上，而**集合通信的缓冲区必须是定长的**。容量就是那个缓冲区。这不是算法上的选择，是工程约束,而它反过来塑造了算法。',
+        '不加干预的话路由器会`塌`：所有 token 都去同一个专家，其余的永远学不到东西。经典解法是加一个`负载均衡损失`,专家越集中它越大。它可导的只有「路由器给各专家的平均概率」那一半，「实际分了多少」是数出来的、不可导，这个不对称是有意的。',
+        '2026 年 DeepSeek-V3 换掉了辅助损失：它在和主损失抢梯度，逼着路由器为了均衡做出不利于建模的选择。新做法是给每个专家的路由分数加一个**只调不求导**的偏置，谁超载就把谁调低。均衡从此不打扰主损失。',
+        '还有一条工程上的：**MoE 的瓶颈是通信不是计算**。专家分布在不同卡上，每层要做两次 all-to-all。容量因子、专家并行的拓扑、专门的通信库，都是围着这件事转的。'
+      ),
+      p(
+        'In a dense model every token passes through all parameters. `MoE` (mixture of experts) replaces one large feed-forward with many small ones and routes each token through a few,**parameters multiply while per-token compute stays the same**. DeepSeek-V3 has 671B total parameters with 37B active, an 18x sparsity.',
+        'A `router` decides who goes where: a small linear layer scoring each expert per token, softmax, then take the top few. Weights must be **renormalised within those few**,otherwise this layer\'s output magnitude drifts with router confidence.',
+        '`Capacity` is the least intuitive part. Each expert accepts a limited number of tokens and the rest are **dropped** (that token visits one fewer expert). Why cap at all? Because in a real distributed implementation each expert lives on one device and **collective-communication buffers must be fixed size**. Capacity is that buffer. It is an engineering constraint rather than an algorithmic choice,and it then shapes the algorithm.',
+        'Left alone the router `collapses`: every token goes to one expert and the others never learn. The classic remedy is a `load-balancing loss` that grows as routing concentrates. Only the "mean router probability per expert" half is differentiable; the "how many actually went there" half is counted and carries no gradient, and that asymmetry is deliberate.',
+        'In 2026 DeepSeek-V3 dropped the auxiliary loss: it competes with the main objective, pushing the router toward choices that balance load at the expense of modelling. The replacement adds a **tunable, gradient-free** bias to each expert\'s routing score, lowered whenever that expert is overloaded. Balancing then never disturbs the main loss.',
+        'One more engineering note: **MoE is bottlenecked by communication, not compute**. Experts sit on different devices and every layer performs two all-to-all exchanges. Capacity factors, expert-parallel topologies and dedicated communication libraries all revolve around this.'
+      )
+    ),
   },
 };
 

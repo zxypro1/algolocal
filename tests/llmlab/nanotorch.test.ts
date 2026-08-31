@@ -227,6 +227,78 @@ M().num_parameters()
   });
 
   /*
+   * `F.mul` / `F.row_scale` / `F.gather` / `F.scatter_add` —— 第 20 关起要用的四个。
+   *
+   * 四个一起验是因为 MoE 那一关把它们串成一条链：
+   * 按专家 gather 出 token、算完、乘上路由权重、再 scatter 回原位。
+   * 链上任何一环写错，表现都是「loss 还在降，只是慢一点」。
+   */
+  it('mul 与 row_scale 的前向和反向', () => {
+    const out = session.py.run(`
+import json
+import nanotorch as nt
+from nanotorch import functional as F
+
+a = nt.parameter((2, 3), None, 0.0); a.set_([1, 2, 3, 4, 5, 6])
+b = nt.parameter((2, 3), None, 0.0); b.set_([2, 2, 2, 3, 3, 3])
+y = F.mul(a, b)
+g = y.ensure_grad(); g.set_([1, 1, 1, 1, 1, 1])
+y._backward()
+
+x = nt.parameter((2, 3), None, 0.0); x.set_([1, 2, 3, 4, 5, 6])
+c = nt.parameter((2,), None, 0.0); c.set_([0.5, 2.0])
+z = F.row_scale(x, c, 2, 3)
+gz = z.ensure_grad(); gz.set_([1, 1, 1, 1, 1, 1])
+z._backward()
+
+json.dumps({"mul": y.tolist(), "da": a.grad.tolist(), "db": b.grad.tolist(),
+            "rs": z.tolist(), "dx": x.grad.tolist(), "dc": c.grad.tolist()})
+`) as string;
+    const r = JSON.parse(out);
+    expect(r.mul).toEqual([2, 4, 6, 12, 15, 18]);
+    // d(a⊙b)/da = b，d/db = a
+    expect(r.da).toEqual([2, 2, 2, 3, 3, 3]);
+    expect(r.db).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(r.rs).toEqual([0.5, 1, 1.5, 8, 10, 12]);
+    // 每行乘自己的系数，所以 dx 的每一行就是那个系数
+    expect(r.dx).toEqual([0.5, 0.5, 0.5, 2, 2, 2]);
+    // dc[r] = Σ_c x[r][c]  ->  1+2+3=6，4+5+6=15
+    expect(r.dc).toEqual([6, 15]);
+  });
+
+  /*
+   * gather / scatter_add 是一对。**scatter 是累加不是覆盖** ——
+   * top-k > 1 时同一个 token 会从好几个专家那里各收一份，
+   * 覆盖的话只剩最后一个专家的贡献，而 loss 照样降。
+   */
+  it('gather 与 scatter_add：scatter 是累加', () => {
+    const out = session.py.run(`
+import json
+import nanotorch as nt
+from nanotorch import functional as F
+
+table = nt.parameter((4, 2), None, 0.0)
+table.set_([10, 11, 20, 21, 30, 31, 40, 41])
+idx = nt.zeros((3,), role="data"); idx.set_int_([2, 0, 2])
+g = F.gather(table, idx, 3, 2)
+
+src = nt.parameter((3, 2), None, 0.0); src.set_([1, 1, 2, 2, 4, 4])
+sc = F.scatter_add(src, idx, 3, 2, 4)
+
+gg = sc.ensure_grad(); gg.set_([1, 2, 3, 4, 5, 6, 7, 8])
+sc._backward()
+
+json.dumps({"gather": g.tolist(), "scatter": sc.tolist(), "dsrc": src.grad.tolist()})
+`) as string;
+    const r = JSON.parse(out);
+    expect(r.gather).toEqual([30, 31, 10, 11, 30, 31]);
+    // 行 2 收到 src[0] 和 src[2] 两份：1+4 = 5
+    expect(r.scatter).toEqual([2, 2, 0, 0, 5, 5, 0, 0]);
+    // scatter 的反向是 gather
+    expect(r.dsrc).toEqual([5, 6, 1, 2, 5, 6]);
+  });
+
+  /*
    * `F.gemm` 的三种转置模式。写自定义算子的反向全靠它，
    * **一旦某个模式的 m/n/k 对错了，梯度会静静地错掉**，
    * 而形状检查未必拦得住（方阵上尤其拦不住）。
