@@ -21,14 +21,20 @@ const { execFileSync } = require('node:child_process');
 
 const ROOT = path.join(__dirname, '..', '..');
 
-/** 这个仓库预期会出现在 public/ 下的实验台 wasm，三个来源合起来 */
+/**
+ * 这个仓库预期会出现在 public/ 下的实验台资源，三个来源合起来。
+ *
+ * 收的是**所有扩展名**，不只是 .wasm —— Pyodide 那五个里有 .mjs / .zip / .json，
+ * 而漏掉它们中的任何一个，Python 都起不来。第一版这里只匹配了 `.wasm`，
+ * 正好在要加它们的前一刻发现这个洞。
+ */
 function expectedAssets() {
   const found = new Set();
 
   // 1. copy-lab-assets.js 从 node_modules 拷过去的那些
   const copy = fs.readFileSync(path.join(ROOT, 'scripts', 'copy-lab-assets.js'), 'utf8');
   const assetsBlock = copy.slice(copy.indexOf('const ASSETS'), copy.indexOf('let copied'));
-  for (const match of assetsBlock.matchAll(/'([^']+\.wasm)'\s*\]/g)) {
+  for (const match of assetsBlock.matchAll(/,\s*'([^']+)'\s*\]/g)) {
     found.add(`public/${match[1]}`);
   }
 
@@ -50,16 +56,22 @@ function expectedAssets() {
   return [...found].sort();
 }
 
+/** 白名单里逐个列名的那些 public/ 资源 */
+function listedAssets(config) {
+  return [...config.matchAll(/'(public\/(?:labkit|gpulab|opslab|llmlab)\/[^']+)',/g)].map((m) => m[1]);
+}
+
 describe('实验台资源的打包白名单', () => {
   const config = fs.readFileSync(path.join(ROOT, 'electron-builder.config.js'), 'utf8');
   const assets = expectedAssets();
 
-  it('至少认出了三个实验台的资源 —— 否则这条用例是空转的', () => {
-    expect(assets.length).toBeGreaterThanOrEqual(4);
-    // 三个实验台各自的目录都要出现，少一个说明上面的收集逻辑漏了一类
+  it('三个实验台的资源都认出来了 —— 否则这条用例是空转的', () => {
+    expect(assets.length).toBeGreaterThanOrEqual(9);
     for (const dir of ['public/labkit/', 'public/gpulab/', 'public/opslab/', 'public/llmlab/']) {
       expect(assets.some((asset) => asset.startsWith(dir))).toBe(true);
     }
+    // Pyodide 那五个一个都不能少，少一个 Python 就起不来
+    expect(assets.filter((a) => a.startsWith('public/llmlab/pyodide/'))).toHaveLength(5);
   });
 
   it.each(expectedAssets())('%s 在 files 白名单里', (asset) => {
@@ -76,9 +88,8 @@ describe('实验台资源的打包白名单', () => {
    * 反向：白名单里也不该留着已经没人用的路径 —— 那种残留会把一个
    * 早就删掉的文件继续打进包，或者（更常见）在重命名之后掩盖真正的缺失。
    */
-  it('files 白名单里没有指向不存在也不会被产出的 wasm', () => {
-    const listed = [...config.matchAll(/'(public\/[^']+\.wasm)',/g)].map((m) => m[1]);
-    for (const item of listed) {
+  it('files 白名单里没有指向不存在也不会被产出的资源', () => {
+    for (const item of listedAssets(config)) {
       const known = assets.includes(item) || fs.existsSync(path.join(ROOT, item));
       expect(known).toBe(true);
     }

@@ -59,7 +59,9 @@ class TestRunner {
       {
         name: 'Llmlab Training Workbench',
         file: 'tests/llmlab',
-        description: 'The train workbench wiring, the WASM tensor kernels, nanotorch, and the Python runtime that trains a real model in the browser'
+        description: 'The train workbench wiring, the WASM tensor kernels, nanotorch, and the Python runtime that trains a real model in the browser',
+        // Pyodide 的 Node 路径内部用了动态 import()，jest 的 CJS 沙箱要这个 flag
+        needsVmModules: true
       },
       {
         name: 'Desktop Menus',
@@ -174,13 +176,24 @@ class TestRunner {
        * （jest 的模块注册表是按文件隔离的）。默认堆在机器同时干着别的活时会不够，
        * 表现成偶发的整套失败 —— 偶发的失败比稳定的失败更费人。
        */
+      /**
+       * llmlab 那套要在 jest 里起 Pyodide，而 Pyodide 的 Node 路径内部用了
+       * 动态 `import()`。jest 的 CJS 沙箱不带 `--experimental-vm-modules` 时
+       * 会抛「A dynamic import callback was invoked without ...」。
+       *
+       * 只给需要的那一套加，不全局开：这个 flag 会改变 jest 的模块解析行为，
+       * 没有理由让另外十二套跟着变。
+       */
+      const nodeOptions = [
+        process.env.NODE_OPTIONS || '',
+        '--max-old-space-size=8192',
+        suite.needsVmModules ? '--experimental-vm-modules' : '',
+      ].filter(Boolean).join(' ');
+
       const jest = spawn('npx', ['jest', ...jestArgs], {
         stdio: 'inherit',
         shell: true,
-        env: {
-          ...process.env,
-          NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --max-old-space-size=8192`.trim(),
-        },
+        env: { ...process.env, NODE_OPTIONS: nodeOptions },
       });
 
       jest.on('close', (code) => {
