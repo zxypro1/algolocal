@@ -104,6 +104,15 @@ export function buildLlmMetrics(input: BuildMetricsInput): LlmMetricTree {
       currentBytes: arena.currentBytes,
       /** 只数 activation 那一类 —— 第 17/18 关的门槛读它 */
       peakActivationBytes: arena.peakActivationBytes,
+      /**
+       * **此刻**还占着的激活。
+       *
+       * 第 18 关（激活重算）读的是它，不是峰值 —— 重算省下来的是
+       * 「前向结束之后为反向留着的那些」，而峰值里混着反向自己的临时量，
+       * 那部分重算不但不省，还因为多算一遍而略高。
+       * 量错了对象的话，一个完全正确的重算实现会显示成「没省」。
+       */
+      currentActivationBytes: arena.currentActivationBytes,
       paramBytes: arena.byRole.param,
       gradBytes: arena.byRole.grad,
       optimizerStateBytes: arena.byRole.optimizer,

@@ -104,3 +104,35 @@ class Function:
         out._backward = _backward
         out._parents = tuple(inputs)
         return out
+
+
+def backward(root, grad=None):
+    """从 `root` 出发倒着走一遍带，梯度从 `grad` 起步。
+
+    对应 `torch.autograd.backward(tensors, grad_tensors)`。
+    和 `Tensor.backward()` 的区别只有一个：**起点不必是标量**,
+    给了 `grad` 就用它播种。激活重算的那一遍反向要的正是这个，
+    因为重算出来的中间量不是 loss。
+    """
+    if grad is not None:
+        g = root.ensure_grad()
+        B.copy(g.handle, grad.handle, g.numel)
+    elif root.grad is None:
+        assert root.numel == 1, "不给 grad 的话起点必须是标量"
+        root.ensure_grad().fill_(1.0)
+
+    topo, seen = [], set()
+
+    def visit(t):
+        if id(t) in seen:
+            return
+        seen.add(id(t))
+        for p in t._parents:
+            visit(p)
+        topo.append(t)
+
+    visit(root)
+    for t in reversed(topo):
+        if t._backward is not None:
+            t._backward()
+    return topo
