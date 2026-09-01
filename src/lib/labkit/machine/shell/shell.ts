@@ -770,6 +770,35 @@ const BUILTINS: Record<string, CommandHandler> = {
 
   pwd: ({ shell }) => ({ stdout: `${shell.cwd}\n` }),
 
+  /**
+   * `help` —— 这台机器上有什么命令。
+   *
+   * 真 bash 的 `help` 只列自己的内建，这里列**全部装上的命令**：
+   * 学员想知道的是「这台机器能干什么」，而不是「哪些是 bash 内建」。
+   * 少了它，终端对新学员就是一个不给任何线索的黑框 ——
+   * 而两个工作台的横幅都在让人「先敲点什么试试」。
+   */
+  help: ({ argv, shell }) => {
+    const names = shell.commandNames();
+    if (argv[0]) {
+      const name = argv[0];
+      return names.includes(name)
+        ? { stdout: `${name} 是这台机器上的命令。具体用法敲 \`${name} --help\`。\n` }
+        : { stderr: `bash: help: 没有 ${name} 这条命令\n`, code: 1 };
+    }
+    // 按列排版：一行塞太多名字反而看不清，80 列是终端的老规矩
+    const width = Math.max(...names.map((n) => n.length)) + 2;
+    const perLine = Math.max(1, Math.floor(80 / width));
+    const lines: string[] = [];
+    for (let i = 0; i < names.length; i += perLine) {
+      lines.push(names.slice(i, i + perLine).map((n) => n.padEnd(width)).join('').trimEnd());
+    }
+    return {
+      stdout: `这台机器上装了 ${names.length} 条命令：\n\n${lines.join('\n')}\n\n`
+        + '具体用法敲 `<命令> --help`。\n',
+    };
+  },
+
   echo: ({ argv }) => {
     const noNewline = argv[0] === '-n';
     const words = noNewline ? argv.slice(1) : argv;

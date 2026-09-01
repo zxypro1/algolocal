@@ -50,6 +50,7 @@ const BANNER = [
   '',
   '  nvcc、ncu、compute-sanitizer、nvidia-smi 都在。',
   '  `nvcc -o bench <源文件> && ./bench` 起步，然后 `ncu ./bench` 看指标。',
+  '  敲 `help` 看这台机器上都装了什么。',
   '',
 ].join('\r\n');
 
