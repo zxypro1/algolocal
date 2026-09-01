@@ -112,16 +112,19 @@ _lab_globals = runpy.run_path(${JSON.stringify(full)}, run_name="__main__")
       return py.drainOutput();
     },
     resetLabModules() {
+      /*
+       * 用推导式而不是 for 语句：`for _x in ...` 会把 _x 留在全局命名空间里，
+       * 而这段跑在**判定用例共用的那个命名空间**（`_cache`、`_full` 都在这儿），
+       * 多留一个名字就是多一次可能的撞名。推导式的循环变量不外泄。
+       */
       py.run(`
 import sys as _sys
-_lab_root = ${JSON.stringify(`${LAB_ROOT}/`)}
-for _name in [
-    _n for _n, _m in list(_sys.modules.items())
-    if _n != "nanotorch" and not _n.startswith("nanotorch.")
-    and str(getattr(_m, "__file__", "") or "").startswith(_lab_root)
-]:
-    del _sys.modules[_name]
-del _sys, _lab_root
+[_sys.modules.pop(_n, None) for _n in [
+    _k for _k, _v in list(_sys.modules.items())
+    if _k != "nanotorch" and not _k.startswith("nanotorch.")
+    and str(getattr(_v, "__file__", "") or "").startswith(${JSON.stringify(`${LAB_ROOT}/`)})
+]]
+del _sys
 `);
     },
     scriptJson(name) {
