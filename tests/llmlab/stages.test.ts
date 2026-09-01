@@ -133,3 +133,66 @@ describe('llm-from-scratch 的关卡', () => {
     }
   );
 });
+
+/**
+ * 「通过」必须是「现在通过」，不能是「曾经通过过」
+ *
+ * 判定用例普遍写成 `import importlib, bpe` + `importlib.reload(bpe)`。
+ * 而 reload 是把新源码**在同一个模块命名空间里**再执行一遍 ——
+ * 新代码没重新定义的名字不会消失。于是同一次会话里先通过一次、
+ * 再把关键函数整个删掉，上一次留下的定义还在，用例照样全绿。
+ *
+ * 这条是在 v0.19.0 的实装验收里抓到的：同一份文件，新开会话 0/5，
+ * 而在通过过一次的会话里 5/5，控制台里打的还是上一次那轮的输出。
+ *
+ * 上面那两条反向验证拦不住它 —— 它们每次都建一个全新的世界，
+ * 正好绕开了「同一个会话跑第二次」这个唯一会出问题的路径。
+ */
+describe('同一个会话里跑第二次', () => {
+  it('先通过、再把代码改坏，第二次必须挂', async () => {
+    const stage = project.stages[0];
+    expect(stage.id).toBe('byte-bpe');
+
+    const world = await buildWorld({
+      wasmBytes: WASM,
+      python: { indexURL: INDEX_URL },
+      spec: mergeWorldSpec(
+        (project.workspace as { world?: TrainWorldSpec }).world,
+        {
+          ...(stage.train?.world ?? {}),
+          machine: {
+            files: { ...(stage.train?.files ?? {}), ...(stage.train?.referenceFiles ?? {}) },
+          },
+        }
+      ),
+    });
+    world.rt.forbid((stage.train?.forbidden ?? []) as never[]);
+
+    const run = () => runTrainStage({
+      world,
+      specs: stage.specs ?? [],
+      gates: stage.gates ?? [],
+      transpile: noTranspile,
+    });
+
+    const first = await run();
+    if (first.status !== 'passed') {
+      throw new Error(`参考解第一次就没过：\n${describeFailures(first)}`);
+    }
+
+    /*
+     * 把三个函数**整个删掉**。这正是学员会干的事：
+     * 通过之后接着改，改到一半保存了一次。
+     */
+    world.session.writeFile('bpe.py', '# 什么都没写\nWIP = 1\n');
+
+    const second = await run();
+    if (second.status === 'passed') {
+      throw new Error(
+        '同一个会话里把 train_bpe 删光之后判定还是通过 —— '
+        + '上一次的模块还留在 sys.modules 里，reload 清不掉它'
+      );
+    }
+    expect(second.status).not.toBe('passed');
+  }, 600_000);
+});

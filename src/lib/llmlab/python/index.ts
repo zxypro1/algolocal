@@ -36,6 +36,25 @@ export interface TrainSession {
   scriptJson(name: string): unknown;
   /** 往工作目录里放文件（关卡的起始代码、语料、数据集） */
   writeFile(path: string, content: string): void;
+  /**
+   * 把学员那些模块从 `sys.modules` 里踢掉，让下一次 import 是真的从头来。
+   *
+   * **为什么必须有这一步。** 判定用例里到处是
+   * `import importlib, bpe` + `importlib.reload(bpe)`。而 `reload`
+   * 是把新源码**在同一个模块命名空间里**再执行一遍 ——
+   * 新代码没重新定义的名字**不会消失**。
+   *
+   * 后果是判定会失效：同一次会话里先通过一次，再把代码改坏
+   * （比如把 `train_bpe` 整个删掉），上一次留下的函数还在，
+   * 用例照样全绿。**「通过」于是变成了「曾经通过过」。**
+   *
+   * `importlib.invalidate_caches()` 挡不住这个 —— 它清的是
+   * finder 按目录 mtime 缓存的那份目录列表，和 `sys.modules` 无关。
+   *
+   * nanotorch 也在 `/lab` 下，但它是平台装的、状态挂着算子桥，
+   * 重新 import 没有意义还有风险，所以排除掉。
+   */
+  resetLabModules(): void;
 }
 
 /**
@@ -91,6 +110,22 @@ import runpy
 _lab_globals = runpy.run_path(${JSON.stringify(full)}, run_name="__main__")
 `);
       return py.drainOutput();
+    },
+    resetLabModules() {
+      /*
+       * 用推导式而不是 for 语句：`for _x in ...` 会把 _x 留在全局命名空间里，
+       * 而这段跑在**判定用例共用的那个命名空间**（`_cache`、`_full` 都在这儿），
+       * 多留一个名字就是多一次可能的撞名。推导式的循环变量不外泄。
+       */
+      py.run(`
+import sys as _sys
+[_sys.modules.pop(_n, None) for _n in [
+    _k for _k, _v in list(_sys.modules.items())
+    if _k != "nanotorch" and not _k.startswith("nanotorch.")
+    and str(getattr(_v, "__file__", "") or "").startswith(${JSON.stringify(`${LAB_ROOT}/`)})
+]]
+del _sys
+`);
     },
     scriptJson(name) {
       const raw = py.run(`

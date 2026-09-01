@@ -40,7 +40,12 @@ export interface TrainWorkspaceState {
   world: TrainWorld | null;
   status: TrainBootStatus;
   error?: string;
-  /** 世界变过几次 —— 面板要重算什么就把这个数放进依赖 */
+  /**
+   * 面板重算的信号：世界变过几次 **加上** 日志记过多少条。
+   *
+   * 只数世界是不够的 —— 验收那条路径不动世界的计数，
+   * 于是验收里记下的 loss 在面板上一步都不存在（v0.19.0 就是这样）。
+   */
   revision: number;
   /** 重建过几次 —— 终端与编辑器按它重挂 */
   generation: number;
@@ -156,10 +161,18 @@ export function useTrainWorkspace(options: UseTrainWorkspaceOptions): TrainWorks
   }, [stageKey]);
 
   const log = world ? world.rt.log.view() : EMPTY_LOG;
+  /*
+   * 面板的投影挂在这个数上，所以它**必须把日志自己的变化计数算进来**。
+   *
+   * 只用 hook 自己那个 `revision` 是不够的：它只在建世界和跑终端命令时加一，
+   * 而验收那条路径一次都不动它 —— 于是验收里记下的每一步 loss
+   * 在面板上都不存在。日志自己的 `revision` 每记一条就加一，才是真的信号。
+   */
+  const panelRevision = revision + (world ? world.rt.log.revision : 0);
   const prompt = `${options.stage?.entry ? '' : ''}~ $ `;
 
   return {
-    world, status, error, revision, generation, history, prompt, sourcePaths,
+    world, status, error, revision: panelRevision, generation, history, prompt, sourcePaths,
     log, runCommand, readFile, writeFile,
     reboot: () => setGeneration((n) => n + 1),
   };

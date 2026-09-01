@@ -98,6 +98,9 @@ export class TrainingLog {
   private reported: Record<string, unknown> = {};
   /** 变化计数 —— 面板挂在这个数上重算，不用深比 */
   revision = 0;
+  /** `view()` 的快照与它对应的 revision，见 view() 上的说明 */
+  private snapshot: TrainingLogView | null = null;
+  private snapshotAt = -1;
 
   step(record: Partial<TrainStepRecord> & { step: number }): void {
     this.steps.push({
@@ -152,15 +155,35 @@ export class TrainingLog {
     this.revision += 1;
   }
 
+  /**
+   * 面板读的那份投影。**身份必须跟着内容走。**
+   *
+   * 以前这里直接把内部数组交出去。它们是原地 `push` 的，所以
+   * 记了两百步之后 `view().steps` 还是**同一个引用** ——
+   * 而面板的 `useMemo` 挂在 `[log.steps, revision]` 上，
+   * 引用不变就不重算，曲线一条都画不出来。
+   *
+   * 这个 bug 在 v0.19.0 的实装验收里露头：头部徽章显示「200 步」
+   * （它每次渲染直接读 `.length`），而训练面板同时显示「还没有训练记录」。
+   * **同一份数据，两个地方给出相反的结论**，差别只在读法。
+   *
+   * 现在按 `revision` 缓存一份快照：内容没变就返回同一个对象
+   * （memo 照样省得下来），内容一变就是全新的引用。
+   */
   view(): TrainingLogView {
-    return {
-      steps: this.steps,
-      scalars: this.scalars,
-      samples: this.samples,
-      attention: this.attention,
-      histograms: this.histograms,
-      reported: this.reported,
+    if (this.snapshot && this.snapshotAt === this.revision) return this.snapshot;
+    this.snapshotAt = this.revision;
+    this.snapshot = {
+      steps: this.steps.slice(),
+      scalars: Object.fromEntries(
+        Object.entries(this.scalars).map(([name, list]) => [name, list.slice()])
+      ),
+      samples: this.samples.slice(),
+      attention: this.attention.slice(),
+      histograms: this.histograms.slice(),
+      reported: { ...this.reported },
     };
+    return this.snapshot;
   }
 
   clear(): void {
