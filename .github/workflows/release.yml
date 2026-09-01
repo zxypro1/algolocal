@@ -156,6 +156,20 @@ jobs:
       - name: Build Next.js
         run: npm run build
 
+      # Pyodide 的五个运行时文件（13.5MB）不入库，由 build 的 prebuild 钩子
+      # （scripts/copy-lab-assets.js）从 node_modules 拷过来。少了它们
+      # llm-from-scratch 那 30 关一关都开不了 —— 和 opslab 的 wasm 一样，当场验。
+      - name: Verify llmlab runtime assets are in place
+        shell: bash
+        run: |
+          ls -l public/llmlab/ public/llmlab/pyodide/
+          test -s public/llmlab/llmlab-kernels.wasm
+          test -s public/llmlab/pyodide/pyodide.mjs
+          test -s public/llmlab/pyodide/pyodide.asm.mjs
+          test -s public/llmlab/pyodide/pyodide.asm.wasm
+          test -s public/llmlab/pyodide/python_stdlib.zip
+          test -s public/llmlab/pyodide/pyodide-lock.json
+
       # 导入 Apple 开发者证书用于签名（如果配置了证书）
       - name: Import Code Signing Certificate
         env:
@@ -308,6 +322,20 @@ jobs:
       - name: Build Next.js
         run: npm run build
 
+      # Pyodide 的五个运行时文件（13.5MB）不入库，由 build 的 prebuild 钩子
+      # （scripts/copy-lab-assets.js）从 node_modules 拷过来。少了它们
+      # llm-from-scratch 那 30 关一关都开不了 —— 和 opslab 的 wasm 一样，当场验。
+      - name: Verify llmlab runtime assets are in place
+        shell: bash
+        run: |
+          ls -l public/llmlab/ public/llmlab/pyodide/
+          test -s public/llmlab/llmlab-kernels.wasm
+          test -s public/llmlab/pyodide/pyodide.mjs
+          test -s public/llmlab/pyodide/pyodide.asm.mjs
+          test -s public/llmlab/pyodide/pyodide.asm.wasm
+          test -s public/llmlab/pyodide/python_stdlib.zip
+          test -s public/llmlab/pyodide/pyodide-lock.json
+
       - name: Build Electron app (Windows)
         run: |
           npx electron-builder --win --config electron-builder.config.js
@@ -360,6 +388,20 @@ jobs:
 
       - name: Build Next.js
         run: npm run build
+
+      # Pyodide 的五个运行时文件（13.5MB）不入库，由 build 的 prebuild 钩子
+      # （scripts/copy-lab-assets.js）从 node_modules 拷过来。少了它们
+      # llm-from-scratch 那 30 关一关都开不了 —— 和 opslab 的 wasm 一样，当场验。
+      - name: Verify llmlab runtime assets are in place
+        shell: bash
+        run: |
+          ls -l public/llmlab/ public/llmlab/pyodide/
+          test -s public/llmlab/llmlab-kernels.wasm
+          test -s public/llmlab/pyodide/pyodide.mjs
+          test -s public/llmlab/pyodide/pyodide.asm.mjs
+          test -s public/llmlab/pyodide/pyodide.asm.wasm
+          test -s public/llmlab/pyodide/python_stdlib.zip
+          test -s public/llmlab/pyodide/pyodide-lock.json
 
       - name: Build Electron app (Linux)
         run: |
