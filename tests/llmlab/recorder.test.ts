@@ -153,3 +153,46 @@ nt.log.histogram(Tensor((256,), handle=h_handle), "weights/wq", step=2)
     expect(rt.log.view().steps).toHaveLength(0);
   });
 });
+
+/**
+ * 面板的投影：身份必须跟着内容走
+ *
+ * 面板的 `useMemo` 挂在 `[log.steps, revision]` 上。以前 `view()` 直接把
+ * 内部那个数组交出去，而它是原地 `push` 的 —— 记了两百步之后引用还是同一个，
+ * memo 不重算，曲线一条都画不出来。
+ *
+ * v0.19.0 的实装验收里就是这个症状：头部徽章写着「200 步」
+ * （它每次渲染直接读 `.length`），训练面板同时写着「还没有训练记录」。
+ * **同一份数据，两个地方给出相反的结论。**
+ */
+describe('view() 的身份', () => {
+  it('记了新的一步之后，steps 必须是一个新的引用', () => {
+    const log = new TrainingLog();
+    log.step({ step: 1, loss: 2.0 });
+    const before = log.view();
+
+    log.step({ step: 2, loss: 1.5 });
+    const after = log.view();
+
+    expect(after.steps).not.toBe(before.steps);
+    expect(before.steps).toHaveLength(1);
+    expect(after.steps).toHaveLength(2);
+    // 拿到手的那份不该被后来的写入改掉
+    expect(before.steps.map((s) => s.step)).toEqual([1]);
+  });
+
+  it('什么都没记的时候返回同一个对象 —— memo 还是要省得下来的', () => {
+    const log = new TrainingLog();
+    log.step({ step: 1, loss: 2.0 });
+    expect(log.view()).toBe(log.view());
+  });
+
+  it('scalars / samples 也一样', () => {
+    const log = new TrainingLog();
+    log.scalar('ppl', 1, 10);
+    const before = log.view();
+    log.scalar('ppl', 2, 9);
+    expect(log.view().scalars.ppl).not.toBe(before.scalars.ppl);
+    expect(before.scalars.ppl).toHaveLength(1);
+  });
+});

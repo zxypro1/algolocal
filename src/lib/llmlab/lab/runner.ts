@@ -88,6 +88,15 @@ export async function runTrainStage(options: RunTrainStageOptions): Promise<Stag
      * 那条路上就是要它抛，因为那是出题期，题目根本不该入库。
      */
     assertGatesAreStructural(options.gates);
+    /*
+     * **每次验收都从干净的模块命名空间开始。**
+     *
+     * 用例里的 `importlib.reload(x)` 是在**同一个命名空间**里重跑新源码，
+     * 学员删掉的函数不会消失 —— 于是「先通过一次、再把代码改坏」还是全绿。
+     * 这里先把 /lab 下的模块踢出 `sys.modules`，reload 前那次 import
+     * 才是真的从头来。钉这条行为的用例见 tests/llmlab/stages.test.ts。
+     */
+    options.world.session.resetLabModules();
     const builtins = createTrainLabModules(options.world);
 
     for (const spec of options.specs) {
