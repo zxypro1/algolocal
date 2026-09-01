@@ -414,10 +414,10 @@ export function createNvidiaSmi(world: GpuWorld): CommandHandler {
 
 /** 把整套工具链装到机器上 */
 export function installToolchain(world: GpuWorld): void {
-  world.machine.install('nvcc', createNvcc(world));
-  world.machine.install('ncu', createNcu(world));
-  world.machine.install('compute-sanitizer', createComputeSanitizer(world));
-  world.machine.install('nvidia-smi', createNvidiaSmi(world));
+  world.machine.install('nvcc', createNvcc(world), '编译 .cu，产物就在这台机器上跑');
+  world.machine.install('ncu', createNcu(world), '跑一遍并给出访存、占用率这些指标');
+  world.machine.install('compute-sanitizer', createComputeSanitizer(world), '查越界与数据竞争');
+  world.machine.install('nvidia-smi', createNvidiaSmi(world), '看这台机器上有几张卡、显存多大');
   // `./bench` 走 shell 的「执行磁盘上的文件」路径，见 lab/index.ts
 }
 
