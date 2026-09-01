@@ -252,5 +252,28 @@ export default function WorkbenchTerminal(
     return () => registerInsert(null);
   }, [registerInsert, prompt]);
 
-  return <div ref={hostRef} style={{ width: '100%', height: '100%', background: '#12161f', padding: 8 }} />;
+  /*
+   * 点面板的任何地方都聚焦到终端。
+   *
+   * xterm 自己的元素只盖住它渲染的那几行 —— 底下的空白和外面这层 padding
+   * 都不是它的，点上去焦点不会进来，于是**敲字有反应、回车没反应**
+   * （字进了 xterm 的缓冲，Enter 却没被它的 keydown 接住）。
+   * 对着一个黑框敲不动而又不报错，是最难自己想明白的那种卡住。
+   *
+   * 用 mouseup 而不是 mousedown，并且拖出了选区就不抢焦点 ——
+   * 否则「拖着选一段输出去复制」会在松手时被清掉。
+   */
+  const focusTerminal = () => {
+    const term = termRef.current;
+    if (!term || term.hasSelection()) return;
+    term.focus();
+  };
+
+  return (
+    <div
+      ref={hostRef}
+      onMouseUp={focusTerminal}
+      style={{ width: '100%', height: '100%', background: '#12161f', padding: 8, cursor: 'text' }}
+    />
+  );
 }

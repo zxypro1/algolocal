@@ -85,7 +85,8 @@
     "nanotorch:build": "node scripts/build-nanotorch.js",
     "kernels:build": "bash scripts/build-llmlab-kernels.sh",
     "projects:build": "node scripts/build-projects.js",
-    "projects:verify": "node scripts/build-projects.js && node scripts/verify-projects.js"
+    "projects:verify": "node scripts/build-projects.js && node scripts/verify-projects.js",
+    "serve:build": "node scripts/serve-build.js"
   },
   "dependencies": {
     "@mantine/core": "7.6.1",

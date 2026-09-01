@@ -544,3 +544,46 @@ describe('重定向挂在哪一段上', () => {
     expect(machine.vfs.exists('/root/never.txt')).toBe(false);
   });
 });
+
+/**
+ * `help` —— 终端的第一块路标
+ *
+ * 两个工作台的终端都是一个不给任何线索的黑框，而横幅在让人「先敲点什么」。
+ * 少了 help，学员只能靠猜；而猜错的反馈是 `command not found`，
+ * 那是最不给人方向的一句话。
+ */
+describe('help', () => {
+  it('列出这台机器上装了的命令，装上去的也在里面', async () => {
+    const machine = createMachine();
+    machine.install('kubectl', async () => ({ stdout: '' }));
+
+    const result = await machine.exec('help');
+
+    expect(result.code).toBe(0);
+    // 内建、coreutils、以及后装的命令都要出现
+    expect(result.stdout).toContain('kubectl');
+    expect(result.stdout).toContain('echo');
+    expect(result.stdout).toContain('help');
+    expect(result.stdout).toMatch(/装了 \d+ 条命令/);
+  });
+
+  it('help <命令> 认得出装过的和没装过的', async () => {
+    const machine = createMachine();
+    machine.install('helm', async () => ({ stdout: '' }));
+
+    const known = await machine.exec('help helm');
+    expect(known.code).toBe(0);
+    expect(known.stdout).toContain('helm');
+
+    const unknown = await machine.exec('help nosuchthing');
+    expect(unknown.code).toBe(1);
+    expect(unknown.stderr).toContain('nosuchthing');
+  });
+
+  it('输出能进管道 —— 它就是一条普通命令', async () => {
+    const machine = createMachine();
+    const result = await machine.exec('help | grep echo');
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('echo');
+  });
+});
