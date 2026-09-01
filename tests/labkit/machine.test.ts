@@ -567,6 +567,32 @@ describe('help', () => {
     expect(result.stdout).toMatch(/装了 \d+ 条命令/);
   });
 
+  it('按类别分栏，自带的命令带一句说明', async () => {
+    const machine = createMachine();
+    const result = await machine.exec('help');
+
+    for (const title of ['shell 内建', '看文件', '文本处理']) {
+      expect(result.stdout).toContain(title);
+    }
+    // 说明不是摆设：每条自带命令都该有一句
+    expect(result.stdout).toContain('列目录');
+    expect(result.stdout).toContain('按模式挑出行');
+  });
+
+  it('世界装工具时带的说明会出现在「这台机器上装的」那一栏', async () => {
+    const machine = createMachine();
+    machine.install('kubectl', async () => ({ stdout: '' }), '操作 Kubernetes 集群');
+
+    const listed = await machine.exec('help');
+    expect(listed.stdout).toContain('这台机器上装的');
+    expect(listed.stdout).toContain('操作 Kubernetes 集群');
+
+    // `help <命令>` 也读同一份说明
+    const single = await machine.exec('help kubectl');
+    expect(single.code).toBe(0);
+    expect(single.stdout).toContain('操作 Kubernetes 集群');
+  });
+
   it('help <命令> 认得出装过的和没装过的', async () => {
     const machine = createMachine();
     machine.install('helm', async () => ({ stdout: '' }));

@@ -79,6 +79,31 @@ const DEFAULT_CLUSTER_AGE_MS = 32 * 24 * 60 * 60_000;
 /** 初态对象默认「已经在那儿 6 小时」 */
 const DEFAULT_OBJECT_AGE_MS = 6 * 60 * 60_000;
 
+/**
+ * 这台跳板机上那些工具的一句话说明，`help` 里显示。
+ *
+ * 放在这儿而不是逐个写在 `machine.install` 的调用点上：装的地方散在
+ * 十几处（有些还是循环里批量装的），集中一份表改起来也看得全。
+ */
+const TOOL_HELP: Record<string, string> = {
+  kubectl: '操作 Kubernetes 集群，最常用的那条',
+  helm: '用 chart 装、升、回滚一整套应用',
+  docker: '本地构建与运行容器镜像',
+  istioctl: '服务网格：查代理配置、诊断连不通的调用',
+  velero: '集群的备份与恢复',
+  cosign: '给镜像签名、验签',
+  promtool: '校验 Prometheus 的规则与配置',
+  openssl: '生成密钥、签证书、看证书内容',
+  bao: 'OpenBao：取密钥与凭据',
+  git: '版本控制，内网 Git 服务在这台机器够得到',
+  curl: '发 HTTP 请求',
+  dig: '查 DNS',
+  nslookup: '查 DNS（另一种写法）',
+  ping: '看通不通',
+  nc: '裸 TCP 连接，探端口用',
+  getent: '查 hosts 与 DNS 的解析结果',
+};
+
 export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<OpsWorld> {
   const spec = options.world ?? {};
   const stage = options.stage ?? {};
@@ -280,6 +305,7 @@ export async function createOpsWorld(options: OpsWorldOptions = {}): Promise<Ops
     cwd: machineSpec.cwd ?? '/root',
     files: { ...(machineSpec.files ?? {}), ...(stage.files ?? {}) },
     now: () => cluster.wallClock(),
+    descriptions: TOOL_HELP,
   });
 
   const images = new ImageStore();

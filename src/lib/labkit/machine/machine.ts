@@ -20,6 +20,8 @@ export interface MachineOptions {
   files?: Record<string, string>;
   /** 关卡额外装的命令 */
   commands?: Record<string, CommandHandler>;
+  /** 命令的一句话说明，`help` 里显示 */
+  descriptions?: Record<string, string>;
   /** 虚拟墙钟，毫秒 */
   now?: () => number;
   /** 循环体最多跑多少轮，防住写错的死循环 */
@@ -70,12 +72,18 @@ export class Machine {
       env: options.env,
       maxLoopIterations: options.maxLoopIterations,
       commands: { ...COREUTILS, ...(options.commands ?? {}) },
+      descriptions: options.descriptions,
     });
   }
 
-  /** 装一个命令（kubectl、helm、systemctl…） */
-  install(name: string, handler: CommandHandler): void {
-    this.shell.register(name, handler);
+  /**
+   * 装一个命令（kubectl、helm、systemctl…）。
+   *
+   * `description` 会出现在 `help` 里。**装了工具就顺手写一句** ——
+   * 终端对新学员本来就是个不给线索的黑框，一行说明的成本几乎是零。
+   */
+  install(name: string, handler: CommandHandler, description?: string): void {
+    this.shell.register(name, handler, description);
   }
 
   get cwd(): string {

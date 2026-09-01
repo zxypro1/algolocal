@@ -33,6 +33,8 @@ export interface ShellOptions {
   cwd?: string;
   env?: Record<string, string>;
   commands?: Record<string, CommandHandler>;
+  /** 命令的一句话说明，`help` 里显示 */
+  descriptions?: Record<string, string>;
   /** 提示符里的主机名，也用于 `hostname` */
   hostname?: string;
   user?: string;
@@ -75,6 +77,8 @@ export class Shell {
   /** shell 变量（未 export 的），与环境变量分开 */
   private vars: Record<string, string> = {};
   private commands: Record<string, CommandHandler>;
+  /** 命令的一句话说明，`help` 用。世界装命令时可以自己带一条 */
+  private descriptions: Record<string, string>;
   private functions: Record<string, Node> = {};
   readonly hostname: string;
   readonly user: string;
@@ -99,10 +103,17 @@ export class Shell {
       ...(options.env ?? {}),
     };
     this.commands = { ...options.commands };
+    this.descriptions = { ...(options.descriptions ?? {}) };
   }
 
-  register(name: string, handler: CommandHandler): void {
+  register(name: string, handler: CommandHandler, description?: string): void {
     this.commands[name] = handler;
+    if (description) this.descriptions[name] = description;
+  }
+
+  /** 一句话说明。`help` 用；没登记过就返回 undefined */
+  describe(name: string): string | undefined {
+    return this.descriptions[name] ?? COMMAND_HELP[name];
   }
 
   has(name: string): boolean {
@@ -758,6 +769,46 @@ function parseBraceExpansion(text: string): WordPart {
 /* 内置命令                                                            */
 /* ------------------------------------------------------------------ */
 
+/**
+ * labkit 自带那些命令的一句话说明。
+ *
+ * 世界自己装的工具（kubectl、nvcc……）由装的人在 `machine.install` 时带上，
+ * 这里只管这台机器**开箱就有**的那些。
+ */
+const COMMAND_HELP: Record<string, string> = {
+  // shell 内建
+  cd: '切换当前目录', pwd: '打印当前目录', echo: '把参数打出来',
+  printf: '按格式打印', export: '设环境变量', unset: '删掉变量',
+  set: '设置 shell 选项与位置参数', exit: '结束当前脚本', return: '从函数返回',
+  true: '什么都不做，返回 0', false: '什么都不做，返回 1',
+  test: '判断条件（也写作 [ ]）', source: '在当前 shell 里跑一个脚本',
+  help: '就是这条 —— 看这台机器上有什么命令',
+  ':': '什么都不做，返回 0', '[': 'test 的另一种写法', '.': 'source 的另一种写法',
+  // 看文件
+  ls: '列目录', cat: '打印整个文件', head: '看开头几行', tail: '看结尾几行',
+  wc: '数行数、词数、字节数', find: '按名字找文件', which: '这条命令在哪',
+  // 改文件
+  mkdir: '建目录', rmdir: '删空目录', rm: '删文件', cp: '复制', mv: '移动或改名',
+  touch: '建空文件或更新时间', chmod: '改权限', tee: '一路存盘一路继续往下传',
+  // 文本处理
+  grep: '按模式挑出行', sort: '排序', uniq: '去掉相邻的重复行',
+  cut: '按列切', tr: '换字符或删字符', sed: '按规则改文本', seq: '生成一串数',
+  base64: '按 base64 编解码',
+  xargs: '把上一段的输出拆成参数再跑一条命令',
+  // 这台机器本身
+  env: '打印环境变量', hostname: '主机名', whoami: '当前用户',
+  id: '用户与组的 id', basename: '路径里的文件名', dirname: '路径里的目录部分',
+};
+
+/** `help` 里的分栏。名字没落进任何一组的，归到「这台机器上装的」 */
+const HELP_GROUPS: Array<{ title: string; names: string[] }> = [
+  { title: 'shell 内建', names: [':', '[', '.', 'cd', 'pwd', 'echo', 'printf', 'export', 'unset', 'set', 'exit', 'return', 'true', 'false', 'test', 'source', 'help'] },
+  { title: '看文件', names: ['ls', 'cat', 'head', 'tail', 'wc', 'find', 'which'] },
+  { title: '改文件', names: ['mkdir', 'rmdir', 'rm', 'cp', 'mv', 'touch', 'chmod', 'tee'] },
+  { title: '文本处理', names: ['grep', 'sort', 'uniq', 'cut', 'tr', 'sed', 'seq', 'xargs', 'base64'] },
+  { title: '这台机器本身', names: ['env', 'hostname', 'whoami', 'id', 'basename', 'dirname'] },
+];
+
 const BUILTINS: Record<string, CommandHandler> = {
   cd: ({ argv, shell, env }) => {
     try {
@@ -773,30 +824,52 @@ const BUILTINS: Record<string, CommandHandler> = {
   /**
    * `help` —— 这台机器上有什么命令。
    *
-   * 真 bash 的 `help` 只列自己的内建，这里列**全部装上的命令**：
-   * 学员想知道的是「这台机器能干什么」，而不是「哪些是 bash 内建」。
+   * 真 bash 的 `help` 只列自己的内建，这里列**全部装上的命令**，
+   * 而且按类别分栏、每条带一句说明：学员想知道的是「这台机器能干什么」，
+   * 而不是「哪些是 bash 内建」。
+   *
    * 少了它，终端对新学员就是一个不给任何线索的黑框 ——
-   * 而两个工作台的横幅都在让人「先敲点什么试试」。
+   * 而三个工作台的横幅都在让人「先敲点什么试试」。
    */
   help: ({ argv, shell }) => {
     const names = shell.commandNames();
+
     if (argv[0]) {
       const name = argv[0];
-      return names.includes(name)
-        ? { stdout: `${name} 是这台机器上的命令。具体用法敲 \`${name} --help\`。\n` }
-        : { stderr: `bash: help: 没有 ${name} 这条命令\n`, code: 1 };
+      if (!names.includes(name)) {
+        return { stderr: `bash: help: 没有 ${name} 这条命令\n`, code: 1 };
+      }
+      const description = shell.describe(name);
+      return {
+        stdout: description
+          ? `${name} —— ${description}\n具体用法敲 \`${name} --help\`。\n`
+          : `${name} 是这台机器上的命令。具体用法敲 \`${name} --help\`。\n`,
+      };
     }
-    // 按列排版：一行塞太多名字反而看不清，80 列是终端的老规矩
-    const width = Math.max(...names.map((n) => n.length)) + 2;
-    const perLine = Math.max(1, Math.floor(80 / width));
-    const lines: string[] = [];
-    for (let i = 0; i < names.length; i += perLine) {
-      lines.push(names.slice(i, i + perLine).map((n) => n.padEnd(width)).join('').trimEnd());
+
+    const taken = new Set(HELP_GROUPS.flatMap((group) => group.names));
+    // 分组之外的都是这个世界自己装的工具（kubectl、nvcc、helm……），
+    // 那恰恰是学员最想看到的一栏，所以放在最后、最显眼的位置
+    const installed = names.filter((name) => !taken.has(name));
+    const groups = [
+      ...HELP_GROUPS.map((group) => ({
+        title: group.title,
+        names: group.names.filter((name) => names.includes(name)),
+      })),
+      { title: '这台机器上装的', names: installed },
+    ].filter((group) => group.names.length > 0);
+
+    const width = Math.max(...names.map((name) => name.length)) + 2;
+    const lines: string[] = [`这台机器上装了 ${names.length} 条命令：`];
+    for (const group of groups) {
+      lines.push('', `\x1b[1m${group.title}\x1b[0m`);
+      for (const name of group.names) {
+        const description = shell.describe(name);
+        lines.push(`  ${name.padEnd(width)}${description ?? ''}`.trimEnd());
+      }
     }
-    return {
-      stdout: `这台机器上装了 ${names.length} 条命令：\n\n${lines.join('\n')}\n\n`
-        + '具体用法敲 `<命令> --help`。\n',
-    };
+    lines.push('', '具体用法敲 `<命令> --help`，或者 `help <命令>`。', '');
+    return { stdout: lines.join('\n') };
   },
 
   echo: ({ argv }) => {
