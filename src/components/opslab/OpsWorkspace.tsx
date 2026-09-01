@@ -50,6 +50,7 @@ const BANNER = [
   '',
   '  shell、coreutils、kubectl、helm、docker 都是真的。',
   '  `kubectl get nodes` 起步；拓扑图上点一下会把只读命令插进来。',
+  '  敲 `help` 看这台机器上都装了什么。',
   '',
 ].join('\r\n');
 
