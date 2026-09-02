@@ -445,6 +445,134 @@ a {
 }
 
 /* ------------------------------------------------------------------
+ * 工程项目概述弹窗
+ *
+ * 概述同样放在 Mantine ScrollArea 里，也会遇到视口内容层按最宽表格收缩包裹的
+ * 问题。弹窗只允许纵向滚动，Markdown 里的表格则在当前内容宽度内重新排版。
+ * ------------------------------------------------------------------ */
+
+.project-overview-scroll .mantine-ScrollArea-viewport {
+  overflow-x: hidden !important;
+}
+
+.project-overview-scroll .mantine-ScrollArea-viewport > div {
+  display: block !important;
+  min-width: 0 !important;
+}
+
+.project-overview-content {
+  width: 100%;
+  max-width: 960px;
+  min-width: 0;
+  margin-inline: auto;
+}
+
+.project-overview-hero {
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--mantine-color-brand-light) 45%, var(--app-surface)),
+      var(--app-surface) 62%
+    );
+}
+
+.project-overview-section,
+.project-overview-stage-list {
+  background: var(--app-surface);
+}
+
+.project-overview-stage-list {
+  overflow: hidden;
+}
+
+.project-overview-stage + .project-overview-stage {
+  border-top: 1px solid var(--app-border);
+}
+
+.project-overview-stage {
+  transition: background-color 140ms ease;
+}
+
+.project-overview-stage:hover {
+  background: var(--app-surface-muted);
+}
+
+.project-overview-markdown {
+  min-width: 0;
+  max-width: 100%;
+  font-size: 0.94rem;
+}
+
+.project-overview-markdown h1,
+.project-overview-markdown h2 {
+  margin-top: 1.65rem;
+  margin-bottom: 0.65rem;
+  font-size: 1.3rem;
+  line-height: 1.35;
+}
+
+.project-overview-markdown h3,
+.project-overview-markdown h4,
+.project-overview-markdown h5,
+.project-overview-markdown h6 {
+  margin-top: 1.35rem;
+  margin-bottom: 0.5rem;
+  font-size: 1.05rem;
+  line-height: 1.4;
+}
+
+.project-overview-markdown p,
+.project-overview-markdown li {
+  line-height: 1.75;
+}
+
+.project-overview-markdown ul,
+.project-overview-markdown ol {
+  padding-inline-start: 1.5em;
+}
+
+.project-overview-markdown table {
+  width: 100%;
+  min-width: 100% !important;
+  table-layout: auto;
+  font-size: 0.88rem;
+}
+
+.project-overview-markdown th,
+.project-overview-markdown td {
+  padding: 8px 10px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  line-height: 1.55;
+}
+
+.project-overview-markdown pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+@media (max-width: 48em) {
+  .project-overview-markdown {
+    font-size: 0.9rem;
+  }
+
+  .project-overview-markdown h1,
+  .project-overview-markdown h2 {
+    font-size: 1.16rem;
+  }
+
+  .project-overview-markdown table {
+    font-size: 0.8rem;
+  }
+
+  .project-overview-markdown th,
+  .project-overview-markdown td {
+    padding: 6px;
+  }
+}
+
+/* ------------------------------------------------------------------
  * 左栏的正文排版
  *
  * 三个实战工作台（code / ops / gpu）的左栏都挂 `.panel-scroll`，

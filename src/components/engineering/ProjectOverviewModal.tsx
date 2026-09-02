@@ -4,7 +4,6 @@ import {
   Badge,
   Box,
   Button,
-  Divider,
   Group,
   Loader,
   Modal,
@@ -12,9 +11,16 @@ import {
   ScrollArea,
   Stack,
   Text,
+  ThemeIcon,
+  Title,
 } from '@mantine/core';
 import { useMediaQuery } from '@mantine/hooks';
-import { IconBook2, IconPlayerPlay, IconRefresh } from '@tabler/icons-react';
+import {
+  IconArrowRight,
+  IconBook2,
+  IconListDetails,
+  IconRefresh,
+} from '@tabler/icons-react';
 import { useI18n, useTranslation } from '../../contexts/I18nContext';
 import type { LocalizedText } from '../../lib/engineering/types';
 import type { ProjectOverview, ProjectSummary } from '../../lib/server/projectStore';
@@ -104,28 +110,52 @@ export default function ProjectOverviewModal({
     [locale, project]
   );
 
-  const modalTitle = project ? pick(project.title) : pick(summary?.title);
+  const projectTitle = project ? pick(project.title) : pick(summary?.title);
 
   return (
     <Modal
       opened={opened}
       onClose={onClose}
-      title={modalTitle || t('engineering.list.overviewTitle')}
-      size="xl"
+      title={
+        <Text size="sm" fw={700} c="dimmed">
+          {t('engineering.list.overviewTitle')}
+        </Text>
+      }
+      size={1080}
+      radius="xl"
       fullScreen={isMobile}
       centered={!isMobile}
+      overlayProps={{ backgroundOpacity: 0.68, blur: 3 }}
       styles={{
-        header: { borderBottom: '1px solid var(--app-border)' },
-        body: { padding: 0 },
-        title: { fontWeight: 700 },
+        content: {
+          overflow: 'hidden',
+          border: isMobile ? 'none' : '1px solid var(--app-border)',
+          boxShadow: 'var(--app-shadow)',
+        },
+        header: {
+          minHeight: 58,
+          paddingInline: isMobile ? 'var(--mantine-spacing-md)' : 'var(--mantine-spacing-lg)',
+          borderBottom: '1px solid var(--app-border)',
+          background: 'var(--app-surface)',
+        },
+        body: { padding: 0, background: 'var(--app-bg)' },
       }}
     >
       <Stack
         gap={0}
-        style={{ height: isMobile ? 'calc(100dvh - 60px)' : 'min(72vh, 720px)' }}
+        style={{ height: isMobile ? 'calc(100dvh - 58px)' : 'min(80vh, 820px)' }}
       >
-        <ScrollArea style={{ flex: 1, minHeight: 0 }}>
-          <Box px={{ base: 'md', sm: 'xl' }} py="lg">
+        <ScrollArea
+          className="project-overview-scroll"
+          scrollbarSize={8}
+          style={{ flex: 1, minHeight: 0 }}
+          styles={{ viewport: { overflowX: 'hidden' } }}
+        >
+          <Box
+            className="project-overview-content"
+            px={{ base: 'sm', sm: 'xl' }}
+            py={{ base: 'md', sm: 'xl' }}
+          >
             {loading ? (
               <Stack align="center" justify="center" gap="sm" mih={260}>
                 <Loader size="sm" />
@@ -149,57 +179,82 @@ export default function ProjectOverviewModal({
                 </Stack>
               </Alert>
             ) : project ? (
-              <Stack gap="xl">
-                <Stack gap="sm">
-                  <Group gap="xs">
-                    <Badge variant="light">{project.domain}</Badge>
-                    <Badge variant="light" color="gray">
-                      {t('engineering.list.chapterCount', { count: project.stages.length })}
-                    </Badge>
-                  </Group>
-                  <Text c="dimmed">{pick(project.summary)}</Text>
-                </Stack>
-
-                <Stack gap="sm">
-                  <Divider
-                    label={
-                      <Group gap={6}>
-                        <IconBook2 size={15} />
-                        <Text fw={650}>{t('engineering.list.projectIntroduction')}</Text>
+              <Stack gap={isMobile ? 'md' : 'xl'}>
+                <Paper className="project-overview-hero" withBorder radius="xl" p={{ base: 'lg', sm: 'xl' }}>
+                  <Group align="flex-start" gap="lg" wrap="nowrap">
+                    <ThemeIcon
+                      variant="light"
+                      color="brand"
+                      radius="lg"
+                      size={46}
+                      style={{ flexShrink: 0 }}
+                    >
+                      <IconBook2 size={23} />
+                    </ThemeIcon>
+                    <Stack gap="sm" style={{ minWidth: 0 }}>
+                      <Group gap="xs">
+                        <Badge variant="light">{project.domain}</Badge>
+                        <Badge variant="light" color="gray">
+                          {t('engineering.list.chapterCount', { count: project.stages.length })}
+                        </Badge>
                       </Group>
-                    }
-                    labelPosition="left"
-                  />
-                  <MarkdownRenderer content={pick(project.brief)} />
-                </Stack>
+                      <Title order={2} fz={{ base: 23, sm: 30 }} lh={1.25}>
+                        {projectTitle}
+                      </Title>
+                      <Text c="dimmed" size={isMobile ? 'sm' : 'md'} lh={1.7} maw={760}>
+                        {pick(project.summary)}
+                      </Text>
+                    </Stack>
+                  </Group>
+                </Paper>
 
-                <Stack gap="sm">
-                  <Divider
-                    label={<Text fw={650}>{t('engineering.list.chapterIntroduction')}</Text>}
-                    labelPosition="left"
-                  />
-                  <Stack gap="xs">
+                <Paper className="project-overview-section" withBorder radius="xl" p={{ base: 'lg', sm: 'xl' }}>
+                  <Group gap="sm" mb="lg">
+                    <ThemeIcon variant="light" color="brand" radius="md" size="lg">
+                      <IconBook2 size={17} />
+                    </ThemeIcon>
+                    <Title order={3} fz={{ base: 'lg', sm: 'xl' }}>
+                      {t('engineering.list.projectIntroduction')}
+                    </Title>
+                  </Group>
+                  <Box className="project-overview-markdown">
+                    <MarkdownRenderer content={pick(project.brief)} />
+                  </Box>
+                </Paper>
+
+                <Stack gap="md">
+                  <Group gap="sm" px={{ base: 4, sm: 8 }}>
+                    <ThemeIcon variant="light" color="brand" radius="md" size="lg">
+                      <IconListDetails size={17} />
+                    </ThemeIcon>
+                    <Title order={3} fz={{ base: 'lg', sm: 'xl' }}>
+                      {t('engineering.list.chapterIntroduction')}
+                    </Title>
+                  </Group>
+                  <Paper withBorder radius="xl" className="project-overview-stage-list">
                     {stages.map((stage, index) => (
-                      <Paper key={stage.id} withBorder radius="md" p="md">
+                      <Box key={stage.id} className="project-overview-stage" px={{ base: 'md', sm: 'lg' }} py="md">
                         <Group align="flex-start" gap="md" wrap="nowrap">
-                          <Badge
+                          <ThemeIcon
                             variant="light"
                             color="brand"
-                            size="lg"
+                            radius="xl"
+                            size={34}
+                            fw={700}
                             style={{ flexShrink: 0 }}
                           >
                             {index + 1}
-                          </Badge>
-                          <Stack gap={4} style={{ minWidth: 0 }}>
-                            <Text fw={650}>{stage.title}</Text>
-                            <Text size="sm" c="dimmed" lh={1.6}>
+                          </ThemeIcon>
+                          <Stack gap={3} style={{ minWidth: 0 }}>
+                            <Text fw={650} lh={1.45}>{stage.title}</Text>
+                            <Text size="sm" c="dimmed" lh={1.65}>
                               {stage.introduction}
                             </Text>
                           </Stack>
                         </Group>
-                      </Paper>
+                      </Box>
                     ))}
-                  </Stack>
+                  </Paper>
                 </Stack>
               </Stack>
             ) : null}
@@ -210,13 +265,18 @@ export default function ProjectOverviewModal({
           justify="flex-end"
           px={{ base: 'md', sm: 'xl' }}
           py="md"
-          style={{ borderTop: '1px solid var(--app-border)', flexShrink: 0 }}
+          style={{
+            borderTop: '1px solid var(--app-border)',
+            background: 'var(--app-surface)',
+            flexShrink: 0,
+          }}
         >
           <Button
-            size="md"
+            size="sm"
+            radius="md"
             fullWidth={isMobile}
             disabled={!project}
-            leftSection={<IconPlayerPlay size={17} />}
+            rightSection={<IconArrowRight size={16} />}
             onClick={() => project && onStart(project.id)}
           >
             {t('engineering.list.beginProject')}
