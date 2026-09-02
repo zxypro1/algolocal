@@ -456,7 +456,15 @@
       "empty": "没有找到匹配的项目",
       "stages": "关卡数",
       "start": "开始构建",
-      "continue": "继续构建"
+      "continue": "继续构建",
+      "overviewTitle": "项目概述",
+      "loadingOverview": "正在加载项目概述…",
+      "overviewLoadError": "项目概述加载失败，请稍后重试",
+      "retryOverview": "重新加载",
+      "projectIntroduction": "项目介绍",
+      "chapterIntroduction": "章节内容介绍",
+      "chapterCount": "共 {{count}} 章",
+      "beginProject": "开始项目"
     },
     "stage": {
       "label": "第 {{current}}/{{total}} 关",

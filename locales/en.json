@@ -456,7 +456,15 @@
       "empty": "No projects match this search",
       "stages": "Stages",
       "start": "Start building",
-      "continue": "Continue"
+      "continue": "Continue",
+      "overviewTitle": "Project overview",
+      "loadingOverview": "Loading project overview…",
+      "overviewLoadError": "Could not load this project overview. Please try again.",
+      "retryOverview": "Try again",
+      "projectIntroduction": "About this project",
+      "chapterIntroduction": "What each chapter covers",
+      "chapterCount": "{{count}} chapters",
+      "beginProject": "Start project"
     },
     "stage": {
       "label": "Stage {{current}}/{{total}}",

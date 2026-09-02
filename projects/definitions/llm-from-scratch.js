@@ -35,78 +35,10 @@ const LAB = `const lab = require('@llm/lab');`;
 
 const STAGE_BPE = {
   id: 'byte-bpe',
-  title: t('字节级 BPE —— 从字节开始训一张 merge 表', 'Byte-level BPE — train a merge table from raw bytes'),
-  primer: t(
-    code`
-      模型不认识字符，只认识**整数**。把文本变成整数的那一步叫分词（tokenization），
-      而 2026 年绝大多数模型用的是同一个算法：**字节对编码（BPE）**。
-
-      ## 为什么从字节开始
-
-      如果从字符开始，你立刻要回答「表里放哪些字符」——
-      中文有几万个、emoji 每年还在加。而**字节只有 256 个**，
-      任何文本都能表示，永远不会遇到「不认识的字符」。
-      这就是 Llama 3、GPT-4o 都用**字节级** BPE 的原因。
-
-      ## 算法本身只有三行
-
-      1. 把文本变成一串字节（0–255），这是初始词表；
-      2. 数一数哪一对相邻 token 出现得最多，把它合并成一个新 token；
-      3. 重复第 2 步，直到词表到达目标大小。
-
-      每次合并记下来，就得到一张 **merge 表**。编码时按这张表的顺序反复合并，
-      解码时按 id 展开回字节再解 UTF-8。
-
-      ## 一个必须说清的细节：平局怎么办
-
-      「出现最多的那一对」经常不止一个。真实的实现都会规定一个确定的
-      平局规则，否则同一份语料两次训练会得到不同的词表。
-      我们的规则是：**先比频次，频次相同时取第一次出现位置更靠前的那一对**。
-
-      ## 慢是正常的
-
-      这一关你会发现 BPE 训练要跑几秒 —— 纯 Python 的循环比编译语言慢两个数量级。
-      这不是我们的实现问题：HuggingFace 的 \`tokenizers\` 之所以用 Rust 重写，
-      正是因为这一步在真实语料上要跑几个小时。
-    `,
-    code`
-      A model does not see characters, only **integers**. Turning text into integers is
-      tokenization, and in 2026 almost every model uses the same algorithm:
-      **byte pair encoding (BPE)**.
-
-      ## Why start from bytes
-
-      Starting from characters forces you to answer "which characters go in the table" —
-      there are tens of thousands of Chinese ones and new emoji every year. **Bytes are
-      only 256**, can represent any text, and you never hit an unknown character. That is
-      why Llama 3 and GPT-4o both use *byte-level* BPE.
-
-      ## The algorithm is three lines
-
-      1. Turn the text into bytes (0–255) — that is the initial vocabulary;
-      2. Count which adjacent pair occurs most often and merge it into a new token;
-      3. Repeat step 2 until the vocabulary reaches the target size.
-
-      Recording every merge gives you a **merge table**. Encoding replays it in order;
-      decoding expands ids back to bytes and decodes UTF-8.
-
-      ## One detail that must be pinned down: ties
-
-      "The most frequent pair" is often not unique. Every real implementation fixes a
-      deterministic tie-break, otherwise two runs over the same corpus produce different
-      vocabularies. Ours: **highest count first; on a tie, the pair whose first occurrence
-      is earlier.**
-
-      ## Slow is normal
-
-      Training the BPE here takes seconds — pure Python loops are two orders of magnitude
-      slower than compiled code. That is not a flaw in our setup: HuggingFace rewrote
-      \`tokenizers\` in Rust precisely because this step takes hours on real corpora.
-    `
-  ),
+  title: t('字节级 BPE：训练分词器', 'Byte-level BPE: train a tokenizer'),
   goal: t(
     code`
-      在 \`bpe.py\` 里把三个函数写出来。
+      在 \`bpe.py\` 里实现训练、编码和解码三个函数。
 
       ## 要实现什么
 
@@ -125,20 +57,10 @@ const STAGE_BPE = {
 
       | | 要求 |
       | --- | --- |
-      | 往返 | \`decode(encode(t)) == t\`，语料里**每一段**都要成立 |
+      | 往返 | \`decode(encode(t)) == t\`，语料里每一段都要成立 |
       | 词表 | 恰好 512（256 个字节 + 256 次合并） |
-      | 压缩率 | 字节数 ÷ token 数 **≥ 2.80** |
-      | merge 表 | 与参考实现**逐条相同** —— 平局规则见「背景」 |
-
-      三个数都告诉你：**完全不合并是 1.00，参考解是 3.52，门槛 2.80**。
-      门槛卡在中间靠参考侧 —— 少合并几十次、或者编码时漏合一些，都会掉到线下。
-
-      ## 最容易写错的地方
-
-      **编码时按 merge 表的顺序合并，不是按频次。** 一个很自然但错误的写法是
-      「每次找当前串里 rank 最小的那一对合并」—— 那在多数情况下给出同样的结果，
-      但在合并有嵌套关系时会不一样，而且**往返测试照样能过**。
-      正确的做法是从第一条 merge 开始，把它在整个串里能合的都合完，再看下一条。
+      | 压缩率 | 字节数 ÷ token 数 ≥ 2.80 |
+      | merge 表 | 与参考实现逐条相同：平局规则见「背景」 |
     `,
     code`
       Implement three functions in \`bpe.py\`.
@@ -160,21 +82,10 @@ const STAGE_BPE = {
 
       | | Requirement |
       | --- | --- |
-      | Round trip | \`decode(encode(t)) == t\` for **every** slice of the corpus |
+      | Round trip | \`decode(encode(t)) == t\` for every slice of the corpus |
       | Vocabulary | Exactly 512 (256 bytes + 256 merges) |
-      | Compression | bytes ÷ tokens **≥ 2.80** |
-      | Merge table | Identical to the reference, **entry by entry** — tie-break in the primer |
-
-      All three numbers, up front: **1.00 with no merges, 3.52 for the reference, gate at
-      2.80**. The gate sits between them, near the reference — doing a few dozen fewer
-      merges, or missing some during encoding, drops you below the line.
-
-      ## The easiest thing to get wrong
-
-      **Encoding replays the merge table in order, not by frequency.** A natural but wrong
-      version picks "the lowest-rank pair currently present" each round. It agrees most of
-      the time, differs when merges nest — and **still passes a round-trip test**. The
-      correct version takes merge 1, applies it everywhere, then moves to merge 2.
+      | Compression | bytes ÷ tokens ≥ 2.80 |
+      | Merge table | Identical to the reference, entry by entry: tie-break in the primer |
     `
   ),
   checklist: [
@@ -514,68 +425,10 @@ const STAGE_BPE = {
 
 const STAGE_BASELINE = {
   id: 'baselines',
-  title: t('语言建模的地板 —— 三条基线与困惑度', 'The floor — three baselines and perplexity'),
-  primer: t(
-    code`
-      后面十几关的门槛都是「loss 要低于某个数」。而**一个 loss 是好是坏，
-      单看它是判断不了的** —— 取决于词表多大、语料多规整。
-
-      所以第一件事是把地板测出来。三条基线，从笨到不那么笨：
-
-      | 基线 | 它假设什么 | 交叉熵 |
-      | --- | --- | --- |
-      | 均匀 | 每个 token 等概率 | \`ln(V)\` |
-      | unigram | 只看频率，不看上下文 | 按频率算 |
-      | bigram | 只看**前一个** token | 按转移频率算 |
-
-      **bigram 是最要紧的那一条。** 它是「完全不理解语言、只记住相邻搭配」
-      能达到的水平。一个模型如果打不穿 bigram，说明它的注意力**根本没在工作**。
-      第 16 关那条门槛的分母就是它。
-
-      ## 交叉熵与困惑度
-
-      交叉熵 \`H = -1/N · Σ log p(实际的那个 token)\`，单位是 nat。
-      困惑度 \`PPL = exp(H)\`，直觉是「模型平均在多少个候选里犹豫」。
-      均匀分布的困惑度恰好等于词表大小。
-
-      ## 平滑：为什么不能不做
-
-      验证集里一定会出现训练集没见过的搭配。不平滑的话 \`p = 0\`、
-      \`log 0 = -inf\`，整个基线就没法用了。
-      我们用**加一平滑**：\`p(b|a) = (count(a,b) + 1) / (count(a) + V)\`。
-    `,
-    code`
-      Most gates from here on read "loss below X". But **a loss on its own tells you
-      nothing** — it depends on vocabulary size and how regular the corpus is.
-
-      So first, measure the floor. Three baselines, from dumb to less dumb:
-
-      | Baseline | What it assumes | Cross-entropy |
-      | --- | --- | --- |
-      | Uniform | every token equally likely | \`ln(V)\` |
-      | Unigram | frequency only, no context | from frequencies |
-      | Bigram | only the **previous** token | from transition counts |
-
-      **Bigram is the one that matters.** It is what "understands nothing, just memorised
-      adjacent pairs" achieves. A model that cannot beat bigram has attention that is
-      **not working at all**. It is the denominator of the gate in stage 16.
-
-      ## Cross-entropy and perplexity
-
-      \`H = -1/N · Σ log p(actual token)\`, in nats. Perplexity \`PPL = exp(H)\` reads as
-      "how many candidates is the model hesitating between". A uniform model's perplexity
-      equals the vocabulary size exactly.
-
-      ## Smoothing: why you cannot skip it
-
-      The held-out set will contain pairs the training set never saw. Without smoothing
-      \`p = 0\` and \`log 0 = -inf\`, and the baseline is unusable. We use **add-one**:
-      \`p(b|a) = (count(a,b) + 1) / (count(a) + V)\`.
-    `
-  ),
+  title: t('语言模型基线：unigram、bigram 与困惑度', 'Language-model baselines: unigram, bigram, and perplexity'),
   goal: t(
     code`
-      在 \`baseline.py\` 里实现三条基线，都在**留出集**上评估。
+      在 \`baseline.py\` 里实现三条基线，都在留出集上评估。
 
       \`\`\`python
       def unigram_cross_entropy(train_ids, eval_ids, vocab_size) -> float
@@ -587,35 +440,24 @@ const STAGE_BASELINE = {
       ## 怎么算过
 
       - 三条基线依次严格递减：\`均匀 > unigram > bigram\`；
-      - 两个数与平台的参考实现相差 **< 1e-9**（同样的加一平滑、同样的切分）；
+      - 两个数与平台的参考实现相差 < 1e-9（同样的加一平滑、同样的切分）；
       - 报告出来的困惑度等于 \`exp(交叉熵)\`。
-
-      ## 为什么要算得这么准
-
-      因为后面十几关的门槛拿它当分母。差 1% 看不出来，但会让某一关的门槛
-      系统性地偏松或偏紧 —— 而那时候你只会觉得「这一关怎么这么难」。
     `,
     code`
-      Implement the three baselines in \`baseline.py\`, all evaluated on the **held-out** set.
+      Implement the three baselines in \`baseline.py\`, all evaluated on the held-out set.
 
       \`\`\`python
       def unigram_cross_entropy(train_ids, eval_ids, vocab_size) -> float
       def bigram_cross_entropy(train_ids, eval_ids, vocab_size) -> float
       \`\`\`
 
-      The platform gives you the train/held-out split — the same one \`lab\` uses.
+      The platform gives you the train/held-out split: the same one \`lab\` uses.
 
       ## What counts as passing
 
       - Strictly decreasing: \`uniform > unigram > bigram\`;
-      - Both numbers within **1e-9** of the reference (same add-one smoothing, same split);
+      - Both numbers within 1e-9 of the reference (same add-one smoothing, same split);
       - Reported perplexity equals \`exp(cross-entropy)\`.
-
-      ## Why the precision matters
-
-      A dozen later gates use these as their denominator. A 1% error is invisible here but
-      makes some later gate systematically loose or tight — and at that point all you feel
-      is "this stage is oddly hard".
     `
   ),
   checklist: [
@@ -968,7 +810,7 @@ const ATTN_HARNESS = `
 
 const STAGE_ATTENTION = {
   id: 'causal-attention',
-  title: t('单头因果自注意力 —— 自己把它拼出来', 'Single-head causal attention — assemble it yourself'),
+  title: t('单头因果注意力：拼出完整计算', 'Single-head causal attention: assemble the calculation'),
   goal: t(
     code`
       在 \`attention.py\` 里实现一个单头因果自注意力。
@@ -991,36 +833,17 @@ const STAGE_ATTENTION = {
       out = F.attn_apply(probs, v, batch, seq, seq, 1, 1, head_dim)
       \`\`\`
 
-      **\`F.scaled_dot_product_attention\` 这一关不许用。** 它是融合好的一整块，
+      \`F.scaled_dot_product_attention\` 这一关不许用。它是融合好的一整块，
       而这一关的全部内容就是自己把它拼出来。平台数得到调用次数，必须是 0。
 
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | 数值 | 与平台的 f64 参考实现最大差 **≤ 2e-6** |
-      | 因果性 | 改掉最后一个位置的输入，前面位置的输出**一位都不变** |
-      | 概率 | 每一行的注意力概率和为 1，被掩掉的位置是**硬 0** |
+      | 数值 | 与平台的 f64 参考实现最大差 ≤ 2e-6 |
+      | 因果性 | 改掉最后一个位置的输入，前面位置的输出一位都不变 |
+      | 概率 | 每一行的注意力概率和为 1，被掩掉的位置是硬 0 |
       | 捷径 | 禁用算子调用次数 = 0 |
-
-      ## 2e-6 这个界是怎么来的
-
-      你的实现跑在 **fp32** 上，参考实现跑在 fp64 上,所以两者必然有差，
-      问题只是差多少算正常。
-
-      fp32 的机器精度是 \`ε = 2⁻²³ ≈ 1.19e-7\`。K 项累加的相对误差界大约是
-      \`√K · ε\`；这一关里 K 是 head_dim 与 seq 两次累加的量级，约 14，
-      于是界在 \`4.5e-7\` 上下。**实测参考解是 3.5e-7**，门槛取 2e-6,
-      留了约 6 倍的余量给不同的求和顺序。
-
-      界不是拍出来的。一个「差 1e-3」的实现一定是算错了，
-      而一个「差 1e-9」的实现不可能跑在 fp32 上。
-
-      ## 为什么因果性要单独查
-
-      因为**漏了因果掩码的模型 loss 会更低**。它能看到答案，训练曲线漂亮得多，
-      而生成时一个字都对不上。这个错在任何 loss 曲线上都看不出来,
-      只有拿「改未来、看现在」这个探针去问才问得出来。
     `,
     code`
       Implement single-head causal self-attention in \`attention.py\`.
@@ -1043,7 +866,7 @@ const STAGE_ATTENTION = {
       out = F.attn_apply(probs, v, batch, seq, seq, 1, 1, head_dim)
       \`\`\`
 
-      **\`F.scaled_dot_product_attention\` is forbidden in this stage.** It is the fused
+      \`F.scaled_dot_product_attention\` is forbidden in this stage. It is the fused
       version, and assembling it yourself is the entire point. The platform counts the
       calls; the count must be zero.
 
@@ -1051,29 +874,10 @@ const STAGE_ATTENTION = {
 
       | | Requirement |
       | --- | --- |
-      | Numerics | Max difference from the f64 reference **≤ 2e-6** |
-      | Causality | Change the last input position; earlier outputs must be **bit-identical** |
-      | Probabilities | Every row sums to 1; masked positions are **hard zero** |
+      | Numerics | Max difference from the f64 reference ≤ 2e-6 |
+      | Causality | Change the last input position; earlier outputs must be bit-identical |
+      | Probabilities | Every row sums to 1; masked positions are hard zero |
       | Shortcuts | Forbidden operator calls = 0 |
-
-      ## Where 2e-6 comes from
-
-      Your implementation runs in **fp32**, the reference in fp64, so a difference is
-      unavoidable; the only question is how much is normal.
-
-      fp32 machine epsilon is \`ε = 2⁻²³ ≈ 1.19e-7\`. The relative error of a K-term sum is
-      roughly \`√K · ε\`; here K is on the order of head_dim plus seq, about 14, putting the
-      bound near \`4.5e-7\`. **The reference measures 3.5e-7**, so the gate sits at 2e-6,
-      leaving about 6x of headroom for different summation orders.
-
-      The bound is derived, not guessed. An implementation off by 1e-3 is wrong; one off by
-      1e-9 cannot be running in fp32.
-
-      ## Why causality gets its own check
-
-      Because **a model that leaks the future has a lower loss**. It can see the answer,
-      the training curve looks better, and generation is worthless. No loss curve shows
-      this. Only the "change the future, watch the present" probe finds it.
     `
   ),
   checklist: [
@@ -1312,10 +1116,10 @@ const STAGE_ATTENTION = {
 
 const STAGE_MHA = {
   id: 'multi-head-gqa',
-  title: t('多头与 GQA —— 少几个 kv 头能省多少', 'Multi-head and GQA — what fewer KV heads buy you'),
+  title: t('多头注意力与 GQA：减少 KV 头', 'Multi-head attention and GQA: use fewer KV heads'),
   goal: t(
     code`
-      在 \`mha.py\` 里把多头注意力写成一个 \`nn.Module\`，并支持 **GQA**。
+      在 \`mha.py\` 里把多头注意力写成一个 \`nn.Module\`，并支持 GQA。
 
       \`\`\`python
       class MultiHeadAttention(nn.Module):
@@ -1328,35 +1132,20 @@ const STAGE_MHA = {
               ...
       \`\`\`
 
-      \`head_dim = dim // n_head\`。**wk 与 wv 按 \`n_kv_head\` 开，不是 \`n_head\`** ——
+      \`head_dim = dim // n_head\`。wk 与 wv 按 \`n_kv_head\` 开，不是 \`n_head\`：
       这就是 GQA 省下来的地方，也是这一关最容易写错的一行。
 
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | 参数量 | **恰好等于解析式**（见下） |
+      | 参数量 | 恰好等于解析式（见下） |
       | 数值 | 与 f64 参考最大差 ≤ 2e-6（fp32 的界，同第 3 关） |
       | 因果性 | 泄漏 = 0 |
       | 捷径 | 仍然不许用融合的那一块 |
-
-      参数量的解析式：
-
-      \`\`\`
-      dim·n_head·hd  +  dim·n_kv_head·hd × 2  +  n_head·hd·dim
-      \`\`\`
-
-      \`n_kv_head = n_head\` 时它退化成普通的 MHA。本关的配置是
-      \`dim=64, n_head=8, n_kv_head=2\`，所以 wk 与 wv 各只有 MHA 的 **1/4**。
-
-      ## 为什么要有 GQA
-
-      推理时每生成一个 token 都要读一遍整个 KV cache，而 cache 的大小正比于
-      \`n_kv_head\`。把 8 个 kv 头减到 2 个，**KV cache 直接小 4 倍** ——
-      这在解码时是实打实的带宽，而质量几乎没掉。Llama 2 70B 起就是这么做的。
     `,
     code`
-      Write multi-head attention as an \`nn.Module\` in \`mha.py\`, with **GQA**.
+      Write multi-head attention as an \`nn.Module\` in \`mha.py\`, with GQA.
 
       \`\`\`python
       class MultiHeadAttention(nn.Module):
@@ -1369,32 +1158,17 @@ const STAGE_MHA = {
               ...
       \`\`\`
 
-      \`head_dim = dim // n_head\`. **wk and wv are sized by \`n_kv_head\`, not
-      \`n_head\`** — that is what GQA saves, and the easiest line to get wrong here.
+      \`head_dim = dim // n_head\`. wk and wv are sized by \`n_kv_head\`, not
+      \`n_head\`: that is what GQA saves, and the easiest line to get wrong here.
 
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | Parameters | **Exactly** the analytic formula (below) |
+      | Parameters | Exactly the analytic formula (below) |
       | Numerics | Max difference from the f64 reference ≤ 2e-6 (the fp32 bound, as in stage 3) |
       | Causality | Leakage = 0 |
       | Shortcuts | The fused operator is still forbidden |
-
-      The formula:
-
-      \`\`\`
-      dim·n_head·hd  +  dim·n_kv_head·hd × 2  +  n_head·hd·dim
-      \`\`\`
-
-      With \`n_kv_head = n_head\` it degenerates to plain MHA. This stage uses
-      \`dim=64, n_head=8, n_kv_head=2\`, so wk and wv are each **a quarter** of MHA's.
-
-      ## Why GQA exists
-
-      Decoding reads the whole KV cache for every generated token, and the cache scales
-      with \`n_kv_head\`. Going from 8 KV heads to 2 makes **the cache four times smaller**
-      — real decode bandwidth, at almost no quality cost. Llama 2 70B onwards does this.
     `
   ),
   checklist: [
@@ -1722,7 +1496,7 @@ const STAGE_MHA = {
 
 const STAGE_ROPE = {
   id: 'rope',
-  title: t('RoPE —— 让注意力只看得见相对距离', 'RoPE — making attention see only relative distance'),
+  title: t('RoPE：编码相对位置', 'RoPE: encode relative position'),
   goal: t(
     code`
       在 \`rope.py\` 里自己把 RoPE 的表算出来，并接进第 4 关的注意力。
@@ -1737,32 +1511,8 @@ const STAGE_ROPE = {
               # q 和 k 各转一次；**v 不转**
       \`\`\`
 
-      **收的是位置列表，不是长度。** 解码时你要的往往不是 \`0..S\` 而是
-      \`t..t+1\` —— 第 8 关的 KV cache 会直接用到这一点，所以接口现在就得是对的。
-
-      ## 表怎么算
-
-      第 \`i\` 对维度（\`i\` 从 0 数到 \`head_dim/2 - 1\`）配一个频率：
-
-      \`\`\`
-      θ(p, i) = p · base^(−2i / head_dim)
-      cos[p][i] = cos(θ)      sin[p][i] = sin(θ)
-      \`\`\`
-
-      \`i = 0\` 时频率是 1，转得最快，管的是相邻几个位置；
-      \`i\` 越大频率越低，管的是几百上千个位置的尺度。
-      一个头的 \`head_dim/2\` 对维度合起来就是一把不同刻度的尺子。
-
-      ## 转哪两维配对
-
-      我们用**前后半配对**（Llama / HF 的写法）：第 \`i\` 维和第 \`i + head_dim/2\` 维
-      当成一个复数转。另一种写法是相邻配对（\`2i\` 与 \`2i+1\`），
-      两者数学上等价，但**表和权重必须按同一种约定**,混着用不会报错，只会静静地训不出来。
-
-      \`\`\`
-      x[i]        ← x[i]·cos − x[i+half]·sin
-      x[i+half]   ← x[i]·sin + x[i+half]·cos
-      \`\`\`
+      收的是位置列表，不是长度。 解码时你要的往往不是 \`0..S\` 而是
+      \`t..t+1\`：第 8 关的 KV cache 会直接用到这一点，所以接口现在就得是对的。
 
       ## 怎么算过
 
@@ -1770,12 +1520,8 @@ const STAGE_ROPE = {
       | --- | --- |
       | 表 | 与 f64 参考最大差 ≤ 2e-6 |
       | 数值 | 整个注意力与 f64 参考最大差 ≤ 5e-5 |
-      | **平移不变** | 整段往后挪 \`Δ\`，注意力分数矩阵**不变**（≤ 5e-5） |
-      | v 没被转 | 每次前向恰好 \`rope_fwd\` **2 次** |
-
-      平移不变那条是这一关的全部意义。\`q_i · k_j\` 转完之后只依赖 \`i − j\`,
-      这就是「相对位置」四个字的准确含义，也是 RoPE 能外推到没训过的长度的原因。
-      它挂了说明表没按位置对齐,而这个错在 loss 上看不出来。
+      | 平移不变 | 整段往后挪 \`Δ\`，注意力分数矩阵不变（≤ 5e-5） |
+      | v 没被转 | 每次前向恰好 \`rope_fwd\` 2 次 |
     `,
     code`
       In \`rope.py\`, build the RoPE tables yourself and wire them into stage 4's attention.
@@ -1790,34 +1536,9 @@ const STAGE_ROPE = {
               # rotate q and k; **do not rotate v**
       \`\`\`
 
-      **It takes positions, not a length.** When decoding you usually want \`t..t+1\`
-      rather than \`0..S\` — stage 8's KV cache depends on exactly this, so the interface
+      It takes positions, not a length. When decoding you usually want \`t..t+1\`
+      rather than \`0..S\`: stage 8's KV cache depends on exactly this, so the interface
       has to be right now.
-
-      ## Building the table
-
-      Dimension pair \`i\` (from 0 to \`head_dim/2 - 1\`) gets one frequency:
-
-      \`\`\`
-      θ(p, i) = p · base^(−2i / head_dim)
-      cos[p][i] = cos(θ)      sin[p][i] = sin(θ)
-      \`\`\`
-
-      At \`i = 0\` the frequency is 1 and rotation is fastest, covering neighbouring
-      positions; larger \`i\` means lower frequency, covering hundreds or thousands of
-      positions. Together the \`head_dim/2\` pairs form rulers at many scales.
-
-      ## Which dimensions pair up
-
-      We use **half-and-half pairing** (the Llama / HF convention): dimension \`i\` pairs
-      with dimension \`i + head_dim/2\`. The alternative pairs neighbours (\`2i\` with
-      \`2i+1\`). They are mathematically equivalent, but **table and weights must agree**,
-      mixing them raises no error and simply fails to train.
-
-      \`\`\`
-      x[i]        ← x[i]·cos − x[i+half]·sin
-      x[i+half]   ← x[i]·sin + x[i+half]·cos
-      \`\`\`
 
       ## What counts as passing
 
@@ -1825,13 +1546,8 @@ const STAGE_ROPE = {
       | --- | --- |
       | Table | Max difference from the f64 reference ≤ 2e-6 |
       | Numerics | Whole attention within 5e-5 of the f64 reference |
-      | **Shift invariance** | Shift the segment by \`Δ\`; the score matrix is unchanged (≤ 5e-5) |
-      | v untouched | Exactly **2** \`rope_fwd\` calls per forward |
-
-      Shift invariance is the whole point of this stage. After rotation \`q_i · k_j\`
-      depends only on \`i − j\` — that is precisely what "relative position" means, and why
-      RoPE extrapolates to lengths it never saw. If it fails, the table is not aligned to
-      positions, and no loss curve will tell you.
+      | Shift invariance | Shift the segment by \`Δ\`; the score matrix is unchanged (≤ 5e-5) |
+      | v untouched | Exactly 2 \`rope_fwd\` calls per forward |
     `
   ),
   checklist: [
@@ -2237,10 +1953,10 @@ const STAGE_ROPE = {
 
 const STAGE_NORM = {
   id: 'rmsnorm-prenorm',
-  title: t('RMSNorm 与 pre-norm —— 深了还能不能训', 'RMSNorm and pre-norm — staying trainable at depth'),
+  title: t('RMSNorm 与 pre-norm：稳定深层网络', 'RMSNorm and pre-norm: stabilize deep networks'),
   goal: t(
     code`
-      在 \`norm.py\` 里写归一化和残差堆叠，把「深度」这件事真的量出来。
+      在 \`norm.py\` 里写归一化和残差堆叠，并记录每层的 RMS。
 
       \`\`\`python
       class RMSNorm(nn.Module):
@@ -2255,51 +1971,14 @@ const STAGE_NORM = {
               顺手把每层之后的 F.rms(x) 记进 self.layer_rms。"""
       \`\`\`
 
-      ## RMSNorm 和 LayerNorm 差在哪
-
-      LayerNorm 先减均值再除标准差，RMSNorm **只除均方根**：
-
-      \`\`\`
-      LayerNorm(x) = (x − mean(x)) / std(x) · g + b
-      RMSNorm(x)   = x / sqrt(mean(x²) + ε) · g
-      \`\`\`
-
-      少了减均值、少了 bias，省下大约 7% 的归一化开销,而效果基本持平。
-      这是 Llama 之后的默认选择。
-
-      一个直接的推论：**给输入整体加一个常数，LayerNorm 的输出不变，RMSNorm 的会变。**
-      这一关就用它来验你写的到底是哪一个。
-
-      ## pre-norm 与残差缩放
-
-      \`pre-norm\`（\`x + f(norm(x))\`）和 \`post-norm\`（\`norm(x + f(x))\`）的区别，
-      在于残差通路上有没有归一化挡着。pre-norm 的残差是一条干净的恒等通路,
-      这是深层能训起来的直接原因，也是今天的默认。
-
-      代价是残差流的量级随深度涨。每层往上加一份方差 \`σ²\`，\`L\` 层之后是
-      \`sqrt(1 + L·σ²)\`。把每层输出乘 \`1/sqrt(2L)\` 之后，总量变成
-      \`sqrt(1 + σ²/2)\` —— **和深度无关**。GPT-2 起就是这么初始化的。
-
-      这一关把权重按 \`std = dim^(−1/2)\` 初始化，于是 \`σ ≈ 1\`，三个数分别是：
-
-      \`\`\`
-      16 层不带缩放   sqrt(1 + 16) ≈ 4.12
-      16 层带缩放     sqrt(1 + 0.5) ≈ 1.22
-       2 层带缩放     sqrt(1 + 0.5) ≈ 1.22   ← 和 16 层一样
-      \`\`\`
-
-      （\`0.02\` 那个常见的初始化是给 \`dim = 768\` 调的:
-      \`0.02 · sqrt(768) ≈ 0.55\`。照搬到 \`dim = 32\` 上 \`σ\` 只有 0.11，
-      深度效应会被压得几乎看不见。**初始化的尺度得跟着宽度走。**）
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
       | 数值 | RMSNorm 与 f64 参考最大差 ≤ 2e-6 |
-      | 是 RMSNorm 不是 LayerNorm | 整体平移之后输出的变化 **≥ 0.05** |
+      | 是 RMSNorm 不是 LayerNorm | 整体平移之后输出的变化 ≥ 0.05 |
       | 参数 | 每层归一化恰好 \`dim\` 个参数（没有 bias） |
-      | 深度无关 | 16 层与 2 层的残差流增长比 **≤ 1.25** |
+      | 深度无关 | 16 层与 2 层的残差流增长比 ≤ 1.25 |
     `,
     code`
       In \`norm.py\`, write the normalisation and the residual stack, and actually measure
@@ -2318,42 +1997,14 @@ const STAGE_NORM = {
               Record F.rms(x) after every layer into self.layer_rms."""
       \`\`\`
 
-      ## RMSNorm versus LayerNorm
-
-      LayerNorm subtracts the mean then divides by the standard deviation; RMSNorm
-      **only divides by the root mean square**:
-
-      \`\`\`
-      LayerNorm(x) = (x − mean(x)) / std(x) · g + b
-      RMSNorm(x)   = x / sqrt(mean(x²) + ε) · g
-      \`\`\`
-
-      No mean subtraction, no bias, about 7% less normalisation cost, and essentially the
-      same quality. It has been the default since Llama.
-
-      One immediate consequence: **add a constant to the whole input and LayerNorm's output
-      is unchanged while RMSNorm's changes.** This stage uses that to check which one you
-      actually wrote.
-
-      ## Pre-norm and residual scaling
-
-      \`pre-norm\` (\`x + f(norm(x))\`) differs from \`post-norm\` (\`norm(x + f(x))\`) in
-      whether a normalisation sits on the residual path. Pre-norm keeps that path a clean
-      identity, which is the direct reason deep stacks train, and the default today.
-
-      The cost is that the residual stream grows with depth. Each layer adds variance
-      \`σ²\`, so after \`L\` layers the scale is \`sqrt(1 + L·σ²)\`. Multiply each layer's
-      output by \`1/sqrt(2L)\` and the total becomes \`sqrt(1 + σ²/2)\` — **independent of
-      depth**. GPT-2 has initialised this way from the start.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
       | Numerics | RMSNorm within 2e-6 of the f64 reference |
-      | RMSNorm, not LayerNorm | Output change under a constant shift **≥ 0.05** |
+      | RMSNorm, not LayerNorm | Output change under a constant shift ≥ 0.05 |
       | Parameters | Exactly \`dim\` per normalisation layer (no bias) |
-      | Depth independence | 16-layer growth over 2-layer growth **≤ 1.25** |
+      | Depth independence | 16-layer growth over 2-layer growth ≤ 1.25 |
     `
   ),
   checklist: [
@@ -2751,7 +2402,7 @@ const PARTS_PY = code`
 
 const STAGE_BLOCK = {
   id: 'swiglu-block',
-  title: t('SwiGLU 与完整的 block —— 一层到底是什么', 'SwiGLU and the full block — what one layer actually is'),
+  title: t('SwiGLU：组装一个 Transformer block', 'SwiGLU: assemble a Transformer block'),
   goal: t(
     code`
       前几关的零件都在 \`parts.py\` 里了（RoPE 表、RMSNorm、GQA 注意力）。
@@ -2771,57 +2422,15 @@ const STAGE_BLOCK = {
               # 两条 pre-norm 残差：注意力一条，前馈一条
       \`\`\`
 
-      ## 隐藏维为什么是 176 而不是 256
-
-      传统前馈是两个矩阵：\`down(act(up(x)))\`，隐藏维取 \`4·dim\`。
-      SwiGLU 是**三个**矩阵：
-
-      \`\`\`
-      SwiGLU(x) = down( silu(gate(x)) · up(x) )
-      silu(z) = z · σ(z)
-      \`\`\`
-
-      三个矩阵要是也用 \`4·dim\`，参数就比传统前馈多 50%。
-      Llama 的做法是把隐藏维乘 \`2/3\` 再向上取到 \`multiple_of\` 的倍数：
-
-      \`\`\`
-      hidden = round_up( int(2 · (4 · dim) / 3), multiple_of )
-      dim = 64  ->  int(512 · 2/3) = 170  ->  向上取到 8 的倍数 = 176
-      \`\`\`
-
-      于是参数量和传统前馈基本持平，而效果更好。**取整到 8 的倍数不是洁癖** ——
-      矩阵乘的分块和张量核心都按 8/16/32 对齐，170 会掉进一条慢路径。
-
-      ## 一层长什么样
-
-      \`\`\`
-      x = x + scale · attn(norm1(x))
-      x = x + scale · mlp(norm2(x))
-      \`\`\`
-
-      两条残差，两个归一化，各挂在支路上。\`scale\` 是第 6 关那条 \`1/sqrt(2L)\`。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | 参数量 | 恰好 **46208**（解析式见下） |
+      | 参数量 | 恰好 46208（解析式见下） |
       | 前馈数值 | 与 f64 参考最大差 ≤ 2e-6 |
-      | **残差是恒等** | 把 \`wo\` 和 \`w_down\` 清零，输出必须和输入**逐位相同** |
+      | 残差是恒等 | 把 \`wo\` 和 \`w_down\` 清零，输出必须和输入逐位相同 |
       | 因果性 | 泄漏 = 0 |
-      | 每 token 的前向 FLOPs | 与 \`2N\` 的比在 **1.0 ~ 1.6** 之间 |
-
-      \`\`\`
-      注意力 12288 + 前馈 3·64·176 = 33792 + 两个 norm 128 = 46208
-      \`\`\`
-
-      「残差是恒等」那条能一刀切开 pre-norm 和 post-norm：支路清零之后
-      pre-norm 的输出**就是**输入，post-norm 的输出是 \`norm(x)\`,差得很明显，
-      而这两种写法在 loss 曲线上要十几层才分得开。
-
-      最后一条是那个著名的经验规律：**前向大约是 \`2N\` FLOPs / token**
-      （N 是参数量），反向再来两倍，一次训练步合计约 \`6N\`。
-      注意力那块 \`O(S²)\` 的项让实测略高于 1.0。
+      | 每 token 的前向 FLOPs | 与 \`2N\` 的比在 1.0 ~ 1.6 之间 |
     `,
     code`
       The pieces from earlier stages are in \`parts.py\` (RoPE tables, RMSNorm, GQA
@@ -2842,61 +2451,15 @@ const STAGE_BLOCK = {
               # Two pre-norm residuals: one for attention, one for the MLP
       \`\`\`
 
-      ## Why the hidden width is 176, not 256
-
-      A classic feed-forward is two matrices, \`down(act(up(x)))\`, with a hidden width of
-      \`4·dim\`. SwiGLU uses **three**:
-
-      \`\`\`
-      SwiGLU(x) = down( silu(gate(x)) · up(x) )
-      silu(z) = z · σ(z)
-      \`\`\`
-
-      Three matrices at \`4·dim\` would cost 50% more parameters than the classic version.
-      Llama scales the width by \`2/3\` and rounds up to a multiple of \`multiple_of\`:
-
-      \`\`\`
-      hidden = round_up( int(2 · (4 · dim) / 3), multiple_of )
-      dim = 64  ->  int(512 · 2/3) = 170  ->  round up to a multiple of 8 = 176
-      \`\`\`
-
-      Parameters end up roughly matching the classic block while quality improves. **The
-      rounding is not fastidiousness**: matmul tiling and tensor cores align to 8/16/32, and
-      170 falls onto a slow path.
-
-      ## What a layer looks like
-
-      \`\`\`
-      x = x + scale · attn(norm1(x))
-      x = x + scale · mlp(norm2(x))
-      \`\`\`
-
-      Two residuals, two normalisations, each on a branch. \`scale\` is stage 6's
-      \`1/sqrt(2L)\`.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | Parameters | Exactly **46208** (formula below) |
+      | Parameters | Exactly 46208 (formula below) |
       | MLP numerics | Within 2e-6 of the f64 reference |
-      | **Residual is identity** | Zero \`wo\` and \`w_down\`; output must be **bit-identical** to the input |
+      | Residual is identity | Zero \`wo\` and \`w_down\`; output must be bit-identical to the input |
       | Causality | Leakage = 0 |
-      | Forward FLOPs per token | Ratio to \`2N\` between **1.0 and 1.6** |
-
-      \`\`\`
-      attention 12288 + MLP 3·64·176 = 33792 + two norms 128 = 46208
-      \`\`\`
-
-      The identity check cleanly separates pre-norm from post-norm: with the branches zeroed
-      pre-norm returns the input exactly, while post-norm returns \`norm(x)\` — an obvious
-      difference, where the two designs need a dozen layers before any loss curve tells them
-      apart.
-
-      The last row is the well-known rule of thumb: **a forward pass costs about \`2N\`
-      FLOPs per token** (N being the parameter count), the backward twice that, so one
-      training step is roughly \`6N\`. Attention's \`O(S²)\` term puts the measurement a
-      little above 1.0.
+      | Forward FLOPs per token | Ratio to \`2N\` between 1.0 and 1.6 |
     `
   ),
   checklist: [
@@ -3287,7 +2850,7 @@ const MODEL_PY = code`
 
 const STAGE_KVCACHE = {
   id: 'sampling-kvcache',
-  title: t('采样与 KV cache —— 解码为什么不是 O(n²)', 'Sampling and the KV cache — why decoding is not O(n²)'),
+  title: t('采样与 KV cache：减少重复计算', 'Sampling and the KV cache: avoid repeated computation'),
   goal: t(
     code`
       在 \`gen.py\` 里写带缓存的注意力和生成循环。模型在 \`model.py\` 里已经接好了。
@@ -3303,49 +2866,14 @@ const STAGE_KVCACHE = {
           """prompt 是一个 token 列表（batch=1）。返回新生成的 n_new 个 token。"""
       \`\`\`
 
-      ## 为什么必须有 cache
-
-      不带缓存的解码，每生成一个 token 都要把整段前缀从头算一遍：
-      第 \`t\` 步是 \`O(t)\`，生成 \`n\` 个就是 \`O(n²)\`。
-      带缓存之后每步只算**新来的那一个位置**的投影，前面的 k/v 直接读缓存,
-      每步 \`O(1)\`，全程 \`O(n)\`。
-
-      这不是「优化」，是能不能用的分界。第 27 关的 GRPO 要成批地 rollout，
-      不做缓存那一关**真的跑不完**。
-
-      ## 两条路必须给出一样的结果
-
-      带缓存和不带缓存算的是**同一个函数**，所以结果应当**逐位相同** ——
-      不是「差不多」，是一位都不差。这一关的第一条门槛就是它。
-
-      对不上通常是三件事之一：
-      RoPE 的位置没跟着 \`offset\` 走、
-      因果掩码的 \`offset\` 忘了传、
-      往缓存里追加时 batch 之间串了位。
-
-      ## 缓存怎么用
-
-      \`nt.generate.KVCache\` 已经写好了：形状 \`[batch, max_seq, kv_heads·head_dim]\`，
-      \`append(k, v, n)\` 按位置追加。注意它是按 \`max_seq\` 开的，
-      所以做注意力时 \`seq_kv\` 传 \`cache.max_seq\`，
-      靠 \`causal_valid(batch, heads, seq, offset)\` 把还没写过的位置挡在外面 ——
-      那些位置的概率是**硬 0**，不参与求和。
-
-      ## 采样
-
-      \`nt.generate.sample(logits, row, vocab, temperature, top_k, top_p, seed)\`
-      的参数名和叠加顺序都跟 HuggingFace 的 \`generate()\` 一致（先 top-k 后 top-p）。
-      它是**确定性**的：结果只由 \`(logits, seed)\` 决定，
-      概率相同的候选按 token id 排序 —— 否则整条重放链就断了。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | 两条路一致 | 带 cache 与不带 cache 的输出**逐位相同** |
-      | 真的省了 | 不带 cache 的解码 FLOPs 是带 cache 的 **≥ 3 倍** |
+      | 两条路一致 | 带 cache 与不带 cache 的输出逐位相同 |
+      | 真的省了 | 不带 cache 的解码 FLOPs 是带 cache 的 ≥ 3 倍 |
       | 确定性 | 同一个 seed 跑两遍，结果完全一样 |
-      | top-k | 采出来的 token 全在**逐步重放算出来的** top-k 集合里 |
+      | top-k | 采出来的 token 全在逐步重放算出来的 top-k 集合里 |
     `,
     code`
       Write the cached attention and the generation loop in \`gen.py\`. The model in
@@ -3362,47 +2890,14 @@ const STAGE_KVCACHE = {
           """prompt is a list of tokens (batch=1). Returns the n_new new tokens."""
       \`\`\`
 
-      ## Why the cache is mandatory
-
-      Uncached decoding recomputes the whole prefix for every generated token: step \`t\`
-      costs \`O(t)\`, so \`n\` tokens cost \`O(n²)\`. With a cache each step projects only
-      **the one new position** and reads earlier k/v straight from memory — \`O(1)\` per
-      step, \`O(n)\` overall.
-
-      This is not an optimisation but the line between usable and not. Stage 27's GRPO
-      rolls out in batches, and without a cache that stage **genuinely does not finish**.
-
-      ## The two paths must agree exactly
-
-      Cached and uncached compute the **same function**, so the results must be
-      **bit-identical** — not close, identical. That is this stage's first gate.
-
-      A mismatch is usually one of three things: RoPE positions not following \`offset\`,
-      a forgotten \`offset\` on the causal mask, or appends that cross batch boundaries.
-
-      ## Using the cache
-
-      \`nt.generate.KVCache\` is written for you: shape
-      \`[batch, max_seq, kv_heads·head_dim]\`, with \`append(k, v, n)\` adding positions.
-      It is allocated at \`max_seq\`, so pass \`cache.max_seq\` as \`seq_kv\` when attending
-      and let \`causal_valid(batch, heads, seq, offset)\` exclude positions not yet written
-      — their probability is a **hard zero** and they never enter the sum.
-
-      ## Sampling
-
-      \`nt.generate.sample(logits, row, vocab, temperature, top_k, top_p, seed)\` matches
-      HuggingFace's \`generate()\` in both parameter names and ordering (top-k then top-p).
-      It is **deterministic**: the result depends only on \`(logits, seed)\`, and ties are
-      broken by token id — otherwise the whole replay chain breaks.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | Paths agree | Cached and uncached outputs are **bit-identical** |
-      | Real saving | Uncached decoding costs **at least 3x** the FLOPs of cached |
+      | Paths agree | Cached and uncached outputs are bit-identical |
+      | Real saving | Uncached decoding costs at least 3x the FLOPs of cached |
       | Determinism | The same seed twice gives the same result |
-      | top-k | Every sampled token lies in the top-k set **recomputed by replay** |
+      | top-k | Every sampled token lies in the top-k set recomputed by replay |
     `
   ),
   checklist: [
@@ -3767,10 +3262,10 @@ const STAGE_KVCACHE = {
 
 const STAGE_MANUAL_BWD = {
   id: 'manual-backward',
-  title: t('手写反向 —— 矩阵乘与交叉熵', 'Backward by hand — matmul and cross-entropy'),
+  title: t('手写反向传播：矩阵乘与交叉熵', 'Backpropagation by hand: matrix multiplication and cross-entropy'),
   goal: t(
     code`
-      在 \`mygrad.py\` 里写两个自定义算子，**前向和反向都自己来**。
+      在 \`mygrad.py\` 里写两个自定义算子，前向和反向都自己来。
       形状照 \`torch.autograd.Function\`：
 
       \`\`\`python
@@ -3786,67 +3281,21 @@ const STAGE_MANUAL_BWD = {
               return dx, dw          # 顺序对着 forward 里的张量参数
       \`\`\`
 
-      \`forward\` 跑在 \`no_grad\` 里，所以你在里面调 \`F.linear\` 也**不会**挂上
-      内建的反向 —— 挂了的话反向会走两遍（引擎一遍、你的 \`backward\` 一遍），
+      \`forward\` 跑在 \`no_grad\` 里，所以你在里面调 \`F.linear\` 也不会挂上
+      内建的反向：挂了的话反向会走两遍（引擎一遍、你的 \`backward\` 一遍），
       梯度正好翻倍。PyTorch 里这件事同样是自动的，只是藏得更深。
-
-      ## 矩阵乘的反向
-
-      \`y = x @ W\`，\`x\` 是 \`[rows, din]\`，\`W\` 是 \`[din, dout]\`。链式法则给出：
-
-      \`\`\`
-      dx = dy @ Wᵀ        [rows, din]
-      dW = xᵀ @ dy        [din, dout]
-      \`\`\`
-
-      记住形状怎么对上就够了：**两个下标里，被消掉的那个是求和的维度。**
-      \`F.gemm(a, b, m, n, k, mode)\` 有 \`"nn"\` / \`"nt"\` / \`"tn"\` 三种模式,
-      名字照 BLAS 来，真的 cuBLAS 就是这三个转置标志：
-
-      \`\`\`python
-      dx = F.gemm(dy, w, rows, din, dout, "nt")     # dy @ Wᵀ
-      dw = F.gemm(x, dy, din, dout, rows, "tn")     # xᵀ @ dy
-      \`\`\`
-
-      ## 交叉熵的反向
-
-      这是整套里最漂亮的一个结果。softmax 加交叉熵合起来求导，
-      中间那一大堆全消掉了，只剩：
-
-      \`\`\`
-      dlogits = (softmax(logits) − onehot(targets)) / rows
-      \`\`\`
-
-      「预测的概率减去真实的概率」—— 就这么一句。
-      这也是为什么真实框架总把 softmax 和交叉熵**融在一个算子里**：
-      分开算不但慢，还要在中间存一个 \`[rows, vocab]\` 的雅可比。
-
-      \`F.softmax\` 与 \`F.one_hot\` 都有了。别忘了乘上游传下来的 \`grad_output\` ——
-      虽然从 loss 出发时它就是 1，但**写对了才叫写对了**，
-      到第 11 关整模型反向、第 19 关梯度累积时它就不再是 1 了。
 
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | 梯度检验 | **f64 中心差分**，最大相对误差 ≤ 2e-3 |
+      | 梯度检验 | f64 中心差分，最大相对误差 ≤ 2e-3 |
       | 抽样量 | 至少 16 个元素（2 个张量 × 8 点） |
       | 前向 | loss 与内建实现差 ≤ 1e-12 |
       | 不退化 | 梯度不能几乎全是 0 |
-
-      ## 为什么梯度检验必须在 f64 上做
-
-      中心差分是 \`(f(x+h) − f(x−h)) / 2h\`。分子是两个几乎相等的数相减,
-      **灾难性抵消**，有效位数直接掉一大截。
-
-      fp32 只有 24 位尾数（约 7 位十进制）。抵消掉 4~5 位之后剩不下什么，
-      于是一个**完全正确**的反向也会量出 5e-2 量级的相对误差。
-      这个项目在实现阶段实测过这一条：同一份反向，f32 下 4.99e-2，f64 下 1.47e-5。
-
-      所以这一关的张量是 \`dtype="f64"\` 建的。**梯度检验挂了先看精度，再看代码。**
     `,
     code`
-      Write two custom operators in \`mygrad.py\`, **forward and backward both by hand**,
+      Write two custom operators in \`mygrad.py\`, forward and backward both by hand,
       shaped like \`torch.autograd.Function\`:
 
       \`\`\`python
@@ -3862,70 +3311,19 @@ const STAGE_MANUAL_BWD = {
               return dx, dw          # ordered like forward's tensor arguments
       \`\`\`
 
-      \`forward\` runs under \`no_grad\`, so calling \`F.linear\` inside it does **not**
-      attach the built-in backward — if it did, the backward would run twice (once by the
+      \`forward\` runs under \`no_grad\`, so calling \`F.linear\` inside it does not
+      attach the built-in backward: if it did, the backward would run twice (once by the
       engine, once by yours) and gradients would come out exactly doubled. PyTorch does the
       same thing, just less visibly.
-
-      ## The backward of a matmul
-
-      For \`y = x @ W\` with \`x\` at \`[rows, din]\` and \`W\` at \`[din, dout]\`, the chain
-      rule gives:
-
-      \`\`\`
-      dx = dy @ Wᵀ        [rows, din]
-      dW = xᵀ @ dy        [din, dout]
-      \`\`\`
-
-      Remembering how the shapes line up is enough: **the index that cancels is the summed
-      dimension.** \`F.gemm(a, b, m, n, k, mode)\` offers \`"nn"\` / \`"nt"\` / \`"tn"\`,
-      named after BLAS — real cuBLAS has exactly these three transpose flags:
-
-      \`\`\`python
-      dx = F.gemm(dy, w, rows, din, dout, "nt")     # dy @ Wᵀ
-      dw = F.gemm(x, dy, din, dout, rows, "tn")     # xᵀ @ dy
-      \`\`\`
-
-      ## The backward of cross-entropy
-
-      This is the prettiest result in the whole set. Differentiate softmax together with
-      cross-entropy and everything in the middle cancels, leaving:
-
-      \`\`\`
-      dlogits = (softmax(logits) − onehot(targets)) / rows
-      \`\`\`
-
-      "Predicted probability minus true probability" — that is all of it. It is also why
-      real frameworks **fuse** softmax and cross-entropy into one operator: splitting them
-      is slower and forces a \`[rows, vocab]\` Jacobian into memory.
-
-      \`F.softmax\` and \`F.one_hot\` are available. Do not forget to multiply by the
-      incoming \`grad_output\`: it happens to be 1 when you start from the loss, but
-      **correct means correct** — by stage 11 and by gradient accumulation in stage 19 it
-      is no longer 1.
 
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | Gradient check | **f64 central differences**, max relative error ≤ 2e-3 |
+      | Gradient check | f64 central differences, max relative error ≤ 2e-3 |
       | Samples | At least 16 elements (2 tensors x 8 points) |
       | Forward | Loss within 1e-12 of the built-in |
       | Non-degenerate | Gradients must not be almost entirely zero |
-
-      ## Why the gradient check must run in f64
-
-      A central difference is \`(f(x+h) − f(x−h)) / 2h\`. The numerator subtracts two nearly
-      equal numbers — **catastrophic cancellation** — and loses a large chunk of the
-      significant digits.
-
-      fp32 has a 24-bit mantissa, roughly 7 decimal digits. Cancel four or five of them and
-      little remains, so a **perfectly correct** backward still measures a relative error
-      around 5e-2. This project measured exactly that during implementation: the same
-      backward gives 4.99e-2 in f32 and 1.47e-5 in f64.
-
-      That is why this stage builds its tensors with \`dtype="f64"\`. **When a gradient check
-      fails, suspect precision before you suspect the code.**
     `
   ),
   checklist: [
@@ -4276,7 +3674,7 @@ const STAGE_MANUAL_BWD = {
 
 const STAGE_ENGINE = {
   id: 'autograd-engine',
-  title: t('自动微分引擎 —— 那条带是怎么倒着走的', 'The autograd engine — how the tape runs backwards'),
+  title: t('自动微分：实现计算图引擎', 'Autograd: implement a computation-graph engine'),
   goal: t(
     code`
       在 \`engine.py\` 里自己写一遍反向传播的调度：
@@ -4286,7 +3684,7 @@ const STAGE_ENGINE = {
           """从一个标量出发，把整张图的梯度算出来。"""
       \`\`\`
 
-      **这一关不许调用 \`Tensor.backward()\`** —— 用例会把它换成一个当场报错的桩。
+      这一关不许调用 \`Tensor.backward()\`：用例会把它换成一个当场报错的桩。
 
       ## 你手上有什么
 
@@ -4298,48 +3696,20 @@ const STAGE_ENGINE = {
       \`\`\`
 
       \`t._backward()\` 读的是 \`t.grad\`，写的是 \`t._parents\` 各自的 \`.grad\`,
-      **累加**进去，不是赋值。所以你要做的只有三件事：
+      累加进去，不是赋值。所以你要做的只有三件事：
 
       1. 给起点播种：\`root.grad = 1\`（\`d(loss)/d(loss)\`）
-      2. 排出一个**拓扑序**
-      3. **倒着**走一遍，每个节点的 \`_backward\` 调**恰好一次**
-
-      ## 为什么必须是拓扑序
-
-      \`t._backward()\` 要求 \`t.grad\` 已经**攒齐**了 —— 所有用到 \`t\` 的下游都得先算完。
-      顺序错了不会报错，只会算出一个偏小的梯度：某个下游的贡献还没加上就先散出去了。
-
-      \`\`\`
-            x
-           / \\
-          a   b        ← a 和 b 都用了 x
-           \\ /
-            y
-      \`\`\`
-
-      这张**菱形**图是分水岭。\`x\` 要等 \`a\` 和 \`b\` 都算完才轮到它。
-      而如果你的实现在 DFS 里没有去重，\`x._backward\` 会被调两次,
-      梯度**正好翻倍**，而这在单链的表达式上完全看不出来。
+      2. 排出一个拓扑序
+      3. 倒着走一遍，每个节点的 \`_backward\` 调恰好一次
 
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
       | 数值 | 与内建引擎的结果差 ≤ 1e-9（f64） |
-      | **菱形图** | 同一个中间量被用两次时梯度要相加 |
-      | **每个节点恰好一次** | \`_backward\` 的最大调用次数 = 1 |
+      | 菱形图 | 同一个中间量被用两次时梯度要相加 |
+      | 每个节点恰好一次 | \`_backward\` 的最大调用次数 = 1 |
       | 没抄近路 | 没调 \`Tensor.backward()\` |
-
-      「每个节点恰好一次」是这一关最锋利的一条:它不看数值，只数调用。
-      一个「多调了一次」的实现在某些图上数值碰巧还对得上，
-      但这条门槛不会放过它。
-
-      ## 一句题外话
-
-      你写的这十几行，就是 PyTorch \`autograd\` 引擎的骨架。
-      真实的那个多了：跨线程的依赖计数（不是一次性排好拓扑序，
-      而是每个节点记着「还有几个下游没来」）、\`retain_graph\`、
-      钩子、以及对不需要梯度的子图的剪枝。骨架是一样的。
     `,
     code`
       Write the backward-pass scheduler yourself in \`engine.py\`:
@@ -4349,7 +3719,7 @@ const STAGE_ENGINE = {
           """Given a scalar, compute gradients across the whole graph."""
       \`\`\`
 
-      **This stage forbids \`Tensor.backward()\`** — the hidden cases replace it with a stub
+      This stage forbids \`Tensor.backward()\`: the hidden cases replace it with a stub
       that raises.
 
       ## What you have
@@ -4363,50 +3733,20 @@ const STAGE_ENGINE = {
       \`\`\`
 
       \`t._backward()\` reads \`t.grad\` and writes into each parent's \`.grad\`,
-      **accumulating** rather than assigning. So there are only three things to do:
+      accumulating rather than assigning. So there are only three things to do:
 
       1. Seed the root: \`root.grad = 1\` (\`d(loss)/d(loss)\`)
-      2. Produce a **topological order**
-      3. Walk it **backwards**, calling each node's \`_backward\` **exactly once**
-
-      ## Why the order has to be topological
-
-      \`t._backward()\` requires \`t.grad\` to be **complete** — every downstream user of \`t\`
-      must have finished first. Getting this wrong raises nothing; it just produces a
-      gradient that is too small, because one downstream contribution had not arrived yet.
-
-      \`\`\`
-            x
-           / \\
-          a   b        ← both a and b use x
-           \\ /
-            y
-      \`\`\`
-
-      This **diamond** is the dividing line. \`x\` must wait for both \`a\` and \`b\`. And if
-      your DFS does not deduplicate, \`x._backward\` runs twice and the gradient comes out
-      **exactly doubled** — invisible on any single-chain expression.
+      2. Produce a topological order
+      3. Walk it backwards, calling each node's \`_backward\` exactly once
 
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
       | Numerics | Within 1e-9 of the built-in engine (f64) |
-      | **Diamond graph** | Gradients add when an intermediate is used twice |
-      | **Exactly once per node** | Maximum \`_backward\` call count = 1 |
+      | Diamond graph | Gradients add when an intermediate is used twice |
+      | Exactly once per node | Maximum \`_backward\` call count = 1 |
       | No shortcut | \`Tensor.backward()\` is not called |
-
-      "Exactly once per node" is the sharpest gate here: it ignores values and counts calls.
-      An implementation that calls one node twice can still land on the right numbers for
-      some graphs; this gate does not let it through.
-
-      ## An aside
-
-      The dozen lines you are writing are the skeleton of PyTorch's \`autograd\` engine. The
-      real one adds cross-thread dependency counting (rather than one precomputed
-      topological order, each node tracks how many downstream users remain),
-      \`retain_graph\`, hooks, and pruning of subgraphs that need no gradient. The skeleton
-      is the same.
     `
   ),
   checklist: [
@@ -4889,11 +4229,11 @@ const PARTS_FULL_PY = code`
 
 const STAGE_MODEL_BWD = {
   id: 'model-backward',
-  title: t('整个模型的反向 —— 每一个参数都得对', 'The whole model backward — every parameter has to be right'),
+  title: t('完整语言模型的反向传播', 'Backpropagation through the full model'),
   goal: t(
     code`
       前面所有零件都在 \`parts.py\` 里了。这一关在 \`lm.py\` 里把它们接成一个
-      **能训的语言模型**，并让每一个参数的梯度都经得起查。
+      能训的语言模型，并让每一个参数的梯度都经得起查。
 
       \`\`\`python
       class LM(nn.Module):
@@ -4903,53 +4243,19 @@ const STAGE_MODEL_BWD = {
               """返回一个标量 loss。"""
       \`\`\`
 
-      ## 权重绑定
-
-      输出头**用嵌入表本身**，不另开一块：\`F.linear_tied(x, self.embed, ...)\`。
-      GPT-2 起就是这么做的。在小模型上这省掉的是一大块 —— 本关
-      \`vocab · dim = 256\`，占总参数的 4%；到 vocab 15 万的模型上，
-      不绑定的话光输出头就是几亿个参数。
-
-      注意 \`parameters()\` **不许把它数两遍**。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | 参数量 | 恰好 **6480**（解析式见下） |
-      | **每一个参数张量都查过** | \`checkedTensors\` = **20** |
+      | 参数量 | 恰好 6480（解析式见下） |
+      | 每一个参数张量都查过 | \`checkedTensors\` = 20 |
       | 梯度检验 | f64 中心差分，最大相对误差 ≤ 2e-3 |
-      | **没有哪个张量的梯度全是 0** | 全零的张量数 = 0 |
-      | 反向的代价 | \`backward / forward\` FLOPs ≤ **2.2** |
-
-      \`\`\`
-      嵌入 16·16 = 256
-      每层 注意力 768 + 前馈 3·16·48 = 2304 + 两个 norm 32 = 3104
-      2 层 6208，加最后一个 norm 16，加嵌入 256  ->  6480
-      张量数 1 + 2·9 + 1 = 20
-      \`\`\`
-
-      ## 「梯度全是 0」为什么单独查
-
-      一个模块建出来了、前向也用上了，但**没被登记进 \`parameters()\`** ——
-      这是最常见的一类错。表现是：模型跑得通，loss 也降，只是那一部分从来没被更新过。
-      放进普通 \`list\` 的子模块就是这样，\`nn.ModuleList\` 存在的全部理由就是它。
-
-      另一种是某个分支根本没接进计算图（写了但没用上），梯度自然是 0。
-      两种都不报错，两种都只能靠**逐张量查一遍**发现。
-
-      ## \`backward / forward ≤ 2.2\` 是什么意思
-
-      理论值是 **2**：每个矩阵乘在反向里要算两个（\`dX\` 和 \`dW\`），
-      而逐元素的那些算子反向和前向同阶。留 0.2 的余量给
-      softmax 反向、归一化反向这类稍贵一点的。
-
-      **明显超过 2.2 说明反向里重算了前向。** 这个错不会让梯度出问题 ——
-      结果完全正确，只是算力白花了一大半，而在 loss 曲线上一点痕迹都没有。
+      | 没有哪个张量的梯度全是 0 | 全零的张量数 = 0 |
+      | 反向的代价 | \`backward / forward\` FLOPs ≤ 2.2 |
     `,
     code`
       All the earlier pieces live in \`parts.py\`. This stage assembles them in \`lm.py\`
-      into a **trainable language model** whose every parameter gradient survives checking.
+      into a trainable language model whose every parameter gradient survives checking.
 
       \`\`\`python
       class LM(nn.Module):
@@ -4959,53 +4265,15 @@ const STAGE_MODEL_BWD = {
               """Returns a scalar loss."""
       \`\`\`
 
-      ## Weight tying
-
-      The output head **is the embedding table**, not a separate matrix:
-      \`F.linear_tied(x, self.embed, ...)\`. GPT-2 onwards does this. Here
-      \`vocab · dim = 256\` is 4% of the parameters; at a 150k vocabulary an untied output
-      head alone would be hundreds of millions.
-
-      Note that \`parameters()\` must **not count it twice**.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | Parameters | Exactly **6480** (formula below) |
-      | **Every parameter tensor checked** | \`checkedTensors\` = **20** |
+      | Parameters | Exactly 6480 (formula below) |
+      | Every parameter tensor checked | \`checkedTensors\` = 20 |
       | Gradient check | f64 central differences, max relative error ≤ 2e-3 |
-      | **No tensor with an all-zero gradient** | zero-gradient tensors = 0 |
-      | Cost of the backward | \`backward / forward\` FLOPs ≤ **2.2** |
-
-      \`\`\`
-      embedding 16·16 = 256
-      per layer: attention 768 + MLP 3·16·48 = 2304 + two norms 32 = 3104
-      2 layers 6208, plus the final norm 16, plus the embedding 256  ->  6480
-      tensors 1 + 2·9 + 1 = 20
-      \`\`\`
-
-      ## Why "all-zero gradient" gets its own check
-
-      A module gets built and used in the forward pass, but is **never registered in
-      \`parameters()\`** — the most common failure of its kind. The model runs, the loss
-      falls, and that part is simply never updated. Submodules dropped into a plain
-      \`list\` behave exactly this way; avoiding it is the entire reason \`nn.ModuleList\`
-      exists.
-
-      The other variant is a branch that never joined the graph at all (written but not
-      used), whose gradient is naturally zero. Neither raises an error, and only a
-      **per-tensor sweep** finds them.
-
-      ## What \`backward / forward ≤ 2.2\` means
-
-      The theoretical value is **2**: every matmul needs two in the backward (\`dX\` and
-      \`dW\`), while elementwise operators cost the same either way. The 0.2 of slack covers
-      slightly pricier backwards like softmax and normalisation.
-
-      **Clearly above 2.2 means the backward recomputed the forward.** That bug does not
-      corrupt gradients — results stay perfectly correct, more than half the compute is
-      simply wasted, and no loss curve shows a trace of it.
+      | No tensor with an all-zero gradient | zero-gradient tensors = 0 |
+      | Cost of the backward | \`backward / forward\` FLOPs ≤ 2.2 |
     `
   ),
   checklist: [
@@ -5363,10 +4631,10 @@ const STAGE_MODEL_BWD = {
 
 const STAGE_ADAMW = {
   id: 'adamw',
-  title: t('AdamW —— 偏差修正与解耦的权重衰减', 'AdamW — bias correction and decoupled weight decay'),
+  title: t('AdamW：偏差修正与权重衰减', 'AdamW: bias correction and weight decay'),
   goal: t(
     code`
-      在 \`opt.py\` 里自己写一个 AdamW。**这一关不许用 \`nt.optim.AdamW\`** ——
+      在 \`opt.py\` 里自己写一个 AdamW。这一关不许用 \`nt.optim.AdamW\`：
       用例会把它换成一个当场报错的桩。
 
       \`\`\`python
@@ -5379,64 +4647,22 @@ const STAGE_ADAMW = {
               """走一步，返回**裁剪前**的梯度范数。"""
       \`\`\`
 
-      逐元素的那一步用 \`F.adamw_(p, g, m, v, lr, beta1, beta2, eps, decay, t, clip)\` ——
+      逐元素的那一步用 \`F.adamw_(p, g, m, v, lr, beta1, beta2, eps, decay, t, clip)\`：
       它对应一次融合的优化器 kernel（真实框架里叫 \`fused\` 或 \`foreach\`）。
-      **你要写的是它外面那一层**：状态怎么开、\`t\` 怎么数、哪些参数衰减、裁剪怎么算。
+      你要写的是它外面那一层：状态怎么开、\`t\` 怎么数、哪些参数衰减、裁剪怎么算。
       而这一层正是真实训练代码里出错的地方。
-
-      ## 偏差修正：为什么第一步的步长恰好是 lr
-
-      一阶动量从 0 起步：\`m₁ = (1−β₁)·g\`。β₁ = 0.9 的话它只有梯度的 **1/10**。
-      二阶同理，\`v₁ = (1−β₂)·g²\`。直接拿去更新的话第一步会小得离谱：
-
-      \`\`\`
-      不修正   lr · (1−β₁)g / sqrt((1−β₂)g²) = lr · 0.1/0.2236 ≈ 0.447 · lr
-      修正后   m̂ = m₁/(1−β₁) = g，v̂ = v₁/(1−β₂) = g²
-               lr · g / |g| = lr        ← 恰好一个 lr
-      \`\`\`
-
-      所以**梯度恒定时，第一步的参数变化幅度恰好是 \`lr\`**（先不算衰减）。
-      这一关就用它来验偏差修正接没接对：量出 0.447 说明没修正，量出 nan 说明 \`t\` 从 0 数起。
-
-      修正的分母是 \`1 − β^t\`,\`t\` 从 **1** 开始数，不是 0。
-
-      ## 解耦的权重衰减：AdamW 里的那个 W
-
-      Adam 加 L2 正则是把 \`λ·w\` 加进**梯度**里，于是它也被 \`sqrt(v)\` 除了一道 ——
-      梯度大的参数被衰减得少，梯度小的被衰减得多，**和「衰减」的本意正好相反**。
-
-      AdamW 把它**解耦**出来，直接作用在参数上：
-
-      \`\`\`
-      w ← w − lr · ( m̂/(sqrt(v̂)+ε) + λ·w )
-                                      ↑ 不经过 sqrt(v)
-      \`\`\`
-
-      ## 一维参数不衰减
-
-      归一化的增益、以及（如果有的话）bias，都是一维的。它们**不该被衰减**：
-      增益的作用就是把某一层整体放大或缩小，衰减它等于持续往「缩小」推，
-      而 loss 在前几百步看不出区别。
-
-      这一关的探针：给一维参数**零梯度**跑 100 步。
-      写对了它们的范数**一点都不变**；把它们一起衰减掉的话，
-      \`lr=0.1, λ=0.1\` 下 100 步之后只剩 \`(1−0.01)¹⁰⁰ ≈ 37%\`。
 
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | 与参考实现 | 20 步之后**逐位相同** |
-      | **偏差修正** | 恒定梯度下第一步的幅度与 \`lr\` 的相对差 ≤ 0.02 |
-      | **一维不衰减** | 零梯度跑 100 步，一维参数的范数比 ≥ 0.999 |
-      | 状态显存 | 恰好是参数的 **2 倍**（m 和 v） |
-
-      最后一条顺带回答一个常被问到的问题：**AdamW 的优化器状态是参数的两倍。**
-      加上参数本身和梯度，fp32 训练光这三样就是 \`4N\` 个 float,
-      一个 7B 模型 112GB，而这还没算激活。混合精度和分片存在的理由就在这里。
+      | 与参考实现 | 20 步之后逐位相同 |
+      | 偏差修正 | 恒定梯度下第一步的幅度与 \`lr\` 的相对差 ≤ 0.02 |
+      | 一维不衰减 | 零梯度跑 100 步，一维参数的范数比 ≥ 0.999 |
+      | 状态显存 | 恰好是参数的 2 倍（m 和 v） |
     `,
     code`
-      Write your own AdamW in \`opt.py\`. **\`nt.optim.AdamW\` is forbidden here** — the
+      Write your own AdamW in \`opt.py\`. \`nt.optim.AdamW\` is forbidden here: the
       hidden cases replace it with a stub that raises.
 
       \`\`\`python
@@ -5451,65 +4677,18 @@ const STAGE_ADAMW = {
 
       The elementwise part is
       \`F.adamw_(p, g, m, v, lr, beta1, beta2, eps, decay, t, clip)\`, corresponding to a
-      fused optimiser kernel (\`fused\` or \`foreach\` in real frameworks). **Your job is the
-      layer around it**: how state is allocated, how \`t\` is counted, which parameters
+      fused optimiser kernel (\`fused\` or \`foreach\` in real frameworks). Your job is the
+      layer around it: how state is allocated, how \`t\` is counted, which parameters
       decay, how clipping is computed. That layer is where real training code goes wrong.
-
-      ## Bias correction: why the first step is exactly lr
-
-      The first moment starts at zero: \`m₁ = (1−β₁)·g\`, which at β₁ = 0.9 is only **a
-      tenth** of the gradient. The second follows suit, \`v₁ = (1−β₂)·g²\`. Used directly,
-      the first step is absurdly small:
-
-      \`\`\`
-      uncorrected   lr · (1−β₁)g / sqrt((1−β₂)g²) = lr · 0.1/0.2236 ≈ 0.447 · lr
-      corrected     m̂ = m₁/(1−β₁) = g,  v̂ = v₁/(1−β₂) = g²
-                    lr · g / |g| = lr        <- exactly one lr
-      \`\`\`
-
-      So **with a constant gradient the first step moves each parameter by exactly \`lr\`**
-      (ignoring decay). This stage uses that to verify bias correction: measuring 0.447
-      means no correction, and a nan means \`t\` started at 0.
-
-      The correction denominator is \`1 − β^t\`, with \`t\` counting from **1**, not 0.
-
-      ## Decoupled weight decay: the W in AdamW
-
-      Adam with L2 regularisation adds \`λ·w\` into the **gradient**, so it too gets divided
-      by \`sqrt(v)\` — parameters with large gradients decay less and those with small
-      gradients decay more, **the opposite of what decay is for**.
-
-      AdamW **decouples** it, applying it straight to the parameter:
-
-      \`\`\`
-      w <- w − lr · ( m̂/(sqrt(v̂)+ε) + λ·w )
-                                      ^ never passes through sqrt(v)
-      \`\`\`
-
-      ## One-dimensional parameters are not decayed
-
-      Normalisation gains, and biases where they exist, are one-dimensional. They **should
-      not decay**: a gain exists to scale a layer up or down, and decaying it pushes
-      permanently toward "down" — with no visible difference in the loss for hundreds of
-      steps.
-
-      The probe here gives one-dimensional parameters **zero gradients** for 100 steps.
-      Done right their norm does not move at all; decayed along with everything else, at
-      \`lr=0.1, λ=0.1\` only \`(1−0.01)¹⁰⁰ ≈ 37%\` remains after 100 steps.
 
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | Versus the reference | **Bit-identical** after 20 steps |
-      | **Bias correction** | With a constant gradient, first-step size within 0.02 of \`lr\` |
-      | **No decay on 1-D** | Zero gradients for 100 steps; 1-D norm ratio >= 0.999 |
-      | Optimiser state | Exactly **2x** the parameters (m and v) |
-
-      That last row answers a frequently asked question: **AdamW's optimiser state is twice
-      the parameters.** Together with the parameters and gradients, fp32 training needs
-      \`4N\` floats for those three alone — 112GB for a 7B model, before any activations.
-      That is the reason mixed precision and sharding exist.
+      | Versus the reference | Bit-identical after 20 steps |
+      | Bias correction | With a constant gradient, first-step size within 0.02 of \`lr\` |
+      | No decay on 1-D | Zero gradients for 100 steps; 1-D norm ratio >= 0.999 |
+      | Optimiser state | Exactly 2x the parameters (m and v) |
     `
   ),
   checklist: [
@@ -6017,7 +5196,7 @@ const KIT_PY = code`
 
 const STAGE_SCHEDULE = {
   id: 'lr-schedule',
-  title: t('学习率调度 —— 为什么开头要慢慢来', 'The learning-rate schedule — why the start has to be slow'),
+  title: t('学习率调度：warmup 与 cosine decay', 'Learning-rate schedules: warmup and cosine decay'),
   goal: t(
     code`
       在 \`sched.py\` 里写学习率调度。模型和训练循环都在 \`kit.py\` 里，这一关只写这一个函数：
@@ -6027,40 +5206,7 @@ const STAGE_SCHEDULE = {
           """第 step 步（**从 1 数起**）该用多大的学习率。"""
       \`\`\`
 
-      **这一关不许用 \`nt.optim.cosine_with_warmup\`** —— 用例会把它换成报错的桩。
-
-      ## 两段
-
-      \`\`\`
-      step ≤ warmup:   base_lr · step / warmup                    ← 线性爬升
-      step > warmup:   base_lr · (floor + (1−floor)·½(1+cos(π·p)))
-                       其中 p = (step − warmup) / (total − warmup)  ← 余弦退火
-      \`\`\`
-
-      两段在 \`step = warmup\` 处接上：爬升段到顶正好是 \`base_lr\`，
-      退火段从 \`p = 0\` 起也正好是 \`base_lr\`。**接不上的调度在曲线上是一个台阶**，
-      而台阶处的那一步会把权重推出去一截。
-
-      \`floor\` 是退火的终点比例。取 0.1 而不是 0 —— 学习率真降到 0 的话，
-      最后那些步等于白跑；留一成还能继续微调。
-
-      ## warmup 到底在挡什么
-
-      开头的模型是随机的，梯度又大又没方向。而 Adam 的二阶动量 \`v\` 从 0 起步，
-      前几步估得很不准 —— **分母不可靠的时候分子还很大**，一步就能把权重推很远。
-      warmup 用一段小学习率把 \`v\` 喂到可信的量级，再放开。
-
-      这不是理论。同一个模型、同一份数据、同一个 seed，跑 300 步：
-
-      \`\`\`
-      带 warmup（20 步）    最后 10 步平均 loss  1.286
-      不带 warmup           最后 10 步平均 loss  1.964
-      信息论地板                                 1.213
-      均匀分布（什么都没学）                       2.773
-      \`\`\`
-
-      **差的不是一点半点** —— 不带 warmup 的那一路，走了三分之二的路程就停住了。
-      这两个数是这一关的用例真的跑出来的，你自己也会跑到。
+      这一关不许用 \`nt.optim.cosine_with_warmup\`：用例会把它换成报错的桩。
 
       ## 怎么算过
 
@@ -6068,7 +5214,7 @@ const STAGE_SCHEDULE = {
       | --- | --- |
       | 公式 | 与参考在 60 个采样点上差 ≤ 1e-12 |
       | 接得上 | \`step = warmup\` 处恰好是 \`base_lr\` |
-      | 训得动 | 300 步之后最后 10 步平均 loss ≤ **1.45** |
+      | 训得动 | 300 步之后最后 10 步平均 loss ≤ 1.45 |
       | 比得过对照 | 不带 warmup 的对照必须明显更差 |
     `,
     code`
@@ -6080,43 +5226,8 @@ const STAGE_SCHEDULE = {
           """The learning rate for step \`step\` (**counting from 1**)."""
       \`\`\`
 
-      **\`nt.optim.cosine_with_warmup\` is forbidden here** — the hidden cases replace it
+      \`nt.optim.cosine_with_warmup\` is forbidden here: the hidden cases replace it
       with a stub that raises.
-
-      ## Two segments
-
-      \`\`\`
-      step <= warmup:  base_lr · step / warmup                     <- linear ramp
-      step > warmup:   base_lr · (floor + (1−floor)·½(1+cos(π·p)))
-                       with p = (step − warmup) / (total − warmup)  <- cosine decay
-      \`\`\`
-
-      They meet at \`step = warmup\`: the ramp tops out at exactly \`base_lr\`, and the decay
-      starts from \`p = 0\` at exactly \`base_lr\`. **A schedule that fails to meet shows a
-      step in the curve**, and that one step shoves the weights outward.
-
-      \`floor\` is where the decay ends, as a fraction. It is 0.1 rather than 0 — at a
-      genuine zero the last steps do nothing, while a tenth still refines.
-
-      ## What warmup actually prevents
-
-      Early on the model is random and gradients are large and directionless. Adam's second
-      moment \`v\` starts at zero and is badly estimated for the first few steps —
-      **an unreliable denominator under a large numerator** can throw weights far in one
-      step. Warmup uses a stretch of small learning rates to feed \`v\` to a trustworthy
-      scale before opening up.
-
-      This is not theory. Same model, same data, same seed, 300 steps:
-
-      \`\`\`
-      with warmup (20 steps)    mean loss over the last 10 steps  1.286
-      without warmup            mean loss over the last 10 steps  1.964
-      information-theoretic floor                                 1.213
-      uniform (nothing learned)                                   2.773
-      \`\`\`
-
-      **That is not a small gap** — the run without warmup stops two thirds of the way
-      there. The hidden cases actually produce these two numbers, and so will you.
 
       ## What counts as passing
 
@@ -6124,7 +5235,7 @@ const STAGE_SCHEDULE = {
       | --- | --- |
       | Formula | Within 1e-12 of the reference at 60 sampled steps |
       | Continuity | Exactly \`base_lr\` at \`step = warmup\` |
-      | It trains | Mean loss over the last 10 of 300 steps <= **1.45** |
+      | It trains | Mean loss over the last 10 of 300 steps <= 1.45 |
       | It beats the control | The no-warmup control must be clearly worse |
     `
   ),
@@ -6422,7 +5533,7 @@ const STAGE_SCHEDULE = {
 
 const STAGE_CLIP = {
   id: 'grad-clip',
-  title: t('梯度裁剪 —— 只缩放，不改方向', 'Gradient clipping — rescale, never rotate'),
+  title: t('梯度裁剪：限制全局范数', 'Gradient clipping: limit the norm'),
   goal: t(
     code`
       在 \`clip.py\` 里写两个函数。模型和训练循环还是 \`kit.py\` 那一套。
@@ -6437,47 +5548,15 @@ const STAGE_CLIP = {
           """梯度里有没有 NaN / inf。有就返回 True。"""
       \`\`\`
 
-      ## 全局范数，不是逐张量
-
-      \`\`\`
-      total = sqrt( Σ_p ‖g_p‖² )                ← 所有梯度拼成一个向量的长度
-      coef  = max_norm / total   （total > max_norm 时）
-      每个 g_p 原地乘上同一个 coef
-      \`\`\`
-
-      要点是**同一个 coef**。逐张量各裁各的话，各层之间的相对大小被抹平了 ——
-      梯度的**方向变了**，而方向才是梯度携带的信息。
-      顺带一提，逐张量裁完的总范数是 \`max_norm · sqrt(张量数)\`，根本不是 \`max_norm\`。
-
-      这一关有一条门槛专门查方向：裁剪前后的梯度向量，**夹角余弦必须是 1**。
-
-      ## 返回裁剪前的值
-
-      \`clip_grad_norm_\` 返回的是**裁剪前**的范数,PyTorch 也是这样。
-      理由是诊断：训练曲线要看的是梯度本来有多大。返回裁剪后的值的话，
-      那个数在裁剪生效时恒等于 \`max_norm\`，是一条毫无信息量的直线。
-
-      ## 非有限的梯度：跳过，不是清零
-
-      bf16 / fp16 训练里，梯度出现 \`inf\` 或 \`NaN\` 是常事（溢出）。
-      标准做法是**跳过这一步**：不更新参数，也不更新优化器状态,
-      下一步照常。这就是混合精度里 \`GradScaler\` 干的事。
-
-      **不要清零之后照样 step。** 那样 AdamW 的动量会被一个假的「零梯度」污染，
-      而且优化器的步数 \`t\` 还往前走了一格,偏差修正的分母跟着变，
-      后面每一步都受影响。
-
-      \`F.count_nonfinite(t)\` 数得出一个张量里有多少个 NaN / inf。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
       | 裁剪之后 | 全局范数 ≤ \`max_norm\`（全程） |
-      | **只缩放不改方向** | 裁剪前后的夹角余弦与 1 差 ≤ 1e-6 |
+      | 只缩放不改方向 | 裁剪前后的夹角余弦与 1 差 ≤ 1e-6 |
       | 真的裁到了 | 至少有一步触发了裁剪 |
-      | 炸了要跳过 | 注入一次 \`inf\` 之后，参数里非有限的个数 = **0** |
-      | 跳过的步数 | 恰好 **1**（就是注入的那一步） |
+      | 炸了要跳过 | 注入一次 \`inf\` 之后，参数里非有限的个数 = 0 |
+      | 跳过的步数 | 恰好 1（就是注入的那一步） |
     `,
     code`
       Write two functions in \`clip.py\`. The model and training loop are still \`kit.py\`.
@@ -6492,50 +5571,15 @@ const STAGE_CLIP = {
           """True if any gradient contains a NaN or an inf."""
       \`\`\`
 
-      ## Global norm, not per tensor
-
-      \`\`\`
-      total = sqrt( Σ_p ‖g_p‖² )                <- length of all gradients as one vector
-      coef  = max_norm / total   (when total > max_norm)
-      multiply every g_p in place by the same coef
-      \`\`\`
-
-      The point is **the same coef**. Clipping tensor by tensor flattens the relative
-      magnitudes between layers — it **changes the gradient's direction**, and direction is
-      what a gradient carries. Incidentally, per-tensor clipping leaves a total norm of
-      \`max_norm · sqrt(tensors)\`, not \`max_norm\`.
-
-      One gate here checks direction specifically: the cosine between the pre-clip and
-      post-clip gradient vectors **must be 1**.
-
-      ## Return the pre-clip value
-
-      \`clip_grad_norm_\` returns the norm **before** clipping, as PyTorch does. The reason
-      is diagnostic: a training curve wants to show how large the gradient really was.
-      Returning the post-clip value gives a number that is identically \`max_norm\` whenever
-      clipping fires — a flat line carrying no information.
-
-      ## Non-finite gradients: skip, do not zero
-
-      Under bf16 / fp16, gradients turn into \`inf\` or \`NaN\` routinely (overflow). The
-      standard response is to **skip the step**: leave parameters and optimiser state
-      untouched and carry on. That is what \`GradScaler\` does in mixed precision.
-
-      **Do not zero them and step anyway.** That pollutes AdamW's momentum with a fake
-      "zero gradient", and the optimiser's step counter \`t\` still advances — changing the
-      bias-correction denominator and affecting every step that follows.
-
-      \`F.count_nonfinite(t)\` counts the NaNs and infs in a tensor.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
       | After clipping | Global norm <= \`max_norm\`, throughout |
-      | **Rescale only** | Pre/post cosine within 1e-6 of 1 |
+      | Rescale only | Pre/post cosine within 1e-6 of 1 |
       | It actually clipped | At least one step triggered clipping |
-      | Blow-ups get skipped | After one injected \`inf\`, non-finite parameters = **0** |
-      | Steps skipped | Exactly **1** — the injected one |
+      | Blow-ups get skipped | After one injected \`inf\`, non-finite parameters = 0 |
+      | Steps skipped | Exactly 1: the injected one |
     `
   ),
   checklist: [
@@ -6897,12 +5941,9 @@ const STAGE_CLIP = {
 
 const STAGE_PACKING = {
   id: 'data-packing',
-  title: t('数据打包 —— 别让一篇看见另一篇', 'Packing the data — one document must not see another'),
+  title: t('数据打包：隔离文档边界', 'Data packing: keep document boundaries separate'),
   goal: t(
     code`
-      语料是一篇篇长短不一的文档，模型要的是定长的块。怎么把前者变成后者，
-      有两种做法，差别很大。
-
       在 \`packing.py\` 里实现打包和掩码：
 
       \`\`\`python
@@ -6921,57 +5962,13 @@ const STAGE_PACKING = {
           对应 PyTorch 的 scaled_dot_product_attention(attn_mask=...)。"""
       \`\`\`
 
-      ## 两种做法
-
-      **一篇一块，不够就填。** 简单，但这一关的语料里句子长度从 16 到 97 不等,
-      按 32 一块算，填充率超过 **30%**。三分之一的算力花在填充符上。
-
-      **拼成一条流再切。** 每篇末尾加一个 \`EOS\` 标出边界，全部首尾相接，
-      然后按 \`block_size\` 切开。填充率接近 **0**,只有最后那一块的尾巴。
-      代价是**一块里可能横跨两三篇**。
-
-      真实预训练用的都是第二种。填充率不是省一点点的问题:
-      30% 的填充意味着 30% 的算力、30% 的显存、30% 的时间白花。
-
-      ## 代价：跨文档泄漏
-
-      拼起来之后，第 5 个位置（属于第 1 篇）和第 20 个位置（属于第 2 篇）在同一块里。
-      因果掩码只管「不许看未来」，**它不知道文档边界** ——
-      于是第 2 篇的位置能看见第 1 篇的内容。
-
-      这件事的后果不是「错一点」，而是**模型学到了不存在的关系**。
-      两篇毫不相干的文档被当成上下文连在一起；训练 loss 甚至会更低
-      （信息更多了），而模型在真实使用中拿不到这种上下文。
-
-      所以要一个**块对角**的掩码：只有同一篇之间才允许注意。
-
-      \`\`\`
-          j:  0 1 2 | 3 4 5      ← 竖线是文档边界
-      i=0     ✓ · · | · · ·
-      i=1     ✓ ✓ · | · · ·
-      i=2     ✓ ✓ ✓ | · · ·
-      i=3     · · · | ✓ · ·      ← 第 2 篇的第一个位置只看得见自己
-      i=4     · · · | ✓ ✓ ·
-      i=5     · · · | ✓ ✓ ✓
-      \`\`\`
-
-      ## 为什么是加性掩码，不是 valid 长度
-
-      前面几关的因果掩码写成「每行能看到前多少个」—— 那是个**前缀长度**，
-      表达不了「从第 3 列到第 5 列」这种**区间**。
-      块对角掩码需要区间，所以换成加性掩码：把不许看的位置加上一个很大的负数，
-      softmax 之后它们是**硬 0**（\`exp\` 直接下溢）。
-
-      PyTorch 的 \`attn_mask\` 就是这个形式。两种表示各有各的用处 ——
-      前缀长度更省（一行一个整数），加性掩码更通用。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
       | 一个 token 不丢不重 | 拼出来的流与「逐篇加 EOS 首尾相接」逐个相同 |
-      | 填充率 | ≤ **2%**（一篇一块的对照是 30% 以上） |
-      | **跨文档泄漏** | 不同篇之间的注意力概率**恒为 0** |
+      | 填充率 | ≤ 2%（一篇一块的对照是 30% 以上） |
+      | 跨文档泄漏 | 不同篇之间的注意力概率恒为 0 |
       | 因果性 | 未来位置的概率也恒为 0 |
     `,
     code`
@@ -6996,60 +5993,13 @@ const STAGE_PACKING = {
           Mirrors PyTorch's scaled_dot_product_attention(attn_mask=...)."""
       \`\`\`
 
-      ## Two approaches
-
-      **One document per block, padded.** Simple, but sentence lengths here run from 16 to
-      97, so at a block size of 32 the padding rate exceeds **30%**. A third of the compute
-      goes into padding symbols.
-
-      **Concatenate into one stream, then cut.** Append an \`EOS\` to each document to mark
-      the boundary, join them end to end, and cut every \`block_size\` tokens. Padding drops
-      to nearly **zero** — only the final tail. The cost is that **a block may span two or
-      three documents**.
-
-      Real pretraining uses the second. Padding is not a minor saving: 30% padding means
-      30% of the compute, memory and time is wasted.
-
-      ## The cost: cross-document leakage
-
-      After concatenation, position 5 (document 1) and position 20 (document 2) sit in the
-      same block. The causal mask only enforces "no looking ahead"; **it knows nothing about
-      document boundaries** — so document 2 can see document 1.
-
-      The consequence is not "slightly wrong" but **a model that learns relationships which
-      do not exist**. Two unrelated documents get treated as one context; training loss may
-      even improve (more information), while at inference that context is never there.
-
-      So the mask has to be **block-diagonal**: attention only within a document.
-
-      \`\`\`
-          j:  0 1 2 | 3 4 5      <- the bar is a document boundary
-      i=0     ✓ · · | · · ·
-      i=1     ✓ ✓ · | · · ·
-      i=2     ✓ ✓ ✓ | · · ·
-      i=3     · · · | ✓ · ·      <- document 2's first position sees only itself
-      i=4     · · · | ✓ ✓ ·
-      i=5     · · · | ✓ ✓ ✓
-      \`\`\`
-
-      ## Why an additive mask rather than valid lengths
-
-      Earlier stages wrote the causal mask as "how many keys each row may see" — a
-      **prefix length**, which cannot express an **interval** like "columns 3 through 5".
-      Block-diagonal masking needs intervals, so it switches to an additive mask: add a
-      large negative number at forbidden positions and softmax turns them into **hard
-      zeros** (\`exp\` underflows).
-
-      PyTorch's \`attn_mask\` uses exactly this form. Both representations have their place:
-      prefix lengths are cheaper (one integer per row), additive masks are more general.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
       | No token lost or duplicated | The stream matches "each document plus EOS, concatenated" |
-      | Padding rate | <= **2%** (the one-per-block control exceeds 30%) |
-      | **Cross-document leakage** | Attention probability across documents is **exactly 0** |
+      | Padding rate | <= 2% (the one-per-block control exceeds 30%) |
+      | Cross-document leakage | Attention probability across documents is exactly 0 |
       | Causality | Future positions are exactly 0 as well |
     `
   ),
@@ -7531,10 +6481,10 @@ const KIT16_PY = code`
 
 const STAGE_PRETRAIN = {
   id: 'pretraining-loop',
-  title: t('完整的预训练循环 —— 打穿 bigram 基线', 'The full pretraining loop — beating the bigram baseline'),
+  title: t('预训练：超过 bigram 基线', 'Pretraining: beat the bigram baseline'),
   goal: t(
     code`
-      前面十五关的零件到齐了。这一关在 \`pretrain.py\` 里把它们串成一条**完整的循环**，
+      前面十五关的零件到齐了。这一关在 \`pretrain.py\` 里把它们串成一条完整的循环，
       在真语料上训到打穿基线。模型在 \`kit.py\` 里，其余都是你的。
 
       \`\`\`python
@@ -7549,57 +6499,18 @@ const STAGE_PRETRAIN = {
           """完整的训练循环。返回 {"train": [...], "val": float}。"""
       \`\`\`
 
-      ## 这条循环里有什么
-
-      \`\`\`
-      每步：取一批 -> zero_grad -> 前向 -> 反向 -> 裁剪 -> 按调度取 lr -> step
-      结束：在**留出集**上评一次
-      \`\`\`
-
-      七件事，前面各关分别做过。这一关的价值在于**它们必须同时对**,
-      任何一件错了，loss 曲线看起来都还是「在降」。
-
-      ## 评测必须在 \`no_grad\` 下
-
-      不加 \`no_grad\` 的评测也能算出正确的数,**它只是白白建了一整条反向的带**。
-      在这个小模型上你感觉不到；在真实尺度上，评测时建带意味着要为反向留住
-      每一层的激活，显存差好几倍,而评测本来是不需要反向的。
-
-      这一关**数得出来**：判定会记下评测过程里每个算子调用时
-      \`is_grad_enabled()\` 的值，要求全部是 False。
-
-      ## 基线
-
-      语料是字符级的，词表 50。三条基线（第 2 关算过）：
-
-      \`\`\`
-      均匀（什么都不学）    3.912
-      unigram（只看频率）   2.993
-      bigram（只看前一个）  2.144   ← 这一关的分母
-      \`\`\`
-
-      bigram 是**只看前一个字符**能做到的极限。打穿它意味着模型真的用上了
-      更长的上下文,这是「注意力在工作」最直接的证据。
-      参考实现 400 步之后验证集 loss 约 **1.60**，是 bigram 的 **0.75 倍**。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | 验证集 loss | ≤ **1.90** |
-      | 打穿 bigram | 验证 loss / bigram ≤ **0.85** |
-      | 确定性 | 同一个 seed 跑两遍，**逐位一致** |
-      | 评测没建带 | 评测过程里 \`is_grad_enabled()\` 为真的调用数 = **0** |
-
-      ## 为什么要有验证集
-
-      训练 loss 只说明「模型记住了训练数据」。这个模型只有 3.9 万参数、
-      语料 6 万个 token,过拟合是有可能的，而过拟合在训练 loss 上是看不出来的
-      （它只会一路降）。留出集是唯一能分开「学会了」和「背下来了」的东西。
+      | 验证集 loss | ≤ 1.90 |
+      | 打穿 bigram | 验证 loss / bigram ≤ 0.85 |
+      | 确定性 | 同一个 seed 跑两遍，逐位一致 |
+      | 评测没建带 | 评测过程里 \`is_grad_enabled()\` 为真的调用数 = 0 |
     `,
     code`
       Every piece from the previous fifteen stages is now available. This stage strings them
-      into a **complete loop** in \`pretrain.py\` and trains on the real corpus until it
+      into a complete loop in \`pretrain.py\` and trains on the real corpus until it
       beats the baseline. The model is in \`kit.py\`; everything else is yours.
 
       \`\`\`python
@@ -7614,59 +6525,14 @@ const STAGE_PRETRAIN = {
           """The full training loop. Returns {"train": [...], "val": float}."""
       \`\`\`
 
-      ## What the loop contains
-
-      \`\`\`
-      each step: take a batch -> zero_grad -> forward -> backward -> clip
-                 -> pick lr from the schedule -> step
-      at the end: evaluate once on the **held-out** set
-      \`\`\`
-
-      Seven things, each covered by an earlier stage. The value here is that **they must all
-      be right at once** — get any one wrong and the loss curve still looks like it is
-      falling.
-
-      ## Evaluation must run under \`no_grad\`
-
-      Evaluating without \`no_grad\` still computes the right number; **it merely builds an
-      entire backward tape for nothing**. You will not feel it on this small model; at real
-      scale, building a tape during evaluation means keeping every layer's activations alive
-      for a backward pass that never comes — several times the memory.
-
-      This stage **counts it**: the hidden cases record \`is_grad_enabled()\` at every
-      operator call during evaluation and require all of them to be False.
-
-      ## Baselines
-
-      The corpus is character-level with a vocabulary of 50. Three baselines (computed back
-      in stage 2):
-
-      \`\`\`
-      uniform (nothing learned)     3.912
-      unigram (frequency only)      2.993
-      bigram (previous char only)   2.144   <- this stage's denominator
-      \`\`\`
-
-      Bigram is the ceiling for **looking at one previous character**. Beating it means the
-      model genuinely uses longer context — the most direct evidence that attention is
-      working. The reference reaches a validation loss of about **1.60** after 400 steps,
-      **0.75x** the bigram baseline.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | Validation loss | <= **1.90** |
-      | Beats bigram | validation / bigram <= **0.85** |
-      | Determinism | Two runs at the same seed are **bit-identical** |
-      | No tape during eval | Calls with \`is_grad_enabled()\` true during evaluation = **0** |
-
-      ## Why a validation set at all
-
-      Training loss only shows that the model memorised the training data. This model has
-      39k parameters against a 60k-token corpus — overfitting is possible, and it is
-      invisible in the training loss, which simply keeps falling. A held-out set is the only
-      thing that separates "learned" from "memorised".
+      | Validation loss | <= 1.90 |
+      | Beats bigram | validation / bigram <= 0.85 |
+      | Determinism | Two runs at the same seed are bit-identical |
+      | No tape during eval | Calls with \`is_grad_enabled()\` true during evaluation = 0 |
     `
   ),
   checklist: [
@@ -8121,10 +6987,10 @@ const KIT_DEEP_PY = code`
 
 const STAGE_AMP = {
   id: 'mixed-precision',
-  title: t('混合精度 —— bf16 赢在动态范围', 'Mixed precision — bf16 wins on range'),
+  title: t('混合精度：比较 bf16 与 fp16', 'Mixed precision: compare bf16 and fp16'),
   goal: t(
     code`
-      在 \`amp.py\` 里写一个 \`autocast\`：**参数留在 fp32，算的时候降到低精度**。
+      在 \`amp.py\` 里写一个 \`autocast\`：参数留在 fp32，算的时候降到低精度。
 
       \`\`\`python
       class Cast(nt.autograd.Function):
@@ -8139,56 +7005,21 @@ const STAGE_AMP = {
           def __exit__(self, *a):  # 换回来
       \`\`\`
 
-      \`F.quantize_(x, "bf16")\` 已经有了 —— 它**就地**把每个数舍入到该精度
+      \`F.quantize_(x, "bf16")\` 已经有了：它就地把每个数舍入到该精度
       能表示的最近的值（位级模拟，不是乘个系数糊弄）。
-
-      ## 三种格式，差的不是一件事
-
-      \`\`\`
-              指数位   尾数位   动态范围            相对精度
-      fp32      8       23     ±3.4e38            2⁻²⁴ ≈ 6e-8
-      bf16      8        7     ±3.4e38（同 fp32） 2⁻⁸  ≈ 3.9e-3
-      fp16      5       10     ±65504             2⁻¹¹ ≈ 4.9e-4
-      \`\`\`
-
-      **bf16 比 fp16 精度更差，却是训练的默认选择。** 因为它保住了 fp32 的
-      指数位数,动态范围一模一样。而训练里真正会出事的是**范围**不是精度：
-      梯度动辄跨十几个数量级，fp16 的上限 65504 很容易撞上，下限那头则悄悄下溢成 0。
-
-      fp16 要用起来得配一整套 \`GradScaler\`（loss 先乘一个大系数，
-      反向完再除回去，撞到 inf 就跳过这步并把系数减半）。
-      bf16 什么都不用配。**省掉的复杂度才是 bf16 真正的价值。**
-
-      这一关会拿一组 \`1e5\` 量级的数验一遍：fp16 全部溢出成 inf，bf16 一个都不溢。
-
-      ## 主权重必须留在 fp32
-
-      \`autocast\` 只在**算的时候**降精度,参数本身、梯度、优化器状态都留在 fp32。
-      理由是更新量太小：\`lr · m̂/√v̂\` 常常在 \`1e-6\` 量级，
-      而 bf16 在 1.0 附近的分辨率是 \`3.9e-3\` —— **加上去等于没加**，
-      模型会静静地停止学习。
-
-      所以 \`Cast\` 必须**返回一份拷贝**，不能就地把参数改掉。
-      这一关的门槛专门查这件事：训练结束之后，参数的值必须**还不是** bf16 能表示的值。
-
-      ## 反向为什么是直通
-
-      舍入这个操作几乎处处导数为 0（阶梯函数），照实求导的话梯度全是 0。
-      标准做法是**直通估计**（straight-through）：前向照舍，反向当它是恒等。
-      量化感知训练里的那个 STE 就是同一个东西。
 
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | bf16 的舍入 | 最大相对误差 ≤ **2⁻⁸ = 3.907e-3**，且明显大于 0 |
-      | 动态范围 | \`1e5\` 量级下 bf16 溢出 **0** 个（fp16 全溢） |
-      | **主权重完好** | 训练完的参数与它的 bf16 版本之差 > 0 |
-      | 质量 | 250 步之后 bf16 与 fp32 的 loss 差 ≤ **0.05** |
+      | bf16 的舍入 | 最大相对误差 ≤ 2⁻⁸ = 3.907e-3，且明显大于 0 |
+      | 动态范围 | \`1e5\` 量级下 bf16 溢出 0 个（fp16 全溢） |
+      | 主权重完好 | 训练完的参数与它的 bf16 版本之差 > 0 |
+      | 质量 | 250 步之后 bf16 与 fp32 的 loss 差 ≤ 0.05 |
     `,
     code`
-      Write an \`autocast\` in \`amp.py\`: **parameters stay in fp32, arithmetic drops to low
-      precision**.
+      Write an \`autocast\` in \`amp.py\`: parameters stay in fp32, arithmetic drops to low
+      precision.
 
       \`\`\`python
       class Cast(nt.autograd.Function):
@@ -8204,57 +7035,17 @@ const STAGE_AMP = {
           def __exit__(self, *a):  # swap it back
       \`\`\`
 
-      \`F.quantize_(x, "bf16")\` already exists — it rounds every value **in place** to the
+      \`F.quantize_(x, "bf16")\` already exists: it rounds every value in place to the
       nearest representable one (bit-level, not a scale factor).
-
-      ## Three formats, differing in different ways
-
-      \`\`\`
-              exponent  mantissa  dynamic range      relative precision
-      fp32       8         23      ±3.4e38           2⁻²⁴ ≈ 6e-8
-      bf16       8          7      ±3.4e38 (= fp32)  2⁻⁸  ≈ 3.9e-3
-      fp16       5         10      ±65504            2⁻¹¹ ≈ 4.9e-4
-      \`\`\`
-
-      **bf16 is less precise than fp16 and yet the default for training.** It keeps fp32's
-      exponent width, so the dynamic range is identical. What actually breaks training is
-      **range**, not precision: gradients span a dozen orders of magnitude, fp16's ceiling
-      of 65504 is easy to hit, and the low end quietly underflows to zero.
-
-      Using fp16 requires the whole \`GradScaler\` apparatus (multiply the loss by a large
-      factor, divide it back after the backward, and on hitting an inf skip the step and
-      halve the factor). bf16 needs none of that. **The complexity it removes is bf16's real
-      value.**
-
-      This stage checks it on a batch of values around \`1e5\`: fp16 turns every one into
-      inf, bf16 none.
-
-      ## Master weights stay in fp32
-
-      \`autocast\` lowers precision **only for the arithmetic**; parameters, gradients and
-      optimiser state stay fp32. The reason is that updates are tiny: \`lr · m̂/√v̂\` often
-      sits around \`1e-6\`, while bf16's resolution near 1.0 is \`3.9e-3\` — **adding it
-      changes nothing**, and the model silently stops learning.
-
-      So \`Cast\` must **return a copy** rather than modifying the parameter in place. One
-      gate checks exactly this: after training, parameter values must **not** be values bf16
-      could represent.
-
-      ## Why the backward is straight-through
-
-      Rounding has zero derivative almost everywhere (it is a step function), so
-      differentiating it honestly gives zero gradients everywhere. The standard answer is
-      the **straight-through estimator**: round in the forward, treat it as the identity in
-      the backward. The STE in quantisation-aware training is the same idea.
 
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | bf16 rounding | Max relative error <= **2⁻⁸ = 3.907e-3**, and clearly above 0 |
-      | Dynamic range | Around \`1e5\`, bf16 overflows **0** values (fp16 overflows all) |
-      | **Master weights intact** | Trained parameters differ from their bf16 rounding |
-      | Quality | After 250 steps, bf16 within **0.05** of fp32's loss |
+      | bf16 rounding | Max relative error <= 2⁻⁸ = 3.907e-3, and clearly above 0 |
+      | Dynamic range | Around \`1e5\`, bf16 overflows 0 values (fp16 overflows all) |
+      | Master weights intact | Trained parameters differ from their bf16 rounding |
+      | Quality | After 250 steps, bf16 within 0.05 of fp32's loss |
     `
   ),
   checklist: [
@@ -8608,16 +7399,9 @@ const STAGE_AMP = {
 
 const STAGE_RECOMPUTE = {
   id: 'activation-recompute',
-  title: t('激活重算 —— 拿算力换显存', 'Activation recomputation — trading compute for memory'),
+  title: t('激活重算：用计算换内存', 'Activation recomputation: trade compute for memory'),
   goal: t(
     code`
-      前向算出来的中间量，反向要用,所以它们得一直留到反向。
-      这些**激活**在真实训练里是显存的大头，而且正比于层数。
-
-      \`激活重算\`（也叫 gradient checkpointing）换了个做法：
-      前向**只留每层的边界**，中间量算完就扔；反向走到那一层时**重新算一遍**。
-      代价是多一次前向的算力，收益是显存降一个量级。
-
       在 \`recompute.py\` 里实现它：
 
       \`\`\`python
@@ -8636,80 +7420,23 @@ const STAGE_RECOMPUTE = {
 
       对应 \`torch.utils.checkpoint.checkpoint\`。
 
-      ## 前向：留边界，扔中间
-
-      竞技场是**按标记回退**的：\`nt.mark()\` 记下当前位置，
-      \`nt.release(mark)\` 把之后分配的全部放掉。所以：
-
-      \`\`\`python
-      out = nt.zeros(x.shape)      # 边界张量，要在 mark 之前分配
-      m = nt.mark()
-      y = block(x, batch, seq)     # 中间量都落在 m 之后
-      out.copy_(y)
-      nt.release(m)                # 中间量一把放掉，只剩 out
-      \`\`\`
-
-      注意 \`Function.forward\` **本来就跑在 \`no_grad\` 里**（第 9 关那条），
-      所以这一遍不会建带 —— 这正是我们要的。
-
-      ## 反向：重算，然后倒着走
-
-      \`\`\`python
-      xd = ctx.x.detach()          # 干净的叶子，不接回原来的图
-      xd.requires_grad = True
-      with nt.enable_grad():       # 这一遍要建带
-          y = ctx.block(xd, ...)
-      nt.autograd.backward(y, grad_output)
-      return xd.grad
-      \`\`\`
-
-      \`detach()\` 不能省。不 detach 的话重算出来的子图会接回原图，
-      反向会**沿着同一条路走两遍**,梯度直接翻倍。
-
-      块里的**参数**梯度在重算的那一遍里就已经累加好了（它们不是 \`apply\` 的输入），
-      所以 \`backward\` 只需要返回 \`x\` 那一份。
-
-      ## 量的是「留存」，不是「峰值」
-
-      这一关的门槛读 \`memory.currentActivationBytes\` —— **前向刚结束、反向还没开始**
-      那一刻还占着的激活。这才是重算省下来的东西。
-
-      峰值不行：峰值里混着反向自己的临时量，而那部分重算不但不省，
-      还因为多算一遍而略高。**量错对象的话，一个完全正确的实现会显示成「没省」。**
-
-      ## 算力那一侧
-
-      重算发生在反向阶段，所以 \`前向 FLOPs\` 不变，涨的是 \`反向 / 前向\` 这个比：
-
-      \`\`\`
-      不重算   反向 / 前向 ≈ 2      （每个 gemm 算 dX 和 dW）
-      重算     反向 / 前向 ≈ 3      （多了一整遍前向）
-      一步合计  6N  ->  8N
-      \`\`\`
-
-      **前向 FLOPs 涨了说明重算跑到前向里去了** —— 那不是重算，那是白算。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | **留存的激活** | 重算 / 不重算 ≤ **0.4** |
-      | 反向 / 前向 | 在 **2.4 ~ 3.6** 之间 |
-      | 前向 FLOPs | 与不重算**完全相同** |
-      | **梯度** | 与不重算**逐位相同** |
-
-      最后一条值得说：重算跑的是同一串算子、同一个顺序，
-      所以结果**应当**逐位相同 —— 不是「差不多」。差了说明 detach 漏了、
-      或者重算那一遍的输入不是原来那个。
+      | 留存的激活 | 重算 / 不重算 ≤ 0.4 |
+      | 反向 / 前向 | 在 2.4 ~ 3.6 之间 |
+      | 前向 FLOPs | 与不重算完全相同 |
+      | 梯度 | 与不重算逐位相同 |
     `,
     code`
       The forward pass produces intermediates the backward needs, so they must stay alive
-      until then. Those **activations** dominate memory in real training, and they scale
+      until then. Those activations dominate memory in real training, and they scale
       with depth.
 
       \`Activation recomputation\` (also called gradient checkpointing) takes another route:
-      the forward **keeps only the boundary of each layer** and discards everything in
-      between; when the backward reaches that layer it **computes the forward again**. The
+      the forward keeps only the boundary of each layer and discards everything in
+      between; when the backward reaches that layer it computes the forward again. The
       cost is one extra forward pass, the gain is an order of magnitude less memory.
 
       Implement it in \`recompute.py\`:
@@ -8730,75 +7457,14 @@ const STAGE_RECOMPUTE = {
 
       This mirrors \`torch.utils.checkpoint.checkpoint\`.
 
-      ## Forward: keep the boundary, drop the middle
-
-      The arena rewinds **to a mark**: \`nt.mark()\` records the position and
-      \`nt.release(mark)\` frees everything allocated after it. So:
-
-      \`\`\`python
-      out = nt.zeros(x.shape)      # the boundary tensor, allocated before the mark
-      m = nt.mark()
-      y = block(x, batch, seq)     # intermediates all land after m
-      out.copy_(y)
-      nt.release(m)                # drop them all at once, keeping only out
-      \`\`\`
-
-      Note that \`Function.forward\` **already runs under \`no_grad\`** (stage 9), so this
-      pass builds no tape — exactly what is wanted.
-
-      ## Backward: recompute, then walk
-
-      \`\`\`python
-      xd = ctx.x.detach()          # a clean leaf, not attached to the original graph
-      xd.requires_grad = True
-      with nt.enable_grad():       # this pass does need a tape
-          y = ctx.block(xd, ...)
-      nt.autograd.backward(y, grad_output)
-      return xd.grad
-      \`\`\`
-
-      \`detach()\` is not optional. Without it the recomputed subgraph reconnects to the
-      original, and the backward **walks the same path twice** — gradients come out doubled.
-
-      Gradients for the block's **parameters** are already accumulated during the recompute
-      (they are not inputs to \`apply\`), so \`backward\` only returns the one for \`x\`.
-
-      ## What gets measured is what is **kept**, not the peak
-
-      The gate reads \`memory.currentActivationBytes\` — what is still held **the moment the
-      forward ends and before the backward starts**. That is precisely what recomputation
-      saves.
-
-      The peak will not do: it mixes in the backward's own temporaries, which recomputation
-      does not reduce and in fact slightly increases. **Measure the wrong thing and a
-      perfectly correct implementation reads as "no saving".**
-
-      ## The compute side
-
-      Recomputation happens during the backward, so \`forward FLOPs\` are unchanged and what
-      rises is the \`backward / forward\` ratio:
-
-      \`\`\`
-      without   backward / forward ≈ 2      (each gemm produces dX and dW)
-      with      backward / forward ≈ 3      (one extra full forward)
-      per step  6N  ->  8N
-      \`\`\`
-
-      **Rising forward FLOPs means the recompute leaked into the forward** — that is not
-      recomputation, that is wasted work.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | **Activations kept** | with / without <= **0.4** |
-      | backward / forward | Between **2.4 and 3.6** |
-      | Forward FLOPs | **Identical** to the non-recomputing run |
-      | **Gradients** | **Bit-identical** to the non-recomputing run |
-
-      That last row is worth stating: recomputation runs the same operators in the same
-      order, so results **should** be bit-identical, not merely close. A difference means a
-      missing detach, or that the recompute used a different input.
+      | Activations kept | with / without <= 0.4 |
+      | backward / forward | Between 2.4 and 3.6 |
+      | Forward FLOPs | Identical to the non-recomputing run |
+      | Gradients | Bit-identical to the non-recomputing run |
     `
   ),
   checklist: [
@@ -9280,13 +7946,9 @@ const KIT_SCALE_PY = code`
 
 const STAGE_SCALING = {
   id: 'scaling-laws',
-  title: t('缩放定律 —— 用小档预测大档', 'Scaling laws — predicting the large run from small ones'),
+  title: t('缩放定律：用小实验预测大训练', 'Scaling laws: predict a large run from small experiments'),
   goal: t(
     code`
-      训一个大模型很贵，而**贵的东西不能靠试**。缩放定律的用处就在这里：
-      跑几个便宜的小档，拟合出规律，**预测一个还没跑过的档位**,
-      然后才决定要不要花那笔钱。
-
       在 \`scaling.py\` 里实现拟合与外推：
 
       \`\`\`python
@@ -9299,60 +7961,19 @@ const STAGE_SCALING = {
           """按拟合出来的律，预测在 d 处的 loss。"""
       \`\`\`
 
-      ## 幂律取对数是直线
-
-      \`\`\`
-      L = B · D^(−β)
-      log L = log B − β · log D
-      \`\`\`
-
-      于是「拟合幂律」就是「在 log-log 上拟合一条直线」,
-      最小二乘的闭式解两行就写完：
-
-      \`\`\`
-      β  = −Σ(x−x̄)(y−ȳ) / Σ(x−x̄)²        其中 x = log D, y = log L
-      log B = ȳ + β·x̄
-      \`\`\`
-
-      **别用普通的线性回归直接拟 (D, L)。** 幂律在线性坐标下是一条曲线，
-      直线拟合它会在两端都偏，而外推正是在端点外面。
-
-      ## 这一关走数据轴
-
-      Chinchilla 那套式子有两根轴：参数量 \`N\` 和数据量 \`D\`。
-      这一关拟合的是**数据轴**,固定一个模型，看 loss 随「看过多少 token」怎么降。
-
-      为什么不走参数轴？因为**参数轴的缩放律要求每个档位都单独调好超参**。
-      这个项目实测过：同一个学习率、同样的步数，四个宽度跑出来是
-
-      \`\`\`
-      dim=16  loss 1.379      dim=32  loss 1.081
-      dim=24  loss 1.220      dim=48  loss 1.201      dim=64  loss 1.709
-      \`\`\`
-
-      **大的反而更差** —— 不是缩放律不成立，是最优学习率随宽度变，
-      而我们给所有档位用了同一个。这正是 \`µP\`（最大更新参数化）要解决的问题：
-      让超参在宽度之间可迁移，缩放律才拟合得出来。
-      数据轴没有这个麻烦,同一个模型、同一套超参，只是训得久一点。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | 拟合 | 4 个点上的 log 残差 RMS ≤ **0.04** |
-      | **外推** | 预测 2.3 倍数据量处的 loss，相对误差 ≤ **0.15** |
-      | 指数 | 拟合出的 \`β\` ≥ **0.15**（真的在降，不是一条平线） |
-      | 方向 | 数据翻倍，预测的 loss 必须**更低** |
-
-      参考实现拿前 4 个点（D 从 1.8 万到 6 万）预测 D = 13.6 万处的 loss：
-      **预测 0.982，实际 1.021，相对误差 3.9%**。
-      比最后一个拟合点远 2.3 倍、比第一个远 7.6 倍，误差 4% ——
-      这就是为什么大模型敢在跑之前就定预算。
+      | 拟合 | 4 个点上的 log 残差 RMS ≤ 0.04 |
+      | 外推 | 预测 2.3 倍数据量处的 loss，相对误差 ≤ 0.15 |
+      | 指数 | 拟合出的 \`β\` ≥ 0.15（真的在降，不是一条平线） |
+      | 方向 | 数据翻倍，预测的 loss 必须更低 |
     `,
     code`
-      Training a large model is expensive, and **expensive things cannot be found by trial**.
+      Training a large model is expensive, and expensive things cannot be found by trial.
       That is what scaling laws are for: run a few cheap small configurations, fit the trend,
-      **predict a configuration nobody has run**, and only then decide whether to spend.
+      predict a configuration nobody has run, and only then decide whether to spend.
 
       Implement the fit and the extrapolation in \`scaling.py\`:
 
@@ -9367,58 +7988,14 @@ const STAGE_SCALING = {
           """Predict the loss at d under the fitted law."""
       \`\`\`
 
-      ## A power law is a line in log-log
-
-      \`\`\`
-      L = B · D^(−β)
-      log L = log B − β · log D
-      \`\`\`
-
-      So "fit a power law" means "fit a line in log-log", and the closed-form least squares
-      is two lines of code:
-
-      \`\`\`
-      β  = −Σ(x−x̄)(y−ȳ) / Σ(x−x̄)²        with x = log D, y = log L
-      log B = ȳ + β·x̄
-      \`\`\`
-
-      **Do not run ordinary linear regression on (D, L) directly.** A power law is curved in
-      linear coordinates, a straight fit misses at both ends, and extrapolation happens
-      exactly beyond those ends.
-
-      ## This stage uses the data axis
-
-      Chinchilla's formulation has two axes: parameters \`N\` and data \`D\`. This stage fits
-      the **data axis** — fix a model and watch the loss fall as it sees more tokens.
-
-      Why not the parameter axis? Because **a parameter-axis law requires hyperparameters
-      tuned per configuration**. This project measured it: same learning rate, same step
-      count, four widths give
-
-      \`\`\`
-      dim=16  loss 1.379      dim=32  loss 1.081
-      dim=24  loss 1.220      dim=48  loss 1.201      dim=64  loss 1.709
-      \`\`\`
-
-      **Bigger is worse** — not because scaling laws fail, but because the optimal learning
-      rate moves with width and we used one rate for all. That is precisely the problem
-      \`µP\` (maximal update parameterisation) solves: make hyperparameters transfer across
-      widths so the law can be fitted at all. The data axis has no such trouble — same
-      model, same hyperparameters, simply trained longer.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | Fit | RMS log-residual over 4 points <= **0.04** |
-      | **Extrapolation** | Predict the loss at 2.3x the data, within **0.15** relative |
-      | Exponent | Fitted \`β\` >= **0.15** (genuinely decreasing, not flat) |
-      | Direction | Doubling the data must predict a **lower** loss |
-
-      The reference fits the first 4 points (D from 18k to 60k) and predicts D = 136k:
-      **0.982 predicted against 1.021 actual, 3.9% relative error** — 2.3x beyond the last
-      fitted point and 7.6x beyond the first. Extrapolating that far at 4% error is why
-      large runs can commit to a budget before starting.
+      | Fit | RMS log-residual over 4 points <= 0.04 |
+      | Extrapolation | Predict the loss at 2.3x the data, within 0.15 relative |
+      | Exponent | Fitted \`β\` >= 0.15 (genuinely decreasing, not flat) |
+      | Direction | Doubling the data must predict a lower loss |
     `
   ),
   checklist: [
@@ -9699,13 +8276,9 @@ const STAGE_SCALING = {
 
 const STAGE_MOE = {
   id: 'moe',
-  title: t('MoE —— 参数变多，每个 token 的算力不变', 'MoE — more parameters, same compute per token'),
+  title: t('MoE：增加参数，不增加每 token 计算量', 'MoE: add parameters without adding compute per token'),
   goal: t(
     code`
-      稠密模型里，每个 token 都要过一遍**全部**参数。\`MoE\` 把一个大前馈换成
-      \`n_expert\` 个小的，每个 token 只走其中 \`top_k\` 个 ——
-      **参数量涨了 \`n_expert / top_k\` 倍，而每个 token 的算力不变。**
-
       在 \`moe.py\` 里实现路由与稀疏执行：
 
       \`\`\`python
@@ -9725,52 +8298,21 @@ const STAGE_MOE = {
               """按专家 gather 出 token -> 各自算 -> 乘路由权重 -> scatter 回原位。"""
       \`\`\`
 
-      ## 路由：谁去哪
-
-      路由器是一个小线性层，把每个 token 映射到 \`n_expert\` 个分数，softmax 之后
-      取最大的 \`top_k\` 个。权重要在这 \`top_k\` 个里**重新归一化**,
-      不归一化的话，路由器的置信度会直接缩放这一层的输出量级。
-
-      ## 容量：为什么要丢
-
-      专家的负载是不均的。真实实现给每个专家一个**容量上限**
-      \`capacity = capacity_factor · n_token · top_k / n_expert\`,
-      超出的 (token, 专家) 对被**丢掉**（那个 token 就少走一个专家）。
-
-      为什么不干脆不设上限？因为在真实的分布式实现里，每个专家在一张卡上，
-      **通信的缓冲区必须是定长的**。容量就是那个缓冲区的大小。
-      这不是算法上的选择，是工程上的约束,而它反过来影响了算法
-      （于是才有了负载均衡损失）。
-
-      ## 负载均衡损失
-
-      不加干预的话路由器会**塌**：所有 token 都去同一个专家，其余的永远学不到东西。
-      Switch Transformer 的做法是加一个辅助损失：
-
-      \`\`\`
-      aux = n_expert · Σ_i  f_i · P_i
-        f_i = 分给专家 i 的 token 比例（用 top-1 数）
-        P_i = 路由器给专家 i 的平均概率
-      \`\`\`
-
-      两个都均匀时 \`aux = 1\`；越集中它越大。它可导的那一半是 \`P_i\`,
-      \`f_i\` 是数出来的、不可导，这个不对称是有意的。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | 参数量 | 总量与激活量都**恰好等于解析式**，且激活量 < 总量 |
-      | **真的稀疏** | 前馈 FLOPs / **同参数量**的稠密前馈 ≤ **0.6**（= top_k / n_expert） |
-      | 容量宽松时 | 丢弃 = **0** |
-      | 容量收紧时 | 丢弃 **> 0**（容量真的在起作用，不是摆设） |
+      | 参数量 | 总量与激活量都恰好等于解析式，且激活量 < 总量 |
+      | 真的稀疏 | 前馈 FLOPs / 同参数量的稠密前馈 ≤ 0.6（= top_k / n_expert） |
+      | 容量宽松时 | 丢弃 = 0 |
+      | 容量收紧时 | 丢弃 > 0（容量真的在起作用，不是摆设） |
       | 辅助损失 | 与参考公式差 ≤ 1e-6 |
     `,
     code`
-      In a dense model every token passes through **all** parameters. \`MoE\` replaces one
+      In a dense model every token passes through all parameters. \`MoE\` replaces one
       large feed-forward with \`n_expert\` smaller ones and routes each token through
-      \`top_k\` of them — **parameters grow by \`n_expert / top_k\` while per-token compute
-      stays the same.**
+      \`top_k\` of them: parameters grow by \`n_expert / top_k\` while per-token compute
+      stays the same.
 
       Implement routing and sparse execution in \`moe.py\`:
 
@@ -9793,46 +8335,14 @@ const STAGE_MOE = {
               -> scatter back."""
       \`\`\`
 
-      ## Routing: who goes where
-
-      The router is a small linear layer mapping each token to \`n_expert\` scores; softmax
-      and take the largest \`top_k\`. Weights must be **renormalised within those top_k** —
-      otherwise the router's confidence directly scales this layer's output magnitude.
-
-      ## Capacity: why anything gets dropped
-
-      Expert load is uneven. Real implementations cap each expert at
-      \`capacity = capacity_factor · n_token · top_k / n_expert\`, and (token, expert) pairs
-      beyond it are **dropped** — that token simply visits one fewer expert.
-
-      Why cap at all? Because in a real distributed implementation each expert lives on one
-      device and **the communication buffer must be a fixed size**. Capacity is that buffer.
-      It is not an algorithmic choice but an engineering constraint — one that then shapes
-      the algorithm, which is where the load-balancing loss comes from.
-
-      ## The load-balancing loss
-
-      Left alone the router **collapses**: every token goes to one expert and the rest never
-      learn anything. Switch Transformer adds an auxiliary loss:
-
-      \`\`\`
-      aux = n_expert · Σ_i  f_i · P_i
-        f_i = fraction of tokens assigned to expert i (counted by top-1)
-        P_i = the router's mean probability for expert i
-      \`\`\`
-
-      Both uniform gives \`aux = 1\`; concentration raises it. Only \`P_i\` is
-      differentiable — \`f_i\` is counted and has no gradient, and that asymmetry is
-      deliberate.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | Parameters | Total and active both **exactly** the formula, with active < total |
-      | **Genuinely sparse** | FFN FLOPs over a dense FFN with the **same parameters** <= **0.6** (= top_k / n_expert) |
-      | Loose capacity | Dropped = **0** |
-      | Tight capacity | Dropped **> 0** (capacity actually binds) |
+      | Parameters | Total and active both exactly the formula, with active < total |
+      | Genuinely sparse | FFN FLOPs over a dense FFN with the same parameters <= 0.6 (= top_k / n_expert) |
+      | Loose capacity | Dropped = 0 |
+      | Tight capacity | Dropped > 0 (capacity actually binds) |
       | Auxiliary loss | Within 1e-6 of the reference formula |
     `
   ),
@@ -10293,16 +8803,10 @@ const STAGE_MOE = {
 
 const STAGE_MUON = {
   id: 'muon',
-  title: t('Muon —— 把更新正交化', 'Muon — orthogonalising the update'),
+  title: t('Muon：正交化矩阵更新', 'Muon: orthogonalize matrix updates'),
   goal: t(
     code`
-      AdamW 把每个参数**单独**看：各自估一个步长，彼此无关。
-      但一个权重**矩阵**不是一堆无关的数,它有奇异值谱，而梯度矩阵往往
-      被少数几个方向主导。沿着这样的矩阵走一步，等于在少数几个方向上走得很远、
-      其余方向几乎没动。
-
-      \`Muon\` 换了个做法：把动量矩阵**正交化**之后再更新 ——
-      让所有方向的步长拉平。在 \`muon.py\` 里实现它：
+      在 \`muon.py\` 里实现 \`newton_schulz\` 和 \`Muon\` 优化器：
 
       \`\`\`python
       def newton_schulz(g, rows, cols, steps=5):
@@ -10315,76 +8819,17 @@ const STAGE_MUON = {
           def step(self, lr=None):
       \`\`\`
 
-      ## Newton–Schulz：不做 SVD 的正交化
-
-      真正的正交化要做 SVD（\`G = UΣVᵀ\` 之后取 \`UVᵀ\`），而 SVD 在 GPU 上很慢，
-      也不好并行。Muon 用一个只含矩阵乘的**五次迭代**逼近它：
-
-      \`\`\`
-      X ← G / ‖G‖_F                    先归一化，让奇异值落进收敛域
-      重复 5 次：
-          A ← X Xᵀ                     （行少于列时；否则用 XᵀX，见下）
-          B ← b·A + c·A²
-          X ← a·X + B X
-      (a, b, c) = (3.4445, −4.7750, 2.0315)
-      \`\`\`
-
-      **这三个系数不是为了收敛到精确解调的，是为了「五步之内把奇异值挤进
-      大致 [0.7, 1.3]」调的。** 所以 \`XᵀX\` 离单位阵还差得挺远 ——
-      本关实测最大偏差约 **0.39**，而这是**正常的**，不是没收敛。
-      Muon 需要的只是「各方向步长差不多」，不需要精确正交。
-
-      ## 高矮两种形状
-
-      \`A = X Xᵀ\` 是 \`[rows, rows]\`,矩阵很「宽」时这块比 \`X\` 还大。
-      所以要按短边来：
-
-      \`\`\`
-      rows ≤ cols:  A = X Xᵀ  [r,r]，  X ← a·X + B X
-      rows >  cols: A = Xᵀ X  [c,c]，  X ← a·X + X B
-      \`\`\`
-
-      两条是同一个迭代，只是把乘法放在另一边。\`F.gemm\` 的
-      \`"nt"\` / \`"tn"\` / \`"nn"\` 正好够用,**不需要显式转置**。
-
-      ## 谁走 Muon，谁不走
-
-      **只有矩阵参数走 Muon。** 嵌入表和一维参数（norm 的增益）继续走 AdamW：
-
-      - 一维参数根本没有「奇异值谱」这回事,正交化对它没有意义
-      - 嵌入表虽然是二维的，但它的每一行是一个独立的 token，
-        行与行之间没有那种「矩阵」的结构;实践中把它交给 Adam 更好
-
-      这不是实现上的偷懒，是 Muon 论文与所有生产实现的一致做法。
-
-      ## 更新还要按形状缩放
-
-      正交化之后的 \`X\` 每个方向的量级都是 1，于是更新的 Frobenius 范数
-      正比于 \`sqrt(min(rows, cols))\`。为了让不同形状的矩阵步长可比，
-      要再乘一个 \`sqrt(max(1, rows/cols))\`。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | 正交化 | \`\\|XᵀX − I\\|\` 最大 ≤ **0.6**（五步的 NS 就该在这个量级） |
-      | 有效 | 谱最宽的那个形状上，偏差降到正交化之前的 **1/5 以下** |
-      | 分工 | 矩阵参数走 Muon，嵌入与一维走 AdamW,两边的个数都要对 |
-      | **效果** | 同模型、同数据、同步数下，Muon 的 loss ≤ AdamW 的 **0.95 倍** |
-
-      最后一条是这一关唯一的效果类门槛，而它是**结构性比较**：
-      两边除了优化器什么都一样。参考实现 300 步之后
-      **AdamW 1.081，Muon 0.920,比值 0.851**。
+      | 正交化 | \`\\|XᵀX − I\\|\` 最大 ≤ 0.6（五步的 NS 就该在这个量级） |
+      | 有效 | 谱最宽的那个形状上，偏差降到正交化之前的 1/5 以下 |
+      | 分工 | 矩阵参数走 Muon，嵌入与一维走 AdamW，两边的个数都要对 |
+      | 效果 | 同模型、同数据、同步数下，Muon 的 loss ≤ AdamW 的 0.95 倍 |
     `,
     code`
-      AdamW treats every parameter **separately**: each gets its own step size, independent
-      of the rest. But a weight **matrix** is not a pile of unrelated numbers — it has a
-      singular value spectrum, and gradient matrices are usually dominated by a few
-      directions. Stepping along such a matrix means moving far in a few directions and
-      barely at all in the others.
-
-      \`Muon\` takes another route: **orthogonalise** the momentum matrix before updating, so
-      every direction gets a comparable step. Implement it in \`muon.py\`:
+      Implement \`newton_schulz\` and the \`Muon\` optimizer in \`muon.py\`:
 
       \`\`\`python
       def newton_schulz(g, rows, cols, steps=5):
@@ -10397,71 +8842,14 @@ const STAGE_MUON = {
           def step(self, lr=None):
       \`\`\`
 
-      ## Newton–Schulz: orthogonalisation without an SVD
-
-      True orthogonalisation needs an SVD (\`G = UΣVᵀ\`, then take \`UVᵀ\`), and SVD is slow
-      on GPUs and hard to parallelise. Muon approximates it with a **quintic iteration**
-      made only of matrix multiplies:
-
-      \`\`\`
-      X ← G / ‖G‖_F                    normalise so singular values land in the basin
-      repeat 5 times:
-          A ← X Xᵀ                     (when rows <= cols; otherwise XᵀX, see below)
-          B ← b·A + c·A²
-          X ← a·X + B X
-      (a, b, c) = (3.4445, −4.7750, 2.0315)
-      \`\`\`
-
-      **Those coefficients are not tuned to converge to the exact answer; they are tuned to
-      squeeze singular values into roughly [0.7, 1.3] within five steps.** So \`XᵀX\` stays
-      noticeably away from the identity — this stage measures a maximum deviation around
-      **0.39**, and that is **correct**, not unconverged. Muon only needs comparable steps
-      across directions, not exact orthogonality.
-
-      ## Tall and wide
-
-      \`A = X Xᵀ\` is \`[rows, rows]\`, which for a wide matrix is larger than \`X\` itself.
-      So work along the short side:
-
-      \`\`\`
-      rows <= cols:  A = X Xᵀ  [r,r],  X ← a·X + B X
-      rows >  cols:  A = Xᵀ X  [c,c],  X ← a·X + X B
-      \`\`\`
-
-      Both are the same iteration with the multiplication on the other side. \`F.gemm\`'s
-      \`"nt"\` / \`"tn"\` / \`"nn"\` cover it — **no explicit transpose needed**.
-
-      ## Who uses Muon and who does not
-
-      **Only matrix parameters.** Embeddings and 1-D parameters (normalisation gains) stay
-      on AdamW:
-
-      - a 1-D parameter has no singular value spectrum at all, so orthogonalising it is
-        meaningless
-      - an embedding table is two-dimensional, but each row is an independent token and the
-        rows carry none of that matrix structure; in practice Adam does better there
-
-      This is not implementation laziness but what the Muon paper and every production
-      implementation do.
-
-      ## The update is also scaled by shape
-
-      After orthogonalisation every direction of \`X\` has magnitude 1, so the update's
-      Frobenius norm scales with \`sqrt(min(rows, cols))\`. To make steps comparable across
-      shapes, multiply by \`sqrt(max(1, rows/cols))\`.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | Orthogonalisation | max \`\\|XᵀX − I\\|\` <= **0.6** (five NS steps belong at this scale) |
-      | Effective | On the widest-spectrum shape, deviation falls below **1/5** of before |
+      | Orthogonalisation | max \`\\|XᵀX − I\\|\` <= 0.6 (five NS steps belong at this scale) |
+      | Effective | On the widest-spectrum shape, deviation falls below 1/5 of before |
       | Split | Matrices on Muon, embeddings and 1-D on AdamW, with both counts correct |
-      | **Result** | Same model, data and steps: Muon's loss <= **0.95x** AdamW's |
-
-      That last row is the only outcome gate here, and it is a **structural comparison**:
-      the two runs differ in nothing but the optimiser. The reference measures
-      **AdamW 1.081 against Muon 0.920 after 300 steps — a ratio of 0.851.**
+      | Result | Same model, data and steps: Muon's loss <= 0.95x AdamW's |
     `
   ),
   checklist: [
@@ -11287,13 +9675,9 @@ const KIT_POST_PY = code`
 
 const STAGE_SFT = {
   id: 'sft',
-  title: t('SFT —— loss 只算在回答上', 'SFT — the loss counts only on the answer'),
+  title: t('SFT：只在回答上计算 loss', 'SFT: compute loss only on the answer'),
   goal: t(
     code`
-      预训练教会模型「下一个 token 是什么」。**监督微调（SFT）**教它
-      「拿到一个问题，该输出什么」—— 同样是下一个 token 预测，
-      区别只有一个：**loss 只算在回答上，不算在问题上。**
-
       在 \`sft.py\` 里实现：
 
       \`\`\`python
@@ -11309,57 +9693,19 @@ const STAGE_SFT = {
           """跑 SFT。返回 {"loss": [...], "final": float}。"""
       \`\`\`
 
-      ## 为什么问题上不能算 loss
-
-      在问题上算 loss，等于让模型**学习怎么生成问题**。
-      它照样会收敛,loss 曲线一样好看，甚至更低（问题比回答好预测得多）。
-      但你要的能力是「回答」，而训练信号被稀释了。
-
-      在真实的对话数据上这件事更严重：一轮对话里 prompt 常常比 completion 长好几倍，
-      于是绝大部分梯度花在了学习「用户会怎么说话」上。
-
-      这一关的第一条门槛就是它，而且查得很硬：
-      **prompt 位置上的 \`dlogits\` 必须逐位为 0。**
-
-      ## mask 的边界在哪
-
-      \`\`\`
-      文本      7 + 5 =  1  2  <eos>  <pad> ...
-      位置 t    0 1 2 3  4  5    6      7
-      预测的是  +  5 =  1  2  <eos>  <pad>
-      mask      0 0 0 1  1  1     0      0
-                     ↑
-                最后一个 prompt token 的位置上，要预测的已经是答案的第一位了
-      \`\`\`
-
-      **边界差一位是最常见的错。** 往前差一位，模型学不到「看到 \`=\` 该开口」；
-      往后差一位，\`=\` 本身进了 loss。两种都能训出东西来，都比正确的差一点。
-
-      \`<pad>\` 位置也要屏蔽,它们不是内容。
-
-      ## cross_entropy 报的数不是你要的数
-
-      \`F.cross_entropy(logits, targets, rows, vocab, mask)\` 的 \`mask\`
-      **只作用在梯度上**,它前向返回的仍然是**全部位置**的平均。
-      直接拿它画曲线的话，你看到的是「包含 prompt 与 padding 的平均」，
-      而那个数会随着训练**上升**（模型专心学回答，在 prompt 位置上变得越来越差）。
-
-      这不是实现的疏忽，是有意留的边界:算梯度和报数字是两件事，
-      而混淆它们的后果只有自己算一遍才看得清。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | **prompt 不进 loss** | prompt 位置上梯度不为 0 的个数 = **0** |
+      | prompt 不进 loss | prompt 位置上梯度不为 0 的个数 = 0 |
       | mask 的边界 | 与参考的 mask 逐位相同 |
       | 报的数 | 与平台按 mask 重算的一致（差 ≤ 1e-6） |
-      | 学会了 | 留出集上精确匹配 ≥ **90%** |
+      | 学会了 | 留出集上精确匹配 ≥ 90% |
     `,
     code`
-      Pretraining teaches a model what the next token is. **Supervised fine-tuning (SFT)**
-      teaches it what to output given a question — still next-token prediction, differing in
-      exactly one respect: **the loss counts only on the answer, never on the question.**
+      Pretraining teaches a model what the next token is. Supervised fine-tuning (SFT)
+      teaches it what to output given a question: still next-token prediction, differing in
+      exactly one respect: the loss counts only on the answer, never on the question.
 
       Implement in \`sft.py\`:
 
@@ -11376,56 +9722,14 @@ const STAGE_SFT = {
           """Run SFT. Returns {"loss": [...], "final": float}."""
       \`\`\`
 
-      ## Why the question must not carry loss
-
-      Computing loss on the question means teaching the model **how to generate questions**.
-      It still converges; the curve looks just as good, often better (questions are far more
-      predictable than answers). But the capability you want is answering, and the training
-      signal has been diluted.
-
-      On real conversational data this matters more: a turn's prompt is often several times
-      longer than its completion, so most of the gradient goes into learning how users talk.
-
-      That is this stage's first gate, and it is checked strictly:
-      **\`dlogits\` at prompt positions must be exactly zero.**
-
-      ## Where the mask boundary sits
-
-      \`\`\`
-      text        7 + 5 =  1  2  <eos>  <pad> ...
-      position t  0 1 2 3  4  5    6      7
-      predicts    +  5 =  1  2  <eos>  <pad>
-      mask        0 0 0 1  1  1     0      0
-                       ^
-             at the last prompt token, what comes next is already the answer
-      \`\`\`
-
-      **Off-by-one here is the most common mistake.** One position early and the model never
-      learns to start speaking when it sees \`=\`; one position late and \`=\` itself enters
-      the loss. Both train to something, both slightly worse than correct.
-
-      \`<pad>\` positions must be masked too — they are not content.
-
-      ## The number cross_entropy reports is not the number you want
-
-      The \`mask\` argument of \`F.cross_entropy(logits, targets, rows, vocab, mask)\`
-      **affects only the gradient**; its forward value is still the mean over **all**
-      positions. Plotting that gives you "the average including prompt and padding", and
-      that number **rises** during training — the model concentrates on answers and gets
-      steadily worse at prompt positions.
-
-      This is a deliberate boundary rather than an oversight: computing a gradient and
-      reporting a number are two different things, and only computing it yourself makes the
-      difference visible.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | **No loss on the prompt** | Non-zero gradients at prompt positions = **0** |
+      | No loss on the prompt | Non-zero gradients at prompt positions = 0 |
       | Mask boundary | Bit-identical to the reference mask |
       | Reported number | Matches the platform's masked recomputation (within 1e-6) |
-      | It learned | Exact match on the held-out set >= **90%** |
+      | It learned | Exact match on the held-out set >= 90% |
     `
   ),
   checklist: [
@@ -11829,15 +10133,9 @@ const STAGE_SFT = {
 
 const STAGE_MIXTURE = {
   id: 'data-mixture',
-  title: t('数据配比 —— 学会新的，别忘了旧的', 'Data mixture — learn the new without forgetting the old'),
+  title: t('数据配比：学习新任务并控制遗忘', 'Data mixture: control forgetting'),
   goal: t(
     code`
-      模型已经会加法了（第 22 关训出来的）。现在要教它减法。
-
-      最直接的做法是**拿减法数据继续 SFT**。它会学会减法 ——
-      同时把加法忘掉。这就是 \`对齐税\`（alignment tax）：
-      为了学会新任务而失去的旧能力。
-
       在 \`mixture.py\` 里实现数据配比：
 
       \`\`\`python
@@ -11850,49 +10148,10 @@ const STAGE_MIXTURE = {
       def choose_ratio():
           """你选的配比。两条门槛要同时满足。"""
       \`\`\`
-
-      ## 两条门槛必须同时成立
-
-      | | 要求 |
-      | --- | --- |
-      | 学会了新的 | 减法的精确匹配 ≥ **0.85** |
-      | 没忘掉旧的 | 加法的精确匹配**掉的幅度** ≤ **0.15** |
-
-      **只卡一条的话，最省事的做法就是把另一条换掉** ——
-      只卡「学会减法」，全用减法数据最快；只卡「别忘加法」，一条减法数据都不加最稳。
-      两条一起卡，才逼出「配比」这件事本身。
-
-      这也是真实的后训练里最日常的一个决策：指令数据混多少、
-      不同来源之间怎么配、要不要保留一部分预训练数据回放。
-      它不是一个可以「求解」的问题，是一个要**量着调**的问题。
-
-      ## 混的时候有两个坑
-
-      **比例要准。** 「每 k 条插一条」这种写法在 ratio 不是 1/k 的时候会偏，
-      而偏出来的配比你不会知道 —— 除非量一遍。
-
-      **顺序要确定。** 同一个 seed 必须给同一个混合结果，
-      否则这一关的两个数字之间没法比较,你不知道差异来自配比还是来自采样。
-
-      ## 顺带说一句「灾难性遗忘」
-
-      这一关的现象在小模型上格外明显（容量小、任务少），
-      但它在真实尺度上一样存在，只是形式更隐蔽：
-      不是「完全不会加法了」，而是**某些能力悄悄退化**,
-      代码能力在做完一轮对话对齐之后掉几个点，是行业里反复出现的事。
-
-      所以真实流程里会保留一部分**预训练数据回放**（replay），
-      并且用一整套评测集在后训练前后各跑一遍,
-      这一关的「加法准确率掉了多少」就是那件事的最小形式。
     `,
     code`
-      The model already does addition (trained in stage 22). Now teach it subtraction.
-
-      The direct approach is to **continue SFT on subtraction data**. It will learn
-      subtraction — and forget addition. That is the \`alignment tax\`: old capability lost
-      in exchange for a new one.
-
-      Implement the mixture in \`mixture.py\`:
+      The model from stage 22 can add. In \`mixture.py\`, teach it subtraction while
+      retaining its addition accuracy:
 
       \`\`\`python
       def mix(general, instruct, ratio, count, seed):
@@ -11905,42 +10164,6 @@ const STAGE_MIXTURE = {
       def choose_ratio():
           """Your chosen ratio. Both gates must hold at once."""
       \`\`\`
-
-      ## Both gates must hold together
-
-      | | Requirement |
-      | --- | --- |
-      | New learned | Subtraction exact match >= **0.85** |
-      | Old retained | Addition exact match **drops** by at most **0.15** |
-
-      **Gate only one and the cheapest move is to sacrifice the other** — gate only "learn
-      subtraction" and all-subtraction data wins; gate only "keep addition" and adding no
-      subtraction at all is safest. Requiring both is what forces the mixture question to
-      exist.
-
-      This is also the most routine decision in real post-training: how much instruction
-      data, how sources are proportioned, whether to replay pretraining data. It is not a
-      problem you solve but one you **tune against measurements**.
-
-      ## Two traps when mixing
-
-      **The proportion must be accurate.** "Insert one every k" drifts whenever the ratio is
-      not exactly 1/k, and you will not know the drift — unless you measure it.
-
-      **The order must be deterministic.** The same seed must produce the same mixture, or
-      the two numbers in this stage cannot be compared: you would not know whether a
-      difference came from the ratio or from the sampling.
-
-      ## A word on catastrophic forgetting
-
-      The effect is especially stark on a small model (little capacity, few tasks), but it
-      exists at real scale in a subtler form: not "cannot do addition any more" but
-      **capabilities quietly regressing** — coding scores dropping a few points after a round
-      of dialogue alignment is a recurring industry experience.
-
-      That is why real pipelines keep a share of **pretraining data replay** and run a full
-      evaluation suite before and after post-training. "How much did addition accuracy drop"
-      is the smallest version of that same practice.
     `
   ),
   checklist: [
@@ -12248,12 +10471,9 @@ const STAGE_MIXTURE = {
 
 const STAGE_RM = {
   id: 'reward-model',
-  title: t('奖励模型 —— 从「哪个更好」学出一个分数', 'The reward model — turning "which is better" into a score'),
+  title: t('奖励模型：从成对偏好学习分数', 'Reward models: learn a score from pairwise preferences'),
   goal: t(
     code`
-      人类标不出「这个回答值 7.3 分」，但标得出「A 比 B 好」。
-      \`奖励模型\`要解决的就是这个错配：**从成对的偏好里学出一个标量分数。**
-
       在 \`rm.py\` 里实现：
 
       \`\`\`python
@@ -12268,63 +10488,19 @@ const STAGE_RM = {
       def train(model, pairs, steps, ...): ...
       \`\`\`
 
-      ## Bradley-Terry 就是一个两类的 softmax
-
-      成对偏好的标准模型是 Bradley-Terry：
-      「A 胜过 B 的概率」是两者分数之差过 sigmoid。
-
-      \`\`\`
-      P(A ≻ B) = σ(r_A − r_B)
-      loss     = −log σ(r_A − r_B)
-      \`\`\`
-
-      而 \`−log σ(Δ)\` 正好是**两类 softmax 的交叉熵**：
-      把 \`[r_A, r_B]\` 当成两个 logit、正确类是 0，算出来的就是它。
-
-      \`\`\`
-      −log( e^{r_A} / (e^{r_A} + e^{r_B}) ) = −log σ(r_A − r_B)
-      \`\`\`
-
-      所以**不需要单独实现 sigmoid 和它的反向** —— 把两个奖励拼成
-      \`[n_pairs, 2]\` 的 logits 交给 \`F.cross_entropy\`，目标全填 0。
-      成对损失和分类损失在这里是同一个东西。
-
-      ## 分数要从哪个位置读
-
-      标量头作用在每个位置上，但一条序列只该有**一个**分数,
-      读的是**最后一个内容 token** 的位置，不是最后一个位置。
-
-      \`\`\`
-      7 + 5 = 1 2 <eos> <pad> <pad>
-                      ↑ 从这里读
-      \`\`\`
-
-      读 \`S-1\`（最后一个位置）的话，读到的是 padding 上的输出。
-      不同长度的序列会读到不同数量的 padding 之后的位置，
-      于是**分数变成了长度的函数**,而这个错在准确率上未必看得出来，
-      因为长度本身在这个数据里和对错相关。
-
-      这一关拿「多补一个 padding，分数不许变」来查它。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | 排序 | 留出集上成对准确率 ≥ **0.9** |
+      | 排序 | 留出集上成对准确率 ≥ 0.9 |
       | 损失 | 与 \`−log σ(Δ)\` 的参考实现差 ≤ 1e-6 |
-      | **位置** | 多补一个 padding，分数变化 ≤ 1e-6 |
-      | 校准 | 预测概率与实际胜率的偏差 ≤ **0.15** |
-
-      最后一条是「校准」：模型说「A 有 70% 的概率更好」的那些对里，
-      A 真的更好的比例应该接近 70%。
-      **排序对了不等于校准好了** —— 一个把所有 Δ 都放大十倍的模型排序完全一样，
-      而它会说每一对都是 99.99%。而 RLHF 里奖励是要被当成数值用的（不只是排序），
-      所以校准是有意义的。
+      | 位置 | 多补一个 padding，分数变化 ≤ 1e-6 |
+      | 校准 | 预测概率与实际胜率的偏差 ≤ 0.15 |
     `,
     code`
       People cannot label "this answer is worth 7.3", but they can label "A is better than
-      B". A \`reward model\` bridges that gap: **learn a scalar score from pairwise
-      preferences.**
+      B". A \`reward model\` bridges that gap: learn a scalar score from pairwise
+      preferences.
 
       Implement in \`rm.py\`:
 
@@ -12340,59 +10516,14 @@ const STAGE_RM = {
       def train(model, pairs, steps, ...): ...
       \`\`\`
 
-      ## Bradley-Terry is a two-class softmax
-
-      The standard model for pairwise preference is Bradley-Terry: the probability that A
-      beats B is the sigmoid of their score difference.
-
-      \`\`\`
-      P(A ≻ B) = σ(r_A − r_B)
-      loss     = −log σ(r_A − r_B)
-      \`\`\`
-
-      And \`−log σ(Δ)\` is exactly the **cross-entropy of a two-class softmax**: treat
-      \`[r_A, r_B]\` as two logits with class 0 correct and you get precisely that.
-
-      \`\`\`
-      −log( e^{r_A} / (e^{r_A} + e^{r_B}) ) = −log σ(r_A − r_B)
-      \`\`\`
-
-      So **there is no need to implement a sigmoid and its backward separately** — stack the
-      two rewards into \`[n_pairs, 2]\` logits, hand them to \`F.cross_entropy\` with all
-      targets 0. Pairwise loss and classification loss are the same thing here.
-
-      ## Which position the score is read from
-
-      The scalar head applies at every position, but a sequence should have exactly **one**
-      score — read at the **last content token**, not the last position.
-
-      \`\`\`
-      7 + 5 = 1 2 <eos> <pad> <pad>
-                      ^ read here
-      \`\`\`
-
-      Reading \`S-1\` reads output over padding. Sequences of different lengths then read
-      after different amounts of padding, so **the score becomes a function of length** — a
-      mistake accuracy may not reveal, because length correlates with correctness in this
-      data anyway.
-
-      This stage checks it by appending one more padding token and requiring the score not
-      to move.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | Ranking | Pairwise accuracy on held-out data >= **0.9** |
+      | Ranking | Pairwise accuracy on held-out data >= 0.9 |
       | Loss | Within 1e-6 of a reference \`−log σ(Δ)\` |
-      | **Position** | One extra padding changes the score by <= 1e-6 |
-      | Calibration | Predicted probability versus actual win rate <= **0.15** |
-
-      The last row is calibration: among pairs where the model says "A wins with 70%
-      probability", A should actually win about 70% of the time. **Correct ranking does not
-      imply good calibration** — scaling every Δ by ten leaves the ranking identical while
-      claiming 99.99% on every pair. In RLHF the reward is used as a number rather than only
-      an ordering, so calibration matters.
+      | Position | One extra padding changes the score by <= 1e-6 |
+      | Calibration | Predicted probability versus actual win rate <= 0.15 |
     `
   ),
   checklist: [
@@ -12827,14 +10958,9 @@ const STAGE_RM = {
 
 const STAGE_DPO = {
   id: 'dpo',
-  title: t('DPO —— 不要奖励模型的偏好优化', 'DPO — preference optimisation without a reward model'),
+  title: t('DPO：直接用偏好训练策略', 'DPO: train the policy directly from preferences'),
   goal: t(
     code`
-      RLHF 那条路要三个模型：策略、奖励模型、参考模型,还要一整套 PPO。
-      \`DPO\` 的发现是：**如果奖励模型是 Bradley-Terry 的，
-      那么最优策略和奖励之间有一个闭式关系**,于是奖励模型可以被消掉，
-      偏好数据可以直接用来训策略。
-
       在 \`dpo.py\` 里实现：
 
       \`\`\`python
@@ -12847,73 +10973,19 @@ const STAGE_DPO = {
       def train(policy, ref, pairs, steps, beta, ...): ...
       \`\`\`
 
-      ## 损失
-
-      \`\`\`
-      Δ_w = log π(y_w|x) − log π_ref(y_w|x)      ← 「隐式奖励」
-      Δ_l = log π(y_l|x) − log π_ref(y_l|x)
-      L   = −log σ( β·(Δ_w − Δ_l) )
-      \`\`\`
-
-      \`β·Δ\` 就是 DPO 的**隐式奖励**,它不是被训出来的，是被推导出来的。
-      而 \`−log σ(·)\` 又是第 24 关那个两类 softmax。
-      所以 DPO 的实现和奖励模型的实现在**形状上是同一个东西**，
-      区别只在于分数从哪来：一个来自专门的标量头，一个来自策略与参考的对数概率之差。
-
-      ## 参考模型不参与梯度
-
-      \`π_ref\` 是冻结的（一般就是 SFT 之后那一版）。它在损失里只作为**基准**出现,
-      算它的 log-prob 要在 \`no_grad\` 下。
-
-      忘了这一点的话，梯度会同时推着策略和参考往相反方向走,
-      于是 \`Δ_w − Δ_l\` 涨得飞快而模型什么也没学到。
-      **loss 掉得特别快**是这个错最典型的症状。
-
-      ## 为什么要有 β 和参考项
-
-      \`β\` 控制「允许离参考多远」—— 但**这句话是渐近的，不是每一步的**。
-
-      损失对 \`Δ\` 的梯度是 \`β·(1 − σ(β·Δ))\`。训练早期 \`Δ\` 还小、σ 接近 0.5，
-      于是梯度的大小**正比于 β**。也就是说在**固定步数、固定学习率**下，
-      β 越大策略走得越远,和「β 越大约束越紧」的直觉正好相反。
-      β 的约束作用要到收敛之后才体现（最优解里的 KL 罚项是 \`1/β\`）。
-
-      这一关实测过（同样 120 步、同样学习率，量的是好输出上的逐 token KL）：
-
-      \`\`\`
-      β = 0.1   KL 0.841
-      β = 0.5   KL 1.353      ← 更大的 β，跑得更远
-      \`\`\`
-
-      真正压住漂移的是**步数和学习率**：把学习率减半、步数降到 100 之后是 **0.561**。
-      这一关的门槛就定在这个基础上。
-
-      参考项本身是一个隐式的 \`KL\` 约束：
-      \`log π − log π_ref\` 大就意味着策略在这条样本上已经偏离参考很多。
-      没有它的话，模型可以靠**把所有概率都压低**来拉开 \`Δ_w − Δ_l\`,
-      赢是赢了，而语言模型本身垮掉。
-
-      这一关会量这件事：策略相对参考的 KL 必须在界内。
-
-      ## 序列的对数概率是**和**不是平均
-
-      \`log π(y|x) = Σ_t log p_t\`,一条 completion 的所有 token 加起来。
-      改成平均的话，**长答案被系统性地偏袒**（平均值不随长度增长），
-      而这正是第 26 关那个「长度偏置」的一个来源。这一关先按标准的和来写。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
       | 损失 | 与参考公式差 ≤ 1e-6 |
-      | **参考不带梯度** | 训练之后参考模型的参数一位都没变 |
-      | 偏好 | 留出集上隐式奖励的排序准确率 ≥ **0.9** |
-      | 不跑飞 | **好输出上**相对参考的逐 token KL ≤ **0.8** |
+      | 参考不带梯度 | 训练之后参考模型的参数一位都没变 |
+      | 偏好 | 留出集上隐式奖励的排序准确率 ≥ 0.9 |
+      | 不跑飞 | 好输出上相对参考的逐 token KL ≤ 0.8 |
     `,
     code`
-      The RLHF route needs three models — policy, reward model, reference — plus all of PPO.
-      \`DPO\`'s insight is that **if the reward model is Bradley-Terry, there is a closed-form
-      relation between the optimal policy and the reward**, so the reward model can be
+      The RLHF route needs three models: policy, reward model, reference: plus all of PPO.
+      \`DPO\`'s insight is that if the reward model is Bradley-Terry, there is a closed-form
+      relation between the optimal policy and the reward, so the reward model can be
       eliminated and preference data can train the policy directly.
 
       Implement in \`dpo.py\`:
@@ -12929,73 +11001,14 @@ const STAGE_DPO = {
       def train(policy, ref, pairs, steps, beta, ...): ...
       \`\`\`
 
-      ## The loss
-
-      \`\`\`
-      Δ_w = log π(y_w|x) − log π_ref(y_w|x)      <- the "implicit reward"
-      Δ_l = log π(y_l|x) − log π_ref(y_l|x)
-      L   = −log σ( β·(Δ_w − Δ_l) )
-      \`\`\`
-
-      \`β·Δ\` is DPO's **implicit reward** — not trained but derived. And \`−log σ(·)\` is
-      stage 24's two-class softmax again. So DPO and a reward model have **the same shape**;
-      they differ only in where the score comes from: a dedicated scalar head, or the
-      difference of log probabilities between policy and reference.
-
-      ## The reference takes no gradient
-
-      \`π_ref\` is frozen (usually the post-SFT version). It appears in the loss only as a
-      **baseline**, so its log-probabilities are computed under \`no_grad\`.
-
-      Forgetting this makes the gradient push policy and reference in opposite directions,
-      so \`Δ_w − Δ_l\` grows quickly while the model learns nothing. **A loss that drops
-      unusually fast** is this mistake's signature.
-
-      ## Why β and the reference term exist
-
-      \`β\` controls how far the policy may stray — but **that statement is asymptotic, not
-      per-step**.
-
-      The loss gradient with respect to \`Δ\` is \`β·(1 − σ(β·Δ))\`. Early in training \`Δ\`
-      is small and σ is near 0.5, so the gradient magnitude is **proportional to β**. At a
-      **fixed step count and learning rate**, a larger β therefore moves the policy
-      *further* — the opposite of the intuition that larger β constrains more tightly. β's
-      constraining role appears only at convergence, where the optimum carries a KL penalty
-      of \`1/β\`.
-
-      This stage measured it (same 120 steps, same learning rate, per-token KL on chosen
-      responses):
-
-      \`\`\`
-      β = 0.1   KL 0.841
-      β = 0.5   KL 1.353      <- larger β, further drift
-      \`\`\`
-
-      What actually contains the drift is **step count and learning rate**: halving the rate
-      and dropping to 100 steps gives **0.561**, which is what this stage's gate is set
-      against.
-
-      The reference term is itself an implicit \`KL\` constraint: a large
-      \`log π − log π_ref\` means the policy already differs a lot on that sample. Without
-      it, the model can widen \`Δ_w − Δ_l\` simply by **pushing all probabilities down** — it
-      wins the objective while the language model itself collapses.
-
-      This stage measures that: the policy's KL from the reference must stay within bounds.
-
-      ## A sequence log-probability is a **sum**, not a mean
-
-      \`log π(y|x) = Σ_t log p_t\` across the completion's tokens. Using a mean instead
-      **systematically favours long answers** (a mean does not grow with length), which is
-      one source of the length bias stage 26 examines. This stage uses the standard sum.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
       | Loss | Within 1e-6 of the reference formula |
-      | **Reference frozen** | Not one parameter of the reference moved during training |
-      | Preference | Implicit-reward ranking accuracy on held-out data >= **0.9** |
-      | No blow-up | Per-token KL from the reference **on chosen responses** <= **0.8** |
+      | Reference frozen | Not one parameter of the reference moved during training |
+      | Preference | Implicit-reward ranking accuracy on held-out data >= 0.9 |
+      | No blow-up | Per-token KL from the reference on chosen responses <= 0.8 |
     `
   ),
   checklist: [
@@ -13405,19 +11418,9 @@ const STAGE_DPO = {
 
 const STAGE_LENGTH = {
   id: 'length-bias',
-  title: t('长度偏置 —— 赢了，但不是靠变长赢的', 'Length bias — winning, but not by getting longer'),
+  title: t('长度偏置：排除答案长度的影响', 'Length bias: remove the effect of answer length'),
   goal: t(
     code`
-      偏好优化有一个几乎必然出现的副作用：**答案越来越长**。
-
-      原因不神秘。如果偏好数据里「更好的那个」平均更长
-      （人类标注、模型标注、规则构造，都容易带上这个），
-      那么「长」就是一个和「好」高度相关的特征,
-      而模型没有理由不去学这个更容易学的特征。
-
-      这一关的数据是**故意构造成有长度混淆的**：正确答案可能是一位也可能是两位，
-      而错误答案永远是一位。于是「更长」和「更好」在数据里绑在一起。
-
       在 \`length.py\` 里做三件事：
 
       \`\`\`python
@@ -13431,53 +11434,19 @@ const STAGE_LENGTH = {
           """本该一位的题里，模型吐出两位及以上的比例。"""
       \`\`\`
 
-      ## 为什么要「长度受控」的评测
-
-      直接比胜率是不行的:如果模型学会了「写长一点」，
-      而评委（人或奖励模型）也偏爱长的，那么胜率上升**什么都不能说明**。
-
-      标准做法是 \`长度受控胜率\`（length-controlled win rate）——
-      只在长度可比的样本之间比较，或者把长度作为协变量回归掉。
-      AlpacaEval 2 从 2.0 版起就是这么做的，理由正是原始胜率被长度带偏得太厉害。
-
-      这一关用的是最直接的那种：**只在等长的对之间比**。
-
-      ## 去偏怎么做
-
-      最直接的一种是**让数据本身不带混淆**:
-      只保留 chosen 与 rejected 等长的那些对。代价是数据量变少。
-
-      另一类做法是改损失（\`SimPO\` 的长度归一化、\`R-DPO\` 的长度罚项），
-      好处是不丢数据，代价是引入一个新的超参。
-      这一关走第一条,它最容易验证，而且**先确认混淆存在、再去掉它**
-      这个顺序本身就是要教的东西。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | **先确认混淆存在** | 原始数据里 chosen 比 rejected 平均长 ≥ **0.3** 个 token |
-      | 去偏之后 | 留下来的对**全部等长** |
-      | 不变长 | 本该一位的题里吐两位的比例 ≤ **0.1** |
-      | **对照** | 不去偏的那一路，这个比例要明显更高 |
-
-      最后一条是这一关的骨架：**一个「没有变长」的结果，只有在
-      「不处理就会变长」被验证过之后才有意义。**
-      否则你不知道是去偏起了作用，还是这个任务本来就不会变长。
+      | 先确认混淆存在 | 原始数据里 chosen 比 rejected 平均长 ≥ 0.3 个 token |
+      | 去偏之后 | 留下来的对全部等长 |
+      | 不变长 | 本该一位的题里吐两位的比例 ≤ 0.1 |
+      | 对照 | 不去偏的那一路，这个比例要明显更高 |
     `,
     code`
-      Preference optimisation has one near-inevitable side effect: **answers get longer**.
-
-      The reason is not mysterious. If the "better" option in preference data is longer on
-      average — human labelling, model labelling and rule-based construction all tend to
-      introduce this — then "long" is a feature highly correlated with "good", and the model
-      has no reason not to learn the easier feature.
-
-      This stage's data is **deliberately constructed with a length confound**: correct
-      answers may be one or two digits while wrong answers are always one digit. "Longer" and
-      "better" are tied together in the data.
-
-      Do three things in \`length.py\`:
+      This stage deliberately makes correct answers longer on average than incorrect ones.
+      In \`length.py\`, measure that confound, remove it from the data, and check whether the
+      trained model still produces unnecessarily long answers:
 
       \`\`\`python
       def length_stats(pairs):
@@ -13490,39 +11459,14 @@ const STAGE_LENGTH = {
           """Fraction of one-digit questions where the model emits two or more digits."""
       \`\`\`
 
-      ## Why evaluation must be length-controlled
-
-      Comparing raw win rates does not work: if the model learned to write longer and the
-      judge (human or reward model) prefers longer, a rising win rate **shows nothing**.
-
-      The standard answer is a \`length-controlled win rate\` — compare only among samples of
-      comparable length, or regress length out as a covariate. AlpacaEval has done this since
-      version 2.0, precisely because raw win rates were skewed by length.
-
-      This stage uses the most direct form: **compare only within equal-length pairs**.
-
-      ## How to debias
-
-      The most direct approach removes the confound **from the data**: keep only pairs whose
-      chosen and rejected have equal length. The cost is less data.
-
-      Another family changes the loss (\`SimPO\`'s length normalisation, \`R-DPO\`'s length
-      penalty), keeping the data at the price of a new hyperparameter. This stage takes the
-      first route: it is the easiest to verify, and the ordering — **confirm the confound
-      exists, then remove it** — is itself part of the lesson.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | **Confirm the confound first** | Chosen exceeds rejected by >= **0.3** tokens on average |
+      | Confirm the confound first | Chosen exceeds rejected by >= 0.3 tokens on average |
       | After debiasing | Every surviving pair has equal lengths |
-      | No lengthening | Two-or-more-digit rate on one-digit questions <= **0.1** |
-      | **Control** | The un-debiased run must show a clearly higher rate |
-
-      That last row is the stage's backbone: **a "did not get longer" result means something
-      only after "it would have gotten longer" has been verified.** Otherwise you cannot tell
-      whether debiasing worked or the task simply never lengthens.
+      | No lengthening | Two-or-more-digit rate on one-digit questions <= 0.1 |
+      | Control | The un-debiased run must show a clearly higher rate |
     `
   ),
   checklist: [
@@ -13923,13 +11867,9 @@ const ROLLOUT_PY = code`
 
 const STAGE_ROLLOUT = {
   id: 'rollout',
-  title: t('rollout —— 强化学习跑不跑得动，看这一层', 'Rollout — whether RL runs at all comes down to this layer'),
+  title: t('Rollout：高效生成训练样本', 'Rollouts: generate training samples efficiently'),
   goal: t(
     code`
-      强化学习的每一步都要**先采样再学习**：给一批 prompt，每个采 \`G\` 条，
-      判对错，然后按结果更新。这一层叫 \`rollout\`,
-      而它在真实系统里占 RL 训练时间的 **60% 到 80%**。
-
       在 \`rollout.py\` 里实现：
 
       \`\`\`python
@@ -13944,50 +11884,18 @@ const STAGE_ROLLOUT = {
           三条硬要求：**用 KV cache**、**撞到 EOS 就停**、**确定性**。"""
       \`\`\`
 
-      ## 为什么必须用 KV cache
-
-      不带 cache 的解码，每生成一个 token 都要把整段前缀重算一遍。
-      第 8 关量过：同样生成 12 个 token，**不带 cache 的 FLOPs 是带 cache 的 7.26 倍**。
-
-      而 RL 的一步要采 \`prompt 数 × G\` 条,这个倍数直接乘在整个训练时间上。
-      这不是「优化」，是这一关能不能在预算里跑完的分界。
-
-      这一关的门槛：你的 rollout 的 FLOPs 必须 ≤ 平台那份**不带 cache** 的 **0.6 倍**。
-
-      ## 为什么必须撞到 EOS 就停
-
-      不停的话，EOS 之后那些 token 是**纯浪费**,它们不参与奖励、不参与更新，
-      只消耗算力。在答案长度差异大的任务上（有的两个 token，有的两百个），
-      按最长的那条跑满，浪费的比算的还多。
-
-      真实推理引擎里这件事叫 \`continuous batching\`：一条序列结束就把它换出去，
-      空出来的位置立刻塞新的进来。这一关做的是它的最小形式,**记录每条实际跑了几步**。
-
-      ## 为什么必须确定性
-
-      RL 的调试极其依赖重放。一次训练里出了问题（奖励忽然掉、
-      某一步的梯度爆了），你要能**把那一步原样再跑一遍**。
-      采样带随机性，所以随机性必须是**可寻址的**:
-      同一个 (seed, prompt 下标, 样本下标) 永远给同一条输出。
-
-      拿全局随机状态的实现做不到这一点,换个 batch 大小、换个执行顺序，
-      同一个 seed 就给出不同的结果。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
       | 数量 | 恰好 \`prompt 数 × group_size\` 条 |
-      | **KV cache** | FLOPs ≤ 不带 cache 的 **0.6 倍** |
-      | **提前停** | 每条的步数 = 答案长度 + 1（撞到 EOS），或者 max_new |
-      | **确定性** | 同 seed 两遍逐条相同；换 seed 要有不同的样本 |
+      | KV cache | FLOPs ≤ 不带 cache 的 0.6 倍 |
+      | 提前停 | 每条的步数 = 答案长度 + 1（撞到 EOS），或者 max_new |
+      | 确定性 | 同 seed 两遍逐条相同；换 seed 要有不同的样本 |
     `,
     code`
-      Every reinforcement-learning step **samples before it learns**: take a batch of
-      prompts, draw \`G\` samples each, judge them, then update from the outcome. That layer
-      is the \`rollout\`, and in real systems it consumes **60% to 80%** of RL training time.
-
-      Implement in \`rollout.py\`:
+      Before each reinforcement-learning update, generate \`G\` samples for every prompt
+      and score them. Implement that rollout in \`rollout.py\`:
 
       \`\`\`python
       def rollout(model, prompts, group_size, max_new, seed,
@@ -14002,47 +11910,14 @@ const STAGE_ROLLOUT = {
           **be deterministic**."""
       \`\`\`
 
-      ## Why the KV cache is mandatory
-
-      Uncached decoding recomputes the whole prefix for every token. Stage 8 measured it:
-      generating the same 12 tokens, **the uncached path costs 7.26x the FLOPs**.
-
-      An RL step samples \`prompts × G\` sequences, and that multiplier lands directly on
-      total training time. This is not an optimisation but the line between finishing within
-      budget and not.
-
-      The gate: your rollout's FLOPs must be at most **0.6x** the platform's **uncached**
-      version.
-
-      ## Why stopping at EOS is mandatory
-
-      Otherwise every token after EOS is **pure waste** — it earns no reward, joins no
-      update, and only burns compute. On tasks where answer lengths vary widely (two tokens
-      here, two hundred there), running everything to the longest length wastes more than it
-      computes.
-
-      Real inference engines call this \`continuous batching\`: a finished sequence is
-      evicted and a new one takes its slot immediately. This stage builds the minimal form —
-      **record how many steps each sample actually ran**.
-
-      ## Why determinism is mandatory
-
-      Debugging RL depends heavily on replay. When something goes wrong mid-run (reward
-      suddenly drops, one step's gradient explodes) you must be able to **rerun that exact
-      step**. Sampling is random, so the randomness has to be **addressable**: the same
-      (seed, prompt index, sample index) must always produce the same output.
-
-      An implementation drawing from global random state cannot do that — change the batch
-      size or the execution order and the same seed yields something different.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
       | Count | Exactly \`prompts × group_size\` samples |
-      | **KV cache** | FLOPs <= **0.6x** the uncached version |
-      | **Early stop** | Steps per sample = answer length + 1 (EOS), or max_new |
-      | **Determinism** | Two runs at one seed match sample for sample; a new seed differs |
+      | KV cache | FLOPs <= 0.6x the uncached version |
+      | Early stop | Steps per sample = answer length + 1 (EOS), or max_new |
+      | Determinism | Two runs at one seed match sample for sample; a new seed differs |
     `
   ),
   checklist: [
@@ -14427,16 +12302,9 @@ const STAGE_ROLLOUT = {
 
 const STAGE_GRPO = {
   id: 'grpo-rlvr',
-  title: t('GRPO + RLVR —— 用规则当奖励，用同组当基线', 'GRPO + RLVR — rules as reward, the group as baseline'),
+  title: t('GRPO 与 RLVR：组内基线和规则奖励', 'GRPO and RLVR: group baselines and rule-based rewards'),
   goal: t(
     code`
-      PPO 要一个 \`critic\`（价值网络）来估计基线,它和策略一样大，
-      要单独训、单独存、单独调。\`GRPO\` 的做法是把它去掉：
-      **同一个 prompt 采一组，用组内的平均奖励当基线。**
-
-      而 \`RLVR\` 把奖励模型也去掉：可验证的任务直接**用规则判对错**。
-      两个一起，整条链上只剩策略一个模型。
-
       在 \`grpo.py\` 里实现：
 
       \`\`\`python
@@ -14453,69 +12321,18 @@ const STAGE_GRPO = {
       def train(policy, prompts, steps, group_size, inner_epochs, ...): ...
       \`\`\`
 
-      ## 组内基线为什么够用
-
-      策略梯度需要一个基线来降方差,减去任何**与动作无关**的量都不改变梯度的期望。
-      PPO 用一个学出来的 \`V(s)\`，GRPO 用**同一个 prompt 的另外 G−1 条样本的平均**。
-
-      后者的好处不只是省一个网络：它天然是**无偏**的（同分布采出来的），
-      而 critic 要自己训，训不准的时候会引入偏差,
-      而「critic 训不准」在长序列上是常态。
-
-      代价是方差：G 条样本估出来的均值比一个学出来的 V 抖。
-      所以 GRPO 要 G ≥ 8（这一关用 8）。
-
-      ## 一个必须恒成立的等式
-
-      组内归一化之后，**每一组的优势之和必须是 0**。
-      这不是巧合，是定义,减去均值就是这个意思。
-
-      它也是一条极好的自查：如果某一组的优势和不是 0，
-      要么归一化写错了，要么分组分错了（把不同 prompt 的样本混进了一组）。
-      **后者尤其隐蔽** —— 分错组的实现照样能训，只是基线变成了「全 batch 平均」，
-      于是 GRPO 退化成了一个方差更大的 REINFORCE。
-
-      这一关的门槛：\`|每组优势之和|\` 的最大值 ≤ 1e-5。
-
-      ## 全对或全错的那些组
-
-      如果一组里 8 条全对（或全错），组内标准差是 0，优势也全是 0,
-      **这一组对梯度没有任何贡献**。
-
-      这不是 bug，是 GRPO 的固有性质：模型已经稳定做对的题，没什么可学的。
-      但它有个实际后果:训练后期大部分组都全对，有效的 batch 越来越小。
-      真实系统里会**按难度筛题**，把全对的题换掉。
-
-      ## 裁剪与内层轮次
-
-      \`ρ = π_new / π_old\`。**只跑一个内层轮次的话 ρ 恒等于 1**，裁剪不起作用,
-      这时 GRPO 就是带基线的 REINFORCE。
-      跑多个轮次（这一关跑 2 个）之后 ρ 才会偏离 1，裁剪才有意义。
-
-      \`\`\`
-      L = −(1/N) Σ min( ρ·A,  clip(ρ, 1−ε_low, 1+ε_high)·A )
-      \`\`\`
-
-      这一关先用对称的 \`ε_low = ε_high = 0.2\`。第 29 关会把它拆开。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | **组内优势和为 0** | 最大 \\|和\\| ≤ **1e-5** |
+      | 组内优势和为 0 | 最大 \\|和\\| ≤ 1e-5 |
       | 验证器 | 与平台的规则实现完全一致 |
-      | **学到了东西** | 留出集通过率比起点高 ≥ **0.15**，且 rollout 通过率后 10 步比前 10 步高 ≥ **0.1** |
-      | 不跑飞 | 相对起点的逐 token KL ≤ **0.8** |
+      | 学到了东西 | 留出集通过率比起点高 ≥ 0.15，且 rollout 通过率后 10 步比前 10 步高 ≥ 0.1 |
+      | 不跑飞 | 相对起点的逐 token KL ≤ 0.8 |
     `,
     code`
-      PPO needs a \`critic\` (value network) to estimate the baseline — as large as the
-      policy, separately trained, stored and tuned. \`GRPO\` removes it: **sample a group per
-      prompt and use the group's mean reward as the baseline.**
-
-      \`RLVR\` then removes the reward model too: verifiable tasks **judge correctness by
-      rule**. Together, only the policy remains.
-
-      Implement in \`grpo.py\`:
+      GRPO uses the mean reward from samples of the same prompt as its baseline. RLVR
+      supplies those rewards with a rule-based verifier. Implement both in \`grpo.py\`:
 
       \`\`\`python
       def verify(prompt, sample):
@@ -14531,63 +12348,14 @@ const STAGE_GRPO = {
       def train(policy, prompts, steps, group_size, inner_epochs, ...): ...
       \`\`\`
 
-      ## Why a group baseline suffices
-
-      Policy gradients need a baseline to reduce variance, and subtracting anything
-      **independent of the action** leaves the gradient's expectation unchanged. PPO uses a
-      learned \`V(s)\`; GRPO uses **the mean of the other G−1 samples for the same prompt**.
-
-      Beyond saving a network, the group baseline is naturally **unbiased** (drawn from the
-      same distribution), whereas a critic must be trained and introduces bias when it is
-      inaccurate — and an inaccurate critic is the norm on long sequences.
-
-      The cost is variance: a mean over G samples is noisier than a learned V. Hence GRPO
-      wants G >= 8, which is what this stage uses.
-
-      ## An identity that must always hold
-
-      After group normalisation, **each group's advantages must sum to zero**. That is not a
-      coincidence but the definition — subtracting the mean says exactly this.
-
-      It also makes an excellent self-check: a group whose advantages do not sum to zero
-      means either the normalisation is wrong or the grouping is (samples from different
-      prompts mixed into one group). **The latter is especially insidious** — a
-      wrongly-grouped implementation still trains, its baseline simply becomes "the whole
-      batch mean", and GRPO degenerates into a higher-variance REINFORCE.
-
-      The gate: the largest \`|group sum|\` must be <= 1e-5.
-
-      ## Groups that are all-correct or all-wrong
-
-      When all 8 samples in a group are correct (or all wrong), the group's standard
-      deviation is zero and so are its advantages — **that group contributes nothing to the
-      gradient**.
-
-      This is not a bug but an inherent property of GRPO: questions the model reliably gets
-      right have nothing left to teach. It has a practical consequence, though: late in
-      training most groups are all-correct and the effective batch shrinks. Real systems
-      **filter by difficulty**, swapping out the solved questions.
-
-      ## Clipping and inner epochs
-
-      \`ρ = π_new / π_old\`. **With a single inner epoch ρ is identically 1** and clipping
-      does nothing — GRPO is then REINFORCE with a baseline. Only with several epochs (two
-      here) does ρ move away from 1 and clipping start to matter.
-
-      \`\`\`
-      L = −(1/N) Σ min( ρ·A,  clip(ρ, 1−ε_low, 1+ε_high)·A )
-      \`\`\`
-
-      This stage uses a symmetric \`ε_low = ε_high = 0.2\`; stage 29 splits them apart.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | **Group advantages sum to zero** | Largest \\|sum\\| <= **1e-5** |
+      | Group advantages sum to zero | Largest \\|sum\\| <= 1e-5 |
       | Verifier | Exactly matches the platform's rule |
-      | **It learned** | Held-out pass rate up >= **0.15**, and rollout pass rate's last ten steps beat its first ten by >= **0.1** |
-      | No blow-up | Per-token KL from the starting policy <= **0.8** |
+      | It learned | Held-out pass rate up >= 0.15, and rollout pass rate's last ten steps beat its first ten by >= 0.1 |
+      | No blow-up | Per-token KL from the starting policy <= 0.8 |
     `
   ),
   checklist: [
@@ -15103,13 +12871,10 @@ const GRPO_REF_PY = code`
 
 const STAGE_GRPO_FIX = {
   id: 'grpo-fixes',
-  title: t('GRPO 的三个修正 —— 每一个都对着一个具体的病',
-    "GRPO's three corrections — each aimed at one specific ailment"),
+  title: t('修正 GRPO：去标准差、按 token 归一化、放宽上界',
+    'Correcting GRPO: remove standard deviation, normalize by token, widen the upper clip'),
   goal: t(
     code`
-      第 28 关那版 GRPO 能训，但它有三个已经被反复记录下来的毛病。
-      2025 到 2026 年间，三篇工作各自指出了一个,而三个修正都只有几行。
-
       在 \`fixes.py\` 里实现：
 
       \`\`\`python
@@ -15121,81 +12886,18 @@ const STAGE_GRPO_FIX = {
           """token 级归一化 + 非对称裁剪。"""
       \`\`\`
 
-      ## 修正一：不要除标准差（Dr.GRPO）
-
-      第 28 关的优势是 \`(r − mean) / std\`。除以标准差看着像标准做法
-      （它就是 z-score），但它引入了一个偏置：
-
-      **同样的「对了一个」，在一个几乎全错的组里被放得很大，
-      在一个对错各半的组里被压得很小。** 因为前者的 std 更小。
-
-      于是模型被推着去优先攻克「几乎做不出来的题」,而那些题往往是噪声。
-      Dr.GRPO 的结论是**去掉除法**：只减均值。
-      优势的量级从此由奖励本身决定，而不是由组内碰巧的方差决定。
-
-      注意：**减均值那一半必须留着**,它才是基线，去掉它就没有方差缩减了。
-      所以「每组优势之和为 0」这条门槛在修正之后**仍然成立**。
-
-      ## 修正二：token 级归一化，不是序列级
-
-      第 28 关按「参与的 token 总数」平均。另一种很自然的写法是
-      **先在每条序列内平均，再在序列之间平均**,
-      而这两种在序列长度不同时**不一样**。
-
-      \`\`\`
-      序列级：  L = (1/G) Σ_i (1/|y_i|) Σ_t ...     ← 每条序列权重相同
-      token 级：L = (1/Σ|y_i|) Σ_i Σ_t ...         ← 每个 token 权重相同
-      \`\`\`
-
-      序列级的后果是：**短序列里每个 token 拿到的更新被放大了**
-      （放大的倍数正好是长度比）。而在推理任务上，短的往往是「直接蒙一个」，
-      长的才是「一步步推」—— 于是这个偏置正好推向错误的方向。
-
-      这一关的探针直接量它：造两条长度不同、优势相同的序列，
-      **每个 token 上的梯度必须一样大**。
-
-      ## 一个连带的后果：学习率要跟着调
-
-      去掉 \`/std\` 之后，优势的**量级变了**。对错各半的组里，
-      z-score 是 ±1.0，而只减均值是 ±0.5,整整小一半。
-
-      同样的学习率下，修正版走的步子就小了一半。这一关把学习率从
-      \`0.001\` 提到 \`0.002\` 来补上。
-
-      **改一个归一化，等效学习率就变了** —— 这件事在任何论文里都不会被单独写出来，
-      而它是「照着论文改完之后效果反而变差」最常见的原因。
-
-      ## 修正三：clip-higher（DAPO）
-
-      第 28 关用对称的 \`ε = 0.2\`。DAPO 指出上界应该放宽：
-
-      \`\`\`
-      ε_low = 0.2      ε_high = 0.28
-      \`\`\`
-
-      理由是**熵坍缩**。一个当前概率很低的 token（比如 0.01），
-      即使优势为正，\`ρ\` 的上界 1.2 也意味着它最多只能涨到 0.012,
-      而一个概率 0.9 的 token 可以涨到 1.0（被截断）。
-      于是低概率的选项**永远追不上来**，策略越训越确定、探索越来越少，
-      最后卡在一个局部解上。
-
-      把上界单独放宽，给低概率的 token 留出上升的空间。
-      下界不动 —— 它管的是「别把某个动作压得太狠」，那一侧本来就没问题。
-
       ## 怎么算过
 
       | | 要求 |
       | --- | --- |
-      | 优势 | **只减均值**：每组和仍为 0，但不再除以标准差 |
-      | **token 级** | 长短两条序列上，每个 token 的梯度大小之比在 **[0.98, 1.02]** |
+      | 优势 | 只减均值：每组和仍为 0，但不再除以标准差 |
+      | token 级 | 长短两条序列上，每个 token 的梯度大小之比在 [0.98, 1.02] |
       | 裁剪 | \`ε_high > ε_low\`，且非对称真的生效 |
-      | 效果 | rollout 通过率后 10 步比前 10 步高 ≥ **0.1**（留出集的提升报出来但不卡,那个量在这个尺度上噪声太大） |
+      | 效果 | rollout 通过率后 10 步比前 10 步高 ≥ 0.1（留出集的提升报出来但不卡，那个量在这个尺度上噪声太大） |
     `,
     code`
-      Stage 28's GRPO trains, but it has three well-documented ailments. Between 2025 and
-      2026 three papers each identified one — and all three corrections are a few lines.
-
-      Implement in \`fixes.py\`:
+      In \`fixes.py\`, change three choices from stage 28: remove standard-deviation scaling,
+      normalize the loss by token, and use different lower and upper clipping bounds.
 
       \`\`\`python
       def group_advantages_v2(rewards, group_size):
@@ -15206,80 +12908,14 @@ const STAGE_GRPO_FIX = {
           """Token-level normalisation plus asymmetric clipping."""
       \`\`\`
 
-      ## Correction one: do not divide by the standard deviation (Dr.GRPO)
-
-      Stage 28's advantage is \`(r − mean) / std\`. Dividing by the standard deviation looks
-      standard — it is a z-score — but it introduces a bias:
-
-      **The same "one correct answer" is magnified in a nearly-all-wrong group and
-      suppressed in a half-and-half group**, because the former has a smaller std.
-
-      The model is thus pushed to prioritise near-impossible questions, which are usually
-      noise. Dr.GRPO's conclusion is to **drop the division** and only subtract the mean.
-      Advantage magnitude is then set by the reward itself rather than by a group's
-      incidental variance.
-
-      Note: **the mean subtraction must stay** — that is the baseline, and removing it
-      removes the variance reduction. So the "group advantages sum to zero" gate **still
-      holds** after the correction.
-
-      ## Correction two: token-level normalisation, not sequence-level
-
-      Stage 28 averages over the total number of participating tokens. Another natural
-      formulation **averages within each sequence first, then across sequences** — and the
-      two differ whenever sequence lengths differ.
-
-      \`\`\`
-      sequence-level: L = (1/G) Σ_i (1/|y_i|) Σ_t ...     <- each sequence weighted equally
-      token-level:    L = (1/Σ|y_i|) Σ_i Σ_t ...          <- each token weighted equally
-      \`\`\`
-
-      The consequence of sequence-level is that **each token in a short sequence receives an
-      amplified update**, by exactly the length ratio. And in reasoning tasks the short
-      responses tend to be guesses while the long ones do the step-by-step work — so the bias
-      points in precisely the wrong direction.
-
-      This stage's probe measures it directly: build two sequences of different lengths with
-      the same advantage, and **every token's gradient must have the same magnitude**.
-
-      ## A knock-on consequence: the learning rate must follow
-
-      Dropping \`/std\` changes the **magnitude** of the advantage. In a half-and-half group
-      the z-score is ±1.0 while mean-subtraction alone gives ±0.5 — half the size.
-
-      At the same learning rate the corrected version therefore takes half-sized steps. This
-      stage raises the rate from \`0.001\` to \`0.002\` to compensate.
-
-      **Changing a normalisation changes the effective learning rate** — something no paper
-      states separately, and the most common reason a faithful reimplementation performs
-      worse than the original.
-
-      ## Correction three: clip-higher (DAPO)
-
-      Stage 28 used a symmetric \`ε = 0.2\`. DAPO argues the upper bound should be loosened:
-
-      \`\`\`
-      ε_low = 0.2      ε_high = 0.28
-      \`\`\`
-
-      The reason is **entropy collapse**. A token with a currently low probability (say
-      0.01), even with a positive advantage, is capped by \`ρ\`'s upper bound of 1.2 at
-      rising to 0.012, while a token at 0.9 can climb to 1.0 (and be clipped). Low-probability
-      options can therefore **never catch up**, the policy grows more and more certain,
-      exploration disappears, and it settles into a local solution.
-
-      Loosening the upper bound alone gives low-probability tokens room to rise. The lower
-      bound stays put — it governs "do not crush an action too hard", and that side was never
-      the problem.
-
       ## What counts as passing
 
       | | Requirement |
       | --- | --- |
-      | Advantage | **Mean subtracted only**: group sums stay 0, no division by std |
-      | **Token-level** | Per-token gradient ratio between short and long sequences in **[0.98, 1.02]** |
+      | Advantage | Mean subtracted only: group sums stay 0, no division by std |
+      | Token-level | Per-token gradient ratio between short and long sequences in [0.98, 1.02] |
       | Clipping | \`ε_high > ε_low\`, and the asymmetry genuinely takes effect |
-      | Result | Rollout pass rate's last ten steps beat its first ten by >= **0.1** (the held-out gain is reported but not gated; it is too noisy at this scale) |
+      | Result | Rollout pass rate's last ten steps beat its first ten by >= 0.1 (the held-out gain is reported but not gated; it is too noisy at this scale) |
     `
   ),
   checklist: [
@@ -15838,13 +13474,10 @@ const ACCEPTED_PY = code`
 
 const STAGE_FINALE = {
   id: 'finale',
-  title: t('收官 —— 一条跑得通的流水线', 'The finale — one pipeline that runs end to end'),
+  title: t('完整流水线：预训练、SFT 与 RLVR', 'The full pipeline: pretraining, SFT, and RLVR'),
   goal: t(
     code`
-      前面 29 关每一关都验过一件事。这一关只做一件事：
-      **把它们接起来，让那些结论在同一次运行里同时成立。**
-
-      零件都在 \`accepted.py\` 里（前面各关验收过的版本），你要写的是 \`pipeline.py\`：
+      在 \`pipeline.py\` 里把 \`accepted.py\` 中已经通过前置关卡的组件接成完整训练流程：
 
       \`\`\`python
       def run(seed, pretrain_steps, sft_steps, rl_steps):
@@ -15860,54 +13493,18 @@ const STAGE_FINALE = {
           """
       \`\`\`
 
-      ## 三段
-
-      \`\`\`
-      预训练     在完整的算式上做下一个 token 预测,模型学会「数字、加号、等号」
-                 这些符号怎么排列，但不会「被问了就回答」
-        ↓
-      SFT        同样是下一个 token 预测，但 **loss 只算在答案上**,
-                 模型学会「看到 = 就该说出答案」
-        ↓
-      RL（RLVR） 采样、用规则判对错、按组内相对优势更新,
-                 模型学会「说对的那个答案」
-      \`\`\`
-
-      三段的目标函数其实只有两种（交叉熵、策略梯度），
-      而**区别全在数据和 mask 上**。这是整个项目最值得带走的一句话。
-
-      ## 这一关卡的是「交接处」
-
-      每一段单独跑通过了，接起来仍然可能出问题,
-      而出问题的地方几乎总是**交接**：
-
-      - SFT 的 mask 在流水线里还成立吗（还是被哪一步的重构弄丢了）
-      - RL 的分组还对吗（prompt 换成流水线生成的之后）
-      - 整条链还能重放吗（三段各自确定性，接起来未必）
-
-      所以这一关的门槛不是新的,它们是前面几关那些门槛，
-      **在同一次运行里再验一遍**。
-
       ## 怎么算过
 
       | | 对应 | 要求 |
       | --- | --- | --- |
-      | 三段都跑了 | —— | 三条曲线都非空，且预训练与 SFT 的 loss 都在降 |
-      | prompt 不进 loss | 第 22 关 | 非零梯度的个数 = **0** |
-      | 每组优势和为 0 | 第 28 关 | 最大 \\|和\\| ≤ **1e-5** |
-      | RL 有效 | 第 28 关 | 留出集通过率提升 ≥ **0.1** |
-      | **整条链可重放** | 第 16、27 关 | 同 seed 两遍**逐位一致** |
-
-      最后一条最要紧。三段各自确定性，接起来**未必**,
-      任何一处用了全局随机状态、或者依赖了字典的遍历顺序，
-      整条链就不可重放了。而不可重放的流水线，出了问题只能从头猜。
+      | 三段都跑了 | 无 | 三条曲线都非空，且预训练与 SFT 的 loss 都在降 |
+      | prompt 不进 loss | 第 22 关 | 非零梯度的个数 = 0 |
+      | 每组优势和为 0 | 第 28 关 | 最大 \\|和\\| ≤ 1e-5 |
+      | RL 有效 | 第 28 关 | 留出集通过率提升 ≥ 0.1 |
+      | 整条链可重放 | 第 16、27 关 | 同 seed 两遍逐位一致 |
     `,
     code`
-      Each of the previous 29 stages verified one thing. This stage does one thing only:
-      **connect them and make those conclusions hold simultaneously in a single run.**
-
-      The pieces live in \`accepted.py\` (the versions each stage accepted); what you write is
-      \`pipeline.py\`:
+      In \`pipeline.py\`, connect the components already accepted in earlier stages:
 
       \`\`\`python
       def run(seed, pretrain_steps, sft_steps, rl_steps):
@@ -15923,49 +13520,15 @@ const STAGE_FINALE = {
           """
       \`\`\`
 
-      ## Three phases
-
-      \`\`\`
-      pretraining  next-token prediction over whole equations — the model learns how
-                   digits, plus and equals arrange, but not that a question wants an answer
-        ↓
-      SFT          still next-token prediction, but **loss only on the answer** — the model
-                   learns that "=" is its cue to speak
-        ↓
-      RL (RLVR)    sample, judge by rule, update by group-relative advantage — the model
-                   learns to say the *correct* answer
-      \`\`\`
-
-      Only two objective functions appear across the three phases (cross-entropy and policy
-      gradient); **all the difference is in the data and the mask**. That is the single most
-      portable sentence in this project.
-
-      ## What this stage gates is the seams
-
-      Each phase passed on its own, and connecting them can still break things — almost
-      always at a **seam**:
-
-      - does SFT's mask still hold inside the pipeline, or did a refactor lose it
-      - is the RL grouping still right once prompts come from the pipeline
-      - is the whole chain still replayable (three deterministic phases need not compose)
-
-      So this stage's gates are not new: they are the earlier stages' gates, **verified again
-      in one run**.
-
       ## What counts as passing
 
       | | From | Requirement |
       | --- | --- | --- |
-      | All three phases ran | — | Three non-empty curves, pretraining and SFT losses falling |
-      | No loss on the prompt | Stage 22 | Non-zero gradients = **0** |
-      | Group advantages sum to 0 | Stage 28 | Largest \\|sum\\| <= **1e-5** |
-      | RL worked | Stage 28 | Held-out pass rate up >= **0.1** |
-      | **The chain replays** | Stages 16, 27 | Two runs at one seed are **bit-identical** |
-
-      The last one matters most. Three deterministic phases **need not** compose: any global
-      random state anywhere, or a dependence on dictionary iteration order, and the chain
-      stops replaying. And a pipeline that cannot replay leaves you guessing from the start
-      whenever something goes wrong.
+      | All three phases ran |: | Three non-empty curves, pretraining and SFT losses falling |
+      | No loss on the prompt | Stage 22 | Non-zero gradients = 0 |
+      | Group advantages sum to 0 | Stage 28 | Largest \\|sum\\| <= 1e-5 |
+      | RL worked | Stage 28 | Held-out pass rate up >= 0.1 |
+      | The chain replays | Stages 16, 27 | Two runs at one seed are bit-identical |
     `
   ),
   checklist: [
@@ -16350,8 +13913,8 @@ module.exports = {
   id: 'llm-from-scratch',
   title: t('从零实现一个 LLM', 'Build an LLM from scratch'),
   summary: t(
-    '写 Python，对着一个 PyTorch 子集把 transformer 实现出来，在浏览器里真的把它训出来，然后做完 SFT 与偏好优化。',
-    'Write Python against a PyTorch subset, implement a transformer, actually train it in the browser, then take it through SFT and preference optimisation.'
+    '用 Python 亲手实现小型 Transformer 的分词、前向计算、自动微分和训练循环，再完成 SFT、DPO 与 GRPO。共 30 关，全部在浏览器中运行。',
+    'Implement tokenization, forward computation, autograd, and training for a small Transformer in Python, then add SFT, DPO, and GRPO. All 30 stages run in the browser.'
   ),
   difficulty: 'Hard',
   domain: 'machine-learning',
@@ -16365,25 +13928,43 @@ module.exports = {
   weights: { correctness: 3, latency: 1, resilience: 1.5, encapsulation: 1.5, elegance: 1.5 },
   brief: t(
     code`
-      ## 背景
+      ## 这个项目要做什么
 
-      「大语言模型」听起来像个不可拆的黑盒。它不是。切开之后是三叠东西，
-      每一叠回答一组很具体的问题：
+      你会用 Python 实现并训练一个小型语言模型。起点是一段文本和一个空的 BPE 分词器，
+      终点是一条能重复运行的训练流水线：先预训练，再做 SFT，最后用规则奖励跑 GRPO。
+      中间没有现成的 Transformer 或自动微分框架替你补步骤。
 
-      | 层 | 关卡 | 回答的问题 |
+      项目共 30 关，分成三部分：
+
+      | 部分 | 关卡 | 内容 |
       | --- | --- | --- |
-      | 基础 | 1–8 | 文本怎么变成数、注意力到底在算什么、一次前向发生了什么 |
-      | 训练 | 9–21 | 梯度从哪来、怎么让它别炸、怎么用有限的算力换更低的 loss |
-      | 后训练 | 22–30 | 怎么让它听话、怎么让它答得对、怎么知道它真的变好了 |
+      | 模型 | 1-8 | 分词、注意力、位置编码、归一化、Transformer block 和解码 |
+      | 训练 | 9-21 | 反向传播、自动微分、AdamW、数据打包、预训练和训练优化 |
+      | 后训练 | 22-30 | SFT、奖励模型、DPO、rollout、GRPO 和完整流水线 |
 
-      做完之后你手上是一个**你自己实现、自己训出来**的模型：它会补全文本、
-      会跟随指令、在可验证的任务上答得对，而且你知道每一行代码为什么在那儿。
+      每一关只增加一个概念。前一关通过后，代码会成为后续关卡的基础。
+      最后一关会把预训练、SFT 和 RLVR 接在一次可重放的运行里。
+
+      ## 代码怎样一层层长出来
+
+      | 关卡 | 这一段完成后，代码已经能做什么 |
+      | --- | --- |
+      | 1-2 | 把 UTF-8 文本训练成字节级 BPE 词表，并用 unigram、bigram 和困惑度建立基线 |
+      | 3-8 | 完成因果注意力、GQA、RoPE、RMSNorm、SwiGLU、采样和 KV cache，模型可以前向计算与生成 |
+      | 9-16 | 从矩阵乘和交叉熵的局部梯度开始，写出自动微分、AdamW、学习率调度、梯度裁剪、数据打包和预训练循环 |
+      | 17-21 | 比较 bf16 与 fp16，用激活重算控制内存，再实现缩放拟合、MoE 和 Muon 更新 |
+      | 22-26 | 对回答 token 做 SFT，处理新旧数据配比，再实现奖励模型、DPO 和长度偏置校正 |
+      | 27-30 | 生成 rollout，计算组内优势，修正 GRPO 的归一化与裁剪，最后串起完整训练流程 |
+
+      第 3 关写出的注意力会进入第 7 关的 Transformer block；第 10 关的自动微分会支撑
+      第 16 关预训练，也会继续支撑后面的 SFT、奖励模型与强化学习。你不是每关重新搭一个
+      演示脚本，而是在维护同一套逐步完整的模型和训练工具。
 
       ## 平台提供什么
 
-      \`nanotorch\` —— PyTorch 的一个严格子集，跑在 WebAssembly 上。
-      你写的代码贴进 PyTorch 就能跑：模块的组织方式、算子的名字、优化器的参数、
-      训练循环的形状，全是一样的。
+      \`nanotorch\` 是 PyTorch 的一个小型子集，运行在 WebAssembly 上。
+      它保留了常用的模块结构、算子名称和优化器接口，因此这里写出的训练代码
+      与 PyTorch 代码很接近。
 
       \`\`\`python
       import nanotorch as nt
@@ -16395,68 +13976,96 @@ module.exports = {
               return x + self.mlp(self.norm2(x))
       \`\`\`
 
-      底下是我们自己写的 WASM 算子核（37KB，f32 带 SIMD）。
-      **训练是真的** —— loss 真的降，梯度真的对，权重真的更新。
+      底层使用项目自带的 WASM 算子核，体积 37KB，f32 路径支持 SIMD。
+      运行时会计算真实的前向、反向和参数更新，不使用预先写好的结果。
 
-      ## 门槛怎么定的
+      工作区还提供固定语料、虚拟文件系统和可重放的训练运行器。模型规模与数据量被压到
+      浏览器能够完成的范围，但张量形状、mask、梯度累积、优化器状态和采样过程都按实际数值执行。
 
-      三条规矩，写在每一关的题面里：
+      ## 哪些部分必须自己写
 
-      1. **只建立在结构性计量上。** 每 token 的 FLOPs、峰值激活字节、
-         梯度检验的相对误差、KL 散度 —— 这些数由平台在算子层数出来，你绕不过。
-         **墙钟时间永远不作门槛**：你的机器慢不该让你挂。
-      2. **每条效果门槛都配一条结构性门槛。** 「loss 降到 1.45 以下」可以被
-         一个碰巧能学的错实现蒙过去，「梯度检验 ≤ 2e-3」不能。
-      3. **门槛的两个数都告诉你。** 不是一个凭空的阈值，而是
-         「bigram 基线 1.90，参考解 1.23，门槛 1.50」。
+      你要实现分词器的训练与编解码、注意力和位置编码、Transformer block、反向传播规则、
+      计算图调度、优化器更新、batch 打包、训练与评测循环，以及后训练的 loss 和 rollout。
+      题目会给出函数签名、数据和算子接口，不会给出可以直接调用的完整模型。
+
+      某些关卡会故意收紧可用接口。例如手写反向传播时不能把工作交给自动微分，第 3 关也不能
+      直接调用融合注意力。限制写在关卡验收里，平台会记录相关算子的调用次数。
+
+      ## 怎么验收
+
+      每一关都有可运行的测试和明确的数值门槛。验收分成三类：
+
+      1. 函数行为：形状、数值、mask、边界条件和确定性必须符合契约。
+      2. 学习结果：loss、准确率、奖励或 KL 等指标必须达到题面给出的门槛。
+      3. 实现结构：平台在算子层记录每 token 的 FLOPs、峰值激活内存、梯度误差、
+         KL 散度和特定算子的调用次数。
+
+      墙钟时间不参与验收，机器快慢不会影响结果。题面会同时给出基线、参考结果和通过门槛。
+      例如预训练阶段使用的 bigram 基线是 1.90，参考实现是 1.23，通过门槛是 1.50。
+      loss 降到门槛以下并不自动证明实现正确，梯度检验和结构检查仍要通过。
 
       ## 硬性约束
 
-      1. 种子、语料、超参、步数由平台固定，你改不了 —— 否则「loss 低于 X」
-         只要把步数调到十倍就过了；
-      2. 纯 Python 的循环比编译语言慢两个数量级，**代码必须向量化** ——
-         现实里也是这条规矩；
-      3. 某些关卡禁用某些内建算子（比如第 3 关不许用融合的注意力），
-         平台数得到，恒为 0 才算过。
+      1. 平台固定随机种子、语料、超参数和训练步数，关卡代码不能修改这些值。
+      2. 主要计算必须使用张量算子。用纯 Python 循环处理大批数据会很慢。
+      3. 部分关卡会禁用已经封装好的算子。例如第 3 关不能直接调用融合注意力。
+         平台会记录这些算子的调用次数。
 
       ## 非目标
 
-      - 不做 kernel 优化、不测吞吐：那是姊妹项目 \`llm-accelerator\` 的全部内容
-        （那边是「让它跑得快」，这边是「让它学会」）；
-      - 不做分布式训练：同上，那边有 8 关；
-      - 不做多模态、不做 agent：与「实现并训练一个语言模型」这条主线无关。
+      这个项目不做算子优化、吞吐测试或分布式训练。这些内容在
+      \`llm-accelerator\` 项目中单独练习。项目也不涉及多模态和 agent。
 
       ## 术语
 
-      - **token**：模型看到的最小单位，一个整数。
-      - **注意力**：让每个位置去看它之前的位置，按相关度加权求和。
-      - **因果掩码**：不许看未来。漏了它 loss 会更低，而模型一文不值。
-      - **交叉熵**：预测分布和真实 token 的距离，训练时最小化的那个数。
-      - **困惑度**：exp(交叉熵)，直觉是「平均在多少个候选里犹豫」。
-      - **SFT**：监督微调，用指令-回答对教它听话。
-      - **DPO / GRPO**：两种偏好优化，前者用成对偏好，后者用组内相对优势。
+      - token：模型处理的最小单位，用整数表示。
+      - 注意力：根据相关度，对前面位置的信息做加权求和。
+      - 因果掩码：预测当前位置时禁止读取未来 token。
+      - 交叉熵：衡量预测分布与正确 token 的差异，训练时要让它下降。
+      - 困惑度：交叉熵的指数，可以理解为模型平均在多少个候选中选择。
+      - SFT：监督微调，使用指令和回答训练模型。
+      - DPO 和 GRPO：两种后训练方法，分别使用成对偏好和组内相对优势。
     `,
     code`
-      ## Context
+      ## What you will build
 
-      "A large language model" sounds like an indivisible black box. It is not. Cut it open
-      and you find three stacks, each answering a concrete set of questions:
+      You will implement and train a small language model in Python. The starting point is
+      raw text and an empty BPE tokenizer. The endpoint is a replayable training pipeline
+      that runs pretraining, SFT, and then GRPO with rule-based rewards. There is no finished
+      Transformer or autograd framework filling in the middle.
 
-      | Layer | Stages | Questions it answers |
+      The project has 30 stages split into three parts:
+
+      | Part | Stages | Topics |
       | --- | --- | --- |
-      | Foundations | 1–8 | How text becomes numbers, what attention computes, what one forward pass does |
-      | Training | 9–21 | Where gradients come from, how to keep them from exploding, how to trade compute for loss |
-      | Post-training | 22–30 | How to make it follow instructions, answer correctly, and how to know it improved |
+      | Model | 1-8 | Tokenization, attention, positional encoding, normalization, Transformer blocks, and decoding |
+      | Training | 9-21 | Backpropagation, autograd, AdamW, data packing, pretraining, and training optimizations |
+      | Post-training | 22-30 | SFT, reward models, DPO, rollouts, GRPO, and the complete pipeline |
 
-      At the end you hold a model **you implemented and trained yourself**: it completes
-      text, follows instructions, answers verifiable tasks — and you know why every line is
-      there.
+      Each stage adds one concept. Once a stage passes, its code becomes part of the later
+      stages. The final stage connects pretraining, SFT, and RLVR in one replayable run.
+
+      ## How the code grows
+
+      | Stages | What the code can do afterwards |
+      | --- | --- |
+      | 1-2 | Train a byte-level BPE vocabulary from UTF-8 text and establish unigram, bigram, and perplexity baselines |
+      | 3-8 | Run causal attention, GQA, RoPE, RMSNorm, SwiGLU, sampling, and a KV cache, giving the model a forward and generation path |
+      | 9-16 | Start with local gradients for matrix multiplication and cross-entropy, then add autograd, AdamW, schedules, clipping, data packing, and pretraining |
+      | 17-21 | Compare bf16 with fp16, control memory through recomputation, then implement scaling fits, MoE, and Muon updates |
+      | 22-26 | Apply SFT loss only to answer tokens, mix old and new data, then implement a reward model, DPO, and length-bias correction |
+      | 27-30 | Generate rollouts, compute group-relative advantages, correct GRPO normalization and clipping, and connect the full training run |
+
+      The attention code from stage 3 becomes part of the Transformer block in stage 7.
+      Autograd from stage 10 supports pretraining in stage 16 and remains in use for SFT,
+      reward modelling, and reinforcement learning. Each stage extends the same model and
+      training tools rather than starting a new demonstration script.
 
       ## What the platform gives you
 
-      \`nanotorch\` — a strict subset of PyTorch running on WebAssembly. What you write
-      pastes into PyTorch and runs: module structure, operator names, optimiser arguments,
-      the shape of the training loop are all the same.
+      \`nanotorch\` is a small subset of PyTorch that runs on WebAssembly. It keeps the common
+      module structure, operator names, and optimizer interfaces, so the training code is
+      close to its PyTorch equivalent.
 
       \`\`\`python
       import nanotorch as nt
@@ -16468,49 +14077,67 @@ module.exports = {
               return x + self.mlp(self.norm2(x))
       \`\`\`
 
-      Underneath is our own WASM kernel (37KB, f32 with SIMD). **The training is real** —
-      the loss really drops, the gradients are really correct, the weights really update.
+      The runtime uses the included 37KB WASM kernel, with SIMD on the f32 path. It computes
+      the forward pass, backward pass, and parameter updates instead of returning prepared
+      results.
 
-      ## How the gates work
+      The workspace also provides a fixed corpus, a virtual file system, and a replayable
+      training runner. Model and dataset sizes are small enough for a browser, but tensor
+      shapes, masks, gradient accumulation, optimizer state, and sampling are all computed
+      with real numerical operations.
 
-      Three rules, restated in every stage:
+      ## What you must implement
 
-      1. **Structural measurements only.** FLOPs per token, peak activation bytes, gradient
-         check error, KL divergence — counted by the platform at the operator layer, and
-         you cannot route around them. **Wall-clock is never a gate**: a slow machine must
-         not fail you.
-      2. **Every outcome gate is paired with a structural one.** "Loss below 1.45" can be
-         fooled by a wrong implementation that happens to learn; "gradient check ≤ 2e-3"
-         cannot.
-      3. **You are told both numbers.** Not an arbitrary threshold, but "bigram baseline
-         1.90, reference solution 1.23, gate 1.50".
+      You write tokenizer training and encoding, attention and positional encoding,
+      Transformer blocks, backward rules, computation-graph scheduling, optimizer updates,
+      batch packing, training and evaluation loops, and the losses and rollouts used in
+      post-training. Prompts provide signatures, data, and operator interfaces, not a
+      complete model ready to call.
+
+      Some stages deliberately narrow the available interface. Manual backpropagation cannot
+      delegate to autograd, and stage 3 cannot call fused attention. These restrictions are
+      part of acceptance, and the platform records calls to the relevant operators.
+
+      ## How stages are checked
+
+      Every stage has runnable tests and explicit numerical gates in three categories:
+
+      1. Function behaviour: shapes, values, masks, boundary cases, and determinism follow
+         the contract.
+      2. Learning outcomes: loss, accuracy, reward, or KL reaches the threshold in the prompt.
+      3. Implementation structure: the operator layer records FLOPs per token, peak activation
+         memory, gradient error, KL divergence, and calls to selected operators.
+
+      Wall-clock time is not a gate, so machine speed does not change the outcome. Prompts give
+      a baseline, reference result, and passing threshold. One pretraining example uses a bigram
+      baseline of 1.90, a reference result of 1.23, and a gate of 1.50. Falling below the loss
+      threshold does not by itself prove the implementation correct. Gradient and structure
+      checks must pass too.
 
       ## Hard constraints
 
-      1. Seed, corpus, hyperparameters and step count are fixed by the platform — otherwise
-         "loss below X" is passed by multiplying the step count by ten;
-      2. Pure Python loops are two orders of magnitude slower than compiled code, so
-         **your code must be vectorised** — the same rule applies in reality;
-      3. Some stages forbid some built-in operators (stage 3 forbids fused attention). The
-         platform counts them; the count must be zero.
+      1. The platform fixes the random seed, corpus, hyperparameters, and training steps.
+      2. Main computations must use tensor operators. Large pure Python loops are too slow.
+      3. Some stages forbid an already assembled operator. Stage 3, for example, forbids
+         fused attention, and the platform records whether it was called.
 
       ## Non-goals
 
-      - No kernel optimisation or throughput measurement: that is the sibling project
-        \`llm-accelerator\` ("make it fast" there, "make it learn" here);
-      - No distributed training: same, eight stages of it live there;
-      - No multimodality, no agents: off the line of "implement and train a language model".
+      This project does not cover kernel optimization, throughput measurement, or
+      distributed training. Those topics belong to \`llm-accelerator\`. It also does not
+      cover multimodal models or agents.
 
       ## Glossary
 
-      - **token**: the smallest unit the model sees — an integer.
-      - **attention**: every position looks at earlier positions and takes a weighted sum.
-      - **causal mask**: no peeking at the future. Omit it and the loss drops while the
-        model becomes worthless.
-      - **cross-entropy**: distance between the predicted distribution and the real token.
-      - **perplexity**: exp(cross-entropy) — "how many candidates is it hesitating between".
-      - **SFT**: supervised fine-tuning on instruction/response pairs.
-      - **DPO / GRPO**: two preference-optimisation methods — pairwise, and group-relative.
+      - token: the smallest unit processed by the model, represented as an integer.
+      - attention: a weighted sum of information from earlier positions.
+      - causal mask: prevents a position from reading future tokens.
+      - cross-entropy: measures the difference between the prediction and the correct token.
+      - perplexity: the exponential of cross-entropy, often read as the average number of
+        plausible choices.
+      - SFT: supervised fine-tuning on instruction and response pairs.
+      - DPO and GRPO: post-training methods based on pairwise preferences and group-relative
+        advantages.
     `
   ),
   architecture: t(

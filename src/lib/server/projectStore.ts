@@ -7,7 +7,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { EngineeringProject } from '../engineering/types';
+import type { EngineeringProject, ProjectStage } from '../engineering/types';
 import { coerceProject } from '../engineering/validateProject';
 
 const USER_DIR = path.join(os.homedir(), '.offline-leet-practice');
@@ -37,6 +37,16 @@ export interface ProjectSummary {
   source?: 'preset' | 'user';
 }
 
+/** 概述弹窗所需的内容，不包含隐藏用例、起始代码和参考实现。 */
+export interface ProjectOverview
+  extends Pick<
+    EngineeringProject,
+    'id' | 'title' | 'summary' | 'difficulty' | 'domain' | 'tags' | 'estimatedMinutes' | 'brief'
+  > {
+  stages: Array<Pick<ProjectStage, 'id' | 'title' | 'primer'>>;
+  source?: 'preset' | 'user';
+}
+
 export function summarizeProject(project: StoredProject): ProjectSummary {
   return {
     id: project.id,
@@ -47,6 +57,21 @@ export function summarizeProject(project: StoredProject): ProjectSummary {
     tags: project.tags,
     estimatedMinutes: project.estimatedMinutes,
     stageCount: project.stages?.length || 0,
+    source: project.source,
+  };
+}
+
+export function overviewProject(project: StoredProject): ProjectOverview {
+  return {
+    id: project.id,
+    title: project.title,
+    summary: project.summary,
+    difficulty: project.difficulty,
+    domain: project.domain,
+    tags: project.tags,
+    estimatedMinutes: project.estimatedMinutes,
+    brief: project.brief,
+    stages: project.stages.map(({ id, title, primer }) => ({ id, title, primer })),
     source: project.source,
   };
 }

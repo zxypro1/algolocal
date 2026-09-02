@@ -1,8 +1,14 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { deleteUserProject, loadAllProjects, summarizeProject } from '../../src/lib/server/projectStore';
+import {
+  deleteUserProject,
+  loadAllProjects,
+  overviewProject,
+  summarizeProject,
+} from '../../src/lib/server/projectStore';
 
 /**
  * GET    /api/projects        列表用的精简信息（标题、标签、关卡数）
+ * GET    /api/projects?id=xxx&view=overview 概述弹窗用（项目介绍、关卡简介）
  * GET    /api/projects?id=xxx 单个工程的完整内容，工作区用
  * DELETE /api/projects?id=xxx 删除一个用户生成的项目
  *
@@ -16,6 +22,7 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       if (id) {
         const project = loadAllProjects().find((item) => item.id === id);
         if (!project) return res.status(404).json({ error: 'Project not found' });
+        if (req.query.view === 'overview') return res.status(200).json(overviewProject(project));
         return res.status(200).json(project);
       }
       return res.status(200).json(loadAllProjects().map(summarizeProject));

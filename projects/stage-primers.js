@@ -2486,562 +2486,302 @@ const primers = {
   'llm-from-scratch': {
     'byte-bpe': t(
       p(
-        '模型不认识字符，只认识`整数`。把文本变成整数的那一步叫`分词`（tokenization），2026 年绝大多数模型用的是同一个算法：`字节对编码`（BPE，byte pair encoding）。',
-        '为什么从`字节`开始而不是字符：从字符开始的话，你立刻要回答「表里放哪些字符」，中文有几万个、emoji 每年还在加，而漏掉一个就会出现「不认识的字符」。字节只有 256 个，任何文本都能表示，永远不会遇到未登录字符。这正是 Llama 3 与 GPT-4o 都用字节级 BPE 的原因。',
-        '算法本身只有三步：把文本变成一串字节，这是初始词表；数一数哪一对相邻 token 出现得最多，把它合并成一个新 token；重复第二步直到词表到达目标大小。每次合并记下来就得到一张`merge 表`。编码时按这张表的顺序反复合并，解码时按 id 展开回字节再解 UTF-8。',
-        '有一个细节必须提前定死：`平局`。「出现最多的那一对」经常不止一个，不定规则的话同一份语料两次训练会得到不同的词表，而两次都是对的。真实实现都会规定一个确定的顺序，我们的规则是先比频次，频次相同时取第一次出现位置更靠前的那一对。',
-        '最后，这一关会跑得有点慢，纯 Python 的循环比编译语言慢两个数量级。这不是实现问题：HuggingFace 之所以把 `tokenizers` 用 Rust 重写，正是因为这一步在真实语料上要跑几个小时。'
+        '语言模型处理的是整数，不是字符。分词器负责在两者之间转换。字节级 BPE 先把文本编码成 0 到 255 的字节，再反复合并最常见的相邻 token。',
+        '每次合并都会写进 merge 表。编码必须按表中顺序应用合并，解码则倒序展开。出现频次相同的候选时，本项目选择第一次出现位置更靠前的那一对，这样相同语料总会得到相同词表。'
       ),
       p(
-        'A model does not see characters, only `integers`. Turning text into integers is `tokenization`, and in 2026 almost every model uses the same algorithm: `byte pair encoding` (BPE).',
-        'Why start from `bytes` rather than characters: starting from characters forces you to answer "which characters go in the table", there are tens of thousands of Chinese ones and new emoji every year, and anything you miss becomes an unknown character. Bytes are only 256, can represent any text, and never produce an out-of-vocabulary symbol. That is why Llama 3 and GPT-4o both use byte-level BPE.',
-        'The algorithm is three steps: turn the text into bytes, which is the initial vocabulary; count which adjacent pair occurs most often and merge it into a new token; repeat until the vocabulary reaches the target size. Recording every merge gives a `merge table`. Encoding replays that table in order; decoding expands ids back to bytes and decodes UTF-8.',
-        'One detail must be pinned down first: `ties`. "The most frequent pair" is often not unique, and without a rule two runs over the same corpus produce different vocabularies while both are correct. Every real implementation fixes an order; ours is highest count first, and on a tie the pair whose first occurrence is earlier.',
-        'Finally, this stage runs a little slowly, pure Python loops are two orders of magnitude slower than compiled code. That is not a flaw in the setup: HuggingFace rewrote `tokenizers` in Rust precisely because this step takes hours on real corpora.'
+        'A language model processes integers rather than characters. A tokenizer converts between the two. Byte-level BPE starts with bytes from 0 to 255, then repeatedly merges the most frequent adjacent token pair.',
+        'Each merge is recorded in a merge table. Encoding applies that table in order, while decoding expands it in reverse. When pairs have the same count, this project chooses the pair whose first occurrence is earlier, so the same corpus always produces the same vocabulary.'
       )
     ),
     baselines: t(
       p(
-        '后面十几关的门槛都是「loss 要低于某个数」。而一个 loss 是好是坏，`单看它是判断不了的`，取决于词表多大、语料多规整。所以第一件事是把地板测出来。',
-        '三条基线，从笨到不那么笨。`均匀基线`假设每个 token 等概率，交叉熵恰好是 `ln(V)`。`unigram 基线`只看每个 token 出现的频率，不看上下文。`bigram 基线`只看前一个 token，按转移频率给出预测。',
-        'bigram 是最要紧的那一条：它代表「完全不理解语言、只记住了相邻搭配」能达到的水平。一个模型如果打不穿 bigram，说明它的注意力根本没在工作，后面几关的门槛正是建立在这个判断上的。',
-        '`交叉熵`是 `-1/N · Σ log p(实际出现的那个 token)`，单位是 nat。`困惑度`是 `exp(交叉熵)`，直觉是「模型平均在多少个候选里犹豫」；均匀分布的困惑度恰好等于词表大小。',
-        '还有一件必须做的事是`平滑`。留出集里一定会出现训练集没见过的搭配，不平滑的话概率是 0、对数是负无穷，整条基线就废了。这里用加一平滑：`p(b|a) = (count(a,b) + 1) / (count(a) + V)`，注意分母也要加。'
+        'loss 的数值只有和基线比较才有意义。均匀基线给每个 token 相同概率，unigram 只使用单个 token 的频率，bigram 再多看前一个 token。',
+        '交叉熵是正确 token 的负对数概率的平均值，困惑度是 exp(交叉熵)。留出集中会出现训练集没有见过的 bigram，因此需要加一平滑，避免概率变成 0。'
       ),
       p(
-        'Most gates from here on read "loss below X". But a loss on its own `tells you nothing`, it depends on vocabulary size and how regular the corpus is. So the first job is to measure the floor.',
-        'Three baselines, from dumb to less dumb. The `uniform baseline` assumes every token is equally likely, giving cross-entropy exactly `ln(V)`. The `unigram baseline` uses each token frequency and ignores context. The `bigram baseline` looks only at the previous token and predicts from transition counts.',
-        'Bigram is the one that matters: it is what "understands nothing, merely memorised adjacent pairs" achieves. A model that cannot beat bigram has attention that is not working at all, several later gates rest on exactly that judgement.',
-        '`Cross-entropy` is `-1/N · Σ log p(the token that actually occurred)`, measured in nats. `Perplexity` is `exp(cross-entropy)`, read as "how many candidates is the model hesitating between"; a uniform model has perplexity equal to the vocabulary size.',
-        'One more thing is mandatory: `smoothing`. The held-out set will contain pairs the training split never saw, and without smoothing the probability is zero, the logarithm is negative infinity, and the baseline is unusable. We use add-one smoothing: `p(b|a) = (count(a,b) + 1) / (count(a) + V)`, and note that the denominator is smoothed too.'
+        'A loss value becomes meaningful only when compared with a baseline. The uniform baseline gives every token the same probability, unigram uses individual token frequencies, and bigram also conditions on the previous token.',
+        'Cross-entropy is the mean negative log-probability of the correct token. Perplexity is exp(cross-entropy). The held-out set contains bigrams absent from training, so add-one smoothing prevents their probability from becoming zero.'
       )
     ),
     'causal-attention': t(
       p(
-        '注意力回答一个很具体的问题：预测第 t 个位置时，前面每个位置各应该占多大权重。做法是给每个位置算三样东西,`查询`（query）、`键`（key）、`值`（value），都是同一个向量乘不同的权重矩阵得到的。',
-        '第 i 个位置的查询和第 j 个位置的键做点积，得到一个`分数`,它衡量「i 有多想看 j」。分数除以 `sqrt(head_dim)` 之后过 softmax 变成一组和为 1 的权重，再拿这组权重去对所有位置的值做加权求和。这就是全部。',
-        '除以 `sqrt(head_dim)` 不是装饰。点积的方差随维度线性增长，不缩放的话 softmax 很快进入饱和区：一个位置拿到接近 1 的权重、其余接近 0，梯度也就跟着消失。缩放让分数的方差回到 1 附近。',
-        '`因果掩码`是自回归模型的命门：预测第 t 个位置时只许看 `0..t`，看到 `t+1` 就是看到了答案。漏掉它的模型训练 loss 会明显更低、曲线更漂亮，而生成时一个字都对不上,这个错在任何 loss 曲线上都看不出来。',
-        '掩码有两种做法。一种是给被掩的分数加一个很大的负数，softmax 之后它们接近 0；另一种是让它们根本不参与 softmax，于是概率是`硬 0`。我们用后者:因果性要靠「改未来、看现在有没有变」来验，而逐位比较容不下 1e-30 这样的残留。'
+        '注意力先把每个位置映射成 query、key 和 value。query 与 key 的点积得到分数，分数除以 sqrt(head_dim) 后经过 softmax，再用得到的权重对 value 求和。',
+        '因果注意力只允许位置 t 读取 0 到 t。未来位置必须得到精确的 0 概率，否则模型训练时会偷看答案。缩放项则避免点积随维度增大后让 softmax 过早饱和。'
       ),
       p(
-        'Attention answers a specific question: when predicting position t, how much weight should each earlier position get? Each position produces three things,a `query`, a `key` and a `value`, all obtained by multiplying the same vector by different weight matrices.',
-        'The query at position i dotted with the key at position j gives a `score` measuring how much i wants to look at j. Divide the scores by `sqrt(head_dim)`, push them through softmax to get weights summing to 1, and take the weighted sum of all values. That is the whole mechanism.',
-        'The `sqrt(head_dim)` division is not decoration. Dot-product variance grows linearly with dimension, and without scaling softmax saturates quickly: one position takes nearly all the weight, the rest take almost none, and gradients vanish with them. Scaling brings the score variance back near 1.',
-        'The `causal mask` is what makes an autoregressive model work: predicting position t may look at `0..t` only, and seeing `t+1` means seeing the answer. A model that omits it has a visibly lower training loss and a prettier curve while generating nothing usable,and no loss curve reveals this.',
-        'There are two ways to mask. One adds a large negative number to the masked scores so softmax pushes them near zero; the other excludes them from softmax entirely so the probability is a `hard zero`. We use the latter: causality is verified by changing the future and checking that the present is bit-identical, and a bit-exact comparison has no room for a 1e-30 remainder.'
+        'Attention maps each position to a query, key, and value. Query-key dot products produce scores. After division by sqrt(head_dim) and softmax, the resulting weights are used to sum the values.',
+        'Causal attention lets position t read only positions 0 through t. Future positions must receive exactly zero probability, otherwise training can read the answer. The scale factor keeps larger head dimensions from pushing softmax into saturation.'
       )
     ),
     'multi-head-gqa': t(
       p(
-        '一个头只能表达一种「看哪里」的模式。`多头注意力`把维度切成几份，每份各算一套查询/键/值，各自注意各自的东西，最后把结果拼起来再过一个输出投影。切分是免费的:总的计算量和一个大头一样，但表达能力强得多。',
-        '`head_dim = dim // n_head`。八个头、每个 64 维的模型，和一个 512 维的单头，浮点运算量相同。',
-        '`GQA`（分组查询注意力）动的是键和值:让若干个查询头**共用**一套键值。查询头仍然是 8 个，键值头可以只有 2 个,每 4 个查询头共享一份 kv。',
-        '这么做的理由在推理侧。解码时每生成一个 token 都要读一遍整个 `KV cache`，而 cache 的大小正比于键值头数。8 个头减到 2 个，cache 就小 4 倍,在解码这种访存瓶颈的场景里是实打实的加速，而质量几乎没掉。Llama 2 70B 起就是这么配的。',
-        '`n_kv_head = n_head` 时 GQA 退化成普通多头；`n_kv_head = 1` 时叫 MQA（多查询注意力），省得最多但质量掉得也明显。2 到 8 之间是常见的折中。'
+        '多头注意力把模型维度分成多个 head。每个 query head 单独计算注意力，最后再把结果拼回去。不同 head 可以学习不同的匹配方式。',
+        'GQA 保留较多 query head，但让几组 query 共用同一组 key 和 value。这样能减少 K、V 参数和解码时的 KV cache。实现时最容易错的是 head 的 reshape，以及 query head 到 KV head 的分组关系。'
       ),
       p(
-        'A single head can express only one pattern of "where to look". `Multi-head attention` splits the dimension into groups, computes a separate query/key/value set for each, lets each attend independently, then concatenates and applies an output projection. The split is free: total compute matches one large head, while expressiveness is much greater.',
-        '`head_dim = dim // n_head`. Eight heads of 64 dimensions each cost the same floating-point work as one head of 512.',
-        '`GQA` (grouped-query attention) changes the keys and values: several query heads **share** one key/value set. There can still be 8 query heads while only 2 key/value heads exist,every 4 query heads share one KV set.',
-        'The reason lives on the inference side. Decoding reads the entire `KV cache` for every generated token, and the cache scales with the number of key/value heads. Going from 8 to 2 makes it four times smaller,a real speedup in a memory-bound regime, at almost no quality cost. Llama 2 70B onward ships this configuration.',
-        'With `n_kv_head = n_head` GQA degenerates to ordinary multi-head; with `n_kv_head = 1` it is MQA (multi-query attention), which saves the most but visibly costs quality. Values between 2 and 8 are the usual compromise.'
+        'Multi-head attention divides the model dimension into several heads. Each query head computes attention separately, then the outputs are joined. Different heads can learn different matching patterns.',
+        'GQA keeps more query heads while groups of them share one key and value head. This reduces K and V parameters and shrinks the KV cache during decoding. The main implementation risks are reshaping heads and mapping each query head to the correct KV head.'
       )
     ),
-    'rope': t(
+    rope: t(
       p(
-        '注意力本身对顺序一无所知。把一句话的词打乱重排，注意力算出来的结果只是跟着换个位置,它看不出「谁在前谁在后」。所以位置信息必须另外喂进去。',
-        '早期做法是`绝对位置编码`：给第 0 个位置配一个向量、第 1 个配另一个，加到词向量上。它能用，但有个硬伤,训练时只见过 0..1023 这些位置，第 1024 个位置的编码从没见过，模型到那里就废了。',
-        '`RoPE`（旋转位置编码）换了个思路：不加，而是`转`。把每个头的维度两两配对当成复平面上的点，第 p 个位置就整体转 p·θ 的角度。',
-        '妙处在于点积。两个向量各自转过 i·θ 和 j·θ 之后再做点积，结果只跟 `i − j` 有关,转的绝对角度抵消掉了。于是注意力天然看到的是`相对距离`，而不是绝对下标。',
-        '不同的维度对配不同的频率：低维转得快，管相邻几个位置；高维转得慢，管几百上千的尺度。合起来像一把刻度从毫米到米的复合尺子。频率的底数叫 `base`，原论文取 10000,把它调大再微调一小段，就是今天把上下文从几千拉到十万的常规手段。',
-        'RoPE 只转`查询`和`键`,分数是它们算出来的，位置该影响的是「看哪里」。`值`不转：值是取回来的内容，内容不该带着位置跑。'
+        'RoPE 把 query 和 key 的相邻维度两两配对，再按位置旋转。两个位置旋转后的点积只与它们的位置差有关，因此注意力可以使用相对距离。',
+        'value 不参与旋转。旋转表通常预先计算，序列下标和绝对位置也要分开处理，这样带 KV cache 的解码才能继续使用正确角度。'
       ),
       p(
-        'Attention itself knows nothing about order. Shuffle a sentence and its outputs merely move with the tokens,it cannot tell what came first. Position has to be supplied separately.',
-        'The early approach was `absolute position embeddings`: a vector for position 0, another for position 1, added to the token embedding. It works, with one hard limitation,training only ever saw positions 0..1023, so position 1024 has an embedding the model never learned, and everything breaks there.',
-        '`RoPE` (rotary position embedding) takes another route: it rotates instead of adding. Pair up the dimensions of each head as points on the complex plane, and rotate position p by an angle of p·θ.',
-        'The trick is in the dot product. Rotate two vectors by i·θ and j·θ, take their dot product, and the result depends only on `i − j`,the absolute angles cancel. Attention therefore sees `relative distance` rather than absolute indices.',
-        'Different dimension pairs get different frequencies: low dimensions rotate fast and cover neighbours; high dimensions rotate slowly and cover hundreds or thousands of positions. Together they form a ruler graduated from millimetres to metres. The frequency base is called `base`, and the original paper used 10000,enlarging it and fine-tuning briefly is the standard way today to stretch context from thousands to a hundred thousand.',
-        'RoPE rotates only `queries` and `keys`,they produce the scores, and position should shape where to look. `Values` are left alone: a value is the content fetched, and content should not carry a position with it.'
+        'RoPE pairs adjacent query and key dimensions and rotates each pair by an angle based on position. The dot product between two rotated positions depends on their position difference, which gives attention relative-position information.',
+        'Values are not rotated. Rotation tables are normally precomputed, and sequence indices must stay separate from absolute positions so cached decoding continues with the correct angles.'
       )
     ),
     'rmsnorm-prenorm': t(
       p(
-        '深网络训不动的经典原因是激活的量级失控:一层放大一点，二十层之后就是几个数量级。`归一化`是把每层的输入重新拉回一个固定的尺度。',
-        '`LayerNorm` 的做法是减均值、除标准差，再乘一个可学的增益、加一个可学的偏置。`RMSNorm` 砍掉了减均值和偏置，只除均方根 `sqrt(mean(x²))`。省下大约 7% 的开销，效果基本持平,Llama 之后这就是默认。',
-        '一个能拿来验证的推论：给输入整体加一个常数，LayerNorm 的输出不变（均值被减掉了），RMSNorm 的输出会变。写错了哪一个，这个性质会当场告诉你。',
-        '归一化`放在哪`比用哪一种更要紧。`post-norm` 是 `norm(x + f(x))`,归一化挡在残差通路上；`pre-norm` 是 `x + f(norm(x))`,残差是一条干净的恒等通路，梯度可以不经任何缩放地从输出回到输入。原始 Transformer 用的是前者，需要精心设计的 warmup 才训得动；今天基本都是后者。',
-        'pre-norm 的代价是残差流会随深度变大:每层往上加一份，L 层之后大约是 `sqrt(1 + L·σ²)`。把每层输出乘 `1/sqrt(2L)` 就能把它压回与深度无关,GPT-2 起就是这么初始化的，一行代码，但没有它，深模型的前几百步会明显更难走。'
+        'RMSNorm 用 x / sqrt(mean(x²) + eps) 把输入缩放到稳定范围，再乘一个可学习的 weight。它不减均值，也没有 bias，所以给输入整体加常数时，输出会发生变化。',
+        'pre-norm block 使用 x + f(norm(x))。残差支路保持为恒等映射，梯度可以直接通过。层数增加时，残差量级仍会累积，因此本关再用 1 / sqrt(2L) 缩放每层输出。'
       ),
       p(
-        'The classic reason deep networks fail to train is activation scale running away: each layer amplifies a little, and twenty layers later you are orders of magnitude off. `Normalisation` pulls every layer input back to a fixed scale.',
-        '`LayerNorm` subtracts the mean, divides by the standard deviation, then applies a learned gain and a learned bias. `RMSNorm` drops the mean subtraction and the bias, dividing only by the root mean square `sqrt(mean(x²))`. About 7% cheaper at essentially the same quality,the default since Llama.',
-        'One consequence is directly testable: add a constant to the whole input and LayerNorm is unchanged (the mean was subtracted away) while RMSNorm moves. Whichever one you meant to write, this property tells you which one you actually wrote.',
-        '`Where` normalisation sits matters more than which one you pick. `post-norm` is `norm(x + f(x))`,normalisation blocks the residual path. `pre-norm` is `x + f(norm(x))`,the residual stays a clean identity, and gradients travel from output to input without passing through any scaling. The original Transformer used the former and needed a carefully tuned warmup to train at all; today almost everything uses the latter.',
-        'Pre-norm costs you a residual stream that grows with depth: each layer adds a share, so after L layers the scale is about `sqrt(1 + L·σ²)`. Multiplying each layer output by `1/sqrt(2L)` flattens that back to depth-independent,how GPT-2 has initialised from the start. One line, but without it the first few hundred steps of a deep model are visibly harder.'
+        'RMSNorm scales its input with x / sqrt(mean(x²) + eps), then applies a learned weight. It does not subtract the mean and has no bias, so adding a constant to every input value changes the output.',
+        'A pre-norm block uses x + f(norm(x)). The residual path remains an identity map, which gives gradients a direct route. Residual magnitude can still grow with depth, so this stage also scales each layer output by 1 / sqrt(2L).'
       )
     ),
     'swiglu-block': t(
       p(
-        '一层 Transformer 由两块组成：注意力负责`在位置之间搬运信息`，前馈网络负责`对每个位置各自做变换`。注意力是横着看的，前馈是竖着看的,少了任何一块，模型都会明显变弱。',
-        '前馈网络的参数其实是大头。一层里注意力约 `4·dim²`，前馈约 `8·dim²`,三分之二的参数在这块看着最平平无奇的地方。',
-        '传统写法是 `down(gelu(up(x)))`，隐藏维取 `4·dim`。`SwiGLU` 改成三个矩阵：`gate` 和 `up` 各投影一次，`silu(gate) · up` 逐元素相乘，再 `down` 投回去。多出来的那条`门控`路让网络能学「这一维要不要通过」，而不只是「通过多少」。',
-        '三个矩阵要是都按 `4·dim` 开，参数就比原来多 50%。Llama 的解法是把隐藏维乘 `2/3` 再向上取到 8 或 256 的倍数,参数量持平，效果更好。取整不是洁癖：矩阵乘的分块和张量核心按 8/16/32 对齐，一个不对齐的宽度会掉进慢路径。',
-        '整层的形状是两条 pre-norm 残差:`x = x + attn(norm1(x))`，然后 `x = x + mlp(norm2(x))`。把两条支路的出口权重清零，整层就应该是`恒等映射`,这是检查残差接对没接对最利落的办法。',
-        '还有一个值得记住的数：一次前向大约是 `2N` 次浮点运算每 token（N 是参数量），反向约两倍，一个训练步合计约 `6N`。所有的算力预算都从这个式子开始算。'
+        '一个 Transformer block 由注意力支路和前馈支路组成，两条支路都使用 pre-norm 和残差连接。SwiGLU 前馈先计算 silu(xW1) * (xW2)，再用 W3 投回模型维度。',
+        '拼装时要同时检查形状、参数登记和残差顺序。把支路权重清零后，block 应该退化成恒等映射，这是一条比观察 loss 更直接的结构检查。'
       ),
       p(
-        'A Transformer layer has two halves: attention `moves information between positions`, and the feed-forward network `transforms each position on its own`. Attention looks sideways, the FFN looks down,drop either and the model gets visibly weaker.',
-        'Most parameters actually live in the FFN. Per layer, attention costs about `4·dim²` and the feed-forward about `8·dim²`,two thirds of the parameters sit in the least glamorous part.',
-        'The classic form is `down(gelu(up(x)))` with a hidden width of `4·dim`. `SwiGLU` uses three matrices instead: project through `gate` and `up`, multiply `silu(gate) · up` elementwise, then project back with `down`. That extra `gating` path lets the network learn whether a dimension should pass at all, not merely how much.',
-        'Three matrices at `4·dim` each would cost 50% more parameters. Llama scales the width by `2/3` and rounds up to a multiple of 8 or 256,parameter count holds while quality improves. The rounding is not fastidiousness: matmul tiling and tensor cores align to 8/16/32, and an unaligned width falls onto a slow path.',
-        'A whole layer is two pre-norm residuals: `x = x + attn(norm1(x))` then `x = x + mlp(norm2(x))`. Zero the output weights of both branches and the layer must become the `identity`,the cleanest way to check that the residuals are wired correctly.',
-        'One more number worth keeping: a forward pass costs roughly `2N` floating-point operations per token (N being the parameter count), the backward about twice that, so a training step is about `6N`. Every compute budget starts from this formula.'
+        'A Transformer block has an attention branch and a feed-forward branch. Both use pre-norm and residual connections. The SwiGLU feed-forward path computes silu(xW1) * (xW2), then projects back to the model dimension with W3.',
+        'Assembly must preserve shapes, parameter registration, and residual order. When the branch weights are zero, the block should reduce to the identity function. That is a more direct structural check than watching the loss.'
       )
     ),
     'sampling-kvcache': t(
       p(
-        '训练时整段序列一次算完,因果掩码保证第 t 个位置只看得见前面。生成时不行：第 t 个 token 还不存在，必须先采出来才能往下走。这就是`自回归解码`。',
-        '朴素的写法是每生成一个 token 就把整段前缀重新跑一遍。第 t 步是 O(t)，生成 n 个是 `O(n²)`。生成 1000 个 token 要做的工作是生成 100 个的一百倍,这不是慢一点，这是不能用。',
-        '关键的观察是：前面那些位置的`键`和`值`，每一步算出来的都一模一样。既然一样，存下来就好。这就是 `KV cache`,每步只算新来的那一个位置的 k/v，追加进缓存，然后对缓存里全部位置做注意力。每步 O(1)，全程 O(n)。',
-        '代价是显存。缓存的大小是 `2 · 层数 · batch · 序列长 · kv头数 · 头维 · 位宽`,一个 70B 模型在长上下文、大 batch 下，缓存能比权重本身还大。GQA 减 kv 头数、量化减位宽、分页分配减碎片，这三条都是冲着它去的。',
-        '带缓存和不带缓存算的是同一个函数，所以结果应当`逐位相同`。对不上通常是三件事：RoPE 的位置没跟着已生成长度走、因果掩码忘了传偏移、往缓存里追加时 batch 之间串了位。这三个错都不报异常,生成出来的东西照样像句子。',
-        '采样这一侧，`temperature` 缩放 logits（越小越确定），`top-k` 只留概率最高的 k 个，`top-p` 留累计概率到 p 的那些。三者叠加的顺序是先 k 后 p,和 HuggingFace 一致。要能重放，采样必须确定性：同一份 logits 加同一个 seed 必须给同一个 token，概率相同的候选按 id 排序。'
+        '生成时，模型把最后一个位置的 logits 转成概率并采样。temperature 调整分布尖锐程度，top-k 只保留概率最高的 k 个 token，top-p 保留累计概率达到阈值的最小集合。',
+        '没有 KV cache 时，每生成一个 token 都要重算完整前缀。cache 保存已有位置的 key 和 value，下一步只计算新位置。采样还必须使用固定且可重放的随机数，否则无法比较两次运行。'
       ),
       p(
-        'Training computes the whole sequence at once,the causal mask keeps position t from seeing ahead. Generation cannot: token t does not exist yet and must be sampled before anything can follow. That is `autoregressive decoding`.',
-        'The naive approach reruns the entire prefix for each new token. Step t costs O(t), so n tokens cost `O(n²)`. Generating 1000 tokens is a hundred times the work of generating 100,not somewhat slower, but unusable.',
-        'The key observation is that the `keys` and `values` of earlier positions come out identical at every step. Since they are identical, store them. That is the `KV cache`: compute k/v only for the new position, append, and attend over everything the cache holds. O(1) per step, O(n) overall.',
-        'The cost is memory. The cache is `2 · layers · batch · length · kv_heads · head_dim · width`,on a 70B model with long context and large batches it can exceed the weights themselves. GQA cuts head count, quantisation cuts width, and paged allocation cuts fragmentation; all three target this.',
-        'Cached and uncached decoding compute the same function, so results must be `bit-identical`. Mismatches are usually one of three things: RoPE positions not following the generated length, a forgotten offset on the causal mask, or appends that cross batch boundaries. None of them raises an error,the output still reads like language.',
-        'On the sampling side, `temperature` scales the logits (lower is more deterministic), `top-k` keeps the k most probable tokens, and `top-p` keeps the smallest set reaching cumulative probability p. They stack k first, then p,matching HuggingFace. For replay to work sampling must be deterministic: the same logits and seed must give the same token, with ties broken by id.'
+        'During generation, the model turns the final position logits into probabilities and samples a token. Temperature changes distribution sharpness, top-k keeps the k highest-probability tokens, and top-p keeps the smallest set whose cumulative probability reaches the threshold.',
+        'Without a KV cache, every generated token recomputes the full prefix. The cache stores keys and values for existing positions, so the next step computes only the new position. Sampling must also use fixed, replayable randomness so two runs can be compared.'
       )
     ),
     'manual-backward': t(
       p(
-        '前向把输入变成 loss，反向回答一个问题：**每个参数动一点点，loss 会动多少**。这个「多少」就是梯度,有了它，优化器才知道往哪个方向调。',
-        '链式法则说的是：一条计算链上的导数是各段导数的乘积。反向传播就是把这句话组织成一次从后往前的遍历,每个算子只需要知道「拿到我输出的梯度，怎么算出我输入的梯度」，不需要知道自己身处什么模型。这种局部性是整个深度学习框架能存在的原因。',
-        '矩阵乘的反向值得手推一次。`y = x @ W` 里，`dx = dy @ Wᵀ`，`dW = xᵀ @ dy`。不用背,看形状就能定：`dx` 必须和 `x` 同形，能凑出这个形状的乘法只有一种。',
-        '交叉熵的反向是整套里最漂亮的。softmax 和交叉熵单独求导都很啰嗦，合起来之后中间的东西全部消掉，只剩 `(预测概率 − 真实概率) / 样本数`。这也是真实框架总把这两步融在一个算子里的原因,不只是快，还避免了中间那块 `[样本数, 词表大小]` 的显存。',
-        '`ctx` 是前向留给反向的口袋。它存在的理由是显存：**没被存进去的中间结果可以立刻扔掉**。一个只存了必要几样的实现，和一个把什么都留着的实现，在大模型上差的是能不能跑得起来。',
-        '还有一件容易忽略的事：`backward` 收到的 `grad_output` 不一定是 1。从 loss 出发时它是 1，但这个算子放进更深的图里、或者用了梯度累积之后就不是了。忘了乘它的实现，在最简单的场景下一切正常。'
+        '反向传播计算每个输入对 loss 的影响。算子只需要知道自己的局部导数，再用链式法则把上游梯度传给输入。对于 y = x @ W，dx = dy @ Wᵀ，dW = xᵀ @ dy。',
+        'softmax 与交叉熵合并后的 logits 梯度是 (p - onehot) / rows。forward 可以把 backward 需要的张量保存在 ctx 中，但仍要乘传入的 grad_output。梯度检验使用 f64 中心差分，减少相近数相减带来的精度损失。'
       ),
       p(
-        'The forward pass turns inputs into a loss; the backward pass answers one question: **if each parameter moves a little, how much does the loss move**. That "how much" is the gradient, and it is what tells the optimiser which way to go.',
-        'The chain rule says the derivative along a chain is the product of the per-step derivatives. Backpropagation organises that into a single pass from the end backwards,each operator only needs to know how to turn the gradient of its output into the gradient of its input, without knowing what model it sits in. That locality is why deep learning frameworks can exist at all.',
-        'The matmul backward is worth deriving once. For `y = x @ W`, `dx = dy @ Wᵀ` and `dW = xᵀ @ dy`. There is nothing to memorise: shapes decide it, since `dx` must match `x` and only one product produces that shape.',
-        'The cross-entropy backward is the prettiest result here. Differentiating softmax and cross-entropy separately is tedious; together everything in the middle cancels and only `(predicted probability − true probability) / count` remains. That is also why real frameworks fuse the two into one operator,not merely for speed, but to avoid materialising a `[count, vocab]` intermediate.',
-        '`ctx` is the pocket the forward leaves for the backward. It exists for memory: **anything not saved can be discarded immediately**. On a large model the difference between saving only what is needed and saving everything is the difference between running and not.',
-        'One more thing that is easy to miss: the `grad_output` a `backward` receives is not always 1. It is 1 when you start from the loss, but not once the operator sits deeper in a graph or gradient accumulation is in play. An implementation that forgets to multiply it behaves perfectly in the simplest case.'
+        'Backpropagation computes how each input affects the loss. Each operator needs only its local derivative, then applies the chain rule to pass an upstream gradient to its inputs. For y = x @ W, dx = dy @ Wᵀ and dW = xᵀ @ dy.',
+        'Combining softmax with cross-entropy gives a logits gradient of (p - onehot) / rows. Forward may save tensors needed by backward in ctx, but backward must still multiply by the supplied grad_output. The gradient check uses f64 central differences to reduce cancellation error.'
       )
     ),
     'autograd-engine': t(
       p(
-        '每个算子都知道自己那一步的反向之后，还缺一个`调度`：谁先算、谁后算、谁的梯度什么时候算齐。这就是自动微分引擎干的事,十几行代码，但顺序错了不会报错，只会给出偏小的梯度。',
-        '前向的每一步都在偷偷记账：算出来的张量记着「我是谁算出来的」（parents）和「怎么把梯度散回去」（backward 函数）。这张记账本叫`带`（tape），反向就是倒着读它一遍。',
-        '关键约束是：一个节点要往上散梯度之前，它自己的梯度必须**已经攒齐**,所有用到它的下游都得先算完。满足这个约束的顺序就是`拓扑序`，而后序遍历天然给出一个。',
-        '分水岭是`菱形图`:同一个中间结果被两处用到。这时它的梯度是两条路的**和**。一个在遍历时没有去重的实现，会把这个节点的 backward 调两次，梯度正好翻倍,而在一条直链上完全正常。所以「只在链上验过」是不够的。',
-        '播种也别忘：起点的梯度是 1，因为 `d(loss)/d(loss) = 1`。少了这一步整张图的梯度全是 0,不报错，表现和「学习率设成了 0」一模一样。',
-        '你写的这十几行就是 PyTorch autograd 的骨架。真实的那个多了跨线程的依赖计数、`retain_graph`、钩子、以及对不需要梯度的子图的剪枝,骨架是一样的。'
+        '自动微分引擎负责安排各个局部 backward 的执行顺序。前向时，每个结果记录父节点和 backward 函数；反向时，引擎按逆拓扑顺序遍历这张图。',
+        '一个节点可能被多个下游节点使用，所以它的梯度要先累加，再执行一次 backward。菱形计算图专门检查这件事。反向的起点还要先写入 1，因为 d(loss) / d(loss) = 1。'
       ),
       p(
-        'Once every operator knows its own backward step, one thing is still missing: `scheduling`,who goes first, who goes last, and when a gradient is complete. That is what an autograd engine does. It is a dozen lines, and getting the order wrong raises no error; it simply produces gradients that are too small.',
-        'Every forward step quietly keeps a ledger: each resulting tensor records who produced it (its parents) and how to scatter gradients back (its backward function). That ledger is the `tape`, and the backward pass reads it in reverse.',
-        'The key constraint is that a node may only scatter once its own gradient is **complete**,every downstream user must have finished. An order satisfying that is a `topological order`, and a post-order traversal produces one for free.',
-        'The dividing line is the `diamond`: one intermediate used in two places. Its gradient is the **sum** of both paths. A traversal without deduplication calls that node backward twice and doubles the gradient,while behaving perfectly on a straight chain. Testing only on a chain is not enough.',
-        'Do not forget to seed: the root gradient is 1, because `d(loss)/d(loss) = 1`. Without it every gradient in the graph stays zero,no error, and symptoms identical to setting the learning rate to zero.',
-        'The dozen lines you write here are the skeleton of PyTorch autograd. The real one adds cross-thread dependency counting, `retain_graph`, hooks, and pruning of subgraphs that need no gradient,the skeleton is the same.'
+        'An autograd engine schedules local backward functions. During the forward pass, each result records its parents and backward function. During the backward pass, the engine traverses that graph in reverse topological order.',
+        'A node may feed several downstream nodes, so its gradients must be accumulated before its backward function runs once. A diamond-shaped graph checks this behavior. The backward root must also be seeded with 1 because d(loss) / d(loss) = 1.'
       )
     ),
     'model-backward': t(
       p(
-        '零件各自对了，接起来不一定对。整模型这一关要回答的是：**每一个参数都真的在学吗**。',
-        '最常见的一类错不是算错，是`没接上`。一个模块建出来了、前向也用上了，但它没被登记进 `parameters()`,于是优化器根本看不见它。模型跑得通、loss 也降（嵌入表和最后那层在学），中间那些层一次都没被更新过。这个错不报任何异常。',
-        'PyTorch 里防这件事的机制是 `nn.ModuleList` / `nn.ParameterList`：放进普通 `list` 的子模块不会被登记，放进 ModuleList 的才会。这不是风格问题,是「能不能学」的问题。',
-        '查出来的办法很直接：**逐个参数张量看它的梯度是不是全零**。全零只有两种可能,要么没登记，要么那条分支根本没进计算图。两种都该修。',
-        '第二件要查的是`代价`。反向的浮点运算量理论上是前向的两倍:每个矩阵乘在反向里要算两个梯度（对输入的和对权重的），而逐元素的算子反向和前向同阶。明显超过 2 说明反向里重算了前向,梯度完全正确，只是算力白花了一半，而 loss 曲线上一点痕迹都没有。',
-        '这也补全了那个 `6N` 的式子：前向 `2N`、反向 `4N`，一个训练步约 `6N` 次浮点运算每 token。所有的算力预算都从它算起。',
-        '`权重绑定`（输出头复用嵌入表）值得一提：小模型上它省掉的比例不大，但在 vocab 十几万的模型上，不绑定光输出头就是几亿参数。绑定之后要注意 `parameters()` 别把同一份权重数两遍,数两遍的话优化器会更新它两次，等效于那一块的学习率翻倍。'
+        '局部梯度都正确，不代表完整模型已经接好。子模块和参数必须登记到 ModuleList、ParameterList 或对应字段中，优化器才能找到它们。逐个检查参数梯度，可以发现没有接入计算图的模块。',
+        '矩阵乘在反向中分别计算输入梯度和权重梯度，所以模型反向的 FLOPs 约为前向的两倍。权重绑定还会让嵌入表同时接收输入端和输出端的梯度，但参数列表中只能登记一次。'
       ),
       p(
-        'Correct pieces do not guarantee a correct assembly. The whole-model stage answers one question: **is every parameter actually learning**.',
-        'The most common failure is not miscomputation but `not being connected`. A module gets built and used in the forward pass, yet never registered in `parameters()`,so the optimiser cannot see it. The model runs and the loss falls (the embedding and the final layer are learning) while the middle layers are never updated once. Nothing raises.',
-        "PyTorch guards this with `nn.ModuleList` / `nn.ParameterList`: submodules in a plain `list` are not registered, those in a ModuleList are. This is not a style question,it decides whether the thing learns.",
-        'Finding it is direct: **check each parameter tensor for an all-zero gradient**. All-zero has only two causes,either it was never registered, or that branch never entered the graph. Both need fixing.',
-        'The second thing to check is `cost`. The backward should cost about twice the forward: every matmul produces two gradients (one for the input, one for the weights), while elementwise operators cost the same either way. Clearly above 2 means the backward recomputed the forward,gradients stay perfectly correct, half the compute is wasted, and no loss curve shows it.',
-        'This also completes the `6N` rule: `2N` forward, `4N` backward, so one training step is about `6N` floating-point operations per token. Every compute budget starts there.',
-        '`Weight tying` (reusing the embedding as the output head) deserves a mention: on small models it saves little, but at a vocabulary of a hundred thousand an untied head alone is hundreds of millions of parameters. Once tied, make sure `parameters()` does not count the same weights twice,doing so makes the optimiser update them twice, effectively doubling the learning rate there.'
+        'Correct local gradients do not guarantee that the full model is connected. Submodules and parameters must be registered through ModuleList, ParameterList, or module fields so the optimizer can find them. Inspecting every parameter gradient reveals modules missing from the graph.',
+        'A matrix multiplication computes both input and weight gradients during backward, so model backward uses about twice the FLOPs of forward. With tied weights, the embedding receives gradients from both input and output paths, but it must appear only once in the parameter list.'
       )
     ),
-    'adamw': t(
+    adamw: t(
       p(
-        '有了梯度还得决定`怎么走`。最朴素的是梯度下降：往梯度的反方向走一个固定的步长。它在真实模型上几乎没法用,不同参数的梯度量级差着好几个数量级，一个统一的步长要么把大的走飞，要么把小的走不动。',
-        '`Adam` 的做法是给每个参数各自估一个步长：一阶动量 `m` 是梯度的滑动平均（方向），二阶动量 `v` 是梯度平方的滑动平均（量级），更新量是 `m / sqrt(v)`,量级被除掉了，剩下的是方向。于是每个参数都走差不多大的一步。',
-        '两个动量都从 0 起步，所以最开始它们`偏小`。β₁ = 0.9 时第一步的 `m` 只有梯度的十分之一。`偏差修正`把它们各除以 `1 − β^t` 补回来,做对了的话，梯度恒定时第一步的步长恰好是一个学习率。不修正的话大约是 0.45 倍。',
-        '`权重衰减`是把参数往 0 拉一点，防止它们越长越大。Adam 时代的做法是把 `λ·w` 加进梯度里,但那样它也会被 `sqrt(v)` 除一道，结果是梯度大的参数衰减得少、梯度小的衰减得多，和衰减的本意正好相反。',
-        '`AdamW` 里的那个 W 就是把衰减`解耦`出来：不进梯度，直接作用在参数上。一行的改动，效果差别很大,今天所有的 LLM 训练都用 AdamW 而不是 Adam。',
-        '还有一条经验规矩：**一维参数不衰减**。归一化的增益、bias 都属于这一类。增益的作用就是把某一层整体放大或缩小，持续衰减它等于一直往「缩小」推,而 loss 在前几百步看不出任何区别。',
-        '最后一个要记住的数：AdamW 的优化器状态是参数的`两倍`（m 和 v 各一份）。加上参数和梯度，fp32 训练光这三样就是 4 倍参数量的浮点数,一个 7B 模型 112GB。混合精度、ZeRO 分片、8-bit 优化器，都是冲着这个数去的。'
+        'AdamW 为每个参数维护梯度的一阶动量 m 和平方梯度的二阶动量 v。更新使用 m / sqrt(v)，并用 1 - beta^t 修正两个动量从 0 开始造成的偏差。',
+        '权重衰减直接作用在参数上，不先混进梯度，因此不会被 v 再缩放。一维参数通常不做衰减。m、v 和步数都属于优化器状态，训练多步时必须持续保存。'
       ),
       p(
-        'Having gradients still leaves the question of `how to move`. The simplest answer is gradient descent: step a fixed distance opposite the gradient. It barely works on real models,gradient magnitudes differ by orders of magnitude across parameters, so one step size either overshoots the large ones or fails to move the small ones.',
-        '`Adam` estimates a step size per parameter: the first moment `m` is a moving average of the gradient (direction), the second moment `v` a moving average of its square (magnitude), and the update is `m / sqrt(v)`,magnitude divided out, direction left. Every parameter then takes a step of similar size.',
-        'Both moments start at zero, so early on they are `too small`. At β₁ = 0.9 the first `m` is a tenth of the gradient. `Bias correction` divides each by `1 − β^t` to compensate,done right, a constant gradient makes the first step exactly one learning rate. Without it the step is roughly 0.45 of that.',
-        '`Weight decay` pulls parameters slightly toward zero so they do not grow without bound. The Adam-era approach added `λ·w` into the gradient,but then it too gets divided by `sqrt(v)`, so parameters with large gradients decay less and those with small gradients decay more, the opposite of the intent.',
-        'The W in `AdamW` is that decay `decoupled`: it never enters the gradient and applies straight to the parameter. A one-line change with a large effect,every LLM today trains with AdamW rather than Adam.',
-        'One more rule of thumb: **one-dimensional parameters are not decayed**. Normalisation gains and biases fall in this class. A gain exists to scale a layer up or down, and decaying it forever pushes toward "down",with no visible difference in the loss for hundreds of steps.',
-        'A last number worth remembering: AdamW state is `twice` the parameters (one m and one v). Together with parameters and gradients, fp32 training needs four times the parameter count in floats for those three alone,112GB for a 7B model. Mixed precision, ZeRO sharding and 8-bit optimisers all target that number.'
+        'AdamW keeps a first moment m of gradients and a second moment v of squared gradients for every parameter. Updates use m / sqrt(v), with factors of 1 - beta^t correcting the initial bias caused by starting both moments at zero.',
+        'Weight decay acts directly on parameters instead of entering the gradient, so v does not rescale it. One-dimensional parameters are normally excluded from decay. The moments and step count are persistent optimizer state and must survive across training steps.'
       )
     ),
     'lr-schedule': t(
       p(
-        '学习率是训练里最要紧的一个超参。大了会震荡甚至发散，小了走不动,而且最优值在训练的不同阶段并不一样。所以现代训练几乎都不用固定学习率，而是排一条`曲线`。',
-        '曲线的第一段叫 `warmup`,从很小的值线性爬到峰值，通常占总步数的 1% 到 5%。它挡的是开头那几步：模型是随机的，梯度又大又没方向；而 Adam 的二阶动量从 0 起步，前几步对梯度量级的估计很不准。**分母不可靠而分子很大**，一步就能把权重推出很远，后面很久才走得回来。',
-        '第二段是`退火`。最常见的是余弦：从峰值沿半个余弦周期降到一个地板值（通常是峰值的 10%）。为什么要降,后期模型已经在一个不错的位置附近，大步长只会让它在附近来回跳，降下来才能落进去。',
-        '两段要在交界处`接上`。爬升段到顶正好是峰值，退火段从进度 0 起也正好是峰值。接不上的话曲线里有一个台阶,训练不会报错，只是比该有的慢，而没有对照实验的话你根本不会发现。',
-        '退火的地板取 10% 而不是 0：真降到 0 的话最后那些步等于白跑。',
-        '余弦不是唯一的。`WSD`（爬升-恒定-衰减）在 2026 年用得越来越多,它的恒定段可以随时延长，而余弦的形状取决于你一开始声明的总步数，中途想加训就得重排整条曲线。'
+        '训练通常不会使用固定学习率。warmup 先从较小的值线性升到峰值，让随机初始化阶段的更新保持可控；之后的 cosine decay 再把学习率平滑降到地板值。',
+        '两段曲线在交界处必须连续。还要明确当前 step 是更新前还是更新后计数，避免整条曲线错开一位。学习率降到地板而不是 0，可以让最后几步继续更新。'
       ),
       p(
-        'The learning rate is the single most consequential hyperparameter. Too large and training oscillates or diverges; too small and it crawls,and the best value differs across phases of training. So modern training almost never uses a fixed rate; it follows a `curve`.',
-        'The first segment is `warmup`: a linear climb from near zero to the peak, typically 1% to 5% of total steps. It guards the opening steps, where the model is random and gradients are large and directionless, while Adam\'s second moment starts at zero and estimates gradient magnitude badly. **An unreliable denominator under a large numerator** can throw weights far in one step, and recovery takes a long time.',
-        'The second segment is `decay`, most often cosine: from the peak along half a cosine period down to a floor, usually a tenth of the peak. Why decay at all,late in training the model sits near a good region, and large steps only bounce it around; shrinking them lets it settle.',
-        'The two segments must `meet`. The ramp tops out exactly at the peak, and the decay starts from progress zero at exactly the peak. Failing to meet leaves a step in the curve,nothing errors, training is merely slower than it should be, and without a control run you will never notice.',
-        'The decay floor is 10% rather than 0: at a true zero the final steps accomplish nothing.',
-        'Cosine is not the only option. `WSD` (warmup-stable-decay) has grown common through 2026,its plateau can be extended at any time, while a cosine\'s shape depends on the total step count declared up front, so training longer means redrawing the whole curve.'
+        'Training rarely uses a fixed learning rate. Warmup rises linearly from a small value to the peak so updates remain controlled near random initialization. Cosine decay then lowers the rate smoothly to a floor.',
+        'The two pieces must meet continuously. The implementation must also define whether step is counted before or after an update to avoid shifting the whole schedule by one. A nonzero floor keeps the final steps active.'
       )
     ),
     'grad-clip': t(
       p(
-        '训练偶尔会撞上一个特别陡的地方,某一步的梯度比平时大几十倍。照这个梯度走一步，权重被推得很远，模型可能要几百步才恢复，也可能再也回不来。`梯度裁剪`就是给这一步的长度设一个上限。',
-        '做法是算所有梯度拼成的那个大向量的长度（`全局范数`），超过阈值就整体乘一个小于 1 的系数缩回去。**关键是「整体」**,所有梯度乘同一个系数。',
-        '逐张量各裁各的是个常见的错。范数看着都合规，但各层之间的相对大小被抹平了,梯度的`方向`变了，而方向才是梯度携带的信息。（顺带一提，逐张量裁完的总范数是阈值乘以张量数的平方根，根本不是阈值。）',
-        '`clip_grad_norm_` 返回的是**裁剪前**的范数，PyTorch 也是这样。理由是诊断：训练曲线要看的是梯度本来有多大。返回裁剪后的值的话，那条曲线在裁剪生效时恒等于阈值，没有任何信息。',
-        '梯度范数长期贴着阈值不是「裁剪在起作用」，是**学习率偏大或者初始化不对**的信号。这时候该改的是那些，不是把阈值调大,裁剪掩盖问题的能力比解决问题的能力强得多。',
-        '另一类问题是梯度里出现 `inf` 或 `NaN`,低精度训练里这是常事。标准处理是**整步跳过**：参数不更新，优化器状态也不更新。不要清零之后照常 step,那样动量被一个假的零梯度污染，而且优化器的步数还往前走了一格，偏差修正的分母跟着变，后面每一步都受影响。'
+        '全局梯度裁剪先把所有参数梯度看成一个长向量，计算它的 L2 范数。如果范数超过阈值，就给所有梯度乘同一个系数。这样只缩短更新，不改变各层之间的方向。',
+        '函数返回裁剪前的范数，便于诊断。若梯度中出现 inf 或 NaN，这一步应跳过参数更新，也不能推进 AdamW 的状态。逐张量分别裁剪会改变整体方向，不符合本关要求。'
       ),
       p(
-        'Training occasionally hits a very steep region where one step\'s gradient is tens of times the usual size. Following it moves the weights far, and the model may need hundreds of steps to recover, or never recover. `Gradient clipping` puts a ceiling on how far one step can go.',
-        'The method is to measure the length of all gradients taken as one large vector (the `global norm`) and, when it exceeds a threshold, scale everything by a factor below 1. **The word that matters is "everything"**,every gradient gets the same factor.',
-        'Clipping tensor by tensor is a common mistake. Each norm looks compliant, but relative magnitudes between layers are flattened,the gradient\'s `direction` changes, and direction is what a gradient carries. (Incidentally, per-tensor clipping leaves a total norm of the threshold times the square root of the tensor count, not the threshold.)',
-        '`clip_grad_norm_` returns the norm **before** clipping, as PyTorch does. The reason is diagnostic: the training curve should show how large the gradient really was. Returning the post-clip value yields a line identically equal to the threshold whenever clipping fires, carrying no information.',
-        'A gradient norm that sits against the threshold for a long time is not "clipping doing its job"; it signals **a learning rate that is too high or an initialisation that is wrong**. Those are what to fix, not the threshold,clipping is far better at hiding problems than at solving them.',
-        'A different problem is gradients turning into `inf` or `NaN`, routine in low precision. The standard response is to **skip the whole step**: leave parameters and optimiser state untouched. Do not zero them and step anyway,that pollutes momentum with a fake zero gradient, and the optimiser step counter still advances, shifting the bias-correction denominator and affecting every later step.'
+        'Global gradient clipping treats every parameter gradient as one long vector and computes its L2 norm. If the norm exceeds the threshold, every gradient receives the same scale factor. This shortens the update without changing its direction across layers.',
+        'The function returns the norm before clipping for diagnostics. If any gradient is inf or NaN, the parameter update and AdamW state update must both be skipped. Clipping tensors separately changes the global direction and does not meet this stage requirement.'
       )
     ),
     'data-packing': t(
       p(
-        '语料是一篇篇长短不一的文档，模型要的是定长的块。中间这一步叫`打包`,它看起来只是数据处理，实际上藏着一个能悄悄毁掉训练的陷阱。',
-        '最直白的做法是一篇一块，不够就填。它的问题是浪费：文档长度差异越大，填充占的比例越高。真实语料上这个比例经常超过 30%,三分之一的算力、显存、时间花在填充符上。',
-        '真实做法是`拼流`：每篇末尾加一个 `EOS` 标出边界，全部首尾相接，然后按块长切开。填充率接近 0。代价是**一块里可能横跨两三篇文档**。',
-        '陷阱就在这里。因果掩码只管「不许看未来」,它不知道文档边界。拼起来之后，第二篇的位置能看见第一篇的内容，于是模型学到了两篇不相干文档之间的「关系」。',
-        '而且这个错的表现是**训练 loss 变得更低**,上下文里多了信息，预测当然更准。但这些信息在真实使用时根本不存在，所以模型在实际场景里会更差。**指标变好反而是坏消息**，这类错最难发现。',
-        '解法是`块对角掩码`：只有同一篇之间才允许注意。注意它需要的是「区间」而不是「前缀」,「从第 3 列到第 5 列」这种约束，用「每行能看前多少个」是表达不出来的。所以掩码换成`加性`的形式：不许看的位置加一个很大的负数，softmax 之后是硬 0。PyTorch 的 `attn_mask` 就是这个形式。',
-        '顺带一提，块对角掩码让注意力矩阵变得稀疏且规则,FlashAttention 的变长接口能直接跳过不需要算的块。于是它不但更正确，还更快。'
+        '训练样本需要固定长度，但文档长短不同。把文档依次连接并切成 block 可以减少 padding，前提是每篇末尾加入 EOS，并保留文档边界。',
+        '普通因果掩码只阻止读取未来，不能阻止后一篇文档读取前一篇。块对角掩码还要屏蔽跨文档位置。训练集和留出集也必须先按文档切分，再各自打包，避免同一篇内容落到两边。'
       ),
       p(
-        'A corpus is documents of varying length; a model wants fixed-length blocks. The step between is called `packing`,it looks like plain data handling and hides a trap that can quietly ruin training.',
-        'The obvious approach is one document per block, padded. Its problem is waste: the more lengths vary, the higher the padding share. On real corpora it routinely exceeds 30%,a third of the compute, memory and time spent on padding symbols.',
-        'Real practice is to `concatenate`: append an `EOS` to each document to mark the boundary, join everything end to end, then cut at the block length. Padding drops to nearly zero. The cost is that **a block may span two or three documents**.',
-        'That is where the trap sits. A causal mask only enforces "no looking ahead",it knows nothing about document boundaries. After concatenation, positions in the second document can see the first, and the model learns "relationships" between unrelated texts.',
-        'Worse, the symptom is that **training loss improves**,more information in the context makes prediction easier. But that information does not exist at inference, so the model performs worse in practice. **A better metric is the bad news here**, which makes this class of bug the hardest to notice.',
-        'The fix is a `block-diagonal mask`: attention only within a document. Note that it needs an "interval" rather than a "prefix",a constraint like "columns 3 through 5" cannot be written as "how many keys this row may see". So the mask becomes `additive`: add a large negative number at forbidden positions and softmax turns them into hard zeros. PyTorch\'s `attn_mask` uses exactly this form.',
-        'Incidentally, a block-diagonal mask makes the attention matrix sparse and regular,FlashAttention\'s variable-length interface skips the blocks it does not need. So it is not only more correct but faster.'
+        'Training examples need a fixed length, while documents vary. Concatenating documents and cutting the stream into blocks reduces padding, provided that every document ends with EOS and its boundary is retained.',
+        'A normal causal mask blocks the future but still lets a later document read an earlier one. A block-diagonal mask must also block cross-document positions. Training and held-out data must be split by document before packing so one document cannot appear on both sides.'
       )
     ),
     'pretraining-loop': t(
       p(
-        '零件齐了之后，预训练就是把它们串成一条循环：取一批数据、前向、反向、裁剪梯度、按调度取学习率、更新参数,然后重复几万到几百万次。',
-        '这条循环的每一件事前面都单独做过。合起来的难点在于**它们必须同时对**。任何一件错了，loss 曲线看起来都还是在降,少了 warmup 是降得慢一点，掩码错了是降得快一点，评测用错数据集是看起来特别好。**曲线在降**这件事本身几乎不携带信息。',
-        '所以要有`基线`。字符级语料上有三条天然的基线：均匀分布（什么都不学）、unigram（只看字符频率）、bigram（只看前一个字符）。bigram 是「只看一个字符」能做到的极限,打穿它意味着模型真的用上了更长的上下文。这是「注意力在工作」最直接的证据，而不是「loss 在降」。',
-        '还要有`留出集`。训练 loss 只说明模型记住了训练数据，而那本来就是它在做的事。只有在没见过的数据上评，才分得开「学会了」和「背下来了」。',
-        '评测要在 `no_grad` 下跑。不加也能算出正确的数,代价是白白建了一整条反向的带。小模型上感觉不到，真实尺度上意味着要为一次根本不会发生的反向留住每一层的激活，显存差好几倍。',
-        '最后一件值得养成的习惯：真正开跑之前，先做一次`过拟合小批`检查。拿 8 条样本训 200 步，loss 应该掉到接近 0。掉不下去说明模型或反向有 bug。这个检查几秒钟，能省掉很多天。'
+        '预训练循环按固定顺序执行：取 batch、前向、反向、裁剪梯度、读取当前学习率、更新参数。评测使用留出集并放在 no_grad 中，避免建立无用的反向图。',
+        '训练 loss 下降只说明优化器在工作。留出 loss 低于 bigram 基线，才能说明模型使用了比前一个 token 更长的上下文。同一个 seed 的两次运行还应产生相同曲线和权重。'
       ),
       p(
-        'Once the pieces exist, pretraining is stringing them into a loop: take a batch, forward, backward, clip gradients, pick a learning rate from the schedule, update,then repeat tens of thousands to millions of times.',
-        'Every item in that loop had its own stage. The difficulty of the whole is that **they must all be right at once**. Get any one wrong and the loss curve still descends,missing warmup makes it slower, a broken mask makes it faster, the wrong evaluation set makes it look excellent. **The curve descending** carries almost no information by itself.',
-        'So you need `baselines`. A character-level corpus has three natural ones: uniform (nothing learned), unigram (character frequency only), and bigram (previous character only). Bigram is the ceiling for looking at one character,beating it means the model genuinely uses longer context. That is direct evidence attention works, in a way "the loss is falling" never is.',
-        'You also need a `held-out set`. Training loss only shows the model memorised its training data, which is what it was asked to do. Only unseen data separates "learned" from "memorised".',
-        'Evaluation should run under `no_grad`. Without it the numbers are still correct; the cost is an entire backward tape built for nothing. Imperceptible on a small model, at real scale it means keeping every layer\'s activations alive for a backward that never happens,several times the memory.',
-        'One last habit worth forming: before a real run, do an `overfit a tiny batch` check. Train on 8 examples for 200 steps and the loss should approach zero. If it does not, the model or the backward has a bug. The check takes seconds and saves days.'
+        'The pretraining loop follows a fixed order: fetch a batch, run forward, run backward, clip gradients, read the current learning rate, and update parameters. Evaluation uses held-out data under no_grad to avoid building an unused backward graph.',
+        'A falling training loss only shows that optimization is doing something. Held-out loss below the bigram baseline shows that the model uses context beyond the previous token. Two runs with the same seed should also produce the same curve and weights.'
       )
     ),
     'mixed-precision': t(
       p(
-        '浮点数用位数换两样东西：`动态范围`（能表示多大到多小）和`精度`（相邻两个数隔多远）。指数位管范围，尾数位管精度。fp32 是 8 + 23。',
-        '训练时把 32 位降到 16 位，显存和带宽直接减半。问题是砍哪边的位。`fp16` 砍指数留尾数（5 + 10），`bf16` 砍尾数留指数（8 + 7）。',
-        'bf16 的精度**明显更差**,相对分辨率只有 3.9e-3，fp16 是 4.9e-4。但今天训练的默认选择是 bf16。',
-        '原因是训练里真正会出事的是`范围`不是精度。梯度动辄跨十几个数量级：fp16 的上限 65504 很容易撞上（撞上就是 inf），下限那头则悄悄下溢成 0。而 bf16 的指数位和 fp32 一样多,范围一模一样，换句话说**能表示的东西一个不少，只是每个都粗一点**。',
-        '要用 fp16 就得配一整套 `GradScaler`：loss 先乘一个大系数把梯度抬进可表示的区间，反向完再除回去，撞到 inf 就跳过这一步并把系数减半。bf16 什么都不用配。**省掉的复杂度才是它真正的价值。**',
-        '还有一条铁律：`主权重留在 fp32`。低精度只用在算的时候,参数本身、梯度、优化器状态都是 fp32。因为更新量常常在 1e-6 量级，而 bf16 在 1.0 附近的分辨率是 3.9e-3，加上去等于没加。就地把参数量化掉的模型会**静静地停止学习**，loss 曲线变成一条水平线而不报任何错。',
-        '最后：舍入这个操作几乎处处导数为 0，照实求导梯度全是 0。标准做法是`直通估计`,前向照舍，反向当它是恒等。'
+        '浮点格式用指数位决定动态范围，用尾数位决定精度。fp16 的尾数比 bf16 多，但指数位少；bf16 与 fp32 有相同数量的指数位，因此训练时更不容易上溢或下溢。',
+        '低精度只用于计算。参数、梯度和优化器状态仍保留 fp32，否则小更新会在舍入时消失。量化操作在反向中使用直通估计，也就是前向执行舍入，反向把它当作恒等函数。'
       ),
       p(
-        'A floating-point format spends its bits on two things: `dynamic range` (how large and how small) and `precision` (how far apart adjacent values are). Exponent bits buy range, mantissa bits buy precision. fp32 is 8 + 23.',
-        'Dropping from 32 to 16 bits during training halves memory and bandwidth. The question is which half to cut. `fp16` cuts the exponent and keeps mantissa (5 + 10); `bf16` cuts the mantissa and keeps exponent (8 + 7).',
-        'bf16 is **noticeably less precise**,a relative resolution of 3.9e-3 against fp16\'s 4.9e-4. Yet bf16 is the default for training today.',
-        'The reason is that what breaks training is `range`, not precision. Gradients span a dozen orders of magnitude: fp16\'s ceiling of 65504 is easy to hit (and hitting it means inf), while the low end quietly underflows to zero. bf16 has fp32\'s exponent width,identical range. In other words **nothing becomes unrepresentable; everything is just coarser**.',
-        'Using fp16 requires the whole `GradScaler` apparatus: multiply the loss by a large factor to lift gradients into representable territory, divide it back after the backward, and on hitting an inf skip the step and halve the factor. bf16 needs none of it. **The complexity it removes is its real value.**',
-        'One more rule: `master weights stay in fp32`. Low precision applies only to the arithmetic,parameters, gradients and optimiser state remain fp32. Updates often sit around 1e-6 while bf16\'s resolution near 1.0 is 3.9e-3, so adding one changes nothing. A model whose parameters were quantised in place **silently stops learning**, flattening the loss curve without raising anything.',
-        'Finally: rounding has zero derivative almost everywhere, so differentiating it honestly gives zero gradients. The standard answer is the `straight-through estimator`,round in the forward, identity in the backward.'
+        'Floating-point formats use exponent bits for range and mantissa bits for precision. fp16 has more mantissa bits than bf16 but fewer exponent bits. bf16 has the same exponent width as fp32, so training is less likely to overflow or underflow.',
+        'Low precision is used only for computation. Parameters, gradients, and optimizer state remain in fp32, otherwise small updates disappear during rounding. Quantization uses a straight-through estimator: forward rounds values, while backward treats the operation as the identity.'
       )
     ),
     'activation-recompute': t(
       p(
-        '前向算出来的中间量，反向要用,所以它们得一直留到反向。这些`激活`在真实训练里是显存的大头，而且正比于层数：层数翻倍，留着的激活也翻倍。',
-        '`激活重算`换了个做法：前向只留每层的边界，中间量算完就扔；反向走到那一层时重新算一遍。显存降一个量级，代价是多一遍前向的算力。',
-        '这是一笔**明码标价的交易**：一步训练的浮点运算量从大约 6N 涨到 8N（N 是参数量），换来激活显存降到几分之一。在显存不够的档位上，不换就根本训不了,所以它不是「优化」，是「能不能跑」。',
-        '实现上有两个容易错的地方。第一是`边界张量要先分配`：中间量是按标记一把回收的，边界张量落在标记之后的话会被一起放掉，下一层拿到的是已经回收的显存。',
-        '第二是重算那一遍**必须从一个 detach 出来的叶子出发**。不 detach 的话，新算出来的子图会接回原来的图，反向沿同一条路走两遍,**梯度正好翻倍**。而 loss 照样降（等效学习率大了一倍），看起来完全正常。抓它的办法是和不重算的结果**逐位**比：同一串算子、同一个顺序，本来就该一位不差。',
-        '量的时候也有个坑：该看的是`前向结束、反向开始之前`还留着多少，不是整步的峰值。峰值里混着反向自己的临时量，那部分重算不但不省还略高,量错对象的话，一个完全正确的实现会显示成「没省」。',
-        '还有一条完全不同的路：**别产生那么多激活**。FlashAttention 不存那块注意力矩阵，分块地算、边算边累加。省下的不是重算换来的，是根本没生成。两条可以叠加，而后者更划算。'
+        '反向传播需要前向的中间激活，通常会一直保存到 backward。激活重算只保留分段边界，反向走到某一段时重新执行该段前向，因此使用更多计算换取更少内存。',
+        '重算必须从 detach 后的边界张量开始，否则新图会接回原图并把梯度算两次。正确实现应与普通训练得到相同输出和梯度。内存统计要看前向结束时仍然存活的激活，而不是整步峰值。'
       ),
       p(
-        'The forward pass produces intermediates the backward needs, so they stay alive until then. These `activations` dominate memory in real training and scale with depth: double the layers and double what is held.',
-        '`Activation recomputation` takes another route: the forward keeps only each layer\'s boundary and discards the middle; when the backward arrives it computes the layer again. Memory drops by an order of magnitude at the cost of one extra forward.',
-        'It is a **transparently priced trade**: floating-point work per training step rises from about 6N to 8N (N being the parameter count) in exchange for a fraction of the activation memory. At memory-bound scales, not trading means not training,so this is not an optimisation but a precondition.',
-        'Two things are easy to get wrong. First, the `boundary tensor must be allocated first`: intermediates are reclaimed back to a mark, and a boundary tensor allocated after that mark gets freed with them, handing the next layer reclaimed memory.',
-        'Second, the recompute **must start from a detached leaf**. Without detaching, the new subgraph reconnects to the original and the backward walks the same path twice,**gradients double**. The loss still falls (the effective learning rate merely doubled) and nothing looks wrong. The way to catch it is a **bit-exact** comparison against the non-recomputing run: same operators, same order, so the results should match exactly.',
-        'Measurement has its own trap: what matters is how much is held `after the forward and before the backward`, not the peak across the whole step. The peak mixes in the backward\'s own temporaries, which recomputation does not reduce and slightly increases,measure the wrong thing and a perfectly correct implementation reads as "no saving".',
-        'And a wholly different route: **do not produce the activations at all**. FlashAttention never stores the attention matrix, computing in tiles and accumulating as it goes. That saving is not bought back by recomputing; the data is never generated. The two compose, and the latter is the better bargain.'
+        'Backward needs intermediate activations from forward, which are normally kept until backward runs. Activation recomputation stores only segment boundaries and reruns a segment during backward, trading extra computation for lower memory use.',
+        'Recomputation must start from a detached boundary tensor. Otherwise the new graph reconnects to the old one and doubles the gradient. A correct implementation matches normal training outputs and gradients. Memory measurement should count activations still alive after forward, not the peak of the entire step.'
       )
     ),
     'scaling-laws': t(
       p(
-        '训一个大模型很贵，而贵的东西不能靠试。`缩放定律`回答的是：跑几个便宜的小档，能不能预测一个还没跑过的大档。',
-        '经验上，语言模型的 loss 随参数量、数据量、算力都近似遵循`幂律`:`L = B · D^(−β)`。幂律最有用的性质是它取对数之后是一条`直线`,于是「拟合幂律」变成「在 log-log 上拟合一条直线」，闭式最小二乘两行就写完。',
-        '这里有个常见的错：直接在线性坐标上拟直线。幂律在线性坐标下是一条曲线，直线会在两端都偏,而**外推恰恰发生在端点外面**，误差在你最需要它准的地方最大。内插看起来还行，这让这个错更难发现。',
-        '取曲线的时候还要注意`学习率调度`。余弦退火后期 loss 掉得快，那是学习率在降，不是数据在起作用。拿那段去拟合，指数会偏大，外推到更远处偏得更多。数据轴的曲线要在恒定学习率下取。',
-        'Chinchilla（2022）的结论是参数量和数据量要一起涨：给定算力预算 `C ≈ 6ND`，最优配比大约是 20 token / 参数。在那之前的模型普遍训得太少。',
-        '而 2026 年实践中的配比远高于 20,Llama 3 的 8B 训了 15T token。原因是**推理成本正比于参数量而不是数据量**：训练一次、推理无数次，所以人们愿意在训练上超额投入来换更小的模型。Chinchilla 最优的是「这一次训练的 loss」，不是「部署之后的总成本」。',
-        '最后：外推要谨慎。缩放律在拟合区间附近很准，跨几个数量级之后会遇到没被建模的东西,数据枯竭、架构在某个尺度上的行为变化、以及那个绕不开的不可约损失。'
+        '缩放定律用几个小实验预测更大的训练。若 loss 与数据量近似满足 L = B * D^(-beta)，两边取对数后会变成直线，可以在 log-log 坐标上用最小二乘拟合。',
+        '拟合点要来自相同训练设置，并避开学习率退火造成的额外下降。在线性坐标上拟直线会得到错误外推。预测越远，不可约损失、数据质量和架构变化带来的误差也越大。'
       ),
       p(
-        'Training a large model is expensive, and expensive things cannot be found by trial. `Scaling laws` answer whether a few cheap small runs can predict a large one nobody has done.',
-        'Empirically, language model loss follows approximate `power laws` in parameters, data and compute: `L = B · D^(−β)`. The most useful property of a power law is that taking logs turns it into a `straight line`,so "fit a power law" becomes "fit a line in log-log", and closed-form least squares is two lines of code.',
-        'A common mistake is fitting a line in linear coordinates. A power law is curved there, so a straight fit misses at both ends,and **extrapolation happens precisely beyond those ends**, putting the largest error exactly where accuracy matters most. Interpolation still looks fine, which makes it harder to notice.',
-        'Also mind the `learning-rate schedule` when taking the curve. Loss falls quickly late in a cosine decay because the rate is dropping, not because data is helping. Fitting that segment inflates the exponent, and the further you extrapolate the worse it gets. Data-axis curves must be measured at a constant learning rate.',
-        'Chinchilla (2022) concluded that parameters and data should grow together: for a compute budget `C ≈ 6ND` the optimum is around 20 tokens per parameter. Models before it were generally undertrained.',
-        'By 2026, practice pushes that ratio far past 20,Llama 3\'s 8B trained on 15T tokens. The reason is that **inference cost scales with parameters, not data**: you train once and serve forever, so overspending on training buys a smaller model. Chinchilla optimises one training run\'s loss, not total cost after deployment.',
-        'Finally, extrapolate carefully. Scaling laws are accurate near the fitted range and meet unmodelled effects several orders of magnitude out,data exhaustion, architecture behaving differently at scale, and the irreducible loss that no amount of data removes.'
+        'Scaling laws use several small experiments to predict a larger training run. If loss approximately follows L = B * D^(-beta), taking logarithms turns it into a line that can be fitted with least squares in log-log coordinates.',
+        'Fit points must come from the same training setup and avoid extra loss reduction caused by learning-rate decay. Fitting a straight line in linear coordinates gives the wrong extrapolation. Predictions become less reliable farther from the measured range because of irreducible loss, data quality, and architecture changes.'
       )
     ),
-    'moe': t(
+    moe: t(
       p(
-        '稠密模型里每个 token 都要过一遍全部参数。`MoE`（混合专家）把一个大前馈换成很多个小的，每个 token 只走其中几个,**参数量涨了几倍，而每个 token 的算力不变**。DeepSeek-V3 是总参数 671B、激活 37B，18 倍的稀疏度。',
-        '决定谁去哪的是`路由器`:一个小线性层，把每个 token 映射到每个专家的分数，softmax 之后取最大的几个。权重要在这几个里**重新归一化**,不归一化的话，这一层的输出量级会跟着路由器的置信度飘。',
-        '`容量`是这里最反直觉的一件事。每个专家有一个接收上限，超出的 token 会被**丢掉**（那个 token 就少走一个专家）。为什么不干脆不设上限？因为在真实的分布式实现里，每个专家在一张卡上，而**集合通信的缓冲区必须是定长的**。容量就是那个缓冲区。这不是算法上的选择，是工程约束,而它反过来塑造了算法。',
-        '不加干预的话路由器会`塌`：所有 token 都去同一个专家，其余的永远学不到东西。经典解法是加一个`负载均衡损失`,专家越集中它越大。它可导的只有「路由器给各专家的平均概率」那一半，「实际分了多少」是数出来的、不可导，这个不对称是有意的。',
-        '2026 年 DeepSeek-V3 换掉了辅助损失：它在和主损失抢梯度，逼着路由器为了均衡做出不利于建模的选择。新做法是给每个专家的路由分数加一个**只调不求导**的偏置，谁超载就把谁调低。均衡从此不打扰主损失。',
-        '还有一条工程上的：**MoE 的瓶颈是通信不是计算**。专家分布在不同卡上，每层要做两次 all-to-all。容量因子、专家并行的拓扑、专门的通信库，都是围着这件事转的。'
+        'MoE 用多个前馈专家替换一个稠密前馈层。路由器给每个 token 选择少量专家，因此总参数可以增加，而每个 token 实际经过的计算量保持接近不变。',
+        '选中的路由权重要重新归一化。每个专家还有容量上限，超出的 token 会被丢弃。为了避免所有 token 挤到少数专家，需要负载均衡损失；实际分配数量只用于计量，路由概率负责提供梯度。'
       ),
       p(
-        'In a dense model every token passes through all parameters. `MoE` (mixture of experts) replaces one large feed-forward with many small ones and routes each token through a few,**parameters multiply while per-token compute stays the same**. DeepSeek-V3 has 671B total parameters with 37B active, an 18x sparsity.',
-        'A `router` decides who goes where: a small linear layer scoring each expert per token, softmax, then take the top few. Weights must be **renormalised within those few**,otherwise this layer\'s output magnitude drifts with router confidence.',
-        '`Capacity` is the least intuitive part. Each expert accepts a limited number of tokens and the rest are **dropped** (that token visits one fewer expert). Why cap at all? Because in a real distributed implementation each expert lives on one device and **collective-communication buffers must be fixed size**. Capacity is that buffer. It is an engineering constraint rather than an algorithmic choice,and it then shapes the algorithm.',
-        'Left alone the router `collapses`: every token goes to one expert and the others never learn. The classic remedy is a `load-balancing loss` that grows as routing concentrates. Only the "mean router probability per expert" half is differentiable; the "how many actually went there" half is counted and carries no gradient, and that asymmetry is deliberate.',
-        'In 2026 DeepSeek-V3 dropped the auxiliary loss: it competes with the main objective, pushing the router toward choices that balance load at the expense of modelling. The replacement adds a **tunable, gradient-free** bias to each expert\'s routing score, lowered whenever that expert is overloaded. Balancing then never disturbs the main loss.',
-        'One more engineering note: **MoE is bottlenecked by communication, not compute**. Experts sit on different devices and every layer performs two all-to-all exchanges. Capacity factors, expert-parallel topologies and dedicated communication libraries all revolve around this.'
+        'MoE replaces one dense feed-forward layer with several expert networks. A router sends each token to only a few experts, so total parameters can grow while compute per token stays roughly constant.',
+        'Selected routing weights must be normalized again. Each expert also has a capacity limit, and excess tokens are dropped. A load-balancing loss prevents most tokens from collapsing onto a few experts. Actual assignment counts are measurements, while routing probabilities provide gradients.'
       )
     ),
-    'muon': t(
+    muon: t(
       p(
-        'AdamW 把每个参数单独看：各自估一个步长，彼此无关。这个假设对一维参数成立，但一个权重`矩阵`不是一堆无关的数,它有奇异值谱，而梯度矩阵往往被少数几个方向主导。',
-        '沿着这样的梯度走一步，等于在少数几个方向上走得很远、其余方向几乎没动。`Muon` 的想法是：把动量矩阵`正交化`之后再更新,让所有方向的步长拉平。',
-        '真正的正交化要做 SVD（`G = UΣVᵀ` 之后取 `UVᵀ`），而 SVD 在 GPU 上慢、也不好并行。Muon 用一个只含矩阵乘的`五次迭代`（Newton,Schulz）逼近它,矩阵乘是 GPU 最擅长的事。',
-        '有个反直觉的地方：**那几个系数不是为了收敛到精确解调的**，而是为了「五步之内把奇异值挤进大致 0.7 到 1.3 之间」。所以迭代完 `XᵀX` 离单位阵还差不少,这是正常的，不是没收敛。Muon 需要的只是各方向步长差不多，不需要精确正交。',
-        '`只有矩阵参数走 Muon`。一维参数根本没有奇异值谱这回事；嵌入表虽然是二维的，但它的每一行是一个独立的 token，行与行之间没有那种矩阵结构。这两类继续走 Adam。「一个优化器管所有参数」本来就不是必须的,按参数的结构分组，是 Muon 带来的更普遍的一个想法。',
-        '实际收益有两面。**省显存**：AdamW 每个参数存两块状态，Muon 只存一块动量，而矩阵占模型的绝大多数。**花算力**：每步每个矩阵要做十几次矩阵乘,在大模型上占比不大，在小模型上很明显，Muon 靠更少的步数赢回来。',
-        'Muon 是 2024 年底出来的，2026 年已经在生产里：Kimi K2 与 GLM-5 都在用。它也带来了新问题,训练更快的同时更容易把注意力的 logits 推大，于是有了配套的 QK 裁剪。'
+        'AdamW 独立缩放每个参数。Muon 则针对二维权重矩阵，把动量矩阵的奇异值拉到相近范围，再用它更新参数，使不同方向的步长更均衡。',
+        '本关用五步 Newton-Schulz 迭代近似这个变换，只需要矩阵乘，不要求得到精确正交矩阵。矩阵参数走 Muon，一维参数和嵌入表继续走 AdamW。高矩阵和宽矩阵要沿较短的一边计算中间矩阵。'
       ),
       p(
-        'AdamW treats each parameter separately, estimating a step size independently of the rest. That assumption holds for 1-D parameters, but a weight `matrix` is not a pile of unrelated numbers,it has a singular value spectrum, and gradient matrices are usually dominated by a few directions.',
-        'Stepping along such a gradient means moving far in a few directions and barely at all in the others. `Muon`\'s idea is to `orthogonalise` the momentum matrix before updating,levelling the step size across directions.',
-        'True orthogonalisation needs an SVD (`G = UΣVᵀ`, then `UVᵀ`), and SVD is slow on GPUs and hard to parallelise. Muon approximates it with a `quintic iteration` (Newton-Schulz) made only of matrix multiplies,which is what GPUs do best.',
-        'One counter-intuitive detail: **the coefficients are not tuned to converge to the exact answer**, but to squeeze singular values into roughly 0.7 to 1.3 within five steps. So `XᵀX` remains noticeably away from the identity afterwards,that is correct, not unconverged. Muon needs comparable steps across directions, not exact orthogonality.',
-        '`Only matrix parameters use Muon`. A 1-D parameter has no singular value spectrum at all; an embedding table is two-dimensional but each row is an independent token, carrying none of that matrix structure. Both stay on Adam. That one optimiser need not cover every parameter is itself the more general idea Muon contributed,group parameters by their structure.',
-        'The practical payoff has two sides. **Memory**: AdamW stores two state tensors per parameter while Muon keeps one momentum, and matrices are the vast majority of a model. **Compute**: each step runs a dozen-odd matmuls per matrix,minor at large scale, conspicuous at small scale, where Muon wins back by needing fewer steps.',
-        'Muon appeared in late 2024 and is in production by 2026: Kimi K2 and GLM-5 both use it. It also brought a new problem,training faster while pushing attention logits upward, which is why it ships alongside QK clipping.'
+        'AdamW scales each parameter independently. For two-dimensional weight matrices, Muon instead reshapes the momentum spectrum before updating, making step sizes more even across matrix directions.',
+        'This stage approximates that transform with five Newton-Schulz iterations using only matrix multiplications. It does not require an exactly orthogonal result. Matrix parameters use Muon, while one-dimensional parameters and embeddings remain on AdamW. Tall and wide matrices form the intermediate product along their shorter side.'
       )
     ),
-    'sft': t(
+    sft: t(
       p(
-        '预训练教会模型「下一个 token 是什么」。它读了很多文本，学会了语言的统计规律,但它不知道「被问了一个问题就该回答」。`监督微调`（SFT）补的就是这一课。',
-        '技术上 SFT 和预训练是同一件事:还是下一个 token 预测，还是交叉熵。区别只有一个,**loss 只算在回答上，不算在问题上**。',
-        '为什么？在问题上算 loss，等于让模型学习「怎么生成问题」。它照样会收敛，曲线一样好看甚至更低（问题比回答好预测得多），但你要的能力被稀释了。真实对话数据里 prompt 常常比 completion 长好几倍,于是绝大部分梯度花在学「用户会怎么说话」上。',
-        '实现上就是一个 `loss mask`：一个和序列等长的 0/1 数组，标出哪些位置参与 loss。**边界差一位是最常见的错**,回答的第一个 token 是由「最后一个 prompt token」那个位置预测出来的，所以 mask 要从那里开始。差一位的模型学不到「看到问号该开口」，而 loss 曲线完全正常。',
-        '还有一个容易忽略的边界：`padding` 位置也要屏蔽。它们不是内容，让模型去预测 padding 等于教它一个不存在的规律。',
-        '`chat template` 是把这件事标准化的东西,它规定标记怎么写，于是多轮对话的 mask 可以从标记里算出来，而不是手工数位置。**训练和推理用的模板必须一致**，这是部署时最常见的坑之一：对不上的话模型表现会莫名其妙差一截，而没有任何报错。',
-        '2026 年 SFT 本身的地位在下降,越来越多的流程是「很少的 SFT 冷启动 + 大量的 RL」。因为 SFT 只能模仿数据里已有的东西，RL 能找到数据里没有的解法。但那一小步冷启动仍然必须：没有它，RL 一开始采不出任何格式正确的样本，奖励恒为 0，梯度也就恒为 0。'
+        'SFT 仍然使用下一个 token 的交叉熵，但只让回答 token 参与 loss。prompt 提供条件，不是需要模型复述的目标。padding 位置同样不能参与。',
+        'mask 的起点容易错一位：回答的第一个 token 是由它前一个位置预测的，因此要按 shifted targets 的位置来标记。训练和生成还必须使用相同的对话模板。'
       ),
       p(
-        'Pretraining teaches a model what the next token is. It reads a great deal of text and learns the statistics of language,but it does not know that being asked a question means answering it. `Supervised fine-tuning` (SFT) supplies that lesson.',
-        'Technically SFT is the same operation as pretraining: next-token prediction with cross-entropy. Exactly one thing differs,**the loss counts only on the answer, never on the question**.',
-        'Why? Computing loss on the question teaches the model to generate questions. It still converges, the curve looks as good or better (questions are far more predictable than answers), and the capability you wanted has been diluted. In real dialogue data the prompt is often several times longer than the completion,so most of the gradient goes into learning how users talk.',
-        'The implementation is a `loss mask`: a 0/1 array the length of the sequence marking which positions count. **Off-by-one at the boundary is the most common mistake**,the answer\'s first token is predicted at the position of the last prompt token, so that is where the mask starts. One position off and the model never learns that a question mark is its cue to speak, while the loss curve looks perfectly normal.',
-        'One more boundary is easy to miss: `padding` positions must be masked too. They are not content, and asking the model to predict padding teaches it a pattern that does not exist.',
-        'A `chat template` standardises all this: it fixes how markers are written so a multi-turn mask can be derived from markers rather than counted by hand. **Training and serving must use the same template**, one of the most common deployment traps: a mismatch makes the model inexplicably worse with nothing raising an error.',
-        'SFT\'s own standing has declined through 2026,more pipelines run a little SFT cold start plus a lot of RL, because SFT can only imitate what the data contains while RL can find what it does not. That small cold start stays necessary: without it RL samples nothing correctly formatted, every reward is zero, and so is every gradient.'
+        'SFT still uses next-token cross-entropy, but only answer tokens contribute to the loss. The prompt provides context rather than a target to reproduce. Padding positions must also be excluded.',
+        'The mask start is easy to shift by one position. The first answer token is predicted from the position before it, so the mask must follow shifted target positions. Training and generation must also use the same chat template.'
       )
     ),
     'data-mixture': t(
       p(
-        '教模型一个新任务最直接的做法是拿新任务的数据继续训。它会学会新的,同时把旧的忘掉。这个现象叫`灾难性遗忘`，而为了对齐付出的那部分能力损失，业内叫`对齐税`。',
-        '在小模型上这个现象非常干净：拿减法数据微调一个会加法的模型，减法学会了，加法直接塌掉。真实尺度上它一样存在，只是更隐蔽,不是完全不会了，而是某几个评测集悄悄掉几个点。而没人会在做完对齐之后把所有旧评测重跑一遍，除非流程里写死了要跑。',
-        '解法是`数据配比`：新数据里掺一部分旧数据。掺多少是个要量着调的数,掺太少还是会忘，掺太多新任务学不动。',
-        '这件事有个很重要的结构：**两个目标必须同时卡**。只卡「学会新的」，最省事的做法是全用新数据；只卡「别忘旧的」，最省事的做法是一条新数据都不加。**只有两条一起卡，配比这个问题才存在。**',
-        '混数据本身也有坑。`比例要准`,「每 k 条插一条」在比例不是 1/k 的时候会偏，而偏出来的配比你不会知道，除非量一遍。`顺序要确定`,同一个配置跑两遍必须给同一个结果，否则「配比 A 比 B 好」这个结论立不住：你不知道差异来自配比还是来自这一次的采样。',
-        '真实流程里还有两个常用手段。`回放`：后训练里掺 5% 到 20% 的预训练数据专门防遗忘，便宜且有效。`模型融合`：把擅长不同能力的两版权重按比例平均起来,听着不该有用，实际上很有用。',
-        '最后一句：**对齐税不是必然的**。它很多时候是「配比没调好」的症状，而不是「学新东西必须付出的代价」。区分这两者的唯一办法是量。'
+        '只用新任务继续训练，模型可能学会新能力却忘掉旧能力。数据配比把一部分旧任务样本混回 SFT batch，用新任务准确率和旧任务保留率一起选择比例。',
+        '混合过程必须准确且可重放。只检查新任务会偏向全用新数据，只检查旧任务则会偏向完全不训练。两项同时检查，才能判断配比是否合适。'
       ),
       p(
-        'The direct way to teach a model a new task is to keep training on that task\'s data. It learns the new one,and forgets the old. That phenomenon is `catastrophic forgetting`, and the capability lost in exchange for alignment is called the `alignment tax`.',
-        'On a small model the effect is very clean: fine-tune an addition-capable model on subtraction and subtraction is learned while addition collapses. It exists at real scale too, only more subtly,not "cannot do it any more" but a few evaluation suites quietly losing points. And nobody reruns every old evaluation after alignment unless the pipeline mandates it.',
-        'The remedy is `data mixture`: blend some old data into the new. How much is a number you tune against measurements,too little and it still forgets, too much and the new task does not stick.',
-        'This has an important structure: **both objectives must be gated at once**. Gate only "learn the new" and the cheapest move is all-new data; gate only "keep the old" and the cheapest move is adding none. **Only requiring both makes the mixture question exist at all.**',
-        'Mixing has its own traps. `Proportions must be accurate`,"insert one every k" drifts whenever the ratio is not 1/k, and you will not know unless you measure. `Order must be deterministic`,the same configuration must give the same result twice, or "ratio A beats B" cannot be concluded: the difference might be the ratio or might be this run\'s sampling.',
-        'Real pipelines add two more tools. `Replay`: mix 5% to 20% pretraining data into post-training specifically to prevent forgetting, cheap and effective. `Model merging`: average the weights of two versions strong in different capabilities,it sounds like it should not work and works well.',
-        'One last point: **the alignment tax is not inevitable**. It is often a symptom of an untuned mixture rather than a price that must be paid. The only way to tell is to measure.'
+        'Continuing training only on a new task can teach the new skill while erasing an old one. A data mixture returns some old-task examples to each SFT batch, and the ratio is chosen by measuring both new-task accuracy and old-task retention.',
+        'Mixing must be accurate and replayable. Checking only the new task favors using only new data, while checking only the old task favors doing no new training. Both measurements are needed to judge the ratio.'
       )
     ),
     'reward-model': t(
       p(
-        '强化学习需要一个`奖励`。可对于「这个回答好不好」，人类标不出「值 7.3 分」,但标得出「A 比 B 好」。`奖励模型`要解决的就是这个错配：从成对的偏好里学出一个标量分数。',
-        '做法是给语言模型接一个`标量头`：每个位置输出一个数，整条序列取一个。然后用 `Bradley-Terry` 模型把「A 胜过 B」写成两者分数之差过 sigmoid,`P(A ≻ B) = σ(r_A − r_B)`，损失是它的负对数。',
-        '有个漂亮的等价：`−log σ(Δ)` 正好就是**两类 softmax 的交叉熵**。把两个奖励当成两个 logit、正确类是 0，算出来一模一样。所以成对损失不需要单独实现 sigmoid,它就是分类。',
-        '分数要从`最后一个内容 token` 上读，不是最后一个位置。读最后一个位置读到的是 padding，不同长度的序列偏移不同，于是分数偷偷变成了长度的函数。这个错在准确率上未必看得出来,因为长度和对错本来就常常相关，模型顺着捷径走，而你以为它学会了判断。',
-        '`排序对了不等于校准好了`。把所有分数差乘十，排序一模一样、成对准确率一分不掉，而模型会说每一对都是 99.99%。RLHF 里奖励是被当成数值用的（要减基线、要算优势），过度自信的奖励模型会让策略往一个方向冲过头。',
-        '奖励模型是 RLHF 最脆的一环。它会被`钻空子`：策略找到「奖励模型给高分但人类不喜欢」的输出,最经典的是把答案越写越长。它也会`分布漂移`：RL 把策略推离奖励模型训练时见过的分布，越往后打分越不可信。',
-        '所以 2026 年最重要的转向是 `RLVR`,可验证的任务（数学、代码）直接用规则判对错，根本不训奖励模型。没有奖励模型，就没有被钻空子的问题。'
+        '奖励模型把成对偏好转成一个可训练的标量分数。语言模型接一个标量头，对 chosen 和 rejected 分别打分，再用 P(chosen) = sigmoid(r_chosen - r_rejected) 计算损失。',
+        '分数要从最后一个内容 token 读取，不能读 padding。成对排序准确率只检查顺序，校准误差还要检查分数是否过度自信。奖励模型可能利用长度等捷径，因此需要单独监控这些混淆。'
       ),
       p(
-        'Reinforcement learning needs a `reward`. But for "is this answer good", people cannot label "worth 7.3",they can label "A is better than B". A `reward model` bridges that gap: learn a scalar score from pairwise preferences.',
-        'The construction adds a `scalar head` to a language model: one number per position, one taken per sequence. The `Bradley-Terry` model then writes "A beats B" as the sigmoid of their score difference,`P(A ≻ B) = σ(r_A − r_B)`, with the loss its negative log.',
-        'There is a neat equivalence: `−log σ(Δ)` is exactly the **cross-entropy of a two-class softmax**. Treat the two rewards as two logits with class 0 correct and the numbers match. So a pairwise loss needs no separate sigmoid,it is classification.',
-        'The score is read at the `last content token`, not the last position. The last position holds padding, sequences of different lengths land at different offsets, and the score quietly becomes a function of length. Accuracy may not reveal it,length and correctness often correlate, so the model takes the shortcut while you believe it learned to judge.',
-        '`Correct ranking does not imply good calibration`. Multiply every score difference by ten: identical ranking, identical pairwise accuracy, and the model now claims 99.99% on every pair. RLHF uses reward as a number (baselines subtracted, advantages computed), and an overconfident reward model pushes the policy too far.',
-        'The reward model is RLHF\'s most fragile link. It gets `hacked`: the policy finds outputs it scores highly and humans dislike,classically by writing longer and longer answers. It also suffers `distribution drift`: RL pushes the policy away from what the reward model was trained on, and its scores grow less trustworthy the further it goes.',
-        'Hence the most important shift of 2026, `RLVR`: verifiable tasks (mathematics, code) judge correctness by rule and train no reward model at all. No reward model, no reward hacking.'
+        'A reward model turns pairwise preferences into a trainable scalar score. A scalar head scores the chosen and rejected responses, then the loss uses P(chosen) = sigmoid(r_chosen - r_rejected).',
+        'The score must come from the final content token rather than padding. Pairwise accuracy checks ordering, while calibration error checks whether scores are overconfident. Reward models can exploit shortcuts such as length, so those confounders need separate monitoring.'
       )
     ),
-    'dpo': t(
+    dpo: t(
       p(
-        'RLHF 那条路要三个模型（策略、奖励模型、参考）加一整套 PPO，工程量很大。`DPO` 的发现是：如果奖励模型是 Bradley-Terry 的，那么最优策略和奖励之间有一个闭式关系,于是奖励模型可以被消掉，偏好数据可以直接拿来训策略。',
-        '损失长这样：`−log σ( β·(Δ_w − Δ_l) )`，其中 `Δ = log π − log π_ref`。那个 `β·Δ` 就是 DPO 的`隐式奖励`,它不是训出来的，是推出来的。而 `−log σ(·)` 又是那个两类 softmax，所以 DPO 和奖励模型在形状上是同一个东西，区别只在分数从哪来。',
-        '`参考模型是冻结的`。它在损失里只作为基准出现，算它的 log-prob 要在 no_grad 下。忘了这一点的话，梯度会同时推策略和参考往相反方向走,`Δ_w − Δ_l` 涨得飞快，loss 掉得特别漂亮，而模型什么也没学到。**loss 掉得比预期快**在 DPO 里几乎总是这个错。',
-        '参考项本身是一个隐式的 `KL` 约束。没有它的话，模型可以靠把所有概率都压低来拉开差距,赢是赢了，而语言模型本身垮掉。`β` 控制允许离参考多远：越小越放得开。',
-        '还有一个容易写错又很难发现的地方：序列的 log-prob 是**和**不是平均。改成平均的话，平均值不随长度增长，长答案被系统性地偏袒,这是 DPO 让答案越写越长的直接来源之一。而它看起来更合理（「归一化一下总没错吧」），所有常规的门槛也都过得去。',
-        'DPO 之后有一大批变体，各自动同一个式子的不同部分：`IPO` 换掉 σ 防过拟合，`KTO` 只要单条好坏标注不要成对数据，`SimPO` 干脆去掉参考模型。',
-        '而 2026 年更大的变化是`在线`：DPO 是离线的（偏好事先标好），在线的偏好优化边训边采样边标注，效果明显更好，代价是要一整套 rollout 基础设施。'
+        'DPO 直接用偏好对训练策略，不单独训练奖励模型。它比较策略与冻结参考模型对 chosen、rejected 的序列 log-probability，损失为 -log sigmoid(beta * (delta_chosen - delta_rejected))。',
+        '参考模型只提供基准，必须在 no_grad 下计算并保持不变。序列 log-probability 是回答 token 的和，不是平均值。参考项限制策略偏离原模型，KL 用来检查训练是否跑得太远。'
       ),
       p(
-        'The RLHF route needs three models (policy, reward model, reference) plus all of PPO, which is a great deal of engineering. `DPO`\'s insight: if the reward model is Bradley-Terry, a closed-form relation links the optimal policy to the reward,so the reward model can be eliminated and preference data can train the policy directly.',
-        'The loss reads `−log σ( β·(Δ_w − Δ_l) )` with `Δ = log π − log π_ref`. That `β·Δ` is DPO\'s `implicit reward`,not trained but derived. And `−log σ(·)` is that two-class softmax again, so DPO and a reward model share a shape and differ only in where the score comes from.',
-        'The `reference model is frozen`. It appears only as a baseline, so its log-probabilities are computed under no_grad. Forget that and the gradient pushes policy and reference apart,`Δ_w − Δ_l` grows fast, the loss falls beautifully, and the model learns nothing. **A loss falling faster than expected** is almost always this in DPO.',
-        'The reference term is itself an implicit `KL` constraint. Without it the model can widen the gap simply by pushing all probabilities down,it wins the objective while the language model collapses. `β` sets how far the policy may stray: smaller is looser.',
-        'One more easy-to-write, hard-to-notice mistake: a sequence log-probability is a **sum**, not a mean. A mean does not grow with length, so long answers are systematically favoured,a direct source of DPO lengthening answers. And it looks more reasonable ("normalising can\'t hurt") while every ordinary gate still passes.',
-        'A family of variants followed, each altering a different part: `IPO` replaces σ to prevent overfitting, `KTO` needs only single good/bad labels instead of pairs, `SimPO` drops the reference model entirely.',
-        'The larger 2026 shift is toward `online` methods: DPO is offline (preferences labelled in advance), while online preference optimisation samples and labels as it trains,noticeably better, at the cost of a full rollout infrastructure.'
+        'DPO trains a policy directly from preference pairs without a separate reward model. It compares sequence log-probabilities from the policy and a frozen reference, using -log sigmoid(beta * (delta_chosen - delta_rejected)).',
+        'The reference only provides a baseline. It must run under no_grad and remain unchanged. Sequence log-probability is the sum over answer tokens, not their mean. The reference term limits policy drift, and KL checks whether training has moved too far.'
       )
     ),
     'length-bias': t(
       p(
-        '偏好优化有一个几乎必然出现的副作用：`答案越来越长`。原因不神秘,如果偏好数据里「更好的那个」平均更长，那么「长」就是一个和「好」高度相关、而且**比「好」容易学**的特征。模型没有理由不去学它。',
-        '这不是假想。`AlpacaEval` 在 2.0 版专门引入了`长度受控胜率`，就是因为原始胜率被长度带偏得太厉害,一个学会写长的模型，在偏爱长答案的评委面前胜率会上升，而它并没有变得更好。',
-        '所以评测要做长度控制：只在长度可比的样本之间比，或者把长度当协变量回归掉。**一个上升的指标，先问它有没有别的解释。**',
-        '去偏有两条路。一是`改数据`:只留下 chosen 与 rejected 等长的对，混淆从源头消失，代价是数据少一半。二是`改损失`:`SimPO` 的长度归一化、`R-DPO` 的长度罚项，不丢数据但多一个超参。',
-        '还有一个方法论上的要点：**「模型没有变长」这个结果，只有在「不处理就会变长」被验证过之后才有意义**。少了对照，你不知道是去偏起了作用，还是这个任务本来就不会变长,而后一种情况下你写的去偏代码是死的，却看着像在工作。',
-        '长度只是最容易看见的那个混淆。同类的还有`格式偏好`（评委爱看列表，模型什么都列成条目）、`自信度`（爱看语气肯定的，模型学会不说「我不确定」,这直接伤害校准）、`谄媚`（爱看同意用户的，模型学会顺着说）。结构完全一样：一个和「好」相关、但比「好」容易学的特征，而 RLHF 会准确地找到并放大它。',
-        '`RLVR` 在这件事上有结构性优势：规则判对错不带这些偏好,`7+5=12` 就是对的，写得长不长、有没有列表、语气自不自信，规则都不看。但可验证的任务只覆盖数学、代码这一小块，「写一封得体的邮件」没有验证器。所以真实的后训练是两条路并用。'
+        '如果偏好数据中的 chosen 平均更长，模型可能把长度当成质量的替代信号。此时胜率会上升，但内容不一定更好。评测需要控制长度，训练也要比较处理前后的长度差。',
+        '一种做法是只保留 chosen 与 rejected 长度接近的数据，另一种是在损失中加入长度处理。无论采用哪种方法，都要先验证未处理的对照组确实会变长，否则无法判断去偏是否生效。'
       ),
       p(
-        'Preference optimisation has one near-inevitable side effect: `answers get longer`. The reason is not mysterious,if the "better" option in preference data is longer on average, "long" becomes a feature highly correlated with "good" and **easier to learn than "good"**. The model has no reason to ignore it.',
-        'This is not hypothetical. `AlpacaEval` introduced a `length-controlled win rate` in version 2.0 precisely because raw win rates were badly skewed,a model that learned to write longer scores higher with a length-preferring judge without being better.',
-        'So evaluation must control for length: compare only among comparable lengths, or regress length out as a covariate. **When a metric rises, first ask whether something else explains it.**',
-        'Debiasing has two routes. `Change the data`: keep only pairs whose chosen and rejected are equally long, removing the confound at the source at the cost of half the data. `Change the loss`: `SimPO`\'s length normalisation, `R-DPO`\'s length penalty,no data lost, one more hyperparameter gained.',
-        'One methodological point: **"the model did not lengthen" means something only after "it would have lengthened" has been verified**. Without the control you cannot tell whether debiasing worked or the task never lengthens,and in the latter case your debiasing code is dead while appearing to work.',
-        'Length is only the most visible confound. Others share its structure: `format preference` (judges like lists, so everything becomes bullet points), `confidence` (judges like assertive answers, so the model stops saying "I am not sure",directly damaging calibration), `sycophancy` (judges like agreement, so the model agrees). Each is a feature correlated with "good" but easier to learn, and RLHF finds and amplifies it accurately.',
-        '`RLVR` has a structural advantage: a rule carries none of these preferences,`7+5=12` is correct whether long or short, bulleted or not, confident or hedged. But verifiable tasks cover only mathematics and code, and "write a tactful email" has no verifier. Real post-training runs both routes together.'
+        'If chosen responses are longer on average, a preference model may use length as a proxy for quality. Win rate can then rise without better content. Evaluation must control for length, and training must compare response lengths before and after correction.',
+        'One option keeps only pairs with similar chosen and rejected lengths. Another changes the loss to account for length. Either way, the untreated control must first show the length increase, otherwise there is no evidence that debiasing did anything.'
       )
     ),
-    'rollout': t(
+    rollout: t(
       p(
-        '强化学习的每一步都要**先采样再学习**：给一批 prompt，每个采若干条，判对错，再按结果更新。这一层叫 `rollout`,而它在真实系统里占 RL 训练时间的六到八成。也就是说，RL 跑不跑得动，主要看这一层写得怎么样。',
-        '第一条硬要求是 `KV cache`。不带 cache 的解码每生成一个 token 都要把整段前缀重算一遍,同样生成 12 个 token，实测 FLOPs 是带 cache 的 7 倍多。而 RL 一步要采「prompt 数 × 组大小」条，这个倍数直接乘在整个训练时间上。',
-        '第二条是`撞到结束符就停`。不停的话，结束符之后那些 token 是纯浪费,不参与奖励、不参与更新，只消耗算力。在答案长度差异大的任务上，按最长的那条跑满，浪费的比算的还多。真实推理引擎里这件事叫 `continuous batching`：一条序列结束就换出去，空位立刻塞新的进来。',
-        '第三条是`确定性`，而且是比「跑两遍一样」更强的一种。RL 的调试几乎完全依赖重放：训练里某一步出了问题，你要能把那一步原样再跑一遍。所以随机性必须是**可寻址的**,同一个 (seed, prompt 下标, 样本下标) 永远给同一条输出，换个批大小、换个执行顺序都不变。用全局随机状态的实现做不到这一点。',
-        '真实系统里 rollout 和训练往往是两个进程，甚至在不同的卡上：推理引擎负责采样，训练框架负责更新，中间靠权重同步连起来。',
-        '这带来一个 2026 年才被认真对待的问题：`推理和训练的数值不一致`。推理引擎为了快用了不同的 kernel、不同的批处理、不同的精度，于是两边算出来的 log 概率不完全相等。而 PPO / GRPO 的比值项恰恰是两者相除,一点点不一致会被放大成一个假的比值，训练就此跑偏。解决办法要么让两边共用 kernel，要么在训练侧重算一遍。'
+        '强化学习在每次更新前先为一批 prompt 生成多条回答，再计算奖励。rollout 因此需要高效解码、遇到 EOS 立即停止，并返回训练要用的 token、mask 和 log-probability。',
+        'KV cache 避免每一步重算完整前缀。随机数还要按 seed、prompt 下标和样本下标寻址，这样改变 batch 顺序后仍能重放同一条样本。训练侧可以重算 log-probability，避免推理路径与训练路径的数值差进入重要性比值。'
       ),
       p(
-        'Every reinforcement-learning step **samples before it learns**: take a batch of prompts, draw several samples each, judge them, update from the outcome. That layer is the `rollout`, and in real systems it consumes 60% to 80% of RL training time. Whether RL runs at all mostly comes down to how well this layer is written.',
-        'The first hard requirement is the `KV cache`. Uncached decoding recomputes the whole prefix for every token,generating the same 12 tokens measures over 7x the FLOPs. An RL step samples "prompts x group size" sequences, and that multiplier lands directly on total training time.',
-        'The second is `stopping at the end token`. Otherwise every token after it is pure waste,no reward, no update, only compute. On tasks with widely varying answer lengths, running everything to the longest wastes more than it computes. Real inference engines call this `continuous batching`: a finished sequence is evicted and a new one takes its slot.',
-        'The third is `determinism`, in a stronger sense than "two runs match". Debugging RL depends almost entirely on replay: when a step goes wrong you must rerun exactly that step. So randomness has to be **addressable**,the same (seed, prompt index, sample index) always yields the same output, unchanged by batch size or execution order. Implementations drawing from global random state cannot do this.',
-        'In real systems the rollout and training are separate processes, often on separate devices: an inference engine samples, a training framework updates, and weight synchronisation links them.',
-        'That creates a problem taken seriously only recently: `numerical mismatch between inference and training`. The inference engine uses different kernels, batching and precision for speed, so the two compute slightly different log probabilities. PPO and GRPO divide exactly those two quantities,a small inconsistency inflates into a spurious ratio and training drifts. The fixes are sharing kernels or recomputing on the training side.'
+        'Reinforcement learning generates several responses for a batch of prompts before each update, then scores them. A rollout therefore needs efficient decoding, immediate stopping at EOS, and outputs containing tokens, masks, and log-probabilities for training.',
+        'The KV cache avoids recomputing the full prefix at every step. Randomness must also be addressed by seed, prompt index, and sample index so changing batch order still replays the same sample. The training path may recompute log-probabilities to keep inference-side numerical differences out of importance ratios.'
       )
     ),
     'grpo-rlvr': t(
       p(
-        '强化学习要一个`基线`来降方差:策略梯度里减去任何与动作无关的量，都不改变梯度的期望，却能显著降低它的方差。PPO 用一个学出来的价值网络（critic）当基线,而 critic 和策略一样大，要单独训、单独存、单独调。',
-        '`GRPO` 把 critic 去掉了：**同一个 prompt 采一组，用组内的平均奖励当基线**。好处不只是省一个网络,组内均值天然是无偏的（同分布采出来的），而 critic 训不准的时候会引入偏差，且「critic 训不准」在长序列上是常态。代价是方差更大，所以组要够大（一般 8 起）。',
-        '`RLVR` 把奖励模型也去掉了：可验证的任务**直接用规则判对错**,数学答案对不对、代码跑不跑得过测试。两个一起，整条链上只剩策略一个模型。而且没有奖励模型，就没有奖励被钻空子的问题。',
-        '组内归一化之后有一个必须恒成立的等式：**每一组的优势之和是 0**。这不是巧合，是「减去均值」的定义。它也是一条极好的自查,分错组（把整个 batch 当一组）的实现照样能训，只是基线变成了「所有 prompt 的平均」，GRPO 退化成方差更大的 REINFORCE，而组内和不为 0 会当场暴露它。',
-        '一组里全对或全错的话，组内标准差是 0，优势也全是 0,**这一组对梯度没有贡献**。这不是 bug，是 GRPO 的固有性质：稳定做对的题没什么可学的。但它有个实际后果，训练后期大部分组都全对、有效 batch 越来越小，所以真实系统要按难度筛题。',
-        '重要性比值 `ρ = π_new / π_old` 要在 **log 空间里减再 exp 回来**,两个小概率相除会失去精度。而且只跑一个内层轮次的话 ρ 恒等于 1、裁剪不起作用，这时 GRPO 就是带基线的 REINFORCE。',
-        'DeepSeek-R1 把 RLVR 推到了一个反直觉的地方：**只用 RLVR、不做 SFT** 也能训出很强的推理能力，模型会自己长出「先想一想再回答」这种行为,没有人教它，是奖励逼出来的。但可验证的任务只是所有任务的一小块，所以真实流程是两条路并用。'
+        'GRPO 为同一个 prompt 采样一组回答，并用组内平均奖励作为基线。RLVR 再用规则验证器直接给出奖励，因此这一关不需要 critic 或奖励模型。',
+        '组内优势由奖励减去组均值得到，所以每组优势之和必须为 0。全对或全错的组没有组内差异，优势会全部变成 0。策略损失使用 exp(logp - old_logp) 得到重要性比值，并在多轮更新时裁剪它。'
       ),
       p(
-        'Reinforcement learning needs a `baseline` to reduce variance: subtracting anything independent of the action leaves the gradient\'s expectation unchanged while lowering its variance substantially. PPO learns a value network (critic) for this,as large as the policy, separately trained, stored and tuned.',
-        '`GRPO` removes the critic: **sample a group per prompt and use the group mean as the baseline**. Beyond saving a network, a group mean is naturally unbiased (drawn from the same distribution), whereas an inaccurate critic introduces bias,and inaccuracy is the norm on long sequences. The cost is variance, so groups must be reasonably large (8 and up).',
-        '`RLVR` removes the reward model too: verifiable tasks **judge correctness by rule**,does the mathematical answer match, does the code pass its tests. Together, only the policy remains. And with no reward model, there is no reward hacking.',
-        'After group normalisation one identity must always hold: **each group\'s advantages sum to zero**. Not a coincidence but the definition of subtracting a mean. It also makes an excellent self-check,an implementation that groups wrongly (treating the whole batch as one group) still trains, its baseline becomes "the average across all prompts", GRPO degenerates into a higher-variance REINFORCE, and a non-zero group sum exposes it immediately.',
-        'When a group is all-correct or all-wrong its standard deviation is zero and so are its advantages,**that group contributes nothing to the gradient**. Not a bug but an inherent property: reliably-solved questions have nothing left to teach. It has a practical consequence though, since late in training most groups are all-correct and the effective batch shrinks, so real systems filter by difficulty.',
-        'The importance ratio `ρ = π_new / π_old` must be computed by **subtracting in log space and exponentiating back**,dividing two small probabilities loses precision. And with a single inner epoch ρ is identically 1 and clipping does nothing, leaving GRPO as REINFORCE with a baseline.',
-        'DeepSeek-R1 pushed RLVR somewhere counter-intuitive: **RLVR alone, without SFT**, produces strong reasoning, and the model grows "think before answering" behaviour by itself,nobody taught it, the reward forced it out. But verifiable tasks are a small slice of all tasks, so real pipelines run both routes.'
+        'GRPO samples a group of responses for the same prompt and uses the group mean reward as a baseline. RLVR supplies rewards directly from a rule-based verifier, so this stage needs neither a critic nor a reward model.',
+        'Group advantages subtract the group mean, so advantages in every group must sum to zero. An all-correct or all-wrong group has no within-group difference and therefore produces zero advantages. The policy loss uses exp(logp - old_logp) as the importance ratio and clips it during repeated update epochs.'
       )
     ),
     'grpo-fixes': t(
       p(
-        'GRPO 能训，但它有三个已经被反复记录下来的毛病。2025 到 2026 年间三篇工作各自指出了一个,而三个修正加起来只有几行。它们有一个共同的形状：**都不是「算错了」，而是「归一化选错了」**。',
-        '第一个：`不要除标准差`。把优势写成 z-score 看着最标准，但它引入了偏置,同样的「对了一个」，在几乎全错的组里被放大（那一组标准差小），在对错各半的组里被压小。于是模型被推着去优先攻克几乎做不出来的题，而那些题往往是噪声。Dr.GRPO 的结论是只减均值。**减均值那一半必须留着**,它才是基线，去掉就没有方差缩减了。',
-        '第二个：`token 级归一化，不是序列级`。「先在每条序列内平均，再在序列之间平均」看起来更公平（每条一票），后果却是短序列里每个 token 的更新被放大，倍数正好是长度比。而在推理任务上短的往往是蒙的、长的才是一步步推的,这个偏置正好推反了方向。',
-        '第三个：`clip-higher`。对称裁剪下，一个概率 0.01 的 token 即使优势为正也最多涨到 0.012，而概率 0.9 的可以涨到 1.0。低概率的选项永远追不上来，策略越训越确定、探索越来越少,这叫`熵坍缩`。DAPO 的做法是只把上界放宽（0.2 → 0.28），给低概率的 token 留出上升空间。',
-        '这三个错的共同之处还在于：**都不会在 loss 曲线上表现出来**。发现它们靠的是盯着一个具体的量,优势的分布、每个 token 的梯度、低概率 token 的熵。',
-        '这条线还在继续。`GSPO` 指出 token 级的重要性比值在长序列上会累积出巨大的方差，主张在序列层面做裁剪,这和「token 级归一化」不矛盾（一个说归一化，一个说比值的粒度），但怎么配仍然在争。',
-        '还有一条更基本的问题：**RL 到底在教模型新东西，还是只在放大它已经会的**。有工作指出 RLVR 主要是把基座里已有的解法挑出来并加强，而不是发明新解法。如果这是对的，RL 的上限取决于预训练。'
+        '这一关修改第 28 关的三处归一化。第一，优势只减均值，不再除以组内标准差。第二，loss 按参与训练的 token 总数平均，让长短序列中的每个 token 权重一致。',
+        '第三，裁剪上界从 0.2 放宽到 0.28，下界保持 0.2，给低概率但优势为正的 token 更大上升空间。去掉标准差会改变优势量级，因此学习率也要随之调整。'
       ),
       p(
-        'GRPO trains, but it has three well-documented ailments. Between 2025 and 2026 three papers each identified one, and all three corrections together are a few lines. They share a shape: **none is a miscalculation; each is a wrong choice of normalisation**.',
-        'First: `do not divide by the standard deviation`. Writing the advantage as a z-score looks most standard, yet it introduces a bias,the same "one correct answer" is magnified in a nearly-all-wrong group (small std) and suppressed in a half-and-half one. The model is pushed to prioritise near-impossible questions, which are usually noise. Dr.GRPO subtracts the mean only. **The mean subtraction must stay**,it is the baseline, and removing it removes variance reduction.',
-        'Second: `token-level normalisation, not sequence-level`. Averaging within each sequence then across sequences looks fairer (one vote each), but each token of a short sequence then receives an amplified update, by exactly the length ratio. In reasoning tasks short responses tend to be guesses and long ones do the step-by-step work,so the bias points the wrong way.',
-        'Third: `clip-higher`. Under symmetric clipping a token at probability 0.01 can rise at most to 0.012 even with positive advantage, while one at 0.9 can reach 1.0. Low-probability options never catch up, the policy grows ever more certain and exploration disappears,this is `entropy collapse`. DAPO loosens only the upper bound (0.2 to 0.28), leaving room for low-probability tokens to rise.',
-        'What these three also share: **none shows up in the loss curve**. Finding them takes watching a specific quantity,the distribution of advantages, per-token gradients, the entropy of low-probability tokens.',
-        'The line continues. `GSPO` argues token-level importance ratios accumulate enormous variance on long sequences and that clipping belongs at the sequence level,which does not contradict token-level normalisation (one concerns normalisation, the other the ratio\'s granularity), though how they combine is contested.',
-        'And a more fundamental question: **is RL teaching the model anything new, or only amplifying what it already had?** Work suggests RLVR mainly selects and strengthens solutions already in the base model rather than inventing new ones. If so, RL\'s ceiling is set by pretraining.'
+        'This stage changes three normalization choices from stage 28. First, advantages subtract the group mean but no longer divide by group standard deviation. Second, the loss divides by the total number of participating tokens so each token has the same weight across short and long sequences.',
+        'Third, the upper clip widens from 0.2 to 0.28 while the lower clip remains 0.2, giving low-probability tokens with positive advantage more room to rise. Removing standard deviation changes advantage scale, so the learning rate must change with it.'
       )
     ),
-    'finale': t(
+    finale: t(
       p(
-        '到这一关为止，从一段字节到一个会跟随指令的模型，整条链的每一块都写过了。这一关只做一件事：**把它们接起来，让那些结论在同一次运行里同时成立**。',
-        '三段的分工很清楚。`预训练`在完整的文本上做下一个 token 预测，模型学会符号怎么排列，但不会「被问了就回答」。`SFT` 同样是下一个 token 预测，只是 loss 只算在回答上，模型学会「看到问题就该开口」。`RL` 采样、判对错、按相对优势更新，模型学会「说对的那个」。',
-        '而**三段的目标函数其实只有两种**：交叉熵和策略梯度。区别全在数据和 mask 上。如果整个项目只留下一句话，是这句。',
-        '接起来之后要卡的不是新东西，是`交接处`。每一段单独跑通了，接起来仍然可能出问题，而出问题的地方几乎总是交接：SFT 的 mask 在流水线里还成立吗？RL 的分组还对吗？整条链还能重放吗？',
-        '最后那条最要紧。**三段各自确定性，接起来未必**,任何一处用了全局随机状态、或者依赖了集合与字典的遍历顺序，整条链就不可重放了。而一条不可重放的流水线，出了问题只能从头猜。',
-        '真实尺度上多出来的东西，绝大部分是`工程`而不是新想法：分布式、检查点与断点续训、推理与训练的权重同步、以及一整套评测。而每一样都建立在这些不变量上，「反向是前向的两倍」「优势和为 0」「mask 挡住了 prompt」，在 671B 上和在这里是同一句话。',
-        '最后留一件事：**这条流水线现在是可重放的**。拿它做点别的实验，换个任务、换个优化器、把某个修正关掉看看会怎样。一条可重放的流水线，才谈得上做实验。'
+        '最后一关把预训练、SFT 和 RLVR 放进同一次运行。预训练学习序列规律，SFT 用回答 mask 学习指令格式，RLVR 再用规则奖励提高可验证任务的正确率。',
+        '重点是三段的交接：SFT mask 不能丢，GRPO 分组不能变，整条流水线还要在相同 seed 下逐位重放。这里没有新算法，只是重新检查前面已经建立的不变量能否同时成立。'
       ),
       p(
-        'By this stage every block of the chain from raw bytes to an instruction-following model has been written. This stage does one thing: **connect them so those conclusions hold simultaneously in a single run**.',
-        'The three phases divide the work cleanly. `Pretraining` does next-token prediction over whole texts, the model learns how symbols arrange but not that a question wants an answer. `SFT` is the same prediction with loss only on the answer, the model learns that a question is its cue to speak. `RL` samples, judges, and updates by relative advantage, the model learns to say the correct one.',
-        'And **only two objective functions appear across all three**: cross-entropy and policy gradient. All the difference is in the data and the mask. If this project leaves one sentence behind, it is that one.',
-        'What connecting them gates is not new material but the `seams`. Each phase passed alone; joining them can still break things, and the break is almost always at a seam: does SFT\'s mask still hold in the pipeline? Is the RL grouping still right? Does the whole chain still replay?',
-        'That last one matters most. **Three deterministic phases need not compose**,any global random state anywhere, or a dependence on set and dictionary iteration order, and the chain stops replaying. A pipeline that cannot replay leaves you guessing from the start.',
-        'What real scale adds is mostly `engineering` rather than new ideas: distribution, checkpointing and resumption, weight synchronisation between inference and training, a full evaluation suite. Each rests on these invariants,"the backward costs twice the forward", "advantages sum to zero", "the mask keeps the prompt out" are the same sentences at 671B as here.',
-        'One last thing: **this pipeline is replayable**. Use it for something else, change the task, change the optimiser, switch a correction off and see what happens. Only a replayable pipeline makes experiments possible.'
+        'The final stage runs pretraining, SFT, and RLVR in one execution. Pretraining learns sequence structure, SFT uses an answer mask to learn the instruction format, and RLVR uses rule-based rewards to improve accuracy on verifiable tasks.',
+        'The focus is the handoff between phases. The SFT mask must survive, GRPO groups must remain correct, and the full pipeline must replay bit for bit under the same seed. There is no new algorithm here; the stage checks whether the earlier invariants hold together.'
       )
     ),
   },

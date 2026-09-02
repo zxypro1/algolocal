@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { useRouter } from 'next/router';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActionIcon,
@@ -31,6 +32,7 @@ import {
 } from '@tabler/icons-react';
 import { useI18n, useTranslation } from '../../src/contexts/I18nContext';
 import { AppHeader, HEADER_HEIGHT } from '../../src/components/AppHeader';
+import ProjectOverviewModal from '../../src/components/engineering/ProjectOverviewModal';
 import { loadAllProgress, ProjectProgress } from '../../src/lib/engineering/progress';
 import type { LocalizedText } from '../../src/lib/engineering/types';
 import type { ProjectSummary } from '../../src/lib/server/projectStore';
@@ -42,6 +44,7 @@ const difficultyColor = (difficulty: string) =>
   difficulty === 'Easy' ? 'green' : difficulty === 'Medium' ? 'yellow' : 'red';
 
 export default function ProjectsPage() {
+  const router = useRouter();
   const { t } = useTranslation();
   const { locale } = useI18n();
 
@@ -50,6 +53,7 @@ export default function ProjectsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const [overviewProject, setOverviewProject] = useState<ProjectWithSource | null>(null);
 
   const pick = (text: LocalizedText | undefined) =>
     !text ? '' : text[locale as 'en' | 'zh'] || text.zh || text.en || '';
@@ -235,7 +239,7 @@ export default function ProjectsPage() {
                           />
                         )}
 
-                        <Button component={Link} href={`/projects/${project.id}`} fullWidth variant="light">
+                        <Button onClick={() => setOverviewProject(project)} fullWidth variant="light">
                           {cleared > 0 ? t('engineering.list.continue') : t('engineering.list.start')}
                         </Button>
                       </Card>
@@ -247,6 +251,13 @@ export default function ProjectsPage() {
           </Stack>
         </Container>
       </AppShell.Main>
+
+      <ProjectOverviewModal
+        opened={Boolean(overviewProject)}
+        summary={overviewProject}
+        onClose={() => setOverviewProject(null)}
+        onStart={(projectId) => router.push(`/projects/${projectId}`)}
+      />
     </AppShell>
   );
 }

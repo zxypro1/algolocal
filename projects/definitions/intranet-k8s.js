@@ -7886,8 +7886,8 @@ module.exports = {
   id: 'intranet-k8s',
   title: t('内网设施实战：接手一家公司的 Kubernetes', 'Intranet Infrastructure: Inheriting a Kubernetes Cluster'),
   summary: t(
-    '在一台跳板机上接手真实规模的内网集群：真 kubectl、真 helm、真 docker，真的会坏。',
-    'Take over a company intranet cluster from a jump host: real kubectl, real helm, real docker — and real breakage.'
+    '从一台跳板机接手公司的 Kubernetes 集群。你要排查故障、交付应用、收紧权限、恢复数据，最后写出自己的 Operator。',
+    'Take over a company Kubernetes cluster from a jump host. Diagnose failures, ship workloads, tighten access, restore data, and finish by writing an Operator.'
   ),
   difficulty: 'Hard',
   domain: 'infrastructure',
@@ -7896,30 +7896,111 @@ module.exports = {
   language: 'typescript',
   brief: t(
     code`
-      你入职一家公司做基础设施。前任留下一台跳板机、一个 Kubernetes 集群，
-      和一份不太靠谱的交接文档。
+      ## 你接手的是什么
 
-      这个项目里的东西都是真的：终端里的 shell 是 bash 语法（tree-sitter 解析），
-      \`kubectl\` 与 \`helm\` 是官方二进制编译成 WebAssembly 的，
-      \`docker build\` 真的按 Dockerfile 分层并算 sha256。
-      集群是内存里的 apiserver + 控制器循环，Pod 会真的被调度、拉镜像、就绪、崩溃。
+      你刚加入公司的基础设施团队。前任只留下一台跳板机、一个 Kubernetes 集群，
+      还有一份不能完全相信的交接文档。第一关不会告诉你故障答案，你得先用
+      \`kubectl\` 查看节点、工作负载和事件，判断集群现在是什么状态。
 
-      **判定看的是集群的真实状态**，不是你敲了什么命令。
-      怎么达成随你，达成了就算过。
+      后面的任务沿着真实的运维路径展开。你会把应用容器化并推到私有仓库，处理配置、
+      Secret、探针和资源限制；然后接管入口流量、证书、网络策略与 GitOps。项目后半段会
+      收紧 RBAC，把规则写成准入策略，补上可观测性、自动回滚、备份恢复和容量伸缩。
+      第 23 关要求你写一个 Operator，让自定义资源持续收敛到期望状态。
+
+      ## 二十三关的工作范围
+
+      | 阶段 | 关卡 | 你会处理的事情 |
+      | --- | --- | --- |
+      | 接管与上线 | 1-7 | 集群排障、Deployment、镜像构建、私有仓库、配置、探针、资源与驱逐 |
+      | 交付与流量 | 8-13 | Gateway API、证书、网络策略、GitOps、Helm 与清单定制 |
+      | 网络与安全 | 14-18 | 包路径、服务网格身份、RBAC、策略和集群外密钥 |
+      | 运行与恢复 | 19-23 | 可观测性、自动回滚、备份恢复、弹性容量和 Operator |
+
+      各关共用同一个集群世界。前面留下的对象、仓库提交、证书和策略会继续存在，
+      所以后续任务不是一组互不相干的命令练习。你需要在已有状态上判断该改什么，
+      也要确认改动没有破坏前面已经恢复的部分。
+
+      ## 终端和集群怎样运行
+
+      终端使用 tree-sitter 解析 bash。平台把官方 \`kubectl\` 和 \`helm\` 二进制编译成
+      WebAssembly，命令、参数和资源结构与日常使用一致。
+      \`docker build\` 会读取 Dockerfile，按层构建并计算 sha256 摘要。
+
+      集群由内存中的 apiserver 和控制器循环组成。Pod 会经过调度、拉取镜像、就绪和崩溃，
+      Deployment、证书、Rollout 与 MachineDeployment 也会由各自的控制器推进。
+      时间可以加速，但状态变化仍按控制器逻辑发生。
+
+      ## 怎么验收
+
+      平台检查的是集群最终状态，不是终端历史。用 \`kubectl apply\`、\`patch\`、
+      \`helm upgrade\`，或者编辑清单再提交都可以，只要结果满足要求。
+
+      验收还会等待控制器继续运行。一个对象刚创建时看起来正确，但下一轮 reconcile
+      又被改坏，照样不能通过。网络策略必须真的改变连通性，回滚必须真的撤掉坏版本，
+      恢复任务也必须把对象和数据一起找回来。
+
+      ## 项目边界
+
+      这是可执行的单集群实验环境，不需要准备真实云账号或 Kubernetes 安装。
+      你处理的是集群内资源、仓库状态和控制器行为，不涉及采购机器或配置真实公司的网络。
     `,
     code`
-      You have joined a company as an infrastructure engineer. Your predecessor
-      left behind a jump host, a Kubernetes cluster, and a handover document of
-      questionable accuracy.
+      ## What you are taking over
 
-      Everything here is real: the shell parses bash with tree-sitter, \`kubectl\`
-      and \`helm\` are the upstream binaries compiled to WebAssembly, and
-      \`docker build\` really layers your Dockerfile and computes sha256 digests.
-      The cluster is an in-memory apiserver plus controller loops — pods really do
-      get scheduled, pull images, become ready, and crash.
+      You have just joined the infrastructure team. Your predecessor left a jump host,
+      a Kubernetes cluster, and a handover document that cannot be trusted completely.
+      The first stage does not tell you what failed. You must inspect nodes, workloads,
+      and events with \`kubectl\` and work out the current state yourself.
 
-      **Grading looks at the cluster's actual state**, not at what you typed.
-      How you get there is up to you.
+      The remaining tasks follow the path of real cluster operations. You will containerise
+      an application, push it to a private registry, and deal with configuration, Secrets,
+      probes, and resource limits. You then take over ingress traffic, certificates, network
+      policy, and GitOps. Later stages tighten RBAC, turn rules into admission policy, and add
+      observability, automated rollback, backup and restore, and elastic capacity. Stage 23
+      ends with an Operator that keeps a custom resource reconciled with its desired state.
+
+      ## Scope of the twenty-three stages
+
+      | Phase | Stages | Work |
+      | --- | --- | --- |
+      | Takeover and launch | 1-7 | Diagnosis, Deployments, image builds, private registries, configuration, probes, resources, and eviction |
+      | Delivery and traffic | 8-13 | Gateway API, certificates, network policy, GitOps, Helm, and manifest customisation |
+      | Network and security | 14-18 | Packet paths, service identities, RBAC, policy, and secrets outside the cluster |
+      | Operations and recovery | 19-23 | Observability, rollback, backup and restore, elastic capacity, and an Operator |
+
+      Every stage uses the same cluster world. Objects, repository commits, certificates,
+      and policies from earlier work remain in place. These are not isolated command drills.
+      You must decide what to change in the state you inherited and make sure the change does
+      not break something you already repaired.
+
+      ## How the terminal and cluster work
+
+      The terminal parses bash with tree-sitter. The platform runs the upstream \`kubectl\`
+      and \`helm\` binaries compiled to WebAssembly, with their normal commands, flags, and
+      resource shapes. \`docker build\` reads the Dockerfile, creates layers, and computes
+      sha256 digests.
+
+      The cluster is an in-memory apiserver with controller loops. Pods are scheduled, pull
+      images, become ready, and crash. Deployments, certificates, Rollouts, and
+      MachineDeployments advance through their own controllers. Time can be accelerated,
+      but state still changes through controller logic.
+
+      ## How it is checked
+
+      The platform checks the final cluster state, not the shell history. You may use
+      \`kubectl apply\`, \`patch\`, \`helm upgrade\`, or edit and commit a manifest. The route
+      does not matter if the resulting state is correct.
+
+      Acceptance also lets controllers continue running. An object that looks correct at
+      creation time but is broken by the next reconcile does not pass. A network policy must
+      change connectivity, a rollback must remove the bad release, and a restore must recover
+      both objects and data.
+
+      ## Project boundary
+
+      This is an executable single-cluster lab. It needs no cloud account or Kubernetes
+      installation. The work covers cluster resources, repository state, and controller
+      behaviour, not purchasing machines or configuring a real company network.
     `
   ),
   workspace: { kind: 'ops', world: WORLD },
