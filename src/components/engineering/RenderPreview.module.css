@@ -1,0 +1,28 @@
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 38%);
+  overflow: auto;
+}
+.preview {
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--app-border);
+}
+.contents {
+  height: 100%;
+  overflow: auto;
+}
+.contents > * {
+  flex-shrink: 0;
+}
+@media (max-width: 1200px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(240px, 1fr) 320px;
+  }
+  .preview {
+    min-height: 320px;
+    border-left: 0;
+    border-top: 1px solid var(--app-border);
+  }
+}

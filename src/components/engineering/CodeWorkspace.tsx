@@ -46,6 +46,7 @@ import ReviewPanel from './ReviewPanel';
 import { MetricsPanel, RunReportPanel, ScoreCardPanel } from './ResultPanels';
 import TracePlayer from '../TracePlayer';
 import ErrorBoundary from '../ErrorBoundary';
+import previewStyles from './RenderPreview.module.css';
 import { useProjectRunner } from '../../hooks/useProjectRunner';
 import { useAiConfig } from '../../hooks/useAiConfig';
 import { analyzeWorkspace } from '../../lib/engineering/analysis';
@@ -62,6 +63,7 @@ import type {
 
 const WorkspaceEditor = dynamic(() => import('./WorkspaceEditor'), { ssr: false });
 const EngineeringChat = dynamic(() => import('./EngineeringChat'), { ssr: false });
+const RenderPreview = dynamic(() => import('./RenderPreview'), { ssr: false });
 
 const MIN_BOTTOM_HEIGHT = 120;
 
@@ -130,7 +132,9 @@ export default function CodeWorkspace({ session, registerClearResults }: CodeWor
   const [bottomTab, setBottomTab] = useState<string>('tests');
   const [tracedSources, setTracedSources] = useState<Record<string, string>>({});
   const [leftWidth, setLeftWidth] = useState(34);
-  const [bottomHeight, setBottomHeight] = useState(300);
+  const [bottomHeight, setBottomHeight] = useState(
+    project?.workspace?.kind === 'code' && project.workspace.preview ? 180 : 300
+  );
   const [dragging, setDragging] = useState<'horizontal' | 'vertical' | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -472,7 +476,8 @@ export default function CodeWorkspace({ session, registerClearResults }: CodeWor
 
             {/* 右：编辑器 + 结果面板 */}
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-              <div style={{ flex: 1, minHeight: 0, borderBottom: '1px solid var(--app-border)' }}>
+              <div className={project.workspace?.kind === 'code' && project.workspace.preview ? previewStyles.workspace : undefined} style={{ flex: 1, minHeight: 0, borderBottom: '1px solid var(--app-border)' }}>
+                <div style={{ height: '100%', minWidth: 0, minHeight: 0 }}>
                 <WorkspaceEditor
                   files={files}
                   pristine={pristine}
@@ -484,6 +489,18 @@ export default function CodeWorkspace({ session, registerClearResults }: CodeWor
                   unsavedPaths={unsavedPaths}
                   onSaveNow={flushSave}
                 />
+                </div>
+                {project.workspace?.kind === 'code' && project.workspace.preview && session.view && (
+                  <div className={previewStyles.preview}>
+                    <RenderPreview
+                      key={`${project.id}-${language}-${stage.id}`}
+                      files={files}
+                      project={session.view}
+                      stageIndex={stageIndex}
+                      entryPrefix={project.workspace.preview.entryPrefix}
+                    />
+                  </div>
+                )}
               </div>
 
               <div

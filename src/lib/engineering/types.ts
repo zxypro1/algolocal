@@ -190,6 +190,8 @@ export const WORKSPACE_KINDS: WorkspaceKind[] = ['code', 'ops', 'gpu', 'train'];
 /** 现有形态：多文件工作区 + 隐藏用例 + 指标门槛 */
 export interface CodeWorkspaceSpec {
   kind: 'code';
+  /** Optional live framebuffer preview; entry names omit the language extension. */
+  preview?: { kind: 'minigl'; entryPrefix: string };
 }
 
 /**

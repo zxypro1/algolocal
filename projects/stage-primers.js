@@ -2789,14 +2789,14 @@ const primers = {
 
 function attachStagePrimers(project) {
   const projectPrimers = primers[project.id];
-  if (!projectPrimers) {
+  if (!projectPrimers && !project.stages?.every(stage => stage.primer?.zh && stage.primer?.en)) {
     throw new Error(`没有为工程 ${project.id} 配置前置知识`);
   }
 
   return {
     ...project,
     stages: (project.stages || []).map((stage) => {
-      const primer = projectPrimers[stage.id];
+      const primer = stage.primer || projectPrimers?.[stage.id];
       if (!primer) {
         throw new Error(`工程 ${project.id} 的关卡 ${stage.id} 缺少前置知识`);
       }

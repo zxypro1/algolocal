@@ -33241,6 +33241,1358 @@
     }
   },
   {
+    "id": "minigl-renderer",
+    "title": {
+      "zh": "从零认识 3D · MiniGL 入门实战",
+      "en": "Your first 3D renderer · MiniGL for beginners"
+    },
+    "summary": {
+      "zh": "不需要图形学基础。每关只补一处代码，十二关从点亮像素到带花纹和雾化的多物体场景，边改边看实时画面。",
+      "en": "No graphics background needed. One small edit per lesson, twelve stages from a pixel to patterned, foggy multi-object scenes with live feedback."
+    },
+    "difficulty": "Easy",
+    "domain": "graphics",
+    "tags": [
+      "3D",
+      "beginner",
+      "rendering",
+      "WebGL"
+    ],
+    "estimatedMinutes": 210,
+    "language": "typescript",
+    "workspace": {
+      "kind": "code",
+      "preview": {
+        "kind": "minigl",
+        "entryPrefix": "preview/stage-"
+      }
+    },
+    "weights": {
+      "correctness": 0.8,
+      "encapsulation": 0.1,
+      "elegance": 0.1,
+      "concurrency": 0,
+      "latency": 0,
+      "resilience": 0
+    },
+    "brief": {
+      "zh": "## 给图形学零基础的第一门实战课\n\n你只需要会变量、数组、函数和 for 循环；不用先学矩阵、三角函数或 WebGL。每关约 10 到 20 分钟，只修改一个 TODO。先看效果，再代入具体数字，最后补一行代码并运行验收。\n\n## 你会走过的十二小步\n\n1. 点亮一个像素：把颜色写到正确的格子。\n2. 让几个点转起来：按给出的配方改变位置。\n3. 把位置放到画布上：把标准刻度变成像素坐标。\n4. 给三角形填色：按比例混合红绿蓝。\n5. 判断谁在前面：只保留距离更近的颜色。\n6. 给表面加明暗：颜色乘上亮度。\n7. 拼成渲染器：把几个小工具接起来，看到旋转立方体。\n8. 缩放方块：让位置乘上大小倍数。\n9. 移动物体：把三个方向的移动量加到位置上。\n10. 相机退后：观察近大远小。\n11. 格子花纹：用表面坐标选择不同颜色。\n12. 远处雾化：混合颜色，把前面的小工具组合成多物体场景。\n\n## 哪些内容暂时不用掌握\n\n相机矩阵、齐次裁剪、完整光栅化推导、透视插值作为已提供的工具；不作为入门关卡的独立实现任务。学完后可阅读 src/math.ts 和 src/clipping.ts，尝试不用骨架重写，作为进阶挑战。\n\n这是借鉴 WebGL 思路的教学软件渲染器，CPU 计算像素，Canvas 只显示结果；不是 GPU 加速或完整 WebGL 实现。右侧“我的代码”会随编辑更新，“本关参考”和“最终效果”只用于对照，不修改你的代码与进度。",
+      "en": "## A first hands-on course for graphics beginners\n\nOnly variables, arrays, functions and for loops are required. No matrix, trigonometry or WebGL background is assumed. Each 10 to 20 minute lesson has one TODO: observe the target, substitute concrete numbers, make one small edit and run tests.\n\nThe twelve steps are pixels, rotation, screen coordinates, triangle colors, overlap, brightness, assembly, scaling, translation, camera distance, checker patterns and distance fog. Camera matrices, homogeneous clipping, full rasterization derivations and perspective interpolation are supplied tools rather than beginner implementation requirements. Study and rewrite them later as optional challenges.\n\nThis educational software renderer borrows WebGL concepts: the CPU computes pixels and Canvas displays them. It is not GPU accelerated or a complete WebGL implementation. My code previews drafts live; reference modes never overwrite code or progress."
+    },
+    "architecture": {
+      "zh": "## 先记住这四步就够了\n\n```mermaid\nflowchart TD\n A[模型上的几个点] --> B[转一转，放到屏幕上]\n B --> C[给三角形里的格子涂色]\n C --> D[保留近处颜色，显示画面]\n```\n\n每关只练其中一个小动作。复杂工具已经提供，不用一次理解整条流水线。",
+      "en": "## Start with these four steps\n\n```mermaid\nflowchart TD\n A[Points on a model] --> B[Rotate and place on screen]\n B --> C[Color the pixels inside triangles]\n C --> D[Keep the nearer color and display]\n```\n\nPractice one small action per lesson. Complex helpers are supplied; understanding the entire pipeline at once is unnecessary."
+    },
+    "files": [
+      {
+        "path": "src/types.ts",
+        "content": "export type Vec4 = [number, number, number, number];\nexport type Color = [number, number, number, number]; // RGBA, 0..255\nexport type Mat4 = number[]; // row-major, column vectors: out = M * v\nexport interface Frame { width: number; height: number; pixels: Uint8ClampedArray; }\nexport interface Vertex { position: Vec4; color: Color; }\nexport interface Sample { x: number; y: number; weights: [number, number, number]; }\n",
+        "readonly": true
+      },
+      {
+        "path": "src/math.ts",
+        "content": "// 工具：相机与矩阵。本课程不用修改。 / Supplied camera and matrix tools.\nimport type { Mat4, Vec4 } from './types';\nexport function multiply(a: Mat4, b: Mat4): Mat4 {\n  const out = Array(16).fill(0);\n  for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) for (let k = 0; k < 4; k++) out[r*4+c] += a[r*4+k] * b[k*4+c];\n  return out;\n}\nexport function transform(m: Mat4, v: Vec4): Vec4 {\n  return [0,1,2,3].map(r => v.reduce((s, n, c) => s + m[r*4+c] * n, 0)) as Vec4;\n}\nexport function perspective(fov: number, aspect: number, near: number, far: number): Mat4 {\n  if (!(fov > 0 && fov < Math.PI && aspect > 0 && near > 0 && far > near)) throw new Error('Invalid camera');\n  const f = 1 / Math.tan(fov / 2);\n  return [f/aspect,0,0,0, 0,f,0,0, 0,0,(far+near)/(near-far),2*far*near/(near-far), 0,0,-1,0];\n}\n",
+        "readonly": true
+      },
+      {
+        "path": "src/clipping.ts",
+        "content": "// 进阶工具：裁剪屏幕外的几何体。本课程不用修改。 / Supplied clipping tool.\nimport type { Vertex, Vec4, Color } from './types';\nexport function clipTriangle(triangle: Vertex[]): Vertex[][] {\n  // Sutherland–Hodgman against all six homogeneous clip planes.\n  const planes = [(p: Vec4) => p[3]+p[0], (p: Vec4) => p[3]-p[0],\n    (p: Vec4) => p[3]+p[1], (p: Vec4) => p[3]-p[1],\n    (p: Vec4) => p[3]+p[2], (p: Vec4) => p[3]-p[2]];\n  let polygon = triangle;\n  for (const distance of planes) {\n    const next: Vertex[] = [];\n    for (let i=0; i<polygon.length; i++) {\n      const a = polygon[i], b = polygon[(i+1)%polygon.length];\n      const da = distance(a.position), db = distance(b.position);\n      if (da >= 0) next.push(a);\n      if ((da >= 0) !== (db >= 0)) {\n        const t = da/(da-db);\n        next.push({ position: a.position.map((v,j) => v+(b.position[j]-v)*t) as Vec4,\n          color: a.color.map((v,j) => v+(b.color[j]-v)*t) as Color });\n      }\n    }\n    polygon = next;\n  }\n  const result: Vertex[][] = [];\n  for (let i=1; i+1<polygon.length; i++) result.push([polygon[0],polygon[i],polygon[i+1]]);\n  return result;\n}\n",
+        "readonly": true
+      },
+      {
+        "path": "src/scene.ts",
+        "content": "import type { Color } from './types';\n// Optional: change colors or speed and watch My code update.\nexport const scene = {\n  background: [15,23,42,255] as Color,\n  color: [70,205,235,255] as Color,\n  speed: 0.7,\n};\n"
+      }
+    ],
+    "stages": [
+      {
+        "id": "framebuffer",
+        "title": {
+          "zh": "第 1 关 · 点亮一个像素",
+          "en": "Stage 1 · Light up one pixel"
+        },
+        "primer": {
+          "zh": "先把屏幕想成方格纸：每个小格叫“像素”。x 表示第几列，y 表示第几行，都从 0 开始。一种颜色用 [红,绿,蓝,不透明度] 四个数表示，每个数在 0 到 255 之间；[255,0,0,255] 就是不透明的红色。\n\n电脑把所有格子排成一条长数组，每格占 4 个位置。在宽度为 3 的画布中，(2,1) 前面有 1×3+2=5 个格子，所以它从数组的第 20 个位置开始。你只需要告诉电脑从哪里写颜色。\n\n这门课不要求你学过图形学或线性代数。只需要认识变量、数组、函数和 for 循环。代码中写着“工具”的文件已经能工作，不需要一次读懂。先观察本关参考画面，再只修改 TODO 标出的那一行，最后对照画面运行验收。即使还不理解全部公式，也可以先用给出的数字手算一次，确认代码确实表达了这件事。",
+          "en": "Imagine the screen as graph paper. A square is a pixel. x is its column and y is its row, both starting at zero. A color is four numbers: [red, green, blue, opacity], each from 0 to 255. [255,0,0,255] is opaque red.\n\nThe computer stores the squares in one long array with four slots per pixel. In a frame three pixels wide, (2,1) has 1×3+2=5 pixels before it, so its color starts at slot 20. Your only job is to calculate that starting slot.\n\nYou do not need computer graphics or linear algebra knowledge for this course. You only need variables, arrays, functions and for loops. Files marked as tools already work; you do not need to understand all their internals yet. Look at the stage reference, change only the marked TODO, compare the image, then run acceptance tests. Treat a formula as a small recipe: substitute the example numbers once and check the result before trying to understand its general derivation. The goal is one visible success at a time, with the surrounding machinery supplied for you."
+        },
+        "goal": {
+          "zh": "## 这关只做一件事\n\n在 putPixel 中，把写入位置 0 改为 `(y * frame.width + x) * 4`。不用修改创建画布、清屏和越界检查。先手算：宽 3，x=2，y=1，结果应为 20。\n\n## 跟着做\n\n1. 点击右侧“本关参考”，看看目标画面。\n2. 切回“我的代码”，打开 `src/framebuffer.ts`，找到唯一的 TODO。其他代码已准备好。\n3. 按上面的例子补完代码，停止输入后画面会自动更新。\n4. 点击“运行验收”，通过后进入下一关。\n\n## 做对后会看到什么\n\n一整块彩色渐变，而不再只有角落里的一个点。你已经掌握了渲染器最基本的输出方式。",
+          "en": "## One small task\n\nIn putPixel, replace offset 0 with `(y * frame.width + x) * 4`. Allocation, clearing and bounds checks are already supplied. Check width=3, x=2, y=1: the answer is 20.\n\n## Follow along\n\n1. Open Stage reference to see the target.\n2. Switch to My code, open `src/framebuffer.ts` and find the only TODO. Everything around it is supplied.\n3. Complete that change; the preview updates automatically after typing stops.\n4. Run acceptance tests to unlock the next lesson.\n\n## What success looks like\n\nA full color gradient instead of one pixel in the corner. You have built the renderer’s most basic output operation."
+        },
+        "checklist": [
+          {
+            "zh": "先对照画面，再完成一处 TODO",
+            "en": "Compare the image, then complete one TODO"
+          },
+          {
+            "zh": "运行验收，确认这个小步骤正确",
+            "en": "Run tests to check this small step"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "一行有 width 个像素，前面有 y 行；再加本行的 x 个像素，最后乘每个像素的 4 个通道。",
+            "en": "Count y complete rows, add x pixels in this row, then multiply by four channels."
+          },
+          {
+            "zh": "不用重写整个文件。工具函数、输入检查和循环已经提供；只替换 TODO 下面那一行。",
+            "en": "Do not rewrite the file. Helpers, input checks and loops are supplied; replace only the line below TODO."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "如果画面没变，先确认预览选择的是“我的代码”。“本关参考”和“最终效果”不会运行你的草稿。",
+            "en": "If the image does not change, select My code. The two reference modes do not run your drafts."
+          }
+        ],
+        "starterFiles": [
+          {
+            "path": "src/framebuffer.ts",
+            "content": "import type { Frame, Color } from './types';\nexport function createFrame(width: number, height: number): Frame {\n  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) throw new Error('Invalid frame size');\n  return { width, height, pixels: new Uint8ClampedArray(width * height * 4) };\n}\nexport function clear(frame: Frame, color: Color): void {\n  for (let i = 0; i < frame.pixels.length; i += 4) frame.pixels.set(color, i);\n}\nexport function putPixel(frame: Frame, x: number, y: number, color: Color): void {\n  if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= frame.width || y >= frame.height) return;\n  // TODO: 把 0 换成这个像素在数组中的起始位置 / Calculate the pixel offset.\n    frame.pixels.set(color, 0);\n}\n",
+            "openByDefault": true
+          },
+          {
+            "path": "preview/stage-1.ts",
+            "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\nimport { scene } from '../src/scene';\nexport function renderFrame(time:number,width:number,height:number) { const frame=createFrame(width,height); clear(frame,scene.background); for(let y=30;y<height-30;y++) for(let x=30;x<width-30;x++) putPixel(frame,x,y,[x/width*255,y/height*255,scene.color[2],255]); return frame; }",
+            "readonly": true
+          }
+        ],
+        "referenceFiles": [
+          {
+            "path": "src/framebuffer.ts",
+            "content": "import type { Frame, Color } from './types';\nexport function createFrame(width: number, height: number): Frame {\n  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) throw new Error('Invalid frame size');\n  return { width, height, pixels: new Uint8ClampedArray(width * height * 4) };\n}\nexport function clear(frame: Frame, color: Color): void {\n  for (let i = 0; i < frame.pixels.length; i += 4) frame.pixels.set(color, i);\n}\nexport function putPixel(frame: Frame, x: number, y: number, color: Color): void {\n  if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= frame.width || y >= frame.height) return;\n  frame.pixels.set(color, (y * frame.width + x) * 4);\n}\n"
+          }
+        ],
+        "specs": [
+          {
+            "path": "spec/stage-1.spec.ts",
+            "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\ndescribe('RGBA buffer', () => {\n  it('writes the correct row and channel order', () => {\n    const f = createFrame(3,2); clear(f,[2,3,4,255]); putPixel(f,2,1,[255,80,9,128]);\n    expect(Array.from(f.pixels.slice(20,24))).toEqual([255,80,9,128]);\n    expect(Array.from(f.pixels.slice(0,4))).toEqual([2,3,4,255]);\n  });\n  it('ignores invalid coordinates and rejects invalid sizes', () => {\n    const f=createFrame(2,2); putPixel(f,-1,1,[255,0,0,255]); putPixel(f,2,0,[255,0,0,255]); putPixel(f,0.5,0,[255,0,0,255]);\n    expect(Array.from(f.pixels).every(v=>v===0)).toBe(true); putPixel(f,1,1,[5,6,7,255]); expect(Array.from(f.pixels.slice(12,16))).toEqual([5,6,7,255]);\n    expect(()=>createFrame(0,2)).toThrow(); expect(()=>createFrame(2.5,2)).toThrow();\n  });\n});\n"
+          }
+        ],
+        "referenceNotes": {
+          "zh": "先找到参考实现中与你的 TODO 对应的一行，代入本关例子验证。剩下的代码是课程提供的工具，完整算法可以学完入门路线后再研究。",
+          "en": "Find the reference line matching your TODO and substitute the lesson example. The remaining code is supplied tooling; study its full algorithm after finishing the beginner route."
+        },
+        "extension": {
+          "zh": "选学：读一读本文件已经提供的部分，再尝试不用骨架重写。这个挑战不影响通关。",
+          "en": "Optional: study the supplied scaffolding and try rewriting it independently. This challenge is not required to advance."
+        },
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ]
+      },
+      {
+        "id": "rotation",
+        "title": {
+          "zh": "第 2 关 · 让几个点转起来",
+          "en": "Stage 2 · Make a few points rotate"
+        },
+        "primer": {
+          "zh": "三维位置只是比二维多了一个数：[x,y,z]。x 是左右，y 是上下，z 是前后。想象一根竖直的筷子，绕着它转动时，高度 y 不变，左右 x 和前后 z 会互相变化。这叫“绕 Y 轴旋转”。\n\n本关已经算好 c 和 s，你可以把它们当成旋转配方里的两个系数，不用先学习三角函数。配方是新 x=x×c+z×s，新 z=−x×s+z×c。转四分之一圈时 c=0、s=1，点 [1,0,0] 就会变成 [0,0,−1]。第四个数 w 原样保留即可。\n\n这门课不要求你学过图形学或线性代数。只需要认识变量、数组、函数和 for 循环。代码中写着“工具”的文件已经能工作，不需要一次读懂。先观察本关参考画面，再只修改 TODO 标出的那一行，最后对照画面运行验收。即使还不理解全部公式，也可以先用给出的数字手算一次，确认代码确实表达了这件事。",
+          "en": "A 3D position adds one number to a 2D position: [x,y,z] means left/right, up/down and front/back. Imagine rotating around an upright stick. Height y stays the same, while x and z change together. This is rotation around the Y axis.\n\nThe code supplies coefficients c and s, so you can use the recipe without learning trigonometry first: new x=x×c+z×s and new z=−x×s+z×c. At a quarter turn c=0 and s=1, so [1,0,0] becomes [0,0,−1]. Keep the fourth number w unchanged.\n\nYou do not need computer graphics or linear algebra knowledge for this course. You only need variables, arrays, functions and for loops. Files marked as tools already work; you do not need to understand all their internals yet. Look at the stage reference, change only the marked TODO, compare the image, then run acceptance tests. Treat a formula as a small recipe: substitute the example numbers once and check the result before trying to understand its general derivation. The goal is one visible success at a time, with the surrounding machinery supplied for you."
+        },
+        "goal": {
+          "zh": "## 这关只做一件事\n\n把返回的 `[x,y,z,w]` 换成 `[x*c + z*s, y, -x*s + z*c, w]`。相机和投影已经提供，本关只负责转动这些点。\n\n## 跟着做\n\n1. 点击右侧“本关参考”，看看目标画面。\n2. 切回“我的代码”，打开 `src/rotation.ts`，找到唯一的 TODO。其他代码已准备好。\n3. 按上面的例子补完代码，停止输入后画面会自动更新。\n4. 点击“运行验收”，通过后进入下一关。\n\n## 做对后会看到什么\n\n八个彩色点开始转动，像一个透明方盒子的八个角。修改 src/scene.ts 中的 speed 可以调节速度。",
+          "en": "## One small task\n\nReplace `[x,y,z,w]` with `[x*c + z*s, y, -x*s + z*c, w]`. The supplied camera handles projection; you only rotate the points.\n\n## Follow along\n\n1. Open Stage reference to see the target.\n2. Switch to My code, open `src/rotation.ts` and find the only TODO. Everything around it is supplied.\n3. Complete that change; the preview updates automatically after typing stops.\n4. Run acceptance tests to unlock the next lesson.\n\n## What success looks like\n\nEight colored points rotate like the corners of a transparent box. Change speed in src/scene.ts to adjust the motion."
+        },
+        "checklist": [
+          {
+            "zh": "先对照画面，再完成一处 TODO",
+            "en": "Compare the image, then complete one TODO"
+          },
+          {
+            "zh": "运行验收，确认这个小步骤正确",
+            "en": "Run tests to check this small step"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "只计算左右与前后两个分量，y 和 w 原样放回数组。负号不要漏掉。",
+            "en": "Change only x and z. Return y and w unchanged, and keep the minus sign."
+          },
+          {
+            "zh": "不用重写整个文件。工具函数、输入检查和循环已经提供；只替换 TODO 下面那一行。",
+            "en": "Do not rewrite the file. Helpers, input checks and loops are supplied; replace only the line below TODO."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "如果画面没变，先确认预览选择的是“我的代码”。“本关参考”和“最终效果”不会运行你的草稿。",
+            "en": "If the image does not change, select My code. The two reference modes do not run your drafts."
+          }
+        ],
+        "starterFiles": [
+          {
+            "path": "src/rotation.ts",
+            "content": "import type { Vec4 } from './types';\n// position = [left/right, up/down, front/back, 1]. angle is measured in radians.\nexport function rotateY(position: Vec4, angle: number): Vec4 {\n  const [x,y,z,w] = position;\n  const c = Math.cos(angle), s = Math.sin(angle);\n  // TODO: 按配方计算新的 x、z / Apply the rotation recipe.\n    return [x,y,z,w];\n}\n",
+            "openByDefault": true
+          },
+          {
+            "path": "preview/stage-2.ts",
+            "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\nimport { scene } from '../src/scene';\nimport { rotateY } from '../src/rotation'; import { perspective,transform } from '../src/math';\n      export function renderFrame(time:number,width:number,height:number) { const frame=createFrame(width,height); clear(frame,scene.background); const camera=perspective(1,width/height,.1,20);\n      for(const x of [-1,1]) for(const y of [-1,1]) for(const z of [-1,1]) { const p=rotateY([x,y,z,1],time*scene.speed); p[2]-=5; const v=transform(camera,p);\n        const sx=Math.round((v[0]/v[3]+1)*width/2),sy=Math.round((1-v[1]/v[3])*height/2);\n        for(let dy=-3;dy<=3;dy++) for(let dx=-3;dx<=3;dx++) putPixel(frame,sx+dx,sy+dy,scene.color); } return frame; }",
+            "readonly": true
+          }
+        ],
+        "referenceFiles": [
+          {
+            "path": "src/rotation.ts",
+            "content": "import type { Vec4 } from './types';\n// position = [left/right, up/down, front/back, 1]. angle is measured in radians.\nexport function rotateY(position: Vec4, angle: number): Vec4 {\n  const [x,y,z,w] = position;\n  const c = Math.cos(angle), s = Math.sin(angle);\n  return [x*c + z*s, y, -x*s + z*c, w];\n}\n"
+          }
+        ],
+        "specs": [
+          {
+            "path": "spec/stage-2.spec.ts",
+            "content": "import { rotateY } from '../src/rotation';\nit('a quarter turn moves right toward the back',()=>{const p=rotateY([1,2,0,1],Math.PI/2);expect(p[0]).toBeCloseTo(0);expect(p[1]).toBe(2);expect(p[2]).toBeCloseTo(-1);expect(p[3]).toBe(1);});\nit('zero and full turns preserve a point',()=>{expect(rotateY([2,3,4,1],0)).toEqual([2,3,4,1]);const p=rotateY([2,3,4,1],Math.PI*2);expect(p[0]).toBeCloseTo(2);expect(p[2]).toBeCloseTo(4);const q=rotateY([2,3,4,1],Math.PI);expect(q[0]).toBeCloseTo(-2);expect(q[2]).toBeCloseTo(-4);});\n"
+          }
+        ],
+        "referenceNotes": {
+          "zh": "先找到参考实现中与你的 TODO 对应的一行，代入本关例子验证。剩下的代码是课程提供的工具，完整算法可以学完入门路线后再研究。",
+          "en": "Find the reference line matching your TODO and substitute the lesson example. The remaining code is supplied tooling; study its full algorithm after finishing the beginner route."
+        },
+        "extension": {
+          "zh": "选学：读一读本文件已经提供的部分，再尝试不用骨架重写。这个挑战不影响通关。",
+          "en": "Optional: study the supplied scaffolding and try rewriting it independently. This challenge is not required to advance."
+        },
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ]
+      },
+      {
+        "id": "viewport",
+        "title": {
+          "zh": "第 3 关 · 把位置放到画布上",
+          "en": "Stage 3 · Place points on the canvas"
+        },
+        "primer": {
+          "zh": "相机工具把三维位置转换成“标准坐标”：左右和上下都用 −1 到 1 表示。0 是中间，−1 是左边或下边，1 是右边或上边。这样一来，相机不用关心窗口究竟有多少像素。\n\n你的任务是把这个刻度换成画布上的像素位置。宽度为 200 时，横坐标 −1、0、1 分别对应 0、100、200。公式是 (nx+1)×width÷2。屏幕的 y 向下增加，与标准坐标相反，因此纵坐标用 (1−ny)×height÷2。除以 w 的步骤已经提供，它会让远处物体看起来更小。\n\n这门课不要求你学过图形学或线性代数。只需要认识变量、数组、函数和 for 循环。代码中写着“工具”的文件已经能工作，不需要一次读懂。先观察本关参考画面，再只修改 TODO 标出的那一行，最后对照画面运行验收。即使还不理解全部公式，也可以先用给出的数字手算一次，确认代码确实表达了这件事。",
+          "en": "The camera helper converts 3D positions into normalized coordinates. Horizontal and vertical positions range from −1 to 1, with zero at the center. This lets the camera ignore the actual window size.\n\nConvert this scale into pixel positions. For width 200, x values −1, 0 and 1 map to 0, 100 and 200. The recipe is (nx+1)×width÷2. Screen y increases downward, the opposite direction, so use (1−ny)×height÷2 vertically. Division by w is already supplied; it makes far objects look smaller.\n\nYou do not need computer graphics or linear algebra knowledge for this course. You only need variables, arrays, functions and for loops. Files marked as tools already work; you do not need to understand all their internals yet. Look at the stage reference, change only the marked TODO, compare the image, then run acceptance tests. Treat a formula as a small recipe: substitute the example numbers once and check the result before trying to understand its general derivation. The goal is one visible success at a time, with the surrounding machinery supplied for you."
+        },
+        "goal": {
+          "zh": "## 这关只做一件事\n\n将固定返回的画布中心替换成 `[(nx+1)*width/2, (1-ny)*height/2]`。结果可以是小数，画点时工具会取整。\n\n## 跟着做\n\n1. 点击右侧“本关参考”，看看目标画面。\n2. 切回“我的代码”，打开 `src/viewport.ts`，找到唯一的 TODO。其他代码已准备好。\n3. 按上面的例子补完代码，停止输入后画面会自动更新。\n4. 点击“运行验收”，通过后进入下一关。\n\n## 做对后会看到什么\n\n原来挤在中心的点分散成旋转方盒子的八个角。这个小函数会被最终渲染器继续使用。",
+          "en": "## One small task\n\nReplace the fixed canvas center with `[(nx+1)*width/2, (1-ny)*height/2]`. Fractional coordinates are fine; the point-drawing helper rounds them.\n\n## Follow along\n\n1. Open Stage reference to see the target.\n2. Switch to My code, open `src/viewport.ts` and find the only TODO. Everything around it is supplied.\n3. Complete that change; the preview updates automatically after typing stops.\n4. Run acceptance tests to unlock the next lesson.\n\n## What success looks like\n\nPoints previously piled at the center spread into eight rotating box corners. The final renderer reuses this function."
+        },
+        "checklist": [
+          {
+            "zh": "先对照画面，再完成一处 TODO",
+            "en": "Compare the image, then complete one TODO"
+          },
+          {
+            "zh": "运行验收，确认这个小步骤正确",
+            "en": "Run tests to check this small step"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "先加 1 把 [-1,1] 变成 [0,2]，再除以 2 变成 [0,1]，最后乘画布宽度。y 方向需要翻过来。",
+            "en": "Add one to change [-1,1] to [0,2], halve it to get [0,1], then multiply by the size. Flip y."
+          },
+          {
+            "zh": "不用重写整个文件。工具函数、输入检查和循环已经提供；只替换 TODO 下面那一行。",
+            "en": "Do not rewrite the file. Helpers, input checks and loops are supplied; replace only the line below TODO."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "如果画面没变，先确认预览选择的是“我的代码”。“本关参考”和“最终效果”不会运行你的草稿。",
+            "en": "If the image does not change, select My code. The two reference modes do not run your drafts."
+          }
+        ],
+        "starterFiles": [
+          {
+            "path": "src/viewport.ts",
+            "content": "import type { Vec4 } from './types';\nexport function toScreen(position: Vec4, width: number, height: number): [number,number] {\n  // The camera helper already calculated w. Dividing by w makes far objects smaller.\n  const nx = position[0] / position[3];\n  const ny = position[1] / position[3];\n  // TODO: 把标准坐标转换为像素位置 / Map to screen coordinates.\n    return [width/2,height/2];\n}\n",
+            "openByDefault": true
+          },
+          {
+            "path": "preview/stage-3.ts",
+            "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\nimport { scene } from '../src/scene';\nimport { rotateY } from '../src/rotation'; import { perspective,transform } from '../src/math'; import { toScreen } from '../src/viewport';\n      export function renderFrame(time:number,width:number,height:number) { const frame=createFrame(width,height); clear(frame,scene.background); const camera=perspective(1,width/height,.1,20);\n      for(const x of [-1,1]) for(const y of [-1,1]) for(const z of [-1,1]) { const p=rotateY([x,y,z,1],time*scene.speed); p[2]-=5; const v=transform(camera,p); const [px,py]=toScreen(v,width,height);\n        for(let dy=-3;dy<=3;dy++) for(let dx=-3;dx<=3;dx++) putPixel(frame,Math.round(px)+dx,Math.round(py)+dy,scene.color); } return frame; }",
+            "readonly": true
+          }
+        ],
+        "referenceFiles": [
+          {
+            "path": "src/viewport.ts",
+            "content": "import type { Vec4 } from './types';\nexport function toScreen(position: Vec4, width: number, height: number): [number,number] {\n  // The camera helper already calculated w. Dividing by w makes far objects smaller.\n  const nx = position[0] / position[3];\n  const ny = position[1] / position[3];\n  return [(nx+1)*width/2, (1-ny)*height/2];\n}\n"
+          }
+        ],
+        "specs": [
+          {
+            "path": "spec/stage-3.spec.ts",
+            "content": "import { toScreen } from '../src/viewport';\nit('maps center and corners',()=>{expect(toScreen([0,0,0,1],200,100)).toEqual([100,50]);expect(toScreen([-1,1,0,1],200,100)).toEqual([0,0]);expect(toScreen([1,-1,0,1],200,100)).toEqual([200,100]);});\nit('divides by camera distance before mapping',()=>{expect(toScreen([1,1,0,2],200,100)).toEqual([150,25]);});\n"
+          }
+        ],
+        "referenceNotes": {
+          "zh": "先找到参考实现中与你的 TODO 对应的一行，代入本关例子验证。剩下的代码是课程提供的工具，完整算法可以学完入门路线后再研究。",
+          "en": "Find the reference line matching your TODO and substitute the lesson example. The remaining code is supplied tooling; study its full algorithm after finishing the beginner route."
+        },
+        "extension": {
+          "zh": "选学：读一读本文件已经提供的部分，再尝试不用骨架重写。这个挑战不影响通关。",
+          "en": "Optional: study the supplied scaffolding and try rewriting it independently. This challenge is not required to advance."
+        },
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ]
+      },
+      {
+        "id": "rasterization",
+        "title": {
+          "zh": "第 4 关 · 给三角形填上颜色",
+          "en": "Stage 4 · Fill a triangle with color"
+        },
+        "primer": {
+          "zh": "三维模型通常由很多三角形拼成。先学会画一个，就能重复使用同样的方法画整个模型。把三角形覆盖的方格找出来叫“光栅化”。本关已经提供寻找方格的循环，你不用从头推导算法。\n\n每个方格还需要一种颜色。可以把三个顶点想成红、绿、蓝三桶颜料；u、v、w 表示各取多少，三者相加等于 1。靠近红顶点时，u 会更大。比如 [0.75,0.125,0.125] 表示 75% 红、12.5% 绿和 12.5% 蓝。工具已经算好这三个比例，你只要把它们交给画图代码。\n\n这门课不要求你学过图形学或线性代数。只需要认识变量、数组、函数和 for 循环。代码中写着“工具”的文件已经能工作，不需要一次读懂。先观察本关参考画面，再只修改 TODO 标出的那一行，最后对照画面运行验收。即使还不理解全部公式，也可以先用给出的数字手算一次，确认代码确实表达了这件事。",
+          "en": "3D models are usually made of triangles. Learn to draw one and the same method can draw an entire model. Finding covered pixel squares is called rasterization. The pixel-search loop is supplied, so you do not have to derive the algorithm.\n\nEach square also needs a color. Think of the three vertices as buckets of red, green and blue paint. u, v and w say how much to use from each bucket and sum to one. Near the red vertex, u is larger. [0.75,0.125,0.125] means 75% red and 12.5% each of green and blue. The helper has calculated the proportions; pass them to the drawing code.\n\nYou do not need computer graphics or linear algebra knowledge for this course. You only need variables, arrays, functions and for loops. Files marked as tools already work; you do not need to understand all their internals yet. Look at the stage reference, change only the marked TODO, compare the image, then run acceptance tests. Treat a formula as a small recipe: substitute the example numbers once and check the result before trying to understand its general derivation. The goal is one visible success at a time, with the surrounding machinery supplied for you."
+        },
+        "goal": {
+          "zh": "## 这关只做一件事\n\n找到 samples.push，把固定的 `weights: [1,0,0]` 改成 `weights: [u,v,w]`。其余用于判断哪些像素在三角形内的代码，作为工具直接使用。\n\n## 跟着做\n\n1. 点击右侧“本关参考”，看看目标画面。\n2. 切回“我的代码”，打开 `src/rasterizer.ts`，找到唯一的 TODO。其他代码已准备好。\n3. 按上面的例子补完代码，停止输入后画面会自动更新。\n4. 点击“运行验收”，通过后进入下一关。\n\n## 做对后会看到什么\n\n纯红三角形变成平滑的红绿蓝渐变。这就是“插值”：根据位置混合几个已知值。",
+          "en": "## One small task\n\nIn samples.push, replace fixed `weights: [1,0,0]` with `weights: [u,v,w]`. Use the supplied coverage calculations as a helper.\n\n## Follow along\n\n1. Open Stage reference to see the target.\n2. Switch to My code, open `src/rasterizer.ts` and find the only TODO. Everything around it is supplied.\n3. Complete that change; the preview updates automatically after typing stops.\n4. Run acceptance tests to unlock the next lesson.\n\n## What success looks like\n\nThe solid red triangle becomes a smooth RGB gradient. This is interpolation: mixing known values according to position."
+        },
+        "checklist": [
+          {
+            "zh": "先对照画面，再完成一处 TODO",
+            "en": "Compare the image, then complete one TODO"
+          },
+          {
+            "zh": "运行验收，确认这个小步骤正确",
+            "en": "Run tests to check this small step"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "[1,0,0] 表示全用第一个顶点的颜色，所以现在整块都是红色。换成每个像素自己的比例即可。",
+            "en": "[1,0,0] uses only the first vertex color, making the whole triangle red. Return each pixel’s own proportions instead."
+          },
+          {
+            "zh": "不用重写整个文件。工具函数、输入检查和循环已经提供；只替换 TODO 下面那一行。",
+            "en": "Do not rewrite the file. Helpers, input checks and loops are supplied; replace only the line below TODO."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "如果画面没变，先确认预览选择的是“我的代码”。“本关参考”和“最终效果”不会运行你的草稿。",
+            "en": "If the image does not change, select My code. The two reference modes do not run your drafts."
+          }
+        ],
+        "starterFiles": [
+          {
+            "path": "src/rasterizer.ts",
+            "content": "import type { Sample } from './types';\nexport function rasterize(vertices: number[][], width: number, height: number): Sample[] {\n  const [a,b,c] = vertices;\n  const edge = (u: number[], v: number[], x: number, y: number) => (v[0]-u[0])*(y-u[1])-(v[1]-u[1])*(x-u[0]);\n  const area = edge(a,b,c[0],c[1]);\n  if (!Number.isFinite(area) || Math.abs(area) < 1e-10) return [];\n  const samples: Sample[] = [];\n  const x0 = Math.max(0, Math.floor(Math.min(a[0],b[0],c[0])));\n  const x1 = Math.min(width-1, Math.ceil(Math.max(a[0],b[0],c[0])));\n  const y0 = Math.max(0, Math.floor(Math.min(a[1],b[1],c[1])));\n  const y1 = Math.min(height-1, Math.ceil(Math.max(a[1],b[1],c[1])));\n  for (let y=y0; y<=y1; y++) for (let x=x0; x<=x1; x++) {\n    const u = edge(b,c,x+0.5,y+0.5)/area;\n    const v = edge(c,a,x+0.5,y+0.5)/area;\n    const w = 1-u-v;\n    // TODO: 传回算好的三种颜色比例 / Return the calculated weights.\n      if (u >= -1e-10 && v >= -1e-10 && w >= -1e-10) samples.push({ x, y, weights: [1,0,0] });\n  }\n  return samples;\n}\n",
+            "openByDefault": true
+          },
+          {
+            "path": "preview/stage-4.ts",
+            "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\nimport { scene } from '../src/scene';\nimport { rasterize } from '../src/rasterizer'; export function renderFrame(time:number,width:number,height:number) { const frame=createFrame(width,height); clear(frame,scene.background); for(const s of rasterize([[width*.5,height*.12],[width*.15,height*.85],[width*.85,height*.85]],width,height)) putPixel(frame,s.x,s.y,[s.weights[0]*255,s.weights[1]*255,s.weights[2]*255,255]); return frame; }",
+            "readonly": true
+          }
+        ],
+        "referenceFiles": [
+          {
+            "path": "src/rasterizer.ts",
+            "content": "import type { Sample } from './types';\nexport function rasterize(vertices: number[][], width: number, height: number): Sample[] {\n  const [a,b,c] = vertices;\n  const edge = (u: number[], v: number[], x: number, y: number) => (v[0]-u[0])*(y-u[1])-(v[1]-u[1])*(x-u[0]);\n  const area = edge(a,b,c[0],c[1]);\n  if (!Number.isFinite(area) || Math.abs(area) < 1e-10) return [];\n  const samples: Sample[] = [];\n  const x0 = Math.max(0, Math.floor(Math.min(a[0],b[0],c[0])));\n  const x1 = Math.min(width-1, Math.ceil(Math.max(a[0],b[0],c[0])));\n  const y0 = Math.max(0, Math.floor(Math.min(a[1],b[1],c[1])));\n  const y1 = Math.min(height-1, Math.ceil(Math.max(a[1],b[1],c[1])));\n  for (let y=y0; y<=y1; y++) for (let x=x0; x<=x1; x++) {\n    const u = edge(b,c,x+0.5,y+0.5)/area;\n    const v = edge(c,a,x+0.5,y+0.5)/area;\n    const w = 1-u-v;\n    if (u >= -1e-10 && v >= -1e-10 && w >= -1e-10) samples.push({ x, y, weights: [u,v,w] });\n  }\n  return samples;\n}\n"
+          }
+        ],
+        "specs": [
+          {
+            "path": "spec/stage-4.spec.ts",
+            "content": "import { rasterize } from '../src/rasterizer';\nit('samples centers with correct weights',()=>{\n  const s=rasterize([[0,0],[4,0],[0,4]],4,4), p=s.find(v=>v.x===0&&v.y===0)!;\n  expect(s.length).toBe(10); expect(p.weights).toEqual([0.75,0.125,0.125]);\n  expect(rasterize([[0,4],[4,0],[0,0]],4,4).length).toBe(10);\n});\nit('clips bounds and discards zero area',()=>{\n  expect(rasterize([[0,0],[1,1],[2,2]],8,8)).toEqual([]);\n  const s=rasterize([[-100,-100],[100,0],[0,100]],4,3);\n  expect(s.length>0).toBe(true); expect(s.every(p=>p.x>=0&&p.x<4&&p.y>=0&&p.y<3)).toBe(true); expect(s.some(p=>p.weights[1]>0)).toBe(true);\n});\n"
+          }
+        ],
+        "referenceNotes": {
+          "zh": "先找到参考实现中与你的 TODO 对应的一行，代入本关例子验证。剩下的代码是课程提供的工具，完整算法可以学完入门路线后再研究。",
+          "en": "Find the reference line matching your TODO and substitute the lesson example. The remaining code is supplied tooling; study its full algorithm after finishing the beginner route."
+        },
+        "extension": {
+          "zh": "选学：读一读本文件已经提供的部分，再尝试不用骨架重写。这个挑战不影响通关。",
+          "en": "Optional: study the supplied scaffolding and try rewriting it independently. This challenge is not required to advance."
+        },
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ]
+      },
+      {
+        "id": "depth",
+        "title": {
+          "zh": "第 5 关 · 让前面的物体挡住后面",
+          "en": "Stage 5 · Keep the nearest surface visible"
+        },
+        "primer": {
+          "zh": "画两张重叠的三角形时，最后画的颜色会盖住前面的颜色。但真实世界里应该是“近的挡住远的”，和画图顺序无关。我们给每个像素再准备一张小纸条，记下目前最近的距离，这张表叫“深度缓冲”。\n\n本项目的深度 z 在 0 到 1 之间，数字越小越近。如果纸条写着 0.2，而新来的像素距离是 0.8，它更远，不能覆盖；新距离是 0.1 就可以覆盖，并把纸条改为 0.1。每一帧重新开始时都把纸条清成 Infinity，表示还没看到任何物体。\n\n这门课不要求你学过图形学或线性代数。只需要认识变量、数组、函数和 for 循环。代码中写着“工具”的文件已经能工作，不需要一次读懂。先观察本关参考画面，再只修改 TODO 标出的那一行，最后对照画面运行验收。即使还不理解全部公式，也可以先用给出的数字手算一次，确认代码确实表达了这件事。",
+          "en": "When two triangles overlap, painting later normally overwrites earlier colors. Real visibility should depend on distance, not drawing order. Give each pixel a small note recording the nearest distance seen so far. This table is the depth buffer.\n\nDepth z ranges from zero to one, with smaller values closer. If the note says 0.2 and a new fragment arrives at 0.8, it is farther and must not overwrite the pixel. A new depth of 0.1 may replace it and update the note. Each frame starts with Infinity, meaning no surface has been seen yet.\n\nYou do not need computer graphics or linear algebra knowledge for this course. You only need variables, arrays, functions and for loops. Files marked as tools already work; you do not need to understand all their internals yet. Look at the stage reference, change only the marked TODO, compare the image, then run acceptance tests. Treat a formula as a small recipe: substitute the example numbers once and check the result before trying to understand its general derivation. The goal is one visible success at a time, with the surrounding machinery supplied for you."
+        },
+        "goal": {
+          "zh": "## 这关只做一件事\n\ndepthTest 已经负责检查输入和记录距离。只补一个判断：当 `z >= buffer[index]` 时返回 false，不让更远或相同距离的颜色覆盖。\n\n## 跟着做\n\n1. 点击右侧“本关参考”，看看目标画面。\n2. 切回“我的代码”，打开 `src/depth.ts`，找到唯一的 TODO。其他代码已准备好。\n3. 按上面的例子补完代码，停止输入后画面会自动更新。\n4. 点击“运行验收”，通过后进入下一关。\n\n## 做对后会看到什么\n\n青色三角形稳稳挡住后面的橙色三角形，即使橙色是后画的。",
+          "en": "## One small task\n\nInput validation and distance recording are provided. Add one check: return false when `z >= buffer[index]`, rejecting farther or equal-depth fragments.\n\n## Follow along\n\n1. Open Stage reference to see the target.\n2. Switch to My code, open `src/depth.ts` and find the only TODO. Everything around it is supplied.\n3. Complete that change; the preview updates automatically after typing stops.\n4. Run acceptance tests to unlock the next lesson.\n\n## What success looks like\n\nThe cyan triangle stays in front of the orange triangle even though orange is drawn later."
+        },
+        "checklist": [
+          {
+            "zh": "先对照画面，再完成一处 TODO",
+            "en": "Compare the image, then complete one TODO"
+          },
+          {
+            "zh": "运行验收，确认这个小步骤正确",
+            "en": "Run tests to check this small step"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "“更近”意味着数字更小；所以新数字大于或等于旧数字时应该拒绝。",
+            "en": "Closer means a smaller number. Reject the new number when it is greater than or equal to the old one."
+          },
+          {
+            "zh": "不用重写整个文件。工具函数、输入检查和循环已经提供；只替换 TODO 下面那一行。",
+            "en": "Do not rewrite the file. Helpers, input checks and loops are supplied; replace only the line below TODO."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "如果画面没变，先确认预览选择的是“我的代码”。“本关参考”和“最终效果”不会运行你的草稿。",
+            "en": "If the image does not change, select My code. The two reference modes do not run your drafts."
+          }
+        ],
+        "starterFiles": [
+          {
+            "path": "src/depth.ts",
+            "content": "export function createDepth(width: number, height: number): Float64Array {\n  return new Float64Array(width * height).fill(Infinity);\n}\nexport function depthTest(buffer: Float64Array, index: number, z: number): boolean {\n  if (!Number.isInteger(index) || index < 0 || index >= buffer.length || !Number.isFinite(z) || z < 0 || z > 1) return false;\n  // TODO: false 换成“新像素没有更近”的判断 / Reject a fragment that is not closer.\n    if (false) return false;\n    buffer[index] = z;\n  return true;\n}\n",
+            "openByDefault": true
+          },
+          {
+            "path": "preview/stage-5.ts",
+            "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\nimport { scene } from '../src/scene';\nimport { rasterize } from '../src/rasterizer'; import { createDepth,depthTest } from '../src/depth'; export function renderFrame(time:number,width:number,height:number) { const frame=createFrame(width,height); clear(frame,scene.background); const depth=createDepth(width,height);\n      for(const [offset,z,color] of [[0,.25,scene.color],[.18,.8,[245,160,70,255]]] as any[]) for(const s of rasterize([[width*(.35+offset),height*.15],[width*(.1+offset),height*.8],[width*(.7+offset),height*.8]],width,height)) if(depthTest(depth,s.y*width+s.x,z)) putPixel(frame,s.x,s.y,color); return frame; }",
+            "readonly": true
+          }
+        ],
+        "referenceFiles": [
+          {
+            "path": "src/depth.ts",
+            "content": "export function createDepth(width: number, height: number): Float64Array {\n  return new Float64Array(width * height).fill(Infinity);\n}\nexport function depthTest(buffer: Float64Array, index: number, z: number): boolean {\n  if (!Number.isInteger(index) || index < 0 || index >= buffer.length || !Number.isFinite(z) || z < 0 || z > 1 || z >= buffer[index]) return false;\n  buffer[index] = z;\n  return true;\n}\n"
+          }
+        ],
+        "specs": [
+          {
+            "path": "spec/stage-5.spec.ts",
+            "content": "import { createDepth, depthTest } from '../src/depth';\nit('keeps the nearest fragment independent of draw order',()=>{\n  const d=createDepth(2,2); expect(depthTest(d,0,0.8)).toBe(true); expect(depthTest(d,0,0.2)).toBe(true);\n  expect(depthTest(d,0,0.7)).toBe(false); expect(depthTest(d,0,0.2)).toBe(false); expect(d[0]).toBe(0.2);\n  expect(depthTest(d,1,0)).toBe(true); expect(depthTest(d,2,1)).toBe(true);\n});\nit('does not corrupt the buffer on invalid fragments',()=>{\n  const d=createDepth(1,1);\n  for(const z of [NaN,Infinity,-0.1,1.1]) expect(depthTest(d,0,z)).toBe(false);\n  expect(depthTest(d,-1,0)).toBe(false); expect(depthTest(d,0.5,0)).toBe(false); expect(d[0]).toBe(Infinity); depthTest(d,0,0.2); expect(depthTest(d,0,0.9)).toBe(false);\n});\n"
+          }
+        ],
+        "referenceNotes": {
+          "zh": "先找到参考实现中与你的 TODO 对应的一行，代入本关例子验证。剩下的代码是课程提供的工具，完整算法可以学完入门路线后再研究。",
+          "en": "Find the reference line matching your TODO and substitute the lesson example. The remaining code is supplied tooling; study its full algorithm after finishing the beginner route."
+        },
+        "extension": {
+          "zh": "选学：读一读本文件已经提供的部分，再尝试不用骨架重写。这个挑战不影响通关。",
+          "en": "Optional: study the supplied scaffolding and try rewriting it independently. This challenge is not required to advance."
+        },
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ]
+      },
+      {
+        "id": "lighting",
+        "title": {
+          "zh": "第 6 关 · 给表面加一点明暗",
+          "en": "Stage 6 · Add light and shade"
+        },
+        "primer": {
+          "zh": "同样的颜色，有的面朝着灯就更亮，有的背着灯就更暗，物体因此显出立体感。你可以把“法线”理解成贴在表面、朝外指的小箭头；光方向是指向灯的小箭头。工具会比较两支箭头，得到 diffuse：正对灯时是 1，侧对或背对时接近 0。\n\n本关不要求你计算箭头。只需要把亮度用在红绿蓝三个通道上。我们保留 20% 基础亮度，避免背光面完全黑掉：亮度=0.2+0.8×diffuse。例如原来的红色通道是 100，diffuse=0 时变成 20，diffuse=1 时仍为 100。透明度不受光照影响。\n\n这门课不要求你学过图形学或线性代数。只需要认识变量、数组、函数和 for 循环。代码中写着“工具”的文件已经能工作，不需要一次读懂。先观察本关参考画面，再只修改 TODO 标出的那一行，最后对照画面运行验收。即使还不理解全部公式，也可以先用给出的数字手算一次，确认代码确实表达了这件事。",
+          "en": "A surface facing a lamp looks brighter than one facing away, giving a flat color a 3D appearance. A normal is simply a small arrow pointing outward from the surface. A light direction is an arrow toward the lamp. The supplied helper compares them to produce diffuse: one when directly facing the lamp, near zero when sideways or facing away.\n\nYou do not calculate the arrows here. Apply brightness to red, green and blue. Keep 20% base light with brightness=0.2+0.8×diffuse. A red channel of 100 becomes 20 at diffuse=0 and stays 100 at diffuse=1. Opacity is unaffected.\n\nYou do not need computer graphics or linear algebra knowledge for this course. You only need variables, arrays, functions and for loops. Files marked as tools already work; you do not need to understand all their internals yet. Look at the stage reference, change only the marked TODO, compare the image, then run acceptance tests. Treat a formula as a small recipe: substitute the example numbers once and check the result before trying to understand its general derivation. The goal is one visible success at a time, with the surrounding machinery supplied for you."
+        },
+        "goal": {
+          "zh": "## 这关只做一件事\n\n在 lambert 最后一行，让 color[0]、color[1]、color[2] 各乘 `(0.2+0.8*diffuse)`，color[3] 保持不变。上面的颜色混合和箭头计算都是已提供的工具。\n\n## 跟着做\n\n1. 点击右侧“本关参考”，看看目标画面。\n2. 切回“我的代码”，打开 `src/shader.ts`，找到唯一的 TODO。其他代码已准备好。\n3. 按上面的例子补完代码，停止输入后画面会自动更新。\n4. 点击“运行验收”，通过后进入下一关。\n\n## 做对后会看到什么\n\n彩色三角形随时间变亮、变暗，但不会消失。最终立方体的每个面也会使用这个函数。",
+          "en": "## One small task\n\nIn the final line of lambert, multiply color[0], color[1] and color[2] by `(0.2+0.8*diffuse)`. Keep color[3] unchanged. Color mixing and arrow calculations are supplied.\n\n## Follow along\n\n1. Open Stage reference to see the target.\n2. Switch to My code, open `src/shader.ts` and find the only TODO. Everything around it is supplied.\n3. Complete that change; the preview updates automatically after typing stops.\n4. Run acceptance tests to unlock the next lesson.\n\n## What success looks like\n\nThe colored triangle brightens and dims over time without disappearing. Every face of the final cube will use this function."
+        },
+        "checklist": [
+          {
+            "zh": "先对照画面，再完成一处 TODO",
+            "en": "Compare the image, then complete one TODO"
+          },
+          {
+            "zh": "运行验收，确认这个小步骤正确",
+            "en": "Run tests to check this small step"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "四个数组元素中只改前三个。把三个颜色通道都乘以相同亮度，才不会改变物体本来的色调。",
+            "en": "Change only the first three array elements. Multiply RGB by the same brightness to preserve the surface hue."
+          },
+          {
+            "zh": "不用重写整个文件。工具函数、输入检查和循环已经提供；只替换 TODO 下面那一行。",
+            "en": "Do not rewrite the file. Helpers, input checks and loops are supplied; replace only the line below TODO."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "如果画面没变，先确认预览选择的是“我的代码”。“本关参考”和“最终效果”不会运行你的草稿。",
+            "en": "If the image does not change, select My code. The two reference modes do not run your drafts."
+          }
+        ],
+        "starterFiles": [
+          {
+            "path": "src/shader.ts",
+            "content": "import type { Color, Vertex } from './types';\nexport function interpolateColor(vertices: Vertex[], weights: number[]): Color {\n  const q = weights.map((v,i) => v / vertices[i].position[3]);\n  const sum = q.reduce((a,b) => a+b, 0);\n  return [0,1,2,3].map(c => q.reduce((s,v,i) => s+v*vertices[i].color[c], 0)/sum) as Color;\n}\nexport function lambert(color: Color, normal: number[], light: number[]): Color {\n  const length = (v: number[]) => Math.hypot(...v);\n  const denominator = length(normal)*length(light);\n  const diffuse = denominator ? Math.max(0, Math.min(1, normal.reduce((s,v,i) => s+v*light[i],0)/denominator)) : 0;\n  // TODO: 把亮度乘进三个颜色通道 / Apply brightness to RGB only.\n    return [color[0],color[1],color[2],color[3]];\n}\n",
+            "openByDefault": true
+          },
+          {
+            "path": "preview/stage-6.ts",
+            "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\nimport { scene } from '../src/scene';\nimport { rasterize } from '../src/rasterizer'; import { interpolateColor,lambert } from '../src/shader'; export function renderFrame(time:number,width:number,height:number) { const frame=createFrame(width,height); clear(frame,scene.background);\n      const tri=[{position:[0,0,0,1],color:scene.color},{position:[0,0,0,2],color:[255,140,60,255]},{position:[0,0,0,4],color:[130,100,255,255]}];\n      for(const s of rasterize([[width*.5,height*.1],[width*.12,height*.85],[width*.88,height*.85]],width,height)) putPixel(frame,s.x,s.y,lambert(interpolateColor(tri as any,s.weights),[Math.sin(time*scene.speed),0,Math.cos(time*scene.speed)],[0,0,1])); return frame; }",
+            "readonly": true
+          }
+        ],
+        "referenceFiles": [
+          {
+            "path": "src/shader.ts",
+            "content": "import type { Color, Vertex } from './types';\nexport function interpolateColor(vertices: Vertex[], weights: number[]): Color {\n  const q = weights.map((v,i) => v / vertices[i].position[3]);\n  const sum = q.reduce((a,b) => a+b, 0);\n  return [0,1,2,3].map(c => q.reduce((s,v,i) => s+v*vertices[i].color[c], 0)/sum) as Color;\n}\nexport function lambert(color: Color, normal: number[], light: number[]): Color {\n  const length = (v: number[]) => Math.hypot(...v);\n  const denominator = length(normal)*length(light);\n  const diffuse = denominator ? Math.max(0, Math.min(1, normal.reduce((s,v,i) => s+v*light[i],0)/denominator)) : 0;\n  return [color[0]*(0.2+0.8*diffuse),color[1]*(0.2+0.8*diffuse),color[2]*(0.2+0.8*diffuse),color[3]];\n}\n"
+          }
+        ],
+        "specs": [
+          {
+            "path": "spec/stage-6.spec.ts",
+            "content": "import { interpolateColor,lambert } from '../src/shader';\nit('corrects attributes by reciprocal w',()=>{\n  const tri=[{position:[0,0,0,1],color:[240,0,0,255]},{position:[0,0,0,2],color:[0,240,0,255]},{position:[0,0,0,4],color:[0,0,240,255]}];\n  const c=interpolateColor(tri as any,[1/3,1/3,1/3]);\n  expect(c[0]).toBeCloseTo(240*4/7); expect(c[1]).toBeCloseTo(240*2/7); expect(c[2]).toBeCloseTo(240/7); expect(c[3]).toBeCloseTo(255); expect(lambert([100,50,25,128],[1,0,0],[0,0,1])).toEqual([20,10,5,128]);\n});\nit('normalizes vectors and keeps ambient and alpha',()=>{\n  expect(lambert([100,50,25,128],[0,0,2],[0,0,4])).toEqual([100,50,25,128]);\n  expect(lambert([100,50,25,128],[0,0,-1],[0,0,1])).toEqual([20,10,5,128]);\n  expect(lambert([100,50,25,128],[0,0,0],[0,0,1])).toEqual([20,10,5,128]);\n});\n"
+          }
+        ],
+        "referenceNotes": {
+          "zh": "先找到参考实现中与你的 TODO 对应的一行，代入本关例子验证。剩下的代码是课程提供的工具，完整算法可以学完入门路线后再研究。",
+          "en": "Find the reference line matching your TODO and substitute the lesson example. The remaining code is supplied tooling; study its full algorithm after finishing the beginner route."
+        },
+        "extension": {
+          "zh": "选学：读一读本文件已经提供的部分，再尝试不用骨架重写。这个挑战不影响通关。",
+          "en": "Optional: study the supplied scaffolding and try rewriting it independently. This challenge is not required to advance."
+        },
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ]
+      },
+      {
+        "id": "pipeline",
+        "title": {
+          "zh": "第 7 关 · 拼出你的第一个 3D 渲染器",
+          "en": "Stage 7 · Assemble your first 3D renderer"
+        },
+        "primer": {
+          "zh": "现在你已经会让像素显示颜色、旋转顶点、换算屏幕位置、混合颜色、判断遮挡和添加明暗。渲染器只是按顺序把这些小工具接在一起。“顶点”是模型上的角，“片元”是准备写到某个像素的一次颜色候选。\n\n“着色器”在这里就是普通函数：vertex 把角的位置送到相机，fragment 决定像素最后是什么颜色。两者都由场景传进来，所以同一套框架可以画不同的物体。本关已经接好前面所有步骤，你只需要让最终颜色经过 fragment 函数。裁剪等较复杂的细节已作为工具提供，入门时不要求实现。\n\n这门课不要求你学过图形学或线性代数。只需要认识变量、数组、函数和 for 循环。代码中写着“工具”的文件已经能工作，不需要一次读懂。先观察本关参考画面，再只修改 TODO 标出的那一行，最后对照画面运行验收。即使还不理解全部公式，也可以先用给出的数字手算一次，确认代码确实表达了这件事。",
+          "en": "You can now write pixels, rotate corners, map positions to the screen, mix colors, resolve overlap and add shading. A renderer just connects these small tools in order. A vertex is a model corner; a fragment is a candidate color for one pixel.\n\nA shader here is an ordinary function: vertex sends a corner through the camera, and fragment decides its final color. The scene supplies these functions, so the same framework can draw different objects. All earlier steps are connected for you. Pass the final color through fragment. Complex clipping is provided as a helper and is not a beginner requirement.\n\nYou do not need computer graphics or linear algebra knowledge for this course. You only need variables, arrays, functions and for loops. Files marked as tools already work; you do not need to understand all their internals yet. Look at the stage reference, change only the marked TODO, compare the image, then run acceptance tests. Treat a formula as a small recipe: substitute the example numbers once and check the result before trying to understand its general derivation. The goal is one visible success at a time, with the surrounding machinery supplied for you."
+        },
+        "goal": {
+          "zh": "## 这关只做一件事\n\n找到绘制像素的最后一行，把 `interpolateColor(tri,sample.weights)` 包进 `program.fragment(...)`。只改这一处，让使用者传入的颜色处理函数真正生效。\n\n## 跟着做\n\n1. 点击右侧“本关参考”，看看目标画面。\n2. 切回“我的代码”，打开 `src/renderer.ts`，找到唯一的 TODO。其他代码已准备好。\n3. 按上面的例子补完代码，停止输入后画面会自动更新。\n4. 点击“运行验收”，通过后进入下一关。\n\n## 做对后会看到什么\n\n完整立方体开始以青色旋转，近处挡住远处，六个面有不同明暗。未接上 fragment 时它是灰色。你已经完成基础部分！接下来继续给这个渲染器添加缩放、移动、相机、花纹和雾化。",
+          "en": "## One small task\n\nOn the pixel-writing line, wrap `interpolateColor(tri,sample.weights)` in `program.fragment(...)`. Make this one change so the caller’s color-processing function is actually used.\n\n## Follow along\n\n1. Open Stage reference to see the target.\n2. Switch to My code, open `src/renderer.ts` and find the only TODO. Everything around it is supplied.\n3. Complete that change; the preview updates automatically after typing stops.\n4. Run acceptance tests to unlock the next lesson.\n\n## What success looks like\n\nA complete cyan cube rotates with correct overlap and shaded faces. Before connecting fragment it is gray. You have finished the foundation. Continue with scaling, movement, camera distance, patterns and fog."
+        },
+        "checklist": [
+          {
+            "zh": "先对照画面，再完成一处 TODO",
+            "en": "Compare the image, then complete one TODO"
+          },
+          {
+            "zh": "运行验收，确认这个小步骤正确",
+            "en": "Run tests to check this small step"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "这是一次普通的函数调用：先得到颜色 c，再调用 program.fragment(c)，把返回的新颜色写进像素。",
+            "en": "This is a normal function call: calculate color c, call program.fragment(c), then write the returned color."
+          },
+          {
+            "zh": "不用重写整个文件。工具函数、输入检查和循环已经提供；只替换 TODO 下面那一行。",
+            "en": "Do not rewrite the file. Helpers, input checks and loops are supplied; replace only the line below TODO."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "如果画面没变，先确认预览选择的是“我的代码”。“本关参考”和“最终效果”不会运行你的草稿。",
+            "en": "If the image does not change, select My code. The two reference modes do not run your drafts."
+          }
+        ],
+        "starterFiles": [
+          {
+            "path": "src/renderer.ts",
+            "content": "import { createFrame, clear, putPixel } from './framebuffer';\nimport { createDepth, depthTest } from './depth';\nimport { clipTriangle } from './clipping';\nimport { rasterize } from './rasterizer';\nimport { interpolateColor } from './shader';\nimport { toScreen } from './viewport';\nimport type { Vertex, Color } from './types';\nexport function createRenderer(width: number, height: number) {\n  const frame = createFrame(width,height);\n  const depth = createDepth(width,height);\n  return {\n    frame,\n    clear(color: Color) { clear(frame,color); depth.fill(Infinity); },\n    drawTriangles(vertices: Vertex[], indices: number[], program: {\n      vertex: (v: Vertex) => Vertex;\n      fragment: (color: Color) => Color;\n    }) {\n      if (indices.length % 3 || indices.some(i => !Number.isInteger(i) || i < 0 || i >= vertices.length)) throw new Error('Invalid triangle indices');\n      const transformed = vertices.map(v => program.vertex(v));\n      for (let i=0; i<indices.length; i+=3) {\n        const input = indices.slice(i,i+3).map(j => transformed[j]);\n        for (const tri of clipTriangle(input)) {\n          if (tri.some(v => v.position[3] <= 1e-8)) continue;\n          const screen = tri.map(v => toScreen(v.position,width,height));\n          for (const sample of rasterize(screen,width,height)) {\n            const z = sample.weights.reduce((sum,w,j) => sum+w*tri[j].position[2]/tri[j].position[3],0)*0.5+0.5;\n            // TODO: 让颜色经过 program.fragment / Pass the color through the fragment callback.\n              if (depthTest(depth,sample.y*width+sample.x,z)) putPixel(frame,sample.x,sample.y,interpolateColor(tri,sample.weights));\n          }\n        }\n      }\n    }\n  };\n}\n",
+            "openByDefault": true
+          },
+          {
+            "path": "preview/stage-7.ts",
+            "content": "import { createRenderer } from '../src/renderer';\nimport { transform,perspective,multiply } from '../src/math';\nimport { rotateY } from '../src/rotation';\nimport { lambert } from '../src/shader';\nimport { scene } from '../src/scene';\nimport type { Vertex,Color } from '../src/types';\nexport function renderFrame(time:number,width:number,height:number) {\n  const r=createRenderer(width,height); r.clear(scene.background);\n  const a=time*scene.speed,ct=Math.cos(.4),st=Math.sin(.4);\n  const tilt=[1,0,0,0,0,ct,-st,0,0,st,ct,0,0,0,0,1];\n  const view=tilt.slice(); view[11]=-5;\n  const camera=multiply(perspective(1,width/height,.1,30),view);\n  const positions=[[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]];\n  const faces=[[0,3,2,1],[4,5,6,7],[0,4,7,3],[1,2,6,5],[3,7,6,2],[0,1,5,4]];\n  const normals=[[0,0,-1],[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0]];\n  for(let i=0;i<faces.length;i++) {\n    const normal=transform(tilt,rotateY([...normals[i],0] as any,a)).slice(0,3);\n    const color=lambert(scene.color,normal,[.5,1,2]);\n    const vertices=faces[i].map(j=>({position:[...positions[j],1],color:[190,190,190,255]})) as Vertex[];\n    r.drawTriangles(vertices,[0,1,2,0,2,3],{vertex:v=>({...v,position:transform(camera,rotateY(v.position,a))}),fragment:()=>color});\n  }\n  return r.frame;\n}\n",
+            "readonly": true
+          }
+        ],
+        "referenceFiles": [
+          {
+            "path": "src/renderer.ts",
+            "content": "import { createFrame, clear, putPixel } from './framebuffer';\nimport { createDepth, depthTest } from './depth';\nimport { clipTriangle } from './clipping';\nimport { rasterize } from './rasterizer';\nimport { interpolateColor } from './shader';\nimport { toScreen } from './viewport';\nimport type { Vertex, Color } from './types';\nexport function createRenderer(width: number, height: number) {\n  const frame = createFrame(width,height);\n  const depth = createDepth(width,height);\n  return {\n    frame,\n    clear(color: Color) { clear(frame,color); depth.fill(Infinity); },\n    drawTriangles(vertices: Vertex[], indices: number[], program: {\n      vertex: (v: Vertex) => Vertex;\n      fragment: (color: Color) => Color;\n    }) {\n      if (indices.length % 3 || indices.some(i => !Number.isInteger(i) || i < 0 || i >= vertices.length)) throw new Error('Invalid triangle indices');\n      const transformed = vertices.map(v => program.vertex(v));\n      for (let i=0; i<indices.length; i+=3) {\n        const input = indices.slice(i,i+3).map(j => transformed[j]);\n        for (const tri of clipTriangle(input)) {\n          if (tri.some(v => v.position[3] <= 1e-8)) continue;\n          const screen = tri.map(v => toScreen(v.position,width,height));\n          for (const sample of rasterize(screen,width,height)) {\n            const z = sample.weights.reduce((sum,w,j) => sum+w*tri[j].position[2]/tri[j].position[3],0)*0.5+0.5;\n            if (depthTest(depth,sample.y*width+sample.x,z)) putPixel(frame,sample.x,sample.y,program.fragment(interpolateColor(tri,sample.weights)));\n          }\n        }\n      }\n    }\n  };\n}\n"
+          }
+        ],
+        "specs": [
+          {
+            "path": "spec/stage-7.spec.ts",
+            "content": "import { createRenderer } from '../src/renderer';\nconst vertices=(z:number,color:number[])=>[[-.8,-.8,z,1],[.8,-.8,z,1],[0,.8,z,1]].map(position=>({position,color}));\nconst pass={vertex:(v:any)=>v,fragment:(c:any)=>c};\nit('draws indexed triangles and invokes both shaders',()=>{\n  const r=createRenderer(20,20); r.clear([0,0,0,255]); let calls=0;\n  r.drawTriangles(vertices(0,[255,0,0,255]) as any,[0,1,2],{vertex:v=>{calls++;return v;},fragment:()=>[0,255,0,255]});\n  expect(calls).toBe(3); expect(Array.from(r.frame.pixels.slice((10*20+10)*4,(10*20+10)*4+4))).toEqual([0,255,0,255]);\n});\nit('resolves occlusion and clears depth for the next frame',()=>{\n  const r=createRenderer(20,20), pixel=()=>Array.from(r.frame.pixels.slice(840,844)); r.clear([0,0,0,255]);\n  r.drawTriangles(vertices(-.5,[255,0,0,255]) as any,[0,1,2],pass);\n  r.drawTriangles(vertices(.5,[0,0,255,255]) as any,[0,1,2],pass); expect(pixel()).toEqual([255,0,0,255]);\n  r.clear([0,0,0,255]); r.drawTriangles(vertices(.5,[0,0,255,255]) as any,[0,1,2],{...pass,fragment:()=>[30,60,90,255]}); expect(pixel()).toEqual([30,60,90,255]);\n});\nit('clips outside geometry and rejects invalid indices',()=>{\n  const r=createRenderer(8,8); r.clear([0,0,0,255]); r.drawTriangles(vertices(-2,[255,0,0,255]) as any,[0,1,2],pass);\n  expect(Array.from(r.frame.pixels).filter((_,i)=>i%4===0).every(v=>v===0)).toBe(true);\n  expect(()=>r.drawTriangles(vertices(0,[255,0,0,255]) as any,[0,1,9],pass)).toThrow(); r.drawTriangles(vertices(0,[255,0,0,255]) as any,[0,1,2],{...pass,fragment:()=>[10,20,30,255]}); expect(Array.from(r.frame.pixels.slice(144,148))).toEqual([10,20,30,255]);\n});\n"
+          }
+        ],
+        "referenceNotes": {
+          "zh": "先找到参考实现中与你的 TODO 对应的一行，代入本关例子验证。剩下的代码是课程提供的工具，完整算法可以学完入门路线后再研究。",
+          "en": "Find the reference line matching your TODO and substitute the lesson example. The remaining code is supplied tooling; study its full algorithm after finishing the beginner route."
+        },
+        "extension": {
+          "zh": "选学：读一读本文件已经提供的部分，再尝试不用骨架重写。这个挑战不影响通关。",
+          "en": "Optional: study the supplied scaffolding and try rewriting it independently. This challenge is not required to advance."
+        },
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ]
+      },
+      {
+        "id": "scale",
+        "title": {
+          "zh": "第 8 关 · 让方块变大变小",
+          "en": "Stage 8 · Make the cube bigger or smaller"
+        },
+        "primer": {
+          "zh": "上一关已经能画出方块了。现在想做一个大方块，不需要重新画八个角，只要让每个角离中心更远一点。把位置中的 x、y、z 同时乘一个数，叫作“缩放”。乘 2 就放大两倍，乘 0.5 就缩小一半；乘 1 则保持原样。\n\n例如 [1,2,3] 缩小一半，得到 [0.5,1,1.5]。这里始终围绕方块自己的中心缩放，之后再旋转和移动。第四个数 w 不是长度，不要跟着乘。预览工具已经负责画图，你只需要补回三个乘法。\n\n这门课不要求你学过图形学或线性代数。只需要认识变量、数组、函数和 for 循环。代码中写着“工具”的文件已经能工作，不需要一次读懂。先观察本关参考画面，再只修改 TODO 标出的那一行，最后对照画面运行验收。即使还不理解全部公式，也可以先用给出的数字手算一次，确认代码确实表达了这件事。",
+          "en": "You can already draw a cube. Making it bigger does not require a new mesh: move every corner farther from its center. Multiplying x, y and z by the same number is scaling. Two doubles the size, one half halves it, and one keeps it unchanged.\n\nFor example, [1,2,3] at half size becomes [0.5,1,1.5]. Scale around the cube’s own center before rotating and moving it. The fourth number w is not a length and stays unchanged. The preview helper handles drawing; add only the three multiplications.\n\nYou do not need computer graphics or linear algebra knowledge for this course. You only need variables, arrays, functions and for loops. Files marked as tools already work; you do not need to understand all their internals yet. Look at the stage reference, change only the marked TODO, compare the image, then run acceptance tests. Treat a formula as a small recipe: substitute the example numbers once and check the result before trying to understand its general derivation. The goal is one visible success at a time, with the surrounding machinery supplied for you."
+        },
+        "goal": {
+          "zh": "## 这关只做一件事\n\n在 scalePoint 的返回数组中，让 x、y、z 各乘 size，w 保持不变：`[x*size,y*size,z*size,w]`。本关参考中的 size 是 1.35，因此方块会比起始画面大一些。\n\n## 跟着做\n\n1. 点击右侧“本关参考”，看看目标画面。\n2. 切回“我的代码”，打开 `src/scale.ts`，找到唯一的 TODO。其他代码已准备好。\n3. 按上面的例子补完代码，停止输入后画面会自动更新。\n4. 点击“运行验收”，通过后进入下一关。\n\n## 做对后会看到什么\n\n方块变得更大，旋转和明暗仍然正常。之后可以用同一张模型数据画不同大小的物体。",
+          "en": "## One small task\n\nReturn `[x*size,y*size,z*size,w]` from scalePoint. The reference uses size 1.35, making the cube visibly larger than the starter.\n\n## Follow along\n\n1. Open Stage reference to see the target.\n2. Switch to My code, open `src/scale.ts` and find the only TODO. Everything around it is supplied.\n3. Complete that change; the preview updates automatically after typing stops.\n4. Run acceptance tests to unlock the next lesson.\n\n## What success looks like\n\nThe cube grows while rotation and lighting still work. One mesh can now produce different object sizes."
+        },
+        "checklist": [
+          {
+            "zh": "先对照画面，再完成一处 TODO",
+            "en": "Compare the image, then complete one TODO"
+          },
+          {
+            "zh": "运行验收，确认这个小步骤正确",
+            "en": "Run tests to check this small step"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "前三项是位置，需要乘倍数；第四项 w 原样放回。返回一个新数组，不要修改传入的点。",
+            "en": "Multiply the first three entries and keep w. Return a new array instead of changing the input."
+          },
+          {
+            "zh": "不用重写整个文件。工具函数、输入检查和循环已经提供；只替换 TODO 下面那一行。",
+            "en": "Do not rewrite the file. Helpers, input checks and loops are supplied; replace only the line below TODO."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "如果画面没变，先确认预览选择的是“我的代码”。“本关参考”和“最终效果”不会运行你的草稿。",
+            "en": "If the image does not change, select My code. The two reference modes do not run your drafts."
+          }
+        ],
+        "starterFiles": [
+          {
+            "path": "src/scale.ts",
+            "content": "import type { Vec4 } from './types';\nexport function scalePoint(point: Vec4, size: number): Vec4 {\n  const [x,y,z,w] = point;\n  // TODO: 让三个位置分量乘缩放倍数 / Scale all three coordinates.\n    return [x,y,z,w];\n}\n",
+            "openByDefault": true
+          },
+          {
+            "path": "preview/stage-8.ts",
+            "content": "import { renderCubes } from '../src/cube-scene';\nimport { scalePoint } from '../src/scale';\nimport { scene } from '../src/scene';\nexport function renderFrame(time:number,width:number,height:number) { return renderCubes(time,width,height,{scale:scalePoint},[{size:1.35,offset:[0,0,0],color:scene.color}]); }",
+            "readonly": true
+          },
+          {
+            "path": "src/cube-scene.ts",
+            "content": "import { createRenderer } from './renderer';\nimport { rotateY } from './rotation';\nimport { perspective,transform } from './math';\nimport { lambert } from './shader';\nimport { scene } from './scene';\nimport type { Color,Vec4,Vertex } from './types';\nexport interface Cube { size: number; offset: number[]; color: Color; }\nexport interface SceneTools {\n  scale: (p: Vec4,size: number) => Vec4;\n  translate?: (p: Vec4,offset: number[]) => Vec4;\n  camera?: (p: Vec4,distance: number) => Vec4;\n  material?: (u: number,v: number,color: Color) => Color;\n  fog?: (color: Color,distance: number) => Color;\n}\nexport function renderCubes(time: number,width: number,height: number,tools: SceneTools,cubes: Cube[],distance=5) {\n  const r=createRenderer(width,height); r.clear(scene.background);\n  const projection=perspective(1,width/height,.1,30);\n  const c=Math.cos(.35),s=Math.sin(.35);\n  const tilt=[1,0,0,0,0,c,-s,0,0,s,c,0,0,0,0,1];\n  const positions=[[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]];\n  const faces=[[0,3,2,1],[4,5,6,7],[0,4,7,3],[1,2,6,5],[3,7,6,2],[0,1,5,4]];\n  const normals=[[0,0,-1],[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0]];\n  // RGB carries face coordinates through the existing perspective interpolation.\n  // The material callback then converts those coordinates into a visible color.\n  const uv: Color[]=[[0,0,0,255],[255,0,0,255],[255,255,0,255],[0,255,0,255]];\n  for (const cube of cubes) for (let face=0;face<faces.length;face++) {\n    const normal=transform(tilt,rotateY([...normals[face],0] as Vec4,time*scene.speed)).slice(0,3);\n    const vertices=faces[face].map((index,i)=>({position:[...positions[index],1],color:uv[i]})) as Vertex[];\n    r.drawTriangles(vertices,[0,1,2,0,2,3],{\n      vertex: v => {\n        const scaled=tools.scale(v.position,cube.size);\n        const rotated=transform(tilt,rotateY(scaled,time*scene.speed));\n        const placed=tools.translate ? tools.translate(rotated,cube.offset) : rotated;\n        const viewed=tools.camera ? tools.camera(placed,distance) : [placed[0],placed[1],placed[2]-distance,placed[3]] as Vec4;\n        return {...v,position:transform(projection,viewed)};\n      },\n      fragment: uv => {\n        const color=tools.material ? tools.material(uv[0]/255,uv[1]/255,cube.color) : cube.color;\n        const shaded=lambert(color,normal,[.5,1,2]);\n        // Beginner approximation: one distance per object, not per fragment.\n        return tools.fog ? tools.fog(shaded,distance-cube.offset[2]) : shaded;\n      }\n    });\n  }\n  return r.frame;\n}\n",
+            "readonly": true
+          }
+        ],
+        "referenceFiles": [
+          {
+            "path": "src/scale.ts",
+            "content": "import type { Vec4 } from './types';\nexport function scalePoint(point: Vec4, size: number): Vec4 {\n  const [x,y,z,w] = point;\n  return [x*size,y*size,z*size,w];\n}\n"
+          }
+        ],
+        "specs": [
+          {
+            "path": "spec/stage-8.spec.ts",
+            "content": "import { scalePoint } from '../src/scale';\nit('doubles all three lengths, keeping w',()=>{expect(scalePoint([1,2,-3,1],2)).toEqual([2,4,-6,1]);});\nit('shrinks without changing the original point',()=>{const p:any=[2,4,6,1];expect(scalePoint(p,.5)).toEqual([1,2,3,1]);expect(p).toEqual([2,4,6,1]);expect(scalePoint(p,0)).toEqual([0,0,0,1]);});\n"
+          }
+        ],
+        "referenceNotes": {
+          "zh": "先找到参考实现中与你的 TODO 对应的一行，代入本关例子验证。剩下的代码是课程提供的工具，完整算法可以学完入门路线后再研究。",
+          "en": "Find the reference line matching your TODO and substitute the lesson example. The remaining code is supplied tooling; study its full algorithm after finishing the beginner route."
+        },
+        "extension": {
+          "zh": "选学：读一读本文件已经提供的部分，再尝试不用骨架重写。这个挑战不影响通关。",
+          "en": "Optional: study the supplied scaffolding and try rewriting it independently. This challenge is not required to advance."
+        },
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ]
+      },
+      {
+        "id": "translation",
+        "title": {
+          "zh": "第 9 关 · 把方块移到旁边",
+          "en": "Stage 9 · Move the cube to the side"
+        },
+        "primer": {
+          "zh": "移动一个物体，意味着它所有的点都沿同样的方向走同样远。这叫“平移”。offset 是一个装着三个移动量的数组，分别表示向右、向上、向前移动多少；负数表示反方向。\n\n例如点 [1,2,3] 加上移动量 [2,−1,0]，得到 [3,1,3]：向右两步、向下一步、前后不变。和缩放不同，平移做的是加法。顺序也很重要：先在原地缩放和旋转，再移到指定位置，物体就不会绕着世界中心兜圈。本关的绘制工具已经排好这个顺序。\n\n这门课不要求你学过图形学或线性代数。只需要认识变量、数组、函数和 for 循环。代码中写着“工具”的文件已经能工作，不需要一次读懂。先观察本关参考画面，再只修改 TODO 标出的那一行，最后对照画面运行验收。即使还不理解全部公式，也可以先用给出的数字手算一次，确认代码确实表达了这件事。",
+          "en": "Moving an object means moving every point in the same direction by the same amount. This is translation. The offset array contains rightward, upward and forward movement; negative values mean the opposite direction.\n\nAdding [2,−1,0] to [1,2,3] gives [3,1,3]: two steps right and one down. Translation uses addition instead of multiplication. Order matters: scale and rotate locally first, then move into place, so the object spins around its own center. The supplied drawing helper already uses this order.\n\nYou do not need computer graphics or linear algebra knowledge for this course. You only need variables, arrays, functions and for loops. Files marked as tools already work; you do not need to understand all their internals yet. Look at the stage reference, change only the marked TODO, compare the image, then run acceptance tests. Treat a formula as a small recipe: substitute the example numbers once and check the result before trying to understand its general derivation. The goal is one visible success at a time, with the surrounding machinery supplied for you."
+        },
+        "goal": {
+          "zh": "## 这关只做一件事\n\n返回 `[x+offset[0],y+offset[1],z+offset[2],w]`。只补三个加法。预览的 offset 是 [1.1,0.35,0]，表示往右并稍微往上移动。\n\n## 跟着做\n\n1. 点击右侧“本关参考”，看看目标画面。\n2. 切回“我的代码”，打开 `src/translation.ts`，找到唯一的 TODO。其他代码已准备好。\n3. 按上面的例子补完代码，停止输入后画面会自动更新。\n4. 点击“运行验收”，通过后进入下一关。\n\n## 做对后会看到什么\n\n方块从画布中心移到右上方，并且继续围绕自己的中心旋转。第八关写的缩放函数仍在使用。",
+          "en": "## One small task\n\nReturn `[x+offset[0],y+offset[1],z+offset[2],w]`. Add three offsets. The preview uses [1.1,0.35,0] to move right and slightly upward.\n\n## Follow along\n\n1. Open Stage reference to see the target.\n2. Switch to My code, open `src/translation.ts` and find the only TODO. Everything around it is supplied.\n3. Complete that change; the preview updates automatically after typing stops.\n4. Run acceptance tests to unlock the next lesson.\n\n## What success looks like\n\nThe cube moves to the upper right while spinning around its own center. Your scaling function is still in use."
+        },
+        "checklist": [
+          {
+            "zh": "先对照画面，再完成一处 TODO",
+            "en": "Compare the image, then complete one TODO"
+          },
+          {
+            "zh": "运行验收，确认这个小步骤正确",
+            "en": "Run tests to check this small step"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "offset[0] 加到 x，offset[1] 加到 y，offset[2] 加到 z。w 仍然不变。",
+            "en": "Add offset[0] to x, offset[1] to y, and offset[2] to z. Keep w."
+          },
+          {
+            "zh": "不用重写整个文件。工具函数、输入检查和循环已经提供；只替换 TODO 下面那一行。",
+            "en": "Do not rewrite the file. Helpers, input checks and loops are supplied; replace only the line below TODO."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "如果画面没变，先确认预览选择的是“我的代码”。“本关参考”和“最终效果”不会运行你的草稿。",
+            "en": "If the image does not change, select My code. The two reference modes do not run your drafts."
+          }
+        ],
+        "starterFiles": [
+          {
+            "path": "src/translation.ts",
+            "content": "import type { Vec4 } from './types';\nexport function translatePoint(point: Vec4, offset: number[]): Vec4 {\n  const [x,y,z,w] = point;\n  // TODO: 分别加上三个方向的移动量 / Add the offsets.\n    return [x,y,z,w];\n}\n",
+            "openByDefault": true
+          },
+          {
+            "path": "preview/stage-9.ts",
+            "content": "import { renderCubes } from '../src/cube-scene';\nimport { scalePoint } from '../src/scale';\nimport { scene } from '../src/scene';\nimport { translatePoint } from '../src/translation';\nexport function renderFrame(time:number,width:number,height:number) { return renderCubes(time,width,height,{scale:scalePoint,translate:translatePoint},[{size:.85,offset:[1.1,.35,0],color:scene.color}]); }",
+            "readonly": true
+          }
+        ],
+        "referenceFiles": [
+          {
+            "path": "src/translation.ts",
+            "content": "import type { Vec4 } from './types';\nexport function translatePoint(point: Vec4, offset: number[]): Vec4 {\n  const [x,y,z,w] = point;\n  return [x+offset[0],y+offset[1],z+offset[2],w];\n}\n"
+          }
+        ],
+        "specs": [
+          {
+            "path": "spec/stage-9.spec.ts",
+            "content": "import { translatePoint } from '../src/translation';\nit('moves right, down and forward independently',()=>{expect(translatePoint([1,2,3,1],[2,-1,4])).toEqual([3,1,7,1]);});\nit('keeps the mesh reusable instead of moving its input',()=>{const p:any=[1,2,3,1],offset=[-2,1,-3];expect(translatePoint(p,offset)).toEqual([-1,3,0,1]);expect(p).toEqual([1,2,3,1]);expect(offset).toEqual([-2,1,-3]);});\n"
+          }
+        ],
+        "referenceNotes": {
+          "zh": "先找到参考实现中与你的 TODO 对应的一行，代入本关例子验证。剩下的代码是课程提供的工具，完整算法可以学完入门路线后再研究。",
+          "en": "Find the reference line matching your TODO and substitute the lesson example. The remaining code is supplied tooling; study its full algorithm after finishing the beginner route."
+        },
+        "extension": {
+          "zh": "选学：读一读本文件已经提供的部分，再尝试不用骨架重写。这个挑战不影响通关。",
+          "en": "Optional: study the supplied scaffolding and try rewriting it independently. This challenge is not required to advance."
+        },
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ]
+      },
+      {
+        "id": "camera-distance",
+        "title": {
+          "zh": "第 10 关 · 让相机退后一点",
+          "en": "Stage 10 · Move the camera back"
+        },
+        "primer": {
+          "zh": "观察一个物体时，你往后退，它看起来就会变小，但物体本身的大小没有改变。这和第八关直接缩小模型是两件事。计算机里的相机先问：每个点相对于我在哪里？\n\n本课相机只沿前后方向移动，始终朝负 Z 方向看。如果相机位于 z=6，而物体的点位于 z=1，这个点相对相机的位置就是 1−6=−5。所以只要把每个点的 z 减去相机距离，后面的透视工具就会自动产生近大远小。左右和上下不用改变，也不需要自己重写投影矩阵。\n\n这门课不要求你学过图形学或线性代数。只需要认识变量、数组、函数和 for 循环。代码中写着“工具”的文件已经能工作，不需要一次读懂。先观察本关参考画面，再只修改 TODO 标出的那一行，最后对照画面运行验收。即使还不理解全部公式，也可以先用给出的数字手算一次，确认代码确实表达了这件事。",
+          "en": "When you step away from an object, it looks smaller even though its physical size stays the same. This differs from scaling the mesh. A virtual camera first asks where each point is relative to itself.\n\nOur camera moves only along Z and always looks toward negative Z. If the camera is at z=6 and a point is at z=1, the relative coordinate is 1−6=−5. Subtract the camera distance from z and the supplied perspective tool handles apparent size. Keep x and y unchanged; no projection-matrix work is required.\n\nYou do not need computer graphics or linear algebra knowledge for this course. You only need variables, arrays, functions and for loops. Files marked as tools already work; you do not need to understand all their internals yet. Look at the stage reference, change only the marked TODO, compare the image, then run acceptance tests. Treat a formula as a small recipe: substitute the example numbers once and check the result before trying to understand its general derivation. The goal is one visible success at a time, with the surrounding machinery supplied for you."
+        },
+        "goal": {
+          "zh": "## 这关只做一件事\n\n将返回数组改为 `[x,y,z-distance,w]`。预览中的相机距离随时间在 5 到 8 之间变化，方便观察同一个方块的远近变化。\n\n## 跟着做\n\n1. 点击右侧“本关参考”，看看目标画面。\n2. 切回“我的代码”，打开 `src/camera.ts`，找到唯一的 TODO。其他代码已准备好。\n3. 按上面的例子补完代码，停止输入后画面会自动更新。\n4. 点击“运行验收”，通过后进入下一关。\n\n## 做对后会看到什么\n\n能看清完整的旋转方块，并且它随着相机退后缩小、靠近放大。起始代码中相机留在方块内部，画面可能被裁开。",
+          "en": "## One small task\n\nReturn `[x,y,z-distance,w]`. The preview varies camera distance between 5 and 8 over time so you can observe the same cube at different distances.\n\n## Follow along\n\n1. Open Stage reference to see the target.\n2. Switch to My code, open `src/camera.ts` and find the only TODO. Everything around it is supplied.\n3. Complete that change; the preview updates automatically after typing stops.\n4. Run acceptance tests to unlock the next lesson.\n\n## What success looks like\n\nThe full rotating cube shrinks as the camera retreats and grows as it approaches. The starter leaves the camera inside the cube, so parts may be clipped."
+        },
+        "checklist": [
+          {
+            "zh": "先对照画面，再完成一处 TODO",
+            "en": "Compare the image, then complete one TODO"
+          },
+          {
+            "zh": "运行验收，确认这个小步骤正确",
+            "en": "Run tests to check this small step"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "计算的是“点的位置 − 相机的位置”，不是相加。正距离的相机后退后，物体的相对 z 应该更负。",
+            "en": "Compute point position minus camera position. Moving the camera back makes the relative z more negative."
+          },
+          {
+            "zh": "不用重写整个文件。工具函数、输入检查和循环已经提供；只替换 TODO 下面那一行。",
+            "en": "Do not rewrite the file. Helpers, input checks and loops are supplied; replace only the line below TODO."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "如果画面没变，先确认预览选择的是“我的代码”。“本关参考”和“最终效果”不会运行你的草稿。",
+            "en": "If the image does not change, select My code. The two reference modes do not run your drafts."
+          }
+        ],
+        "starterFiles": [
+          {
+            "path": "src/camera.ts",
+            "content": "import type { Vec4 } from './types';\nexport function toCamera(point: Vec4, distance: number): Vec4 {\n  if (!Number.isFinite(distance) || distance <= 0) throw new Error('Camera distance must be positive');\n  const [x,y,z,w] = point;\n  // TODO: 用点的 z 减去相机的位置 / Subtract the camera distance.\n    return [x,y,z,w];\n}\n",
+            "openByDefault": true
+          },
+          {
+            "path": "preview/stage-10.ts",
+            "content": "import { renderCubes } from '../src/cube-scene';\nimport { scalePoint } from '../src/scale';\nimport { scene } from '../src/scene';\nimport { translatePoint } from '../src/translation';\nimport { toCamera } from '../src/camera';\nexport function renderFrame(time:number,width:number,height:number) { return renderCubes(time,width,height,{scale:scalePoint,translate:translatePoint,camera:toCamera},[{size:1,offset:[0,0,0],color:scene.color}],6.5+Math.sin(time*scene.speed)*1.5); }",
+            "readonly": true
+          }
+        ],
+        "referenceFiles": [
+          {
+            "path": "src/camera.ts",
+            "content": "import type { Vec4 } from './types';\nexport function toCamera(point: Vec4, distance: number): Vec4 {\n  if (!Number.isFinite(distance) || distance <= 0) throw new Error('Camera distance must be positive');\n  const [x,y,z,w] = point;\n  return [x,y,z-distance,w];\n}\n"
+          }
+        ],
+        "specs": [
+          {
+            "path": "spec/stage-10.spec.ts",
+            "content": "import { toCamera } from '../src/camera';\nit('expresses a point relative to the camera',()=>{expect(toCamera([1,2,1,1],6)).toEqual([1,2,-5,1]);});\nit('moves points farther away as camera distance grows',()=>{const p:any=[0,1,-2,1];expect(toCamera(p,3)).toEqual([0,1,-5,1]);expect(toCamera(p,8)).toEqual([0,1,-10,1]);expect(p).toEqual([0,1,-2,1]);expect(()=>toCamera(p,0)).toThrow();});\n"
+          }
+        ],
+        "referenceNotes": {
+          "zh": "先找到参考实现中与你的 TODO 对应的一行，代入本关例子验证。剩下的代码是课程提供的工具，完整算法可以学完入门路线后再研究。",
+          "en": "Find the reference line matching your TODO and substitute the lesson example. The remaining code is supplied tooling; study its full algorithm after finishing the beginner route."
+        },
+        "extension": {
+          "zh": "选学：读一读本文件已经提供的部分，再尝试不用骨架重写。这个挑战不影响通关。",
+          "en": "Optional: study the supplied scaffolding and try rewriting it independently. This challenge is not required to advance."
+        },
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ]
+      },
+      {
+        "id": "checker-material",
+        "title": {
+          "zh": "第 11 关 · 给方块穿上格子外衣",
+          "en": "Stage 11 · Give the cube a checker pattern"
+        },
+        "primer": {
+          "zh": "之前每个面只有一种颜色，现在给它画格子。想象把一张方格纸贴在方块表面，u 表示纸上从左到右的位置，v 表示从上到下的位置，范围都是 0 到 1。这两个数叫“表面坐标”，和屏幕上的 x、y 不同，所以物体转动时花纹也能跟着转。\n\n工具已经把位置换成格子的行号和列号。只要让行号加列号为偶数时选颜色 a，奇数时选颜色 b，相邻格子就会交替换色。例如第 0 行第 0 列是 a，第 0 行第 1 列是 b，第 1 行第 1 列又是 a。这里直接算颜色，不需要下载任何图片。\n\n这门课不要求你学过图形学或线性代数。只需要认识变量、数组、函数和 for 循环。代码中写着“工具”的文件已经能工作，不需要一次读懂。先观察本关参考画面，再只修改 TODO 标出的那一行，最后对照画面运行验收。即使还不理解全部公式，也可以先用给出的数字手算一次，确认代码确实表达了这件事。",
+          "en": "Instead of one color per face, attach imaginary graph paper to its surface. u measures left to right and v top to bottom, both from zero to one. These are surface coordinates, different from screen x and y, so the pattern rotates with the cube.\n\nThe helper converts u and v into grid row and column numbers. Choose color a when their sum is even and b when odd. Row zero, column zero is a; row zero, column one is b; row one, column one is a again. The pattern is generated from numbers, with no image download needed.\n\nYou do not need computer graphics or linear algebra knowledge for this course. You only need variables, arrays, functions and for loops. Files marked as tools already work; you do not need to understand all their internals yet. Look at the stage reference, change only the marked TODO, compare the image, then run acceptance tests. Treat a formula as a small recipe: substitute the example numbers once and check the result before trying to understand its general derivation. The goal is one visible success at a time, with the surrounding machinery supplied for you."
+        },
+        "goal": {
+          "zh": "## 这关只做一件事\n\n把最后一行改为 `return parity === 0 ? a : b;`。`% 2` 已经帮你判断了奇偶，取格子行列的工具也已经写好。\n\n## 跟着做\n\n1. 点击右侧“本关参考”，看看目标画面。\n2. 切回“我的代码”，打开 `src/checker.ts`，找到唯一的 TODO。其他代码已准备好。\n3. 按上面的例子补完代码，停止输入后画面会自动更新。\n4. 点击“运行验收”，通过后进入下一关。\n\n## 做对后会看到什么\n\n青色与金色的格子贴在方块表面，跟随旋转并保留各个面的明暗。它不会像屏幕贴纸一样停在原地。",
+          "en": "## One small task\n\nChange the last line to `return parity === 0 ? a : b;`. The supplied `% 2` calculates parity, and the grid lookup is already implemented.\n\n## Follow along\n\n1. Open Stage reference to see the target.\n2. Switch to My code, open `src/checker.ts` and find the only TODO. Everything around it is supplied.\n3. Complete that change; the preview updates automatically after typing stops.\n4. Run acceptance tests to unlock the next lesson.\n\n## What success looks like\n\nCyan and gold squares stick to the cube, rotate with it, and retain face lighting instead of remaining fixed on the screen."
+        },
+        "checklist": [
+          {
+            "zh": "先对照画面，再完成一处 TODO",
+            "en": "Compare the image, then complete one TODO"
+          },
+          {
+            "zh": "运行验收，确认这个小步骤正确",
+            "en": "Run tests to check this small step"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "parity 为 0 表示偶数格，选 a；否则选 b。这就是一条普通的条件表达式。",
+            "en": "Parity zero means choose a; otherwise choose b. It is an ordinary conditional expression."
+          },
+          {
+            "zh": "不用重写整个文件。工具函数、输入检查和循环已经提供；只替换 TODO 下面那一行。",
+            "en": "Do not rewrite the file. Helpers, input checks and loops are supplied; replace only the line below TODO."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "如果画面没变，先确认预览选择的是“我的代码”。“本关参考”和“最终效果”不会运行你的草稿。",
+            "en": "If the image does not change, select My code. The two reference modes do not run your drafts."
+          }
+        ],
+        "starterFiles": [
+          {
+            "path": "src/checker.ts",
+            "content": "import type { Color } from './types';\nexport function checkerColor(u: number, v: number, cells: number, a: Color, b: Color): Color {\n  if (!Number.isInteger(cells) || cells < 1) throw new Error('Cell count must be a positive integer');\n  // Supplied tool: locate a square on the surface, clamping the outer border.\n  const column = Math.min(cells-1,Math.floor(Math.max(0,Math.min(1,u))*cells));\n  const row = Math.min(cells-1,Math.floor(Math.max(0,Math.min(1,v))*cells));\n  const parity = (column+row) % 2;\n  // TODO: 奇偶格子选择不同颜色 / Alternate the two colors.\n    return a;\n}\n",
+            "openByDefault": true
+          },
+          {
+            "path": "preview/stage-11.ts",
+            "content": "import { renderCubes } from '../src/cube-scene';\nimport { scalePoint } from '../src/scale';\nimport { scene } from '../src/scene';\nimport { translatePoint } from '../src/translation';\nimport { toCamera } from '../src/camera';\nimport { checkerColor } from '../src/checker';\nexport function renderFrame(time:number,width:number,height:number) { return renderCubes(time,width,height,{scale:scalePoint,translate:translatePoint,camera:toCamera,material:(u,v,color)=>checkerColor(u,v,6,color,[245,185,85,255])},[{size:1.15,offset:[0,0,0],color:scene.color}],5.5); }",
+            "readonly": true
+          }
+        ],
+        "referenceFiles": [
+          {
+            "path": "src/checker.ts",
+            "content": "import type { Color } from './types';\nexport function checkerColor(u: number, v: number, cells: number, a: Color, b: Color): Color {\n  if (!Number.isInteger(cells) || cells < 1) throw new Error('Cell count must be a positive integer');\n  // Supplied tool: locate a square on the surface, clamping the outer border.\n  const column = Math.min(cells-1,Math.floor(Math.max(0,Math.min(1,u))*cells));\n  const row = Math.min(cells-1,Math.floor(Math.max(0,Math.min(1,v))*cells));\n  const parity = (column+row) % 2;\n  return parity === 0 ? a : b;\n}\n"
+          }
+        ],
+        "specs": [
+          {
+            "path": "spec/stage-11.spec.ts",
+            "content": "import { checkerColor } from '../src/checker';\nconst a:any=[20,160,220,255],b:any=[240,180,60,255];\nit('alternates neighboring columns and rows',()=>{expect(checkerColor(.1,.1,4,a,b)).toEqual(a);expect(checkerColor(.3,.1,4,a,b)).toEqual(b);expect(checkerColor(.1,.3,4,a,b)).toEqual(b);expect(checkerColor(.3,.3,4,a,b)).toEqual(a);});\nit('keeps the outer border in the final grid cell',()=>{expect(checkerColor(1,0,4,a,b)).toEqual(b);expect(checkerColor(0,1,4,a,b)).toEqual(b);expect(checkerColor(-1,0,4,a,b)).toEqual(a);expect(()=>checkerColor(0,0,0,a,b)).toThrow();});\n"
+          }
+        ],
+        "referenceNotes": {
+          "zh": "先找到参考实现中与你的 TODO 对应的一行，代入本关例子验证。剩下的代码是课程提供的工具，完整算法可以学完入门路线后再研究。",
+          "en": "Find the reference line matching your TODO and substitute the lesson example. The remaining code is supplied tooling; study its full algorithm after finishing the beginner route."
+        },
+        "extension": {
+          "zh": "选学：读一读本文件已经提供的部分，再尝试不用骨架重写。这个挑战不影响通关。",
+          "en": "Optional: study the supplied scaffolding and try rewriting it independently. This challenge is not required to advance."
+        },
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ]
+      },
+      {
+        "id": "distance-fog",
+        "title": {
+          "zh": "第 12 关 · 让远处的物体融入雾中",
+          "en": "Stage 12 · Fade distant objects into fog"
+        },
+        "primer": {
+          "zh": "看远处的山时，颜色会逐渐接近天空的颜色。我们也能用很简单的混色做出这种远近感：近处保留物体颜色，远处多混入一点雾的颜色。amount 表示雾占多少，0 是没有雾，1 是完全变成雾的颜色。\n\n例如红色通道为 100，雾的红色通道为 20，amount=0.5 时得到 100×0.5+20×0.5=60。先用 1−amount 乘物体颜色，再用 amount 乘雾色，最后相加。工具已根据距离算好并限制 amount 的范围。本关为了好理解，每个物体用中心距离算一次雾；更真实的逐像素雾留到进阶再研究。\n\n这门课不要求你学过图形学或线性代数。只需要认识变量、数组、函数和 for 循环。代码中写着“工具”的文件已经能工作，不需要一次读懂。先观察本关参考画面，再只修改 TODO 标出的那一行，最后对照画面运行验收。即使还不理解全部公式，也可以先用给出的数字手算一次，确认代码确实表达了这件事。",
+          "en": "Distant mountains gradually approach the sky color. A simple color blend can create the same depth cue: keep nearby object colors and mix in more fog color at greater distance. amount is the fog fraction: zero means none and one means full fog.\n\nFor an object red channel of 100, fog red channel of 20 and amount 0.5, the result is 60. Multiply the object by 1−amount and the fog by amount, then add them. Distance conversion and clamping are supplied. This beginner model uses one center distance per object; per-fragment fog is a later extension.\n\nYou do not need computer graphics or linear algebra knowledge for this course. You only need variables, arrays, functions and for loops. Files marked as tools already work; you do not need to understand all their internals yet. Look at the stage reference, change only the marked TODO, compare the image, then run acceptance tests. Treat a formula as a small recipe: substitute the example numbers once and check the result before trying to understand its general derivation. The goal is one visible success at a time, with the surrounding machinery supplied for you."
+        },
+        "goal": {
+          "zh": "## 这关只做一件事\n\n将返回值改为 `[0,1,2].map(i => color[i]*(1-amount)+fogColor[i]*amount).concat(color[3]) as Color`。前三个通道做混色，透明度保留。JS 版省略末尾的 `as Color`。\n\n## 跟着做\n\n1. 点击右侧“本关参考”，看看目标画面。\n2. 切回“我的代码”，打开 `src/fog.ts`，找到唯一的 TODO。其他代码已准备好。\n3. 按上面的例子补完代码，停止输入后画面会自动更新。\n4. 点击“运行验收”，通过后进入下一关。\n\n## 做对后会看到什么\n\n三个格子方块同时旋转：近处清晰，远处逐渐融入背景。场景复用了你写的缩放、平移、相机、花纹和雾化函数，十二关至此完成。",
+          "en": "## One small task\n\nReturn `[0,1,2].map(i => color[i]*(1-amount)+fogColor[i]*amount).concat(color[3]) as Color`. Blend RGB and keep opacity. Omit `as Color` in JavaScript.\n\n## Follow along\n\n1. Open Stage reference to see the target.\n2. Switch to My code, open `src/fog.ts` and find the only TODO. Everything around it is supplied.\n3. Complete that change; the preview updates automatically after typing stops.\n4. Run acceptance tests to unlock the next lesson.\n\n## What success looks like\n\nThree checker cubes rotate together: the nearest stays clear while farther cubes fade toward the background. Your scaling, translation, camera, material and fog functions now work together, completing all twelve lessons."
+        },
+        "checklist": [
+          {
+            "zh": "先对照画面，再完成一处 TODO",
+            "en": "Compare the image, then complete one TODO"
+          },
+          {
+            "zh": "运行验收，确认这个小步骤正确",
+            "en": "Run tests to check this small step"
+          }
+        ],
+        "hints": [
+          {
+            "zh": "amount=0 时必须等于原色，amount=1 时 RGB 必须等于雾色。用这两个端点检查是否把权重写反了。",
+            "en": "At amount zero return the original RGB; at one return fog RGB. These endpoints catch reversed weights."
+          },
+          {
+            "zh": "不用重写整个文件。工具函数、输入检查和循环已经提供；只替换 TODO 下面那一行。",
+            "en": "Do not rewrite the file. Helpers, input checks and loops are supplied; replace only the line below TODO."
+          }
+        ],
+        "pitfalls": [
+          {
+            "zh": "如果画面没变，先确认预览选择的是“我的代码”。“本关参考”和“最终效果”不会运行你的草稿。",
+            "en": "If the image does not change, select My code. The two reference modes do not run your drafts."
+          }
+        ],
+        "starterFiles": [
+          {
+            "path": "src/fog.ts",
+            "content": "import type { Color } from './types';\nexport function applyFog(color: Color, fogColor: Color, distance: number, near: number, far: number): Color {\n  if (!(far > near)) throw new Error('Fog end must be farther than its start');\n  const amount = Math.max(0,Math.min(1,(distance-near)/(far-near)));\n  // TODO: 按 amount 混合物体颜色和雾色 / Blend the two RGB colors.\n    return color;\n}\n",
+            "openByDefault": true
+          },
+          {
+            "path": "preview/stage-12.ts",
+            "content": "import { renderCubes } from '../src/cube-scene';\nimport { scalePoint } from '../src/scale';\nimport { scene } from '../src/scene';\nimport { translatePoint } from '../src/translation';\nimport { toCamera } from '../src/camera';\nimport { checkerColor } from '../src/checker';\nimport { applyFog } from '../src/fog';\n        export function renderFrame(time:number,width:number,height:number) { return renderCubes(time,width,height,{\n          scale:scalePoint,translate:translatePoint,camera:toCamera,material:(u,v,color)=>checkerColor(u,v,6,color,[245,185,85,255]),fog:(color,distance)=>applyFog(color,scene.background,distance,4,12)\n        },[{size:.62,offset:[-1.5,-.25,2.2],color:scene.color},{size:.85,offset:[0,.05,-.8],color:scene.color},{size:1.1,offset:[2.5,.5,-3.8],color:scene.color}],7); }",
+            "readonly": true
+          }
+        ],
+        "referenceFiles": [
+          {
+            "path": "src/fog.ts",
+            "content": "import type { Color } from './types';\nexport function applyFog(color: Color, fogColor: Color, distance: number, near: number, far: number): Color {\n  if (!(far > near)) throw new Error('Fog end must be farther than its start');\n  const amount = Math.max(0,Math.min(1,(distance-near)/(far-near)));\n  return [0,1,2].map(i => color[i]*(1-amount)+fogColor[i]*amount).concat(color[3]) as Color;\n}\n"
+          }
+        ],
+        "specs": [
+          {
+            "path": "spec/stage-12.spec.ts",
+            "content": "import { applyFog } from '../src/fog';\nit('mixes colors halfway without changing opacity',()=>{expect(applyFog([100,200,80,128],[20,40,0,255],6,2,10)).toEqual([60,120,40,128]);});\nit('clamps near and far distances without changing inputs',()=>{const color:any=[100,200,80,128],fog:any=[20,40,0,255];expect(applyFog(color,fog,0,2,10)).toEqual(color);expect(applyFog(color,fog,20,2,10)).toEqual([20,40,0,128]);expect(color).toEqual([100,200,80,128]);expect(fog).toEqual([20,40,0,255]);expect(()=>applyFog(color,fog,5,10,2)).toThrow();});\n"
+          }
+        ],
+        "referenceNotes": {
+          "zh": "先找到参考实现中与你的 TODO 对应的一行，代入本关例子验证。剩下的代码是课程提供的工具，完整算法可以学完入门路线后再研究。",
+          "en": "Find the reference line matching your TODO and substitute the lesson example. The remaining code is supplied tooling; study its full algorithm after finishing the beginner route."
+        },
+        "extension": {
+          "zh": "选学：读一读本文件已经提供的部分，再尝试不用骨架重写。这个挑战不影响通关。",
+          "en": "Optional: study the supplied scaffolding and try rewriting it independently. This challenge is not required to advance."
+        },
+        "focus": [
+          "correctness",
+          "encapsulation"
+        ]
+      }
+    ],
+    "variants": {
+      "javascript": {
+        "files": [
+          {
+            "path": "src/types.js",
+            "content": "// Type contract for this file (TypeScript syntax, for reference):\n//\n// export type Vec4 = [number, number, number, number];\n// export type Color = [number, number, number, number]; // RGBA, 0..255\n// export type Mat4 = number[]; // row-major, column vectors: out = M * v\n// export interface Frame { width: number; height: number; pixels: Uint8ClampedArray; }\n// export interface Vertex { position: Vec4; color: Color; }\n// export interface Sample { x: number; y: number; weights: [number, number, number]; }\n",
+            "readonly": true
+          },
+          {
+            "path": "src/math.js",
+            "content": "export function multiply(a, b) {\n    const out = Array(16).fill(0);\n    for (let r = 0; r < 4; r++)\n        for (let c = 0; c < 4; c++)\n            for (let k = 0; k < 4; k++)\n                out[r * 4 + c] += a[r * 4 + k] * b[k * 4 + c];\n    return out;\n}\nexport function transform(m, v) {\n    return [0, 1, 2, 3].map(r => v.reduce((s, n, c) => s + m[r * 4 + c] * n, 0));\n}\nexport function perspective(fov, aspect, near, far) {\n    if (!(fov > 0 && fov < Math.PI && aspect > 0 && near > 0 && far > near))\n        throw new Error('Invalid camera');\n    const f = 1 / Math.tan(fov / 2);\n    return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) / (near - far), 2 * far * near / (near - far), 0, 0, -1, 0];\n}\n",
+            "readonly": true
+          },
+          {
+            "path": "src/clipping.js",
+            "content": "export function clipTriangle(triangle) {\n    // Sutherland–Hodgman against all six homogeneous clip planes.\n    const planes = [(p) => p[3] + p[0], (p) => p[3] - p[0],\n        (p) => p[3] + p[1], (p) => p[3] - p[1],\n        (p) => p[3] + p[2], (p) => p[3] - p[2]];\n    let polygon = triangle;\n    for (const distance of planes) {\n        const next = [];\n        for (let i = 0; i < polygon.length; i++) {\n            const a = polygon[i], b = polygon[(i + 1) % polygon.length];\n            const da = distance(a.position), db = distance(b.position);\n            if (da >= 0)\n                next.push(a);\n            if ((da >= 0) !== (db >= 0)) {\n                const t = da / (da - db);\n                next.push({ position: a.position.map((v, j) => v + (b.position[j] - v) * t),\n                    color: a.color.map((v, j) => v + (b.color[j] - v) * t) });\n            }\n        }\n        polygon = next;\n    }\n    const result = [];\n    for (let i = 1; i + 1 < polygon.length; i++)\n        result.push([polygon[0], polygon[i], polygon[i + 1]]);\n    return result;\n}\n",
+            "readonly": true
+          },
+          {
+            "path": "src/scene.js",
+            "content": "// Optional: change colors or speed and watch My code update.\nexport const scene = {\n    background: [15, 23, 42, 255],\n    color: [70, 205, 235, 255],\n    speed: 0.7,\n};\n"
+          }
+        ],
+        "stages": [
+          {
+            "id": "framebuffer",
+            "starterFiles": [
+              {
+                "path": "src/framebuffer.js",
+                "content": "export function createFrame(width, height) {\n    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1)\n        throw new Error('Invalid frame size');\n    return { width, height, pixels: new Uint8ClampedArray(width * height * 4) };\n}\nexport function clear(frame, color) {\n    for (let i = 0; i < frame.pixels.length; i += 4)\n        frame.pixels.set(color, i);\n}\nexport function putPixel(frame, x, y, color) {\n    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= frame.width || y >= frame.height)\n        return;\n    // TODO: 把 0 换成这个像素在数组中的起始位置 / Calculate the pixel offset.\n    frame.pixels.set(color, 0);\n}\n",
+                "openByDefault": true
+              },
+              {
+                "path": "preview/stage-1.js",
+                "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\nimport { scene } from '../src/scene';\nexport function renderFrame(time, width, height) { const frame = createFrame(width, height); clear(frame, scene.background); for (let y = 30; y < height - 30; y++)\n    for (let x = 30; x < width - 30; x++)\n        putPixel(frame, x, y, [x / width * 255, y / height * 255, scene.color[2], 255]); return frame; }\n",
+                "readonly": true
+              }
+            ],
+            "referenceFiles": [
+              {
+                "path": "src/framebuffer.js",
+                "content": "export function createFrame(width, height) {\n    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1)\n        throw new Error('Invalid frame size');\n    return { width, height, pixels: new Uint8ClampedArray(width * height * 4) };\n}\nexport function clear(frame, color) {\n    for (let i = 0; i < frame.pixels.length; i += 4)\n        frame.pixels.set(color, i);\n}\nexport function putPixel(frame, x, y, color) {\n    if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= frame.width || y >= frame.height)\n        return;\n    frame.pixels.set(color, (y * frame.width + x) * 4);\n}\n"
+              }
+            ],
+            "specs": [
+              {
+                "path": "spec/stage-1.spec.js",
+                "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\ndescribe('RGBA buffer', () => {\n    it('writes the correct row and channel order', () => {\n        const f = createFrame(3, 2);\n        clear(f, [2, 3, 4, 255]);\n        putPixel(f, 2, 1, [255, 80, 9, 128]);\n        expect(Array.from(f.pixels.slice(20, 24))).toEqual([255, 80, 9, 128]);\n        expect(Array.from(f.pixels.slice(0, 4))).toEqual([2, 3, 4, 255]);\n    });\n    it('ignores invalid coordinates and rejects invalid sizes', () => {\n        const f = createFrame(2, 2);\n        putPixel(f, -1, 1, [255, 0, 0, 255]);\n        putPixel(f, 2, 0, [255, 0, 0, 255]);\n        putPixel(f, 0.5, 0, [255, 0, 0, 255]);\n        expect(Array.from(f.pixels).every(v => v === 0)).toBe(true);\n        putPixel(f, 1, 1, [5, 6, 7, 255]);\n        expect(Array.from(f.pixels.slice(12, 16))).toEqual([5, 6, 7, 255]);\n        expect(() => createFrame(0, 2)).toThrow();\n        expect(() => createFrame(2.5, 2)).toThrow();\n    });\n});\n"
+              }
+            ]
+          },
+          {
+            "id": "rotation",
+            "starterFiles": [
+              {
+                "path": "src/rotation.js",
+                "content": "// position = [left/right, up/down, front/back, 1]. angle is measured in radians.\nexport function rotateY(position, angle) {\n    const [x, y, z, w] = position;\n    const c = Math.cos(angle), s = Math.sin(angle);\n    // TODO: 按配方计算新的 x、z / Apply the rotation recipe.\n    return [x, y, z, w];\n}\n",
+                "openByDefault": true
+              },
+              {
+                "path": "preview/stage-2.js",
+                "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\nimport { scene } from '../src/scene';\nimport { rotateY } from '../src/rotation';\nimport { perspective, transform } from '../src/math';\nexport function renderFrame(time, width, height) {\n    const frame = createFrame(width, height);\n    clear(frame, scene.background);\n    const camera = perspective(1, width / height, .1, 20);\n    for (const x of [-1, 1])\n        for (const y of [-1, 1])\n            for (const z of [-1, 1]) {\n                const p = rotateY([x, y, z, 1], time * scene.speed);\n                p[2] -= 5;\n                const v = transform(camera, p);\n                const sx = Math.round((v[0] / v[3] + 1) * width / 2), sy = Math.round((1 - v[1] / v[3]) * height / 2);\n                for (let dy = -3; dy <= 3; dy++)\n                    for (let dx = -3; dx <= 3; dx++)\n                        putPixel(frame, sx + dx, sy + dy, scene.color);\n            }\n    return frame;\n}\n",
+                "readonly": true
+              }
+            ],
+            "referenceFiles": [
+              {
+                "path": "src/rotation.js",
+                "content": "// position = [left/right, up/down, front/back, 1]. angle is measured in radians.\nexport function rotateY(position, angle) {\n    const [x, y, z, w] = position;\n    const c = Math.cos(angle), s = Math.sin(angle);\n    return [x * c + z * s, y, -x * s + z * c, w];\n}\n"
+              }
+            ],
+            "specs": [
+              {
+                "path": "spec/stage-2.spec.js",
+                "content": "import { rotateY } from '../src/rotation';\nit('a quarter turn moves right toward the back', () => { const p = rotateY([1, 2, 0, 1], Math.PI / 2); expect(p[0]).toBeCloseTo(0); expect(p[1]).toBe(2); expect(p[2]).toBeCloseTo(-1); expect(p[3]).toBe(1); });\nit('zero and full turns preserve a point', () => { expect(rotateY([2, 3, 4, 1], 0)).toEqual([2, 3, 4, 1]); const p = rotateY([2, 3, 4, 1], Math.PI * 2); expect(p[0]).toBeCloseTo(2); expect(p[2]).toBeCloseTo(4); const q = rotateY([2, 3, 4, 1], Math.PI); expect(q[0]).toBeCloseTo(-2); expect(q[2]).toBeCloseTo(-4); });\n"
+              }
+            ]
+          },
+          {
+            "id": "viewport",
+            "starterFiles": [
+              {
+                "path": "src/viewport.js",
+                "content": "export function toScreen(position, width, height) {\n    // The camera helper already calculated w. Dividing by w makes far objects smaller.\n    const nx = position[0] / position[3];\n    const ny = position[1] / position[3];\n    // TODO: 把标准坐标转换为像素位置 / Map to screen coordinates.\n    return [width / 2, height / 2];\n}\n",
+                "openByDefault": true
+              },
+              {
+                "path": "preview/stage-3.js",
+                "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\nimport { scene } from '../src/scene';\nimport { rotateY } from '../src/rotation';\nimport { perspective, transform } from '../src/math';\nimport { toScreen } from '../src/viewport';\nexport function renderFrame(time, width, height) {\n    const frame = createFrame(width, height);\n    clear(frame, scene.background);\n    const camera = perspective(1, width / height, .1, 20);\n    for (const x of [-1, 1])\n        for (const y of [-1, 1])\n            for (const z of [-1, 1]) {\n                const p = rotateY([x, y, z, 1], time * scene.speed);\n                p[2] -= 5;\n                const v = transform(camera, p);\n                const [px, py] = toScreen(v, width, height);\n                for (let dy = -3; dy <= 3; dy++)\n                    for (let dx = -3; dx <= 3; dx++)\n                        putPixel(frame, Math.round(px) + dx, Math.round(py) + dy, scene.color);\n            }\n    return frame;\n}\n",
+                "readonly": true
+              }
+            ],
+            "referenceFiles": [
+              {
+                "path": "src/viewport.js",
+                "content": "export function toScreen(position, width, height) {\n    // The camera helper already calculated w. Dividing by w makes far objects smaller.\n    const nx = position[0] / position[3];\n    const ny = position[1] / position[3];\n    return [(nx + 1) * width / 2, (1 - ny) * height / 2];\n}\n"
+              }
+            ],
+            "specs": [
+              {
+                "path": "spec/stage-3.spec.js",
+                "content": "import { toScreen } from '../src/viewport';\nit('maps center and corners', () => { expect(toScreen([0, 0, 0, 1], 200, 100)).toEqual([100, 50]); expect(toScreen([-1, 1, 0, 1], 200, 100)).toEqual([0, 0]); expect(toScreen([1, -1, 0, 1], 200, 100)).toEqual([200, 100]); });\nit('divides by camera distance before mapping', () => { expect(toScreen([1, 1, 0, 2], 200, 100)).toEqual([150, 25]); });\n"
+              }
+            ]
+          },
+          {
+            "id": "rasterization",
+            "starterFiles": [
+              {
+                "path": "src/rasterizer.js",
+                "content": "export function rasterize(vertices, width, height) {\n    const [a, b, c] = vertices;\n    const edge = (u, v, x, y) => (v[0] - u[0]) * (y - u[1]) - (v[1] - u[1]) * (x - u[0]);\n    const area = edge(a, b, c[0], c[1]);\n    if (!Number.isFinite(area) || Math.abs(area) < 1e-10)\n        return [];\n    const samples = [];\n    const x0 = Math.max(0, Math.floor(Math.min(a[0], b[0], c[0])));\n    const x1 = Math.min(width - 1, Math.ceil(Math.max(a[0], b[0], c[0])));\n    const y0 = Math.max(0, Math.floor(Math.min(a[1], b[1], c[1])));\n    const y1 = Math.min(height - 1, Math.ceil(Math.max(a[1], b[1], c[1])));\n    for (let y = y0; y <= y1; y++)\n        for (let x = x0; x <= x1; x++) {\n            const u = edge(b, c, x + 0.5, y + 0.5) / area;\n            const v = edge(c, a, x + 0.5, y + 0.5) / area;\n            const w = 1 - u - v;\n            // TODO: 传回算好的三种颜色比例 / Return the calculated weights.\n            if (u >= -1e-10 && v >= -1e-10 && w >= -1e-10)\n                samples.push({ x, y, weights: [1, 0, 0] });\n        }\n    return samples;\n}\n",
+                "openByDefault": true
+              },
+              {
+                "path": "preview/stage-4.js",
+                "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\nimport { scene } from '../src/scene';\nimport { rasterize } from '../src/rasterizer';\nexport function renderFrame(time, width, height) { const frame = createFrame(width, height); clear(frame, scene.background); for (const s of rasterize([[width * .5, height * .12], [width * .15, height * .85], [width * .85, height * .85]], width, height))\n    putPixel(frame, s.x, s.y, [s.weights[0] * 255, s.weights[1] * 255, s.weights[2] * 255, 255]); return frame; }\n",
+                "readonly": true
+              }
+            ],
+            "referenceFiles": [
+              {
+                "path": "src/rasterizer.js",
+                "content": "export function rasterize(vertices, width, height) {\n    const [a, b, c] = vertices;\n    const edge = (u, v, x, y) => (v[0] - u[0]) * (y - u[1]) - (v[1] - u[1]) * (x - u[0]);\n    const area = edge(a, b, c[0], c[1]);\n    if (!Number.isFinite(area) || Math.abs(area) < 1e-10)\n        return [];\n    const samples = [];\n    const x0 = Math.max(0, Math.floor(Math.min(a[0], b[0], c[0])));\n    const x1 = Math.min(width - 1, Math.ceil(Math.max(a[0], b[0], c[0])));\n    const y0 = Math.max(0, Math.floor(Math.min(a[1], b[1], c[1])));\n    const y1 = Math.min(height - 1, Math.ceil(Math.max(a[1], b[1], c[1])));\n    for (let y = y0; y <= y1; y++)\n        for (let x = x0; x <= x1; x++) {\n            const u = edge(b, c, x + 0.5, y + 0.5) / area;\n            const v = edge(c, a, x + 0.5, y + 0.5) / area;\n            const w = 1 - u - v;\n            if (u >= -1e-10 && v >= -1e-10 && w >= -1e-10)\n                samples.push({ x, y, weights: [u, v, w] });\n        }\n    return samples;\n}\n"
+              }
+            ],
+            "specs": [
+              {
+                "path": "spec/stage-4.spec.js",
+                "content": "import { rasterize } from '../src/rasterizer';\nit('samples centers with correct weights', () => {\n    const s = rasterize([[0, 0], [4, 0], [0, 4]], 4, 4), p = s.find(v => v.x === 0 && v.y === 0);\n    expect(s.length).toBe(10);\n    expect(p.weights).toEqual([0.75, 0.125, 0.125]);\n    expect(rasterize([[0, 4], [4, 0], [0, 0]], 4, 4).length).toBe(10);\n});\nit('clips bounds and discards zero area', () => {\n    expect(rasterize([[0, 0], [1, 1], [2, 2]], 8, 8)).toEqual([]);\n    const s = rasterize([[-100, -100], [100, 0], [0, 100]], 4, 3);\n    expect(s.length > 0).toBe(true);\n    expect(s.every(p => p.x >= 0 && p.x < 4 && p.y >= 0 && p.y < 3)).toBe(true);\n    expect(s.some(p => p.weights[1] > 0)).toBe(true);\n});\n"
+              }
+            ]
+          },
+          {
+            "id": "depth",
+            "starterFiles": [
+              {
+                "path": "src/depth.js",
+                "content": "export function createDepth(width, height) {\n    return new Float64Array(width * height).fill(Infinity);\n}\nexport function depthTest(buffer, index, z) {\n    if (!Number.isInteger(index) || index < 0 || index >= buffer.length || !Number.isFinite(z) || z < 0 || z > 1)\n        return false;\n    // TODO: false 换成“新像素没有更近”的判断 / Reject a fragment that is not closer.\n    if (false)\n        return false;\n    buffer[index] = z;\n    return true;\n}\n",
+                "openByDefault": true
+              },
+              {
+                "path": "preview/stage-5.js",
+                "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\nimport { scene } from '../src/scene';\nimport { rasterize } from '../src/rasterizer';\nimport { createDepth, depthTest } from '../src/depth';\nexport function renderFrame(time, width, height) {\n    const frame = createFrame(width, height);\n    clear(frame, scene.background);\n    const depth = createDepth(width, height);\n    for (const [offset, z, color] of [[0, .25, scene.color], [.18, .8, [245, 160, 70, 255]]])\n        for (const s of rasterize([[width * (.35 + offset), height * .15], [width * (.1 + offset), height * .8], [width * (.7 + offset), height * .8]], width, height))\n            if (depthTest(depth, s.y * width + s.x, z))\n                putPixel(frame, s.x, s.y, color);\n    return frame;\n}\n",
+                "readonly": true
+              }
+            ],
+            "referenceFiles": [
+              {
+                "path": "src/depth.js",
+                "content": "export function createDepth(width, height) {\n    return new Float64Array(width * height).fill(Infinity);\n}\nexport function depthTest(buffer, index, z) {\n    if (!Number.isInteger(index) || index < 0 || index >= buffer.length || !Number.isFinite(z) || z < 0 || z > 1 || z >= buffer[index])\n        return false;\n    buffer[index] = z;\n    return true;\n}\n"
+              }
+            ],
+            "specs": [
+              {
+                "path": "spec/stage-5.spec.js",
+                "content": "import { createDepth, depthTest } from '../src/depth';\nit('keeps the nearest fragment independent of draw order', () => {\n    const d = createDepth(2, 2);\n    expect(depthTest(d, 0, 0.8)).toBe(true);\n    expect(depthTest(d, 0, 0.2)).toBe(true);\n    expect(depthTest(d, 0, 0.7)).toBe(false);\n    expect(depthTest(d, 0, 0.2)).toBe(false);\n    expect(d[0]).toBe(0.2);\n    expect(depthTest(d, 1, 0)).toBe(true);\n    expect(depthTest(d, 2, 1)).toBe(true);\n});\nit('does not corrupt the buffer on invalid fragments', () => {\n    const d = createDepth(1, 1);\n    for (const z of [NaN, Infinity, -0.1, 1.1])\n        expect(depthTest(d, 0, z)).toBe(false);\n    expect(depthTest(d, -1, 0)).toBe(false);\n    expect(depthTest(d, 0.5, 0)).toBe(false);\n    expect(d[0]).toBe(Infinity);\n    depthTest(d, 0, 0.2);\n    expect(depthTest(d, 0, 0.9)).toBe(false);\n});\n"
+              }
+            ]
+          },
+          {
+            "id": "lighting",
+            "starterFiles": [
+              {
+                "path": "src/shader.js",
+                "content": "export function interpolateColor(vertices, weights) {\n    const q = weights.map((v, i) => v / vertices[i].position[3]);\n    const sum = q.reduce((a, b) => a + b, 0);\n    return [0, 1, 2, 3].map(c => q.reduce((s, v, i) => s + v * vertices[i].color[c], 0) / sum);\n}\nexport function lambert(color, normal, light) {\n    const length = (v) => Math.hypot(...v);\n    const denominator = length(normal) * length(light);\n    const diffuse = denominator ? Math.max(0, Math.min(1, normal.reduce((s, v, i) => s + v * light[i], 0) / denominator)) : 0;\n    // TODO: 把亮度乘进三个颜色通道 / Apply brightness to RGB only.\n    return [color[0], color[1], color[2], color[3]];\n}\n",
+                "openByDefault": true
+              },
+              {
+                "path": "preview/stage-6.js",
+                "content": "import { createFrame, clear, putPixel } from '../src/framebuffer';\nimport { scene } from '../src/scene';\nimport { rasterize } from '../src/rasterizer';\nimport { interpolateColor, lambert } from '../src/shader';\nexport function renderFrame(time, width, height) {\n    const frame = createFrame(width, height);\n    clear(frame, scene.background);\n    const tri = [{ position: [0, 0, 0, 1], color: scene.color }, { position: [0, 0, 0, 2], color: [255, 140, 60, 255] }, { position: [0, 0, 0, 4], color: [130, 100, 255, 255] }];\n    for (const s of rasterize([[width * .5, height * .1], [width * .12, height * .85], [width * .88, height * .85]], width, height))\n        putPixel(frame, s.x, s.y, lambert(interpolateColor(tri, s.weights), [Math.sin(time * scene.speed), 0, Math.cos(time * scene.speed)], [0, 0, 1]));\n    return frame;\n}\n",
+                "readonly": true
+              }
+            ],
+            "referenceFiles": [
+              {
+                "path": "src/shader.js",
+                "content": "export function interpolateColor(vertices, weights) {\n    const q = weights.map((v, i) => v / vertices[i].position[3]);\n    const sum = q.reduce((a, b) => a + b, 0);\n    return [0, 1, 2, 3].map(c => q.reduce((s, v, i) => s + v * vertices[i].color[c], 0) / sum);\n}\nexport function lambert(color, normal, light) {\n    const length = (v) => Math.hypot(...v);\n    const denominator = length(normal) * length(light);\n    const diffuse = denominator ? Math.max(0, Math.min(1, normal.reduce((s, v, i) => s + v * light[i], 0) / denominator)) : 0;\n    return [color[0] * (0.2 + 0.8 * diffuse), color[1] * (0.2 + 0.8 * diffuse), color[2] * (0.2 + 0.8 * diffuse), color[3]];\n}\n"
+              }
+            ],
+            "specs": [
+              {
+                "path": "spec/stage-6.spec.js",
+                "content": "import { interpolateColor, lambert } from '../src/shader';\nit('corrects attributes by reciprocal w', () => {\n    const tri = [{ position: [0, 0, 0, 1], color: [240, 0, 0, 255] }, { position: [0, 0, 0, 2], color: [0, 240, 0, 255] }, { position: [0, 0, 0, 4], color: [0, 0, 240, 255] }];\n    const c = interpolateColor(tri, [1 / 3, 1 / 3, 1 / 3]);\n    expect(c[0]).toBeCloseTo(240 * 4 / 7);\n    expect(c[1]).toBeCloseTo(240 * 2 / 7);\n    expect(c[2]).toBeCloseTo(240 / 7);\n    expect(c[3]).toBeCloseTo(255);\n    expect(lambert([100, 50, 25, 128], [1, 0, 0], [0, 0, 1])).toEqual([20, 10, 5, 128]);\n});\nit('normalizes vectors and keeps ambient and alpha', () => {\n    expect(lambert([100, 50, 25, 128], [0, 0, 2], [0, 0, 4])).toEqual([100, 50, 25, 128]);\n    expect(lambert([100, 50, 25, 128], [0, 0, -1], [0, 0, 1])).toEqual([20, 10, 5, 128]);\n    expect(lambert([100, 50, 25, 128], [0, 0, 0], [0, 0, 1])).toEqual([20, 10, 5, 128]);\n});\n"
+              }
+            ]
+          },
+          {
+            "id": "pipeline",
+            "starterFiles": [
+              {
+                "path": "src/renderer.js",
+                "content": "import { createFrame, clear, putPixel } from './framebuffer';\nimport { createDepth, depthTest } from './depth';\nimport { clipTriangle } from './clipping';\nimport { rasterize } from './rasterizer';\nimport { interpolateColor } from './shader';\nimport { toScreen } from './viewport';\nexport function createRenderer(width, height) {\n    const frame = createFrame(width, height);\n    const depth = createDepth(width, height);\n    return {\n        frame,\n        clear(color) { clear(frame, color); depth.fill(Infinity); },\n        drawTriangles(vertices, indices, program) {\n            if (indices.length % 3 || indices.some(i => !Number.isInteger(i) || i < 0 || i >= vertices.length))\n                throw new Error('Invalid triangle indices');\n            const transformed = vertices.map(v => program.vertex(v));\n            for (let i = 0; i < indices.length; i += 3) {\n                const input = indices.slice(i, i + 3).map(j => transformed[j]);\n                for (const tri of clipTriangle(input)) {\n                    if (tri.some(v => v.position[3] <= 1e-8))\n                        continue;\n                    const screen = tri.map(v => toScreen(v.position, width, height));\n                    for (const sample of rasterize(screen, width, height)) {\n                        const z = sample.weights.reduce((sum, w, j) => sum + w * tri[j].position[2] / tri[j].position[3], 0) * 0.5 + 0.5;\n                        // TODO: 让颜色经过 program.fragment / Pass the color through the fragment callback.\n                        if (depthTest(depth, sample.y * width + sample.x, z))\n                            putPixel(frame, sample.x, sample.y, interpolateColor(tri, sample.weights));\n                    }\n                }\n            }\n        }\n    };\n}\n",
+                "openByDefault": true
+              },
+              {
+                "path": "preview/stage-7.js",
+                "content": "import { createRenderer } from '../src/renderer';\nimport { transform, perspective, multiply } from '../src/math';\nimport { rotateY } from '../src/rotation';\nimport { lambert } from '../src/shader';\nimport { scene } from '../src/scene';\nexport function renderFrame(time, width, height) {\n    const r = createRenderer(width, height);\n    r.clear(scene.background);\n    const a = time * scene.speed, ct = Math.cos(.4), st = Math.sin(.4);\n    const tilt = [1, 0, 0, 0, 0, ct, -st, 0, 0, st, ct, 0, 0, 0, 0, 1];\n    const view = tilt.slice();\n    view[11] = -5;\n    const camera = multiply(perspective(1, width / height, .1, 30), view);\n    const positions = [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1], [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]];\n    const faces = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 4, 7, 3], [1, 2, 6, 5], [3, 7, 6, 2], [0, 1, 5, 4]];\n    const normals = [[0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0], [0, 1, 0], [0, -1, 0]];\n    for (let i = 0; i < faces.length; i++) {\n        const normal = transform(tilt, rotateY([...normals[i], 0], a)).slice(0, 3);\n        const color = lambert(scene.color, normal, [.5, 1, 2]);\n        const vertices = faces[i].map(j => ({ position: [...positions[j], 1], color: [190, 190, 190, 255] }));\n        r.drawTriangles(vertices, [0, 1, 2, 0, 2, 3], { vertex: v => ({ ...v, position: transform(camera, rotateY(v.position, a)) }), fragment: () => color });\n    }\n    return r.frame;\n}\n",
+                "readonly": true
+              }
+            ],
+            "referenceFiles": [
+              {
+                "path": "src/renderer.js",
+                "content": "import { createFrame, clear, putPixel } from './framebuffer';\nimport { createDepth, depthTest } from './depth';\nimport { clipTriangle } from './clipping';\nimport { rasterize } from './rasterizer';\nimport { interpolateColor } from './shader';\nimport { toScreen } from './viewport';\nexport function createRenderer(width, height) {\n    const frame = createFrame(width, height);\n    const depth = createDepth(width, height);\n    return {\n        frame,\n        clear(color) { clear(frame, color); depth.fill(Infinity); },\n        drawTriangles(vertices, indices, program) {\n            if (indices.length % 3 || indices.some(i => !Number.isInteger(i) || i < 0 || i >= vertices.length))\n                throw new Error('Invalid triangle indices');\n            const transformed = vertices.map(v => program.vertex(v));\n            for (let i = 0; i < indices.length; i += 3) {\n                const input = indices.slice(i, i + 3).map(j => transformed[j]);\n                for (const tri of clipTriangle(input)) {\n                    if (tri.some(v => v.position[3] <= 1e-8))\n                        continue;\n                    const screen = tri.map(v => toScreen(v.position, width, height));\n                    for (const sample of rasterize(screen, width, height)) {\n                        const z = sample.weights.reduce((sum, w, j) => sum + w * tri[j].position[2] / tri[j].position[3], 0) * 0.5 + 0.5;\n                        if (depthTest(depth, sample.y * width + sample.x, z))\n                            putPixel(frame, sample.x, sample.y, program.fragment(interpolateColor(tri, sample.weights)));\n                    }\n                }\n            }\n        }\n    };\n}\n"
+              }
+            ],
+            "specs": [
+              {
+                "path": "spec/stage-7.spec.js",
+                "content": "import { createRenderer } from '../src/renderer';\nconst vertices = (z, color) => [[-.8, -.8, z, 1], [.8, -.8, z, 1], [0, .8, z, 1]].map(position => ({ position, color }));\nconst pass = { vertex: (v) => v, fragment: (c) => c };\nit('draws indexed triangles and invokes both shaders', () => {\n    const r = createRenderer(20, 20);\n    r.clear([0, 0, 0, 255]);\n    let calls = 0;\n    r.drawTriangles(vertices(0, [255, 0, 0, 255]), [0, 1, 2], { vertex: v => { calls++; return v; }, fragment: () => [0, 255, 0, 255] });\n    expect(calls).toBe(3);\n    expect(Array.from(r.frame.pixels.slice((10 * 20 + 10) * 4, (10 * 20 + 10) * 4 + 4))).toEqual([0, 255, 0, 255]);\n});\nit('resolves occlusion and clears depth for the next frame', () => {\n    const r = createRenderer(20, 20), pixel = () => Array.from(r.frame.pixels.slice(840, 844));\n    r.clear([0, 0, 0, 255]);\n    r.drawTriangles(vertices(-.5, [255, 0, 0, 255]), [0, 1, 2], pass);\n    r.drawTriangles(vertices(.5, [0, 0, 255, 255]), [0, 1, 2], pass);\n    expect(pixel()).toEqual([255, 0, 0, 255]);\n    r.clear([0, 0, 0, 255]);\n    r.drawTriangles(vertices(.5, [0, 0, 255, 255]), [0, 1, 2], { ...pass, fragment: () => [30, 60, 90, 255] });\n    expect(pixel()).toEqual([30, 60, 90, 255]);\n});\nit('clips outside geometry and rejects invalid indices', () => {\n    const r = createRenderer(8, 8);\n    r.clear([0, 0, 0, 255]);\n    r.drawTriangles(vertices(-2, [255, 0, 0, 255]), [0, 1, 2], pass);\n    expect(Array.from(r.frame.pixels).filter((_, i) => i % 4 === 0).every(v => v === 0)).toBe(true);\n    expect(() => r.drawTriangles(vertices(0, [255, 0, 0, 255]), [0, 1, 9], pass)).toThrow();\n    r.drawTriangles(vertices(0, [255, 0, 0, 255]), [0, 1, 2], { ...pass, fragment: () => [10, 20, 30, 255] });\n    expect(Array.from(r.frame.pixels.slice(144, 148))).toEqual([10, 20, 30, 255]);\n});\n"
+              }
+            ]
+          },
+          {
+            "id": "scale",
+            "starterFiles": [
+              {
+                "path": "src/scale.js",
+                "content": "export function scalePoint(point, size) {\n    const [x, y, z, w] = point;\n    // TODO: 让三个位置分量乘缩放倍数 / Scale all three coordinates.\n    return [x, y, z, w];\n}\n",
+                "openByDefault": true
+              },
+              {
+                "path": "preview/stage-8.js",
+                "content": "import { renderCubes } from '../src/cube-scene';\nimport { scalePoint } from '../src/scale';\nimport { scene } from '../src/scene';\nexport function renderFrame(time, width, height) { return renderCubes(time, width, height, { scale: scalePoint }, [{ size: 1.35, offset: [0, 0, 0], color: scene.color }]); }\n",
+                "readonly": true
+              },
+              {
+                "path": "src/cube-scene.js",
+                "content": "// Type contract for this file (TypeScript syntax, for reference):\n//\n// export interface Cube { size: number; offset: number[]; color: Color; }\n//\n// export interface SceneTools {\n//   scale: (p: Vec4,size: number) => Vec4;\n//   translate?: (p: Vec4,offset: number[]) => Vec4;\n//   camera?: (p: Vec4,distance: number) => Vec4;\n//   material?: (u: number,v: number,color: Color) => Color;\n//   fog?: (color: Color,distance: number) => Color;\n// }\n\nimport { createRenderer } from './renderer';\nimport { rotateY } from './rotation';\nimport { perspective, transform } from './math';\nimport { lambert } from './shader';\nimport { scene } from './scene';\nexport function renderCubes(time, width, height, tools, cubes, distance = 5) {\n    const r = createRenderer(width, height);\n    r.clear(scene.background);\n    const projection = perspective(1, width / height, .1, 30);\n    const c = Math.cos(.35), s = Math.sin(.35);\n    const tilt = [1, 0, 0, 0, 0, c, -s, 0, 0, s, c, 0, 0, 0, 0, 1];\n    const positions = [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1], [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]];\n    const faces = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 4, 7, 3], [1, 2, 6, 5], [3, 7, 6, 2], [0, 1, 5, 4]];\n    const normals = [[0, 0, -1], [0, 0, 1], [-1, 0, 0], [1, 0, 0], [0, 1, 0], [0, -1, 0]];\n    // RGB carries face coordinates through the existing perspective interpolation.\n    // The material callback then converts those coordinates into a visible color.\n    const uv = [[0, 0, 0, 255], [255, 0, 0, 255], [255, 255, 0, 255], [0, 255, 0, 255]];\n    for (const cube of cubes)\n        for (let face = 0; face < faces.length; face++) {\n            const normal = transform(tilt, rotateY([...normals[face], 0], time * scene.speed)).slice(0, 3);\n            const vertices = faces[face].map((index, i) => ({ position: [...positions[index], 1], color: uv[i] }));\n            r.drawTriangles(vertices, [0, 1, 2, 0, 2, 3], {\n                vertex: v => {\n                    const scaled = tools.scale(v.position, cube.size);\n                    const rotated = transform(tilt, rotateY(scaled, time * scene.speed));\n                    const placed = tools.translate ? tools.translate(rotated, cube.offset) : rotated;\n                    const viewed = tools.camera ? tools.camera(placed, distance) : [placed[0], placed[1], placed[2] - distance, placed[3]];\n                    return { ...v, position: transform(projection, viewed) };\n                },\n                fragment: uv => {\n                    const color = tools.material ? tools.material(uv[0] / 255, uv[1] / 255, cube.color) : cube.color;\n                    const shaded = lambert(color, normal, [.5, 1, 2]);\n                    // Beginner approximation: one distance per object, not per fragment.\n                    return tools.fog ? tools.fog(shaded, distance - cube.offset[2]) : shaded;\n                }\n            });\n        }\n    return r.frame;\n}\n",
+                "readonly": true
+              }
+            ],
+            "referenceFiles": [
+              {
+                "path": "src/scale.js",
+                "content": "export function scalePoint(point, size) {\n    const [x, y, z, w] = point;\n    return [x * size, y * size, z * size, w];\n}\n"
+              }
+            ],
+            "specs": [
+              {
+                "path": "spec/stage-8.spec.js",
+                "content": "import { scalePoint } from '../src/scale';\nit('doubles all three lengths, keeping w', () => { expect(scalePoint([1, 2, -3, 1], 2)).toEqual([2, 4, -6, 1]); });\nit('shrinks without changing the original point', () => { const p = [2, 4, 6, 1]; expect(scalePoint(p, .5)).toEqual([1, 2, 3, 1]); expect(p).toEqual([2, 4, 6, 1]); expect(scalePoint(p, 0)).toEqual([0, 0, 0, 1]); });\n"
+              }
+            ]
+          },
+          {
+            "id": "translation",
+            "starterFiles": [
+              {
+                "path": "src/translation.js",
+                "content": "export function translatePoint(point, offset) {\n    const [x, y, z, w] = point;\n    // TODO: 分别加上三个方向的移动量 / Add the offsets.\n    return [x, y, z, w];\n}\n",
+                "openByDefault": true
+              },
+              {
+                "path": "preview/stage-9.js",
+                "content": "import { renderCubes } from '../src/cube-scene';\nimport { scalePoint } from '../src/scale';\nimport { scene } from '../src/scene';\nimport { translatePoint } from '../src/translation';\nexport function renderFrame(time, width, height) { return renderCubes(time, width, height, { scale: scalePoint, translate: translatePoint }, [{ size: .85, offset: [1.1, .35, 0], color: scene.color }]); }\n",
+                "readonly": true
+              }
+            ],
+            "referenceFiles": [
+              {
+                "path": "src/translation.js",
+                "content": "export function translatePoint(point, offset) {\n    const [x, y, z, w] = point;\n    return [x + offset[0], y + offset[1], z + offset[2], w];\n}\n"
+              }
+            ],
+            "specs": [
+              {
+                "path": "spec/stage-9.spec.js",
+                "content": "import { translatePoint } from '../src/translation';\nit('moves right, down and forward independently', () => { expect(translatePoint([1, 2, 3, 1], [2, -1, 4])).toEqual([3, 1, 7, 1]); });\nit('keeps the mesh reusable instead of moving its input', () => { const p = [1, 2, 3, 1], offset = [-2, 1, -3]; expect(translatePoint(p, offset)).toEqual([-1, 3, 0, 1]); expect(p).toEqual([1, 2, 3, 1]); expect(offset).toEqual([-2, 1, -3]); });\n"
+              }
+            ]
+          },
+          {
+            "id": "camera-distance",
+            "starterFiles": [
+              {
+                "path": "src/camera.js",
+                "content": "export function toCamera(point, distance) {\n    if (!Number.isFinite(distance) || distance <= 0)\n        throw new Error('Camera distance must be positive');\n    const [x, y, z, w] = point;\n    // TODO: 用点的 z 减去相机的位置 / Subtract the camera distance.\n    return [x, y, z, w];\n}\n",
+                "openByDefault": true
+              },
+              {
+                "path": "preview/stage-10.js",
+                "content": "import { renderCubes } from '../src/cube-scene';\nimport { scalePoint } from '../src/scale';\nimport { scene } from '../src/scene';\nimport { translatePoint } from '../src/translation';\nimport { toCamera } from '../src/camera';\nexport function renderFrame(time, width, height) { return renderCubes(time, width, height, { scale: scalePoint, translate: translatePoint, camera: toCamera }, [{ size: 1, offset: [0, 0, 0], color: scene.color }], 6.5 + Math.sin(time * scene.speed) * 1.5); }\n",
+                "readonly": true
+              }
+            ],
+            "referenceFiles": [
+              {
+                "path": "src/camera.js",
+                "content": "export function toCamera(point, distance) {\n    if (!Number.isFinite(distance) || distance <= 0)\n        throw new Error('Camera distance must be positive');\n    const [x, y, z, w] = point;\n    return [x, y, z - distance, w];\n}\n"
+              }
+            ],
+            "specs": [
+              {
+                "path": "spec/stage-10.spec.js",
+                "content": "import { toCamera } from '../src/camera';\nit('expresses a point relative to the camera', () => { expect(toCamera([1, 2, 1, 1], 6)).toEqual([1, 2, -5, 1]); });\nit('moves points farther away as camera distance grows', () => { const p = [0, 1, -2, 1]; expect(toCamera(p, 3)).toEqual([0, 1, -5, 1]); expect(toCamera(p, 8)).toEqual([0, 1, -10, 1]); expect(p).toEqual([0, 1, -2, 1]); expect(() => toCamera(p, 0)).toThrow(); });\n"
+              }
+            ]
+          },
+          {
+            "id": "checker-material",
+            "starterFiles": [
+              {
+                "path": "src/checker.js",
+                "content": "export function checkerColor(u, v, cells, a, b) {\n    if (!Number.isInteger(cells) || cells < 1)\n        throw new Error('Cell count must be a positive integer');\n    // Supplied tool: locate a square on the surface, clamping the outer border.\n    const column = Math.min(cells - 1, Math.floor(Math.max(0, Math.min(1, u)) * cells));\n    const row = Math.min(cells - 1, Math.floor(Math.max(0, Math.min(1, v)) * cells));\n    const parity = (column + row) % 2;\n    // TODO: 奇偶格子选择不同颜色 / Alternate the two colors.\n    return a;\n}\n",
+                "openByDefault": true
+              },
+              {
+                "path": "preview/stage-11.js",
+                "content": "import { renderCubes } from '../src/cube-scene';\nimport { scalePoint } from '../src/scale';\nimport { scene } from '../src/scene';\nimport { translatePoint } from '../src/translation';\nimport { toCamera } from '../src/camera';\nimport { checkerColor } from '../src/checker';\nexport function renderFrame(time, width, height) { return renderCubes(time, width, height, { scale: scalePoint, translate: translatePoint, camera: toCamera, material: (u, v, color) => checkerColor(u, v, 6, color, [245, 185, 85, 255]) }, [{ size: 1.15, offset: [0, 0, 0], color: scene.color }], 5.5); }\n",
+                "readonly": true
+              }
+            ],
+            "referenceFiles": [
+              {
+                "path": "src/checker.js",
+                "content": "export function checkerColor(u, v, cells, a, b) {\n    if (!Number.isInteger(cells) || cells < 1)\n        throw new Error('Cell count must be a positive integer');\n    // Supplied tool: locate a square on the surface, clamping the outer border.\n    const column = Math.min(cells - 1, Math.floor(Math.max(0, Math.min(1, u)) * cells));\n    const row = Math.min(cells - 1, Math.floor(Math.max(0, Math.min(1, v)) * cells));\n    const parity = (column + row) % 2;\n    return parity === 0 ? a : b;\n}\n"
+              }
+            ],
+            "specs": [
+              {
+                "path": "spec/stage-11.spec.js",
+                "content": "import { checkerColor } from '../src/checker';\nconst a = [20, 160, 220, 255], b = [240, 180, 60, 255];\nit('alternates neighboring columns and rows', () => { expect(checkerColor(.1, .1, 4, a, b)).toEqual(a); expect(checkerColor(.3, .1, 4, a, b)).toEqual(b); expect(checkerColor(.1, .3, 4, a, b)).toEqual(b); expect(checkerColor(.3, .3, 4, a, b)).toEqual(a); });\nit('keeps the outer border in the final grid cell', () => { expect(checkerColor(1, 0, 4, a, b)).toEqual(b); expect(checkerColor(0, 1, 4, a, b)).toEqual(b); expect(checkerColor(-1, 0, 4, a, b)).toEqual(a); expect(() => checkerColor(0, 0, 0, a, b)).toThrow(); });\n"
+              }
+            ]
+          },
+          {
+            "id": "distance-fog",
+            "starterFiles": [
+              {
+                "path": "src/fog.js",
+                "content": "export function applyFog(color, fogColor, distance, near, far) {\n    if (!(far > near))\n        throw new Error('Fog end must be farther than its start');\n    const amount = Math.max(0, Math.min(1, (distance - near) / (far - near)));\n    // TODO: 按 amount 混合物体颜色和雾色 / Blend the two RGB colors.\n    return color;\n}\n",
+                "openByDefault": true
+              },
+              {
+                "path": "preview/stage-12.js",
+                "content": "import { renderCubes } from '../src/cube-scene';\nimport { scalePoint } from '../src/scale';\nimport { scene } from '../src/scene';\nimport { translatePoint } from '../src/translation';\nimport { toCamera } from '../src/camera';\nimport { checkerColor } from '../src/checker';\nimport { applyFog } from '../src/fog';\nexport function renderFrame(time, width, height) {\n    return renderCubes(time, width, height, {\n        scale: scalePoint, translate: translatePoint, camera: toCamera, material: (u, v, color) => checkerColor(u, v, 6, color, [245, 185, 85, 255]), fog: (color, distance) => applyFog(color, scene.background, distance, 4, 12)\n    }, [{ size: .62, offset: [-1.5, -.25, 2.2], color: scene.color }, { size: .85, offset: [0, .05, -.8], color: scene.color }, { size: 1.1, offset: [2.5, .5, -3.8], color: scene.color }], 7);\n}\n",
+                "readonly": true
+              }
+            ],
+            "referenceFiles": [
+              {
+                "path": "src/fog.js",
+                "content": "export function applyFog(color, fogColor, distance, near, far) {\n    if (!(far > near))\n        throw new Error('Fog end must be farther than its start');\n    const amount = Math.max(0, Math.min(1, (distance - near) / (far - near)));\n    return [0, 1, 2].map(i => color[i] * (1 - amount) + fogColor[i] * amount).concat(color[3]);\n}\n"
+              }
+            ],
+            "specs": [
+              {
+                "path": "spec/stage-12.spec.js",
+                "content": "import { applyFog } from '../src/fog';\nit('mixes colors halfway without changing opacity', () => { expect(applyFog([100, 200, 80, 128], [20, 40, 0, 255], 6, 2, 10)).toEqual([60, 120, 40, 128]); });\nit('clamps near and far distances without changing inputs', () => { const color = [100, 200, 80, 128], fog = [20, 40, 0, 255]; expect(applyFog(color, fog, 0, 2, 10)).toEqual(color); expect(applyFog(color, fog, 20, 2, 10)).toEqual([20, 40, 0, 128]); expect(color).toEqual([100, 200, 80, 128]); expect(fog).toEqual([20, 40, 0, 255]); expect(() => applyFog(color, fog, 5, 10, 2)).toThrow(); });\n"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
     "id": "modern-compiler",
     "title": {
       "zh": "从 0 写一个现代编译系统",
